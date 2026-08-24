@@ -1,7 +1,7 @@
 import { telemetry } from "../diag/Telemetry";
 import { GuardDecision, ManipulationGuard } from "../input/ManipulationGuard";
 import { PalmGate, paroleEarned } from "../input/PalmGate";
-import { PenSample } from "../input/PointerRouter";
+import { PenSample, silentLift } from "../input/PointerRouter";
 import { visualToNote } from "./ZoomScale";
 import { hideProbeMarkers, markRawPointer } from "./PenProbe";
 import { hitProbeDown, hitProbeHover, isHitProbeEnabled } from "./PenHitProbe";
@@ -459,6 +459,8 @@ export class InlinePenRouter {
 	penDowns = 0;
 	penUps = 0;
 	fallbackEnds = 0;
+	/** Stroke ends synthesized from a hover sample (no pointerup arrived). */
+	silentLiftEnds = 0;
 	palmsBlocked = 0;
 
 	constructor(
@@ -1022,6 +1024,13 @@ export class InlinePenRouter {
 			return;
 		}
 		if (e.pointerId !== this.activePenId) return;
+		if (silentLift(e)) {
+			this.silentLiftEnds++;
+			telemetry.bump("inline.penUp.silentLift");
+			tr(e.type, e, "SILENT LIFT, TERMINATES STROKE");
+			this.endPenStroke(e, false);
+			return;
+		}
 		e.preventDefault();
 		e.stopPropagation(); // no link-hover popovers under a moving nib
 		telemetry.bump("inline.penMove");
@@ -1051,6 +1060,13 @@ export class InlinePenRouter {
 			return;
 		}
 		if (e.pointerId !== this.activePenId) return;
+		if (silentLift(e)) {
+			this.silentLiftEnds++;
+			telemetry.bump("inline.penUp.silentLift");
+			tr(e.type, e, "SILENT LIFT, TERMINATES STROKE");
+			this.endPenStroke(e, false);
+			return;
+		}
 		// Ground truth for the probe, taken before a single line of the code
 		// under test has run.
 		markRawPointer(e.clientX, e.clientY);

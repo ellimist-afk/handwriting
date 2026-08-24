@@ -110,6 +110,23 @@ function isTextEditingContext(target: EventTarget | null): boolean {
 	return looksEditable(target as Element | null) || looksEditable(document.activeElement);
 }
 
+/**
+ * A pen sample that claims a live stroke but is already hovering: zero
+ * pressure and neither contact bit set (tip = 1, eraser = 32). The barrel
+ * bit (2) is ignored because it can be held through a lift.
+ *
+ * The Surface Slim Pen can lift without a discrete pointerup ever reaching
+ * the app; the raw stream simply resumes hovering under the same pointerId,
+ * and every hover sample would become trailing ink. The Surface Pen (1776)
+ * always delivers the event, so this never fires for it. Both contact bits
+ * and pressure must read zero together, which is exactly the hover
+ * signature; a mid-stroke pressure dip still carries the tip bit and a
+ * buttons glitch still carries pressure, so neither ends a real stroke.
+ */
+export function silentLift(sample: { pressure: number; buttons: number }): boolean {
+	return sample.pressure === 0 && (sample.buttons & 1) === 0 && (sample.buttons & 32) === 0;
+}
+
 const WHEEL_LINE_HEIGHT = 16;
 const ZOOM_WHEEL_SENSITIVITY = 0.0015;
 
@@ -139,6 +156,8 @@ export class PointerRouter {
 	penUps = 0;
 	/** Stroke ends that only the window-level backstop caught. */
 	fallbackEnds = 0;
+	/** Stroke ends synthesized from a hover sample (no pointerup arrived). */
+	silentLiftEnds = 0;
 
 	private winEndFn: ((e: Event) => void) | null = null;
 	private tapCandidates = new Map<number, TapCandidate>();
@@ -356,6 +375,12 @@ export class PointerRouter {
 			return;
 		}
 		if (e.pointerId !== this.activePenId) return;
+		if (silentLift(e)) {
+			this.silentLiftEnds++;
+			telemetry.bump("router.penUp.silentLift");
+			this.endPenStroke(e, false);
+			return;
+		}
 		e.preventDefault();
 		telemetry.bump("router.penMove");
 		const coalesced =
@@ -381,6 +406,12 @@ export class PointerRouter {
 			return;
 		}
 		if (e.pointerId !== this.activePenId) return;
+		if (silentLift(e)) {
+			this.silentLiftEnds++;
+			telemetry.bump("router.penUp.silentLift");
+			this.endPenStroke(e, false);
+			return;
+		}
 		const cb = this.callbacks.onPenRaw;
 		if (!cb) return;
 		telemetry.bump("router.rawUpdate");

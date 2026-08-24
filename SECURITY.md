@@ -2,7 +2,7 @@
 
 ## supported version
 
-Handwriting v0.13.8 is the supported version. Only the newest release is
+Handwriting v0.13.9 is the supported version. Only the newest release is
 supported.
 
 ## reporting a vulnerability

@@ -157,16 +157,18 @@ export function copyInlineInkMetrics(): string {
 	let downs = 0;
 	let ups = 0;
 	let backstops = 0;
+	let silentLifts = 0;
 	let palms = 0;
 	for (const p of instances) {
 		downs += p.routerCounters().downs;
 		ups += p.routerCounters().ups;
 		backstops += p.routerCounters().backstops;
+		silentLifts += p.routerCounters().silentLifts;
 		palms += p.routerCounters().palms;
 	}
 	const lines = [
 		`Handwriting ink metrics: ${metrics.summaries.length} stroke(s)`,
-		`down/up/backstop: ${downs}/${ups}/${backstops}  palms blocked: ${palms}`,
+		`down/up/backstop/silent: ${downs}/${ups}/${backstops}/${silentLifts}  palms blocked: ${palms}`,
 		"",
 		...metrics.summaries.map((s) => StrokeMetrics.summaryText(s)),
 	];
@@ -728,11 +730,18 @@ class InkOverlayPlugin {
 		return this.container;
 	}
 
-	routerCounters(): { downs: number; ups: number; backstops: number; palms: number } {
+	routerCounters(): {
+		downs: number;
+		ups: number;
+		backstops: number;
+		silentLifts: number;
+		palms: number;
+	} {
 		return {
 			downs: this.router?.penDowns ?? 0,
 			ups: this.router?.penUps ?? 0,
 			backstops: this.router?.fallbackEnds ?? 0,
+			silentLifts: this.router?.silentLiftEnds ?? 0,
 			palms: this.router?.palmsBlocked ?? 0,
 		};
 	}
