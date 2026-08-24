@@ -179,7 +179,7 @@ export async function capturePresented(
 	try {
 		// Obsidian ships @electron/remote wired through its preload. Resolved
 		// dynamically so the module stays type-clean without node typings.
-		const req = (globalThis as { require?: (m: string) => unknown }).require;
+		const req = (window as { require?: (m: string) => unknown }).require;
 		if (!req) {
 			return { ok: false, detail: "require unavailable (not an Electron renderer)", presentedPx: 0, inkMatchedPx: 0, sampledPx: 0 };
 		}

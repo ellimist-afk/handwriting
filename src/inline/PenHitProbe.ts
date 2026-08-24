@@ -188,7 +188,7 @@ export function hitProbeDown(e: PointerEvent, claimed: boolean, scrollEl: Elemen
 		globalSaw: pendingGlobalDown !== null && pendingGlobalDown.id === e.pointerId,
 		routerSaw: true,
 		claimed,
-		downTarget: describeEl(e.target as Element),
+		downTarget: describeEl(e.target),
 		ctx: contextProvider?.(e.clientX, e.clientY) ?? null,
 	});
 	pendingGlobalDown = null;

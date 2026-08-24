@@ -1,6 +1,6 @@
 import { CameraState } from "../camera/coordinates";
 import { PenStyle, widthForPressure } from "./PenStyle";
-import { SmoothSegment, smoothSegments } from "./Smoothing";
+import { SmoothSegment } from "./Smoothing";
 import { flattenStroke } from "./Ribbon";
 import { fillRibbon } from "./RibbonRenderer";
 import { InkPoint, InkStroke } from "./Stroke";

@@ -109,30 +109,31 @@ export function isScrollableOverflow(value: string): boolean {
 /**
  * Obsidian's `.cm-scroller` ships `overflow-x: hidden`: the extent spacer can
  * grow scrollWidth all it likes and the user still cannot scroll there. This
- * guard flips exactly that one property to `auto` (important, because themes
- * set it with high specificity), remembers what the inline style carried, and
- * restores it on unmount. It never touches overflow-y.
+ * guard toggles a stylesheet class that flips exactly that one property to
+ * `auto` (important, because themes set it with high specificity) and drops
+ * the class on unmount. Any inline style the scroller carried is never
+ * touched, and neither is overflow-y.
  */
+export const HSCROLL_AXIS_CLASS = "handwriting-hscroll-axis";
+
 export class ScrollAxisGuard {
-	private saved: string | null = null;
+	private on = false;
 
 	get patched(): boolean {
-		return this.saved !== null;
+		return this.on;
 	}
 
 	assert(el: HTMLElement, computedOverflowX: string): void {
-		if (this.saved !== null) return;
+		if (this.on) return;
 		if (isScrollableOverflow(computedOverflowX)) return;
-		this.saved = el.style.getPropertyValue("overflow-x");
-		el.style.setProperty("overflow-x", "auto", "important");
+		el.classList.add(HSCROLL_AXIS_CLASS);
+		this.on = true;
 	}
 
 	restore(el: HTMLElement): void {
-		if (this.saved === null) return;
-		const prev = this.saved;
-		this.saved = null;
-		el.style.removeProperty("overflow-x");
-		if (prev !== "") el.style.setProperty("overflow-x", prev);
+		if (!this.on) return;
+		this.on = false;
+		el.classList.remove(HSCROLL_AXIS_CLASS);
 	}
 }
 

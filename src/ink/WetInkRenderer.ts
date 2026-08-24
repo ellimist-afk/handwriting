@@ -5,7 +5,7 @@ import { InkPoint } from "./Stroke";
 import { IncrementalSmoother, Point2 } from "./Smoothing";
 import { RibbonPt, flattenSegment } from "./Ribbon";
 import { fillRibbon } from "./RibbonRenderer";
-import { drawSegment, drawSmoothSegment } from "./StrokeRenderer";
+import { drawSegment } from "./StrokeRenderer";
 
 /**
  * The wet ink layer: incremental screen-space drawing of the stroke that is

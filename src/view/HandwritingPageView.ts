@@ -3,7 +3,7 @@ import { Camera } from "../camera/Camera";
 import { CameraState } from "../camera/coordinates";
 import { telemetry } from "../diag/Telemetry";
 import { PointerRouter, PenSample } from "../input/PointerRouter";
-import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle, widthForPressure } from "../ink/PenStyle";
+import { DEFAULT_PEN, HIGHLIGHTER_PEN, PenStyle, widthForPressure } from "../ink/PenStyle";
 import { InkStroke, InkTool } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { drawCommitted, drawStroke } from "../ink/StrokeRenderer";
@@ -18,7 +18,7 @@ import { Point2 } from "../ink/Smoothing";
 import { BBox } from "../ink/Stroke";
 import { History } from "../history/History";
 import { TextLayer, TextBoxModel } from "../objects/TextLayer";
-import { ImageLayer, ImageModel } from "../objects/ImageLayer";
+import { ImageLayer } from "../objects/ImageLayer";
 import { ImageData, PageData, TextBoxData, newId } from "../model/PageData";
 import { MarkdownBlock, MarkdownImage } from "../model/MarkdownPage";
 import { PageDocument } from "../model/PageDocument";
@@ -30,7 +30,6 @@ export const HANDWRITING_PAGE_VIEW_TYPE = "handwriting-page";
 
 const MINOR_GRID_WORLD = 40;
 const MAJOR_GRID_WORLD = 200;
-const HISTORY_LIMIT_NOTE = "Handwriting";
 /** Eraser radius in screen pixels; world radius scales with zoom. */
 const ERASER_SCREEN_R = 12;
 /** Real samples kept for prediction turn detection. */
@@ -506,7 +505,6 @@ export class HandwritingPageView extends TextFileView {
 			width: TextLayer.defaultWidth(),
 			z: this.page.textBoxes.length,
 		};
-		const model: TextBoxModel = { data, text: "" };
 		const add = () => {
 			this.doc.addBox(data, this.doc.textOf(id));
 			this.textLayer.upsert({ data, text: this.doc.textOf(id) });
@@ -590,12 +588,14 @@ export class HandwritingPageView extends TextFileView {
 	private positionCaret(): void {
 		if (!this.caretEl) return;
 		if (!this.caret) {
-			this.caretEl.style.display = "none";
+			this.caretEl.setCssStyles({ display: "none" });
 			return;
 		}
 		const s = this.camera.worldToScreen(this.caret.x, this.caret.y);
-		this.caretEl.style.display = "";
-		this.caretEl.style.transform = `translate(${s.x}px, ${s.y}px) scale(${this.camera.zoom})`;
+		this.caretEl.setCssStyles({
+			display: "",
+			transform: `translate(${s.x}px, ${s.y}px) scale(${this.camera.zoom})`,
+		});
 	}
 
 	private onTap(x: number, y: number, source: "mouse" | "touch"): void {
@@ -859,7 +859,7 @@ export class HandwritingPageView extends TextFileView {
 	private schedulePresentProbe(newestTs: number): void {
 		if (this.presentProbePending) return;
 		this.presentProbePending = true;
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.presentProbePending = false;
 			this.metrics.recordPresent(performance.now() - newestTs);
 		});
@@ -871,9 +871,9 @@ export class HandwritingPageView extends TextFileView {
 		const tick = (ts: number) => {
 			if (!this.tickerActive) return;
 			this.metrics.recordFrame(ts);
-			requestAnimationFrame(tick);
+			window.requestAnimationFrame(tick);
 		};
-		requestAnimationFrame(tick);
+		window.requestAnimationFrame(tick);
 	}
 
 	private penUp(): void {
@@ -967,14 +967,16 @@ export class HandwritingPageView extends TextFileView {
 
 	private showEraserCursor(sample: PenSample): void {
 		const r = ERASER_SCREEN_R;
-		this.eraserEl.style.display = "";
-		this.eraserEl.style.width = `${r * 2}px`;
-		this.eraserEl.style.height = `${r * 2}px`;
-		this.eraserEl.style.transform = `translate(${sample.x - r}px, ${sample.y - r}px)`;
+		this.eraserEl.setCssStyles({
+			display: "",
+			width: `${r * 2}px`,
+			height: `${r * 2}px`,
+			transform: `translate(${sample.x - r}px, ${sample.y - r}px)`,
+		});
 	}
 
 	private hideEraserCursor(): void {
-		this.eraserEl.style.display = "none";
+		this.eraserEl.setCssStyles({ display: "none" });
 	}
 
 	// ---- images --------------------------------------------------------------
@@ -1456,7 +1458,7 @@ export class HandwritingPageView extends TextFileView {
 	private requestRender(): void {
 		if (this.renderQueued) return;
 		this.renderQueued = true;
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.renderQueued = false;
 			// Electron changes devicePixelRatio on app zoom and on moving to a
 			// different-DPI monitor. Without this the canvas keeps a stale

@@ -58,7 +58,7 @@ export interface RouterCallbacks {
 	 * view is responsible for ignoring the same samples arriving again via
 	 * onPenMove (they will).
 	 */
-	onPenRaw?(samples: PenSample[], ev: PointerEvent, predicted: PenSample[]): void;
+	onPenRaw?: (samples: PenSample[], ev: PointerEvent, predicted: PenSample[]) => void;
 	/**
 	 * A deliberate tap that moved almost nothing: mouse left-click, or a single
 	 * finger touched and lifted. This is how the canvas gets "click here and

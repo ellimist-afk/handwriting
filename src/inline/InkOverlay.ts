@@ -382,7 +382,7 @@ class InkOverlayPlugin {
 
 		const host = this.view.dom;
 		if (getComputedStyle(host).position === "static") {
-			host.style.position = "relative";
+			host.setCssStyles({ position: "relative" });
 			this.hostPositionPatched = true;
 		}
 		// The lost 2026-08-20 build carried this class (reconstruction gap,
@@ -589,8 +589,7 @@ class InkOverlayPlugin {
 	private updateHandwritingPageClass(): void {
 		if (!this.pageClassHost) {
 			this.pageClassHost =
-				(this.view.dom.closest(".markdown-source-view") as HTMLElement | null) ??
-				this.view.dom;
+				this.view.dom.closest(".markdown-source-view") ?? this.view.dom;
 		}
 		const path = this.filePath();
 		this.pageClassHost.classList.toggle(
@@ -625,7 +624,7 @@ class InkOverlayPlugin {
 		this.axisChecked = false;
 		this.lastReach = null;
 		if (this.scrollPositionPatched) {
-			this.view.scrollDOM.style.position = "";
+			this.view.scrollDOM.setCssStyles({ position: "" });
 			this.scrollPositionPatched = false;
 		}
 		this.container?.remove();
@@ -636,7 +635,7 @@ class InkOverlayPlugin {
 		this.eraserEl = null;
 		this.resetGestureState();
 		if (this.hostPositionPatched) {
-			this.view.dom.style.position = "";
+			this.view.dom.setCssStyles({ position: "" });
 			this.hostPositionPatched = false;
 		}
 	}
@@ -967,7 +966,7 @@ class InkOverlayPlugin {
 	private schedulePresentProbe(newestTs: number): void {
 		if (this.presentProbePending) return;
 		this.presentProbePending = true;
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.presentProbePending = false;
 			metrics.recordPresent(performance.now() - newestTs);
 		});
@@ -1386,7 +1385,7 @@ class InkOverlayPlugin {
 		if (!path) return;
 		const w = this.camera.screenToWorld(sample.x, sample.y);
 		const hits = strokesHitByCircle(
-			inlineInk.strokes(path) as InkStroke[],
+			inlineInk.strokes(path),
 			w.x,
 			w.y,
 			visualToNote(ERASER_SCREEN_R, this.scale)
@@ -1403,14 +1402,16 @@ class InkOverlayPlugin {
 		// Screen-space element: convert the visual constant with cssScale
 		// only (samples are screen css px).
 		const r = visualToNote(ERASER_SCREEN_R, this.cssScale);
-		this.eraserEl.style.display = "";
-		this.eraserEl.style.width = `${r * 2}px`;
-		this.eraserEl.style.height = `${r * 2}px`;
-		this.eraserEl.style.transform = `translate(${sample.x - r}px, ${sample.y - r}px)`;
+		this.eraserEl.setCssStyles({
+			display: "",
+			width: `${r * 2}px`,
+			height: `${r * 2}px`,
+			transform: `translate(${sample.x - r}px, ${sample.y - r}px)`,
+		});
 	}
 
 	private hideEraserCursor(): void {
-		if (this.eraserEl) this.eraserEl.style.display = "none";
+		if (this.eraserEl) this.eraserEl.setCssStyles({ display: "none" });
 	}
 
 	// ---- lasso / move (barrel held; §52/§53, ink-only on the inline surface) --
@@ -1606,7 +1607,7 @@ class InkOverlayPlugin {
 		if (this.repaintQueued || !this.container) return;
 		this.repaintQueued = true;
 		scrollProbeSchedule(via);
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.repaintQueued = false;
 			this.repaint();
 		});
@@ -1753,12 +1754,12 @@ class InkOverlayPlugin {
 		if (!this.container || this.frame.locked) return;
 		const path = this.filePath();
 		if (!path) return;
-		const granted = surfaceExtents.grow(path, inkFrontier(inlineInk.strokes(path) as InkStroke[]));
+		const granted = surfaceExtents.grow(path, inkFrontier(inlineInk.strokes(path)));
 		if (!this.spacer && granted.x === 0 && granted.y === 0) return;
 		const scroller = this.view.scrollDOM;
 		if (!this.spacer) {
 			if (getComputedStyle(scroller).position === "static") {
-				scroller.style.position = "relative";
+				scroller.setCssStyles({ position: "relative" });
 				this.scrollPositionPatched = true;
 			}
 			this.spacer = scroller.createDiv({ cls: "handwriting-surface-extent" });
@@ -1833,7 +1834,7 @@ class InkOverlayPlugin {
 		const path = this.filePath();
 		const scroller = this.view.scrollDOM;
 		const granted: Extent = path ? surfaceExtents.get(path) : ZERO_EXTENT;
-		const frontier = path ? inkFrontier(inlineInk.strokes(path) as InkStroke[]) : ZERO_EXTENT;
+		const frontier = path ? inkFrontier(inlineInk.strokes(path)) : ZERO_EXTENT;
 		const reach = this.lastReach;
 		return [
 			`file: ${path ?? "(none)"}`,

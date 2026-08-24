@@ -8,7 +8,7 @@ Open a note in Live Preview, put the pen down, write. The note stays a normal
 to the right of the text. The only change to the Markdown is one frontmatter
 property, and only on notes you have actually inked.
 
-Handwriting v0.13.7 is free and open source. The complete buildable source is
+Handwriting v0.13.8 is free and open source. The complete buildable source is
 in this repository, licensed under `AGPL-3.0-only`. There is no payment, no
 account, no license key, no telemetry, and nothing that requires a network.
 

@@ -11,8 +11,12 @@ import { GUARD_SUBTREE_CLASS, armGuardStyle, disarmGuardStyle } from "./GuardSty
 
 function fakeScroller(initialTouchAction = "") {
 	const classes = new Set<string>();
+	const style = { touchAction: initialTouchAction };
 	return {
-		style: { touchAction: initialTouchAction },
+		style,
+		setCssStyles: (styles: { touchAction: string }) => {
+			style.touchAction = styles.touchAction;
+		},
 		classList: {
 			add: (c: string) => void classes.add(c),
 			remove: (c: string) => void classes.delete(c),

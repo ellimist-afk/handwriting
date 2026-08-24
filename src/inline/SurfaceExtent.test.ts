@@ -3,6 +3,7 @@ import {
 	EXTENT_CHUNK,
 	EXTENT_HEADROOM,
 	EXTENT_MARGIN,
+	HSCROLL_AXIS_CLASS,
 	ScrollAxisGuard,
 	SurfaceExtents,
 	ZERO_EXTENT,
@@ -14,6 +15,7 @@ import {
 	surfaceOriginInScroller,
 } from "./SurfaceExtent";
 import { InkStroke } from "../ink/Stroke";
+import css from "../../styles.css?raw";
 
 function stroke(x: number, y: number, w: number, h: number): InkStroke {
 	return {
@@ -140,53 +142,53 @@ describe("isScrollableOverflow", () => {
 });
 
 /** The guard touches only el.style's property API — stub exactly that. */
-function fakeStyledElement(): HTMLElement {
-	const props = new Map<string, { value: string; priority: string }>();
-	const style = {
-		getPropertyValue: (name: string) => props.get(name)?.value ?? "",
-		getPropertyPriority: (name: string) => props.get(name)?.priority ?? "",
-		setProperty: (name: string, value: string, priority = "") => {
-			props.set(name, { value, priority });
-		},
-		removeProperty: (name: string) => {
-			props.delete(name);
-		},
+function fakeClassedElement(): HTMLElement & { classes: Set<string> } {
+	const classes = new Set<string>();
+	const classList = {
+		add: (c: string) => void classes.add(c),
+		remove: (c: string) => void classes.delete(c),
 	};
-	return { style } as unknown as HTMLElement;
+	return { classList, classes } as unknown as HTMLElement & { classes: Set<string> };
 }
 
 describe("ScrollAxisGuard", () => {
-	it("patches overflow-x only when the computed value is not scrollable", () => {
-		const el = fakeStyledElement();
+	it("patches only when the computed value is not scrollable", () => {
+		const el = fakeClassedElement();
 		const guard = new ScrollAxisGuard();
 		guard.assert(el, "hidden");
 		expect(guard.patched).toBe(true);
-		expect(el.style.getPropertyValue("overflow-x")).toBe("auto");
-		expect(el.style.getPropertyPriority("overflow-x")).toBe("important");
+		expect(el.classes.has(HSCROLL_AXIS_CLASS)).toBe(true);
 	});
 
 	it("leaves an already-scrollable axis alone", () => {
-		const el = fakeStyledElement();
+		const el = fakeClassedElement();
 		const guard = new ScrollAxisGuard();
 		guard.assert(el, "auto");
 		expect(guard.patched).toBe(false);
-		expect(el.style.getPropertyValue("overflow-x")).toBe("");
+		expect(el.classes.size).toBe(0);
 	});
 
-	it("restores what the inline style carried, including nothing", () => {
-		const el = fakeStyledElement();
-		el.style.setProperty("overflow-x", "hidden");
+	it("restore drops the class and nothing else, idempotently", () => {
+		const el = fakeClassedElement();
 		const guard = new ScrollAxisGuard();
 		guard.assert(el, "hidden");
+		guard.assert(el, "hidden");
+		expect(el.classes.size).toBe(1);
+		guard.restore(el);
 		guard.restore(el);
 		expect(guard.patched).toBe(false);
-		expect(el.style.getPropertyValue("overflow-x")).toBe("hidden");
+		expect(el.classes.size).toBe(0);
+	});
 
-		const bare = fakeStyledElement();
-		const g2 = new ScrollAxisGuard();
-		g2.assert(bare, "hidden");
-		g2.restore(bare);
-		expect(bare.style.getPropertyValue("overflow-x")).toBe("");
+	it("styles.css carries the rule the class relies on", () => {
+		// The guard is inert without its stylesheet half; the packager asserts
+		// this too, but a stale styles.css in dev should fail loudly here.
+		const rule = new RegExp(
+			`\\.cm-scroller\\.${HSCROLL_AXIS_CLASS}\\s*\\{([^}]*)\\}`
+		);
+		const m = css.match(rule);
+		expect(m, "axis rule present").not.toBeNull();
+		expect(m![1]).toMatch(/overflow-x:\s*auto\s*!important/);
 	});
 });
 

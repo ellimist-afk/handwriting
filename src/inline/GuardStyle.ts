@@ -37,18 +37,18 @@
 export const GUARD_SUBTREE_CLASS = "handwriting-touch-guard";
 
 export interface GuardStyleTarget {
-	style: { touchAction: string };
+	setCssStyles(styles: { touchAction: string }): void;
 	classList: { add(name: string): void; remove(name: string): void };
 }
 
 /** Arm: inline `none` on the scroller plus the subtree class. */
 export function armGuardStyle(el: GuardStyleTarget): void {
-	el.style.touchAction = "none";
+	el.setCssStyles({ touchAction: "none" });
 	el.classList.add(GUARD_SUBTREE_CLASS);
 }
 
 /** Disarm: put back what the inline style carried before, drop the class. */
 export function disarmGuardStyle(el: GuardStyleTarget, restoreTo: string): void {
-	el.style.touchAction = restoreTo;
+	el.setCssStyles({ touchAction: restoreTo });
 	el.classList.remove(GUARD_SUBTREE_CLASS);
 }

@@ -860,7 +860,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				state: { file: file.path },
 				active: true,
 			});
-			this.app.workspace.revealLeaf(leaf);
+			void this.app.workspace.revealLeaf(leaf);
 		} catch (err) {
 			console.error("[handwriting] could not create page", err);
 			new Notice("Handwriting: could not create the page. See the developer console.");
@@ -896,7 +896,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 
 	private isHandwritingPage(file: TFile): boolean {
 		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-		const marker = fm?.["handwriting"];
+		const marker: unknown = fm?.["handwriting"];
 		return marker === "page" || marker === true;
 	}
 
@@ -963,8 +963,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	 */
 	private recentPageIdFor(file: TFile): string | undefined {
 		const cache = this.app.metadataCache.getCache(file.path);
-		const fm = cache?.frontmatter as Record<string, unknown> | undefined;
-		const id = fm?.["handwriting-page-id"];
+		const fm = cache?.frontmatter;
+		const id: unknown = fm?.["handwriting-page-id"];
 		return typeof id === "string" ? id : undefined;
 	}
 

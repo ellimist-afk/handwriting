@@ -197,20 +197,20 @@ export class TextLayer {
 		if (!view) return;
 		if (this.editingId && this.editingId !== id) this.endEdit();
 
-		const editor = document.createElement("textarea");
-		editor.className = "handwriting-box-editor handwriting-ui";
+		const editor = view.el.createEl("textarea", {
+			cls: "handwriting-box-editor handwriting-ui",
+		});
 		editor.value = initialChar ? view.model.text + initialChar : view.model.text;
 		editor.spellcheck = false;
 		view.el.addClass("is-editing");
-		view.el.appendChild(editor);
 		view.editor = editor;
-		view.content.style.display = "none";
+		view.content.setCssStyles({ display: "none" });
 		this.editingId = id;
 		this.cb.onEditingChanged(id);
 
 		const autoGrow = () => {
-			editor.style.height = "auto";
-			editor.style.height = `${editor.scrollHeight}px`;
+			editor.setCssStyles({ height: "auto" });
+			editor.setCssStyles({ height: `${editor.scrollHeight}px` });
 		};
 		editor.addEventListener("input", () => {
 			view.model.text = editor.value;
@@ -251,7 +251,7 @@ export class TextLayer {
 			view.editor.remove();
 			view.editor = null;
 			view.el.removeClass("is-editing");
-			view.content.style.display = "";
+			view.content.setCssStyles({ display: "" });
 			void this.renderContent(view);
 			this.cb.onTextChanged(id, text);
 			if (text.trim().length === 0) this.cb.onEmptied(id);

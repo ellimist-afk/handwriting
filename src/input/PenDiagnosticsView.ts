@@ -91,17 +91,21 @@ export class PenDiagnosticsView extends ItemView {
 		const clearBtn = controls.createEl("button", { text: "Clear" });
 		clearBtn.addEventListener("click", () => this.clear());
 		const copyBtn = controls.createEl("button", { text: "Copy JSON" });
-		copyBtn.addEventListener("click", async () => {
-			const payload = this.entries.map((e) => JSON.stringify(e)).join("\n");
-			await navigator.clipboard.writeText(payload);
-			copyBtn.setText(`Copied ${this.entries.length}`);
-			window.setTimeout(() => copyBtn.setText("Copy JSON"), 1500);
+		copyBtn.addEventListener("click", () => {
+			void (async () => {
+				const payload = this.entries.map((e) => JSON.stringify(e)).join("\n");
+				await navigator.clipboard.writeText(payload);
+				copyBtn.setText(`Copied ${this.entries.length}`);
+				window.setTimeout(() => copyBtn.setText("Copy JSON"), 1500);
+			})();
 		});
 		const copySummaryBtn = controls.createEl("button", { text: "Copy summary" });
-		copySummaryBtn.addEventListener("click", async () => {
-			await navigator.clipboard.writeText(this.summaryText());
-			copySummaryBtn.setText("Copied");
-			window.setTimeout(() => copySummaryBtn.setText("Copy summary"), 1500);
+		copySummaryBtn.addEventListener("click", () => {
+			void (async () => {
+				await navigator.clipboard.writeText(this.summaryText());
+				copySummaryBtn.setText("Copied");
+				window.setTimeout(() => copySummaryBtn.setText("Copy summary"), 1500);
+			})();
 		});
 
 		this.captureEl = content.createDiv({ cls: "handwriting-diag-capture" });

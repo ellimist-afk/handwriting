@@ -353,6 +353,14 @@
  * (`handwriting-hscroll` is set alongside the extent spacer). Vertical scrolling
  * and every other pane keep the theme's own styling.
  */
+/* The horizontal axis patch. Obsidian ships `overflow-x: hidden` on the
+   scroller; the ScrollAxisGuard adds this class while inline ink needs
+   horizontal scroll room and removes it on unmount. Important because themes
+   set the property with high specificity. */
+.cm-scroller.handwriting-hscroll-axis {
+	overflow-x: auto !important;
+}
+
 .cm-scroller.handwriting-hscroll::-webkit-scrollbar:horizontal {
 	height: 10px;
 }

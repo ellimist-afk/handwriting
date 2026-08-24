@@ -22,7 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const EXPECT_VERSION = "0.13.7";
+const EXPECT_VERSION = "0.13.8";
 const EXPECT_MIN_APP = "1.13.7";
 const ASSETS = ["main.js", "manifest.json", "styles.css"];
 
@@ -35,6 +35,7 @@ const ASSETS = ["main.js", "manifest.json", "styles.css"];
 const REQUIRED_CSS = [
 	[".cm-scroller.handwriting-touch-guard *", "RC3 nested-scroll-container guard (backlinks dead band)"],
 	[".cm-scroller.handwriting-hscroll::-webkit-scrollbar", "v0.13.0 horizontal bearings"],
+	[".cm-scroller.handwriting-hscroll-axis", "v0.13.8 horizontal axis patch (moved off inline styles)"],
 	[".embedded-backlinks", "v0.13.0 backlinks border removal on Handwriting pages"],
 	['.metadata-property[data-property-key="handwriting-page-id"]', "page-id property hidden from Properties UI"],
 	["body.handwriting-active-page .status-bar", "status bar kept off the writing surface"],

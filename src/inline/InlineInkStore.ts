@@ -472,7 +472,7 @@ export class InlineInkStore {
 		const deadline = new Promise<boolean>((r) => {
 			expire = r;
 		});
-		const timer = setTimeout(() => expire(true), maxWaitMs);
+		const timer = window.setTimeout(() => expire(true), maxWaitMs);
 		try {
 			for (let pass = 0; pass < 4; pass++) {
 				const inFlight: Promise<unknown>[] = [...this.firstWrites];
@@ -488,7 +488,7 @@ export class InlineInkStore {
 				if (timedOut) return;
 			}
 		} finally {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 		}
 	}
 

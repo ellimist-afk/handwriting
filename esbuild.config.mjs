@@ -1,6 +1,6 @@
 import esbuild from "esbuild";
 import process from "process";
-import builtins from "builtin-modules";
+import { builtinModules as builtins } from "node:module";
 
 const banner = `/*
 Handwriting: pen ink on ordinary Markdown notes in Obsidian.

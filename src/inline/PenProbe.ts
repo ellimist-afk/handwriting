@@ -118,8 +118,8 @@ export function recordProbe(entry: ProbeEntry): void {
 // ---- on-screen markers ------------------------------------------------------
 
 function makeMarker(color: string, size: number): HTMLElement {
-	const el = document.createElement("div");
-	Object.assign(el.style, {
+	const el = document.body.createEl("div");
+	el.setCssStyles({
 		position: "fixed",
 		left: "0px",
 		top: "0px",
@@ -133,8 +133,7 @@ function makeMarker(color: string, size: number): HTMLElement {
 		pointerEvents: "none",
 		zIndex: "99999",
 		willChange: "transform",
-	} as Partial<CSSStyleDeclaration>);
-	document.body.appendChild(el);
+	});
 	return el;
 }
 
@@ -145,21 +144,19 @@ function makeMarker(color: string, size: number): HTMLElement {
 export function markRawPointer(clientX: number, clientY: number): void {
 	if (!enabled) return;
 	if (!rawMarker) rawMarker = makeMarker("#ff2d55", 15);
-	rawMarker.style.transform = `translate(${clientX}px, ${clientY}px)`;
-	rawMarker.style.display = "";
+	rawMarker.setCssStyles({ transform: `translate(${clientX}px, ${clientY}px)`, display: "" });
 }
 
 /** The drawn head endpoint, mapped back out through the production transforms. */
 export function markMappedTip(clientX: number, clientY: number): void {
 	if (!enabled) return;
 	if (!mappedMarker) mappedMarker = makeMarker("#00d4ff", 9);
-	mappedMarker.style.transform = `translate(${clientX}px, ${clientY}px)`;
-	mappedMarker.style.display = "";
+	mappedMarker.setCssStyles({ transform: `translate(${clientX}px, ${clientY}px)`, display: "" });
 }
 
 export function hideProbeMarkers(): void {
-	if (rawMarker) rawMarker.style.display = "none";
-	if (mappedMarker) mappedMarker.style.display = "none";
+	if (rawMarker) rawMarker.setCssStyles({ display: "none" });
+	if (mappedMarker) mappedMarker.setCssStyles({ display: "none" });
 }
 
 export function destroyProbeMarkers(): void {

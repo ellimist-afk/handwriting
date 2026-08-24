@@ -5,6 +5,10 @@
 
 import { describe, expect, it } from "vitest";
 import { InkStroke } from "../ink/Stroke";
+
+// The store reaches for window's timers (popout compatibility); the node
+// test environment has no window, so mirror the persistence suites' shim.
+(globalThis as { window?: unknown }).window = globalThis;
 import { parseMarkdownPage } from "../model/MarkdownPage";
 import { emptyPage, parsePage, serializePage } from "../model/PageData";
 import { claimMarkdown, reassignMarkdown } from "./InlineClaim";

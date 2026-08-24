@@ -294,9 +294,9 @@ export class PenLabView extends ItemView {
 				this.lastOverlay = ts;
 				this.updateOverlay();
 			}
-			requestAnimationFrame(tick);
+			window.requestAnimationFrame(tick);
 		};
-		requestAnimationFrame(tick);
+		window.requestAnimationFrame(tick);
 	}
 
 	private updateOverlay(force = false): void {
@@ -349,7 +349,7 @@ export class PenLabView extends ItemView {
 	private requestRender(): void {
 		if (this.renderQueued) return;
 		this.renderQueued = true;
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.renderQueued = false;
 			if ((window.devicePixelRatio || 1) !== this.dpr) {
 				this.handleResize();
