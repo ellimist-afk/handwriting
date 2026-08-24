@@ -1,0 +1,41 @@
+name: ci
+
+# Every push and pull request gets the same four checks a contributor is
+# asked to run locally. Nothing here publishes, tags, releases or writes to
+# the repository.
+on:
+  push:
+  pull_request:
+
+# Read-only. The job needs the source and nothing else.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned to stable major versions. The repository has no
+      # stricter pinning policy; commit-SHA pinning is the harder option if
+      # one is adopted later.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # ci, not install: exactly what package-lock.json pins, and it fails
+      # rather than quietly rewriting the lock.
+      - run: npm ci
+
+      - name: typecheck
+        run: npx tsc -noEmit
+
+      - name: tests
+        run: npm test
+
+      # Runs tsc again and then esbuild, which is what Obsidian's scanner
+      # selects. Proves the release build works from a clean checkout.
+      - name: production build
+        run: npm run build

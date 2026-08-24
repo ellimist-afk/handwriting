@@ -1,0 +1,1173 @@
+import { telemetry } from "../diag/Telemetry";
+import { GuardDecision, ManipulationGuard } from "../input/ManipulationGuard";
+import { PalmGate, paroleEarned } from "../input/PalmGate";
+import { PenSample } from "../input/PointerRouter";
+import { visualToNote } from "./ZoomScale";
+import { hideProbeMarkers, markRawPointer } from "./PenProbe";
+import { hitProbeDown, hitProbeHover, isHitProbeEnabled } from "./PenHitProbe";
+import { scrollProbeTouch } from "./ScrollProbe";
+import { DIAG_OFF_NOTE, diagnosticsEnabled } from "../diag/DiagSwitch";
+import { VelocitySample, flingStep, releaseVelocity } from "../input/Fling";
+import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
+
+/**
+ * Pen capture for the inline overlay.
+ *
+ * This is deliberately NOT the canvas PointerRouter, although the pen path
+ * mirrors it move for move. The difference is everything else: on the canvas,
+ * Handwriting owns the whole surface, so touch pans the camera and mouse navigates.
+ * On an ordinary note the EDITOR owns the surface. Touch must scroll and
+ * place carets natively, the mouse must select text natively, and Handwriting may
+ * claim exactly one thing: the pen.
+ *
+ * Rules:
+ *   Pen tip      -> ink. Claimed in the CAPTURE phase on the editor's
+ *                   scroller, before CodeMirror's own handlers (which live on
+ *                   the child content element) can see it.
+ *   Pen barrel   -> claimed: held at contact it lassos and moves ink.
+ *   Pen eraser   -> claimed and swallowed (no ink, and no accidental
+ *                   right-click storm from the eraser end).
+ *   Touch        -> passed through untouched, UNLESS the palm gate says a pen
+ *                   is active or hovering, in which case the contact is
+ *                   swallowed before the editor can scroll or place a caret
+ *                   under the writer's palm. This is the only touch handling,
+ *                   and it is not on the pen hot path.
+ *   Mouse        -> never touched.
+ *
+ * The pen hot path is byte-for-byte the frozen pipeline's shape: sync work
+ * inside `pointerrawupdate`, coalesced samples, no allocation on move events
+ * beyond the sample array.
+ */
+
+export interface InlinePenCallbacks {
+	onPenDown(sample: PenSample, ev: PointerEvent): void;
+	/** Input-rate coalesced samples while a stroke is active. */
+	onPenRaw(samples: PenSample[], ev: PointerEvent): void;
+	/** rAF-rate move, for metrics only (`coalescedCount`). */
+	onPenMove(ev: PointerEvent, coalescedCount: number): void;
+	onPenUp(ev: PointerEvent): void;
+}
+
+// ---- lifecycle trace -------------------------------------------------------
+//
+// Every pointer event the router sees goes into this ring, cheap enough to be
+// always on (one small object per EVENT, not per coalesced sample; the hot
+// path already allocates far more building the sample array). `Diagnostics:
+// copy pen trace` dumps it. This exists because strokes on the test Surface
+// terminated after a few centimetres. The trace tells us exactly which event
+// ended the stream: a `pointercancel` (browser gesture takeover), a
+// `lostpointercapture` without a cancel (someone stole capture), or a silent
+// stop (delivery ceased).
+
+interface TraceEntry {
+	t: number;
+	type: string;
+	id: number;
+	ptr: string;
+	buttons: number;
+	button: number;
+	pressure: number;
+	x: number;
+	y: number;
+	note: string;
+}
+
+const TRACE_MAX = 3000;
+const trace: TraceEntry[] = [];
+
+function tr(type: string, e: PointerEvent | null, note = ""): void {
+	if (!diagnosticsEnabled()) return;
+	trace.push({
+		t: performance.now(),
+		type,
+		id: e?.pointerId ?? -1,
+		ptr: e?.pointerType ?? "",
+		buttons: e?.buttons ?? -1,
+		button: e?.button ?? -1,
+		pressure: e?.pressure ?? -1,
+		x: e ? Math.round(e.clientX) : 0,
+		y: e ? Math.round(e.clientY) : 0,
+		note,
+	});
+	if (trace.length > TRACE_MAX) trace.splice(0, trace.length - TRACE_MAX);
+}
+
+/** Pure, unit-tested: the acquisition-health counts the summary prints. */
+export function summarizeAcquisitions(
+	events: ReadonlyArray<{ type: string; note: string }>
+): { delivered: number; claimed: number; ignored: number; cancelled: number; pressedHover: number } {
+	let delivered = 0;
+	let claimed = 0;
+	let ignored = 0;
+	let cancelled = 0;
+	let pressedHover = 0;
+	for (const e of events) {
+		if (e.type === "window-pointerdown") delivered++;
+		else if (e.type === "pointerdown" && e.note.includes("CLAIMED")) claimed++;
+		else if (e.type === "pointerdown" && e.note.includes("IGNORED")) ignored++;
+		else if (e.type === "pointercancel") cancelled++;
+		else if (e.type === "pen-hover" && e.note.includes("PRESSED")) pressedHover++;
+	}
+	return { delivered, claimed, ignored, cancelled, pressedHover };
+}
+
+export function formatInlinePenTrace(): string {
+	if (trace.length === 0) {
+		return diagnosticsEnabled()
+			? "Handwriting pen trace: empty"
+			: `Handwriting pen trace: empty. ${DIAG_OFF_NOTE}`;
+	}
+	const t0 = trace[0]!.t;
+	const lines = trace.map((e) => {
+		const at = (e.t - t0).toFixed(1).padStart(8);
+		return (
+			`${at}ms  ${e.type.padEnd(18)} id=${e.id} ${e.ptr || "-"} ` +
+			`buttons=${e.buttons} button=${e.button} p=${e.pressure.toFixed(3)} ` +
+			`(${e.x},${e.y})${e.note ? "  " + e.note : ""}`
+		);
+	});
+	const s = summarizeAcquisitions(trace);
+	return [
+		`Handwriting pen trace: ${trace.length} event(s)`,
+		"",
+		`SUMMARY: ${s.delivered} pen contact(s) delivered to the page, ${s.claimed} claimed, ${s.ignored} ignored, ${s.cancelled} cancelled.`,
+		s.pressedHover > 0
+			? `  *** ${s.pressedHover} hover sample(s) with the pen PRESSED and no pointerdown. Search "PRESSED BUT NO". ***`
+			: "  No pressed-but-undelivered hover samples.",
+		s.delivered === s.claimed && s.ignored === 0 && s.cancelled === 0 && s.pressedHover === 0
+			? "  Every acquisition in this capture was healthy. No failure recorded."
+			: "  At least one acquisition did not follow the healthy path.",
+		"",
+		"How to read an acquisition:",
+		"  window-pointerdown  = the PAGE received the pen contact (window capture,",
+		"                        before every other listener). Absent => the browser",
+		"                        never delivered it.",
+		"  pointerdown … CLAIMED   = the router received it and took it. guard=prearmed",
+		"                        means hover had already pan-locked the scroller;",
+		"                        guard=COLD means it had not.",
+		"  pointerdown … IGNORED   = the router received it and dropped it (a previous",
+		"                        stroke was still active).",
+		"  pointercancel       = delivered, then reclassified as a gesture by the browser.",
+		"  pen-hover           = pen NEAR, no contact claimed. buttons=1 here means the",
+		"                        nib was pressed and the browser sent no pointerdown.",
+		"",
+		...lines,
+	].join("\n");
+}
+
+export function clearInlinePenTrace(): void {
+	trace.length = 0;
+}
+
+// ---- window delivery mirror -------------------------------------------------
+//
+// Log-only, always on while any router lives: a window-CAPTURE listener for
+// pen pointerdown/pointercancel, ahead of every other handler in the page.
+// Its entries prove whether the browser delivered a contact at all, the
+// difference between "the page never got it" (OS/Chromium withheld it) and
+// "the page got it and something upstream of the router ate it". Refcounted
+// across routers; never intercepts, only traces.
+
+let mirrorRefs = 0;
+let mirrorFn: ((e: Event) => void) | null = null;
+const MIRRORED_TYPES = ["pointerdown", "pointercancel"] as const;
+/** Every live router's scroller, so the mirror can say "was this for us". */
+const liveScrollers = new Set<HTMLElement>();
+
+function armWindowMirror(scrollers: () => HTMLElement[]): void {
+	mirrorRefs++;
+	if (mirrorFn) return;
+	const fn = (e: Event) => {
+		// RC4: the switch is read BEFORE any work. This listener is on the
+		// window capture path for every pen contact, so composedPath() (a full
+		// ancestor-array allocation) and the live-scroller scan used to run at
+		// the start of every stroke and be thrown away inside tr().
+		if (!diagnosticsEnabled()) return;
+		const pe = e as PointerEvent;
+		if (pe.pointerType !== "pen") return;
+		const path = typeof pe.composedPath === "function" ? pe.composedPath() : [];
+		const forUs = scrollers().some((el) => path.includes(el));
+		tr(
+			`window-${pe.type}`,
+			pe,
+			`PAGE RECEIVED IT; composed path ${forUs ? "includes" : "does NOT include"} a Handwriting editor scroller`
+		);
+	};
+	mirrorFn = fn;
+	for (const type of MIRRORED_TYPES) {
+		window.addEventListener(type, fn, { capture: true });
+	}
+}
+
+function disarmWindowMirror(): void {
+	mirrorRefs = Math.max(0, mirrorRefs - 1);
+	if (mirrorRefs > 0 || !mirrorFn) return;
+	for (const type of MIRRORED_TYPES) {
+		window.removeEventListener(type, mirrorFn, { capture: true });
+	}
+	mirrorFn = null;
+}
+
+// ---- gesture guard ---------------------------------------------------------
+//
+// The prime suspect for the cut-off strokes: the editor's scroller is a
+// pannable region and does NOT carry `touch-action: none` (the canvas root
+// did, and fingers must keep scrolling here, so it never can statically).
+// For direct-manipulation pointers, `preventDefault` on pointerdown does not
+// opt out of native panning. Only `touch-action` does. So once the pen drags
+// past the browser's slop threshold, Chromium reclassifies the contact as a
+// pan and fires `pointercancel`. Our end funnel then honestly commits a
+// centimetres-long stroke.
+//
+// v0.12.10, STANDING GUARD (the cold-contact fix). The hover-reactive guard
+// above was necessary but not sufficient: Chromium snapshots the allowed
+// gestures from the COMMITTED compositor state at contact, so arming on hover
+// only protects contacts whose approach hover got committed a frame earlier.
+// A cold strike (no prior hover) reached pointerdown with panning still
+// allowed, the pan won, and the first stroke scrolled instead of inking.
+// Hardware-repeatable; hover-first was always fine. There is no reactive fix for
+// a cold contact; the protection must already be committed. So the guard's
+// RESTING state is now `touch-action: none`. Wheel/touchpad and mouse ignore
+// touch-action entirely; palm-blocked touches never open the window.
+//
+// v0.12.12: the window opens on LIFT, not on touchStart. v0.12.10 restored
+// touch-action the instant a non-palm-gated finger landed, and hardware
+// showed the residual failure that bought: on a cold slam the hand's edge
+// reaches the glass milliseconds before the pen tip, the palm gate cannot
+// block it (no hover in its 300 ms window; cold means cold for the palm
+// too), the window opened on that graze, and the tip then landed on a
+// restored-pan snapshot and scrolled. Post-touchpad contacts are always cold
+// (pen hover disables the touchpad, so the pen was necessarily away), which
+// is why the failure tracked "immediately after touchpad scrolling"; the
+// ~1 s recovery is the deliberate approach leading with hover. Now the whole
+// first gesture runs under the standing none, carried end-to-end by the 1:1
+// assist pan; the native window (subsequent gestures fully native, one-shot
+// re-arm timer) opens only when the last finger lifts, and only if the
+// gesture actually panned. A tap or resting palm never disarms the guard.
+// A pen claim mid-gesture reclassifies the carried touch as palm.
+//
+// v0.13.6 RC3: the guard covers the scroller's SUBTREE too. Blink re-enables
+// panning inside every nested scroll container (AdjustTouchActionForElement:
+// an element whose own overflow is auto/scroll gets pan-x/pan-y OR'ed back
+// into the touch-action it inherits, whether or not it has anything to
+// scroll). Obsidian's editor has several: the embedded backlinks pane
+// (`.backlink-pane`, overflow-y: auto), table widgets, math blocks, callout
+// content, embeds. Inside them the standing `none` on `.cm-scroller`
+// was silently `pan-y`/`pan-x` again: a pen drag with a vertical component
+// past slop became a scroll gesture, the stroke died with pointercancel, and
+// the whole band across "Linked mentions / No backlinks found / Unlinked
+// mentions" read as dead (hardware, 2026-08-22). The style write is now
+// GuardStyle.ts: inline none on the scroller plus a class that styles.css
+// turns into none on every descendant, toggled together so the touch window
+// still opens everywhere at once.
+
+let guardEnabled = true;
+
+export function isPenGestureGuardEnabled(): boolean {
+	return guardEnabled;
+}
+
+export function setPenGestureGuardEnabled(on: boolean): void {
+	guardEnabled = on;
+}
+
+/** One-shot re-arm delay after the last finger lifts. */
+const GUARD_REARM_MS = 1000;
+/** Finger movement before the assist pan engages (native slop analog). */
+const ASSIST_SLOP_PX = 8;
+
+// ---- native-event ownership -------------------------------------------------
+//
+// Once Handwriting has positively classified a pen contact (tip / barrel / eraser),
+// it owns that interaction. Cancelling pointerdown on the scroller is not
+// enough: Windows synthesises `contextmenu` AFTER pointerup (so the
+// during-stroke check missed it, and every barrel gesture stacked an Obsidian
+// menu), and Obsidian/CodeMirror register handlers at DOCUMENT level, above
+// the scroller, so mouse-compat / drag / selection machinery could still react
+// to a claimed contact (the eraser visibly dragged the editor caret).
+//
+// The ownership guard is a set of WINDOW-capture listeners (window precedes
+// document in the capture phase, so they pre-empt app-level handlers) that
+// suppress mouse-like fallout while a claimed stroke is active and for a short
+// tail after it ends (trailing click/auxclick/contextmenu land post-pointerup).
+// Armed at claim, disarmed after the tail: never a standing global hook
+// (§40/§82), and mouse/touch behavior outside a pen gesture is untouched.
+
+/** Mouse-like fallout a claimed pen gesture must never leak to the app. */
+const OWNED_NATIVE_EVENTS = [
+	"mousedown",
+	"mousemove",
+	"mouseup",
+	"click",
+	"auxclick",
+	"dblclick",
+	"dragstart",
+	"selectstart",
+	"contextmenu",
+] as const;
+
+/** Trailing window after pen-up in which click/contextmenu fallout still lands. */
+const OWNERSHIP_TAIL_MS = 350;
+
+/** Pure decision, unit-tested: does Handwriting own native fallout right now? */
+export function ownsNativeFallout(opts: {
+	activeStroke: boolean;
+	now: number;
+	ownershipTailUntil: number;
+}): boolean {
+	return opts.activeStroke || opts.now < opts.ownershipTailUntil;
+}
+
+/**
+ * Pure decision, unit-tested: suppress this owned-event dispatch?
+ *
+ * v0.13.2: touch-origin exemption in the tail. The post-stroke tail
+ * exists for the PEN's trailing fallout (click/contextmenu land after
+ * pointerup) and stray mouse compat events. A FINGER tapping right after
+ * pen-up is the user placing the caret. Eating it made the pen-to-touch
+ * handoff feel dead for a third of a second. During an active stroke everything is
+ * still suppressed (that finger is a palm).
+ */
+export function suppressNativeFallout(opts: {
+	activeStroke: boolean;
+	now: number;
+	ownershipTailUntil: number;
+	fromTouch: boolean;
+}): boolean {
+	if (opts.activeStroke) return true;
+	if (opts.now >= opts.ownershipTailUntil) return false;
+	return !opts.fromTouch;
+}
+
+/**
+ * Pure decision, unit-tested: suppress this contextmenu event?
+ *
+ * Yes when a claimed gesture owns the moment, when the event itself is
+ * pen-sourced (Chromium ≥115 delivers contextmenu as a PointerEvent), or when
+ * a pen is writing or hovering, because a barrel press while hovering raises
+ * the menu with no contact to claim. A plain mouse right-click away from the pen is
+ * never suppressed.
+ */
+export function contextMenuSuppressed(opts: {
+	activeStroke: boolean;
+	now: number;
+	ownershipTailUntil: number;
+	pointerType: string | undefined;
+	penNear: boolean;
+}): boolean {
+	if (ownsNativeFallout(opts)) return true;
+	if (opts.pointerType === "pen") return true;
+	if (opts.penNear) return true;
+	return false;
+}
+
+/**
+ * Pure decision, unit-tested: may the WINDOW backstop end the stroke for this
+ * pointerup/pointercancel, or must it stand down for the scroller's own
+ * handler?
+ *
+ * Window capture runs BEFORE the scroller capture listener on the very same
+ * dispatch, so on every ordinary pen-up the backstop used to win the race
+ * against the normal path and the trace read "END VIA WINDOW BACKSTOP" for
+ * perfectly healthy strokes (and, because the normal handler then saw a
+ * stroke that was already over, the event escaped un-suppressed into
+ * CodeMirror). Deferring with queueMicrotask does NOT fix this. The HTML
+ * spec runs a microtask checkpoint after each listener returns, so the
+ * deferred callback still executes before the scroller's listener fires.
+ *
+ * The correct rule needs no timing at all: if the scroller is on the event's
+ * composed path, this same dispatch WILL reach the normal handler. The
+ * backstop's only job is the event that bypasses the scroller entirely
+ * (capture silently lost, pen released over other UI).
+ */
+export function backstopMayEnd(opts: {
+	pointerType: string | undefined;
+	scrollerInPath: boolean;
+}): boolean {
+	if (opts.pointerType !== "pen") return false;
+	return !opts.scrollerInPath;
+}
+
+export class InlinePenRouter {
+	/** The element listeners attach to: the editor's scroller. */
+	private scrollEl: HTMLElement;
+	/** The element pen coordinates are made relative to: the overlay. */
+	private rectEl: HTMLElement;
+	private rect: DOMRect;
+	private cb: InlinePenCallbacks;
+	private scaleProvider: () => number;
+	private gate = new PalmGate();
+
+	private activePenId: number | null = null;
+	/** Palm contacts we swallowed at pointerdown; their later events die too. */
+	private swallowedTouches = new Set<number>();
+	// Palm parole (v0.13.3): the latest swallowed contact is watched. If it
+	// moves like a swipe it converts into the assist pan (see PalmGate.ts).
+	private paroleId: number | null = null;
+	private paroleDownX = 0;
+	private paroleDownY = 0;
+	private paroleDownAt = 0;
+	private paroleContactPx = 0;
+	/** A pen stroke overlapped the watched contact's life, so parole is off (RC3). */
+	private paroleOverlapped = false;
+	private disposers: Array<() => void> = [];
+	private winEndFn: ((e: Event) => void) | null = null;
+
+	// Standing guard state (see module comment above).
+	private manip = new ManipulationGuard();
+	private guardApplied = false;
+	private rearmTimer: number | null = null;
+	private savedTouchAction = "";
+	private savedTouchActionKnown = false;
+	/** Non-palm touches currently counted by the guard's touch window. */
+	private guardTouches = new Set<number>();
+	/** The one transition gesture the assist pan is carrying. */
+	private assistPointerId: number | null = null;
+	private assistLastX = 0;
+	private assistLastY = 0;
+	private assistMoved = 0;
+	private assistEngaged = false;
+	/** Latched when the assist engages; the current touch gesture really panned. */
+	private gesturePanned = false;
+	/** Recent assist positions for release-velocity measurement. */
+	private assistSamples: VelocitySample[] = [];
+	/** Nonzero while an assist fling is gliding (rAF chain, finite). */
+	private flingRaf = 0;
+	private flingVx = 0;
+	private flingVy = 0;
+	private flingLastT = 0;
+
+	// Native-event ownership (armed per claimed stroke + tail).
+	private ownershipTailUntil = 0;
+	private ownershipFn: ((e: Event) => void) | null = null;
+	private ownershipDisarmTimer: number | null = null;
+	/** Event types suppressed this ownership window, traced once each. */
+	private suppressedTraced = new Set<string>();
+	suppressedNative = 0;
+
+	// Cold-contact diagnosis (M2 bug #2): when did the claimed stroke start,
+	// and how late did its first input-rate samples arrive?
+	private strokeDownAt = 0;
+	private firstRawTraced = false;
+
+	// Acquisition context printed with every CLAIMED pen-down.
+	private lastTouchAt = Number.NEGATIVE_INFINITY;
+	private lastPenHoverAt = Number.NEGATIVE_INFINITY;
+	private lastHoverTraceAt = Number.NEGATIVE_INFINITY;
+	private lastHoverButtons = -1;
+
+	penDowns = 0;
+	penUps = 0;
+	fallbackEnds = 0;
+	palmsBlocked = 0;
+
+	constructor(
+		scrollEl: HTMLElement,
+		rectEl: HTMLElement,
+		cb: InlinePenCallbacks,
+		/**
+		 * Visual px per layout px of the overlay. Pointer coordinates arrive in
+		 * visual px; the overlay's canvases and the note-space ink they hold are
+		 * in layout px. Without this the pen lands in the wrong place, and
+		 * draws at the wrong size, whenever the editor is scaled.
+		 */
+		scaleProvider: () => number = () => 1
+	) {
+		this.scrollEl = scrollEl;
+		this.rectEl = rectEl;
+		this.cb = cb;
+		this.scaleProvider = scaleProvider;
+		this.rect = rectEl.getBoundingClientRect();
+		liveScrollers.add(scrollEl);
+		armWindowMirror(() => [...liveScrollers]);
+		// Standing guard: armed from birth, so even the very first contact of
+		// a session, with zero hover, meets a committed touch-action: none.
+		this.applyGuard(this.manip.penSignal(), "resting");
+
+		// Everything is CAPTURE phase: the scroller is the content element's
+		// parent, so these run before any CodeMirror handler regardless of
+		// registration order. Non-pen events (and pen hover) fall straight
+		// through; the listener returns without touching them.
+		const on = (type: string, fn: (ev: PointerEvent) => void) => {
+			const h = (ev: Event) => fn(ev as PointerEvent);
+			this.scrollEl.addEventListener(type, h, { capture: true });
+			this.disposers.push(() =>
+				this.scrollEl.removeEventListener(type, h, { capture: true })
+			);
+		};
+
+		on("pointerdown", (e) => this.pointerDown(e));
+		on("pointermove", (e) => this.pointerMove(e));
+		on("pointerrawupdate", (e) => this.pointerRawUpdate(e));
+		on("pointerup", (e) => this.pointerUpOrCancel(e));
+		on("pointercancel", (e) => this.pointerUpOrCancel(e));
+		on("gotpointercapture", (e) => {
+			if (e.pointerType === "pen") tr("gotpointercapture", e);
+		});
+		on("lostpointercapture", (e) => {
+			if (e.pointerType !== "pen") return;
+			tr("lostpointercapture", e, this.activePenId !== null ? "DURING STROKE" : "");
+			this.endPenStroke(e, false);
+		});
+		on("pointerleave", (e) => {
+			if (e.pointerType === "pen") {
+				tr("pointerleave", e, this.activePenId !== null ? "DURING STROKE" : "");
+			}
+		});
+		// Pen-sourced context menus on the note are never wanted: mid-stroke
+		// long-press, barrel press at contact (fires AFTER pointerup, so the old
+		// during-stroke check missed it and menus stacked), and barrel press
+		// while merely hovering. Mouse right-click away from the pen passes.
+		{
+			const h = (ev: Event) => {
+				const suppress = contextMenuSuppressed({
+					activeStroke: this.activePenId !== null,
+					now: performance.now(),
+					ownershipTailUntil: this.ownershipTailUntil,
+					pointerType: (ev as PointerEvent).pointerType,
+					penNear: this.gate.isPenNear(performance.now()),
+				});
+				if (suppress) {
+					this.traceSuppressed("contextmenu(scroller)");
+					ev.preventDefault();
+					ev.stopPropagation();
+				}
+			};
+			this.scrollEl.addEventListener("contextmenu", h, { capture: true });
+			this.disposers.push(() =>
+				this.scrollEl.removeEventListener("contextmenu", h, { capture: true })
+			);
+		}
+	}
+
+	// ---- native-event ownership ----------------------------------------------
+
+	/**
+	 * Window-capture guards, armed only while a claimed stroke (plus its short
+	 * tail) owns the interaction. Window precedes document in capture order, so
+	 * these pre-empt Obsidian's app-level handlers, which is where the eraser's
+	 * caret-drag leak lived. Touch and mouse OUTSIDE a claimed pen gesture never
+	 * meet this code; the palm gate already quarantines touches for longer than
+	 * the tail, so no finger behavior changes.
+	 */
+	private armOwnership(): void {
+		if (this.ownershipDisarmTimer !== null) {
+			window.clearTimeout(this.ownershipDisarmTimer);
+			this.ownershipDisarmTimer = null;
+		}
+		this.suppressedTraced.clear();
+		if (this.ownershipFn) return; // still armed from the previous stroke's tail
+		const fn = (ev: Event) => {
+			const fromTouch =
+				(ev as PointerEvent).pointerType === "touch" ||
+				((ev as UIEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } })
+					.sourceCapabilities?.firesTouchEvents ??
+					false);
+			if (
+				!suppressNativeFallout({
+					activeStroke: this.activePenId !== null,
+					now: performance.now(),
+					ownershipTailUntil: this.ownershipTailUntil,
+					fromTouch,
+				})
+			) {
+				return;
+			}
+			this.traceSuppressed(ev.type);
+			ev.preventDefault();
+			ev.stopPropagation();
+		};
+		this.ownershipFn = fn;
+		for (const type of OWNED_NATIVE_EVENTS) {
+			window.addEventListener(type, fn, { capture: true });
+		}
+	}
+
+	/** Called at stroke end: keep the guards through the fallout tail, then drop. */
+	private scheduleOwnershipDisarm(): void {
+		this.ownershipTailUntil = performance.now() + OWNERSHIP_TAIL_MS;
+		if (this.ownershipDisarmTimer !== null) window.clearTimeout(this.ownershipDisarmTimer);
+		this.ownershipDisarmTimer = window.setTimeout(() => {
+			this.ownershipDisarmTimer = null;
+			this.disarmOwnership();
+		}, OWNERSHIP_TAIL_MS + 50);
+	}
+
+	private disarmOwnership(): void {
+		if (!this.ownershipFn) return;
+		if (this.activePenId !== null) return; // a new stroke re-claimed meanwhile
+		for (const type of OWNED_NATIVE_EVENTS) {
+			window.removeEventListener(type, this.ownershipFn, { capture: true });
+		}
+		this.ownershipFn = null;
+	}
+
+	private traceSuppressed(type: string): void {
+		this.suppressedNative++;
+		if (this.suppressedTraced.has(type)) return;
+		this.suppressedTraced.add(type);
+		tr("suppressed", null, `${type}: claimed pen gesture owns this interaction`);
+	}
+
+	dispose(): void {
+		this.cancelFling();
+		liveScrollers.delete(this.scrollEl);
+		disarmWindowMirror();
+		for (const d of this.disposers) d();
+		this.disposers = [];
+		this.disarmEndBackstop();
+		this.restoreGuardStyle();
+		if (this.ownershipDisarmTimer !== null) {
+			window.clearTimeout(this.ownershipDisarmTimer);
+			this.ownershipDisarmTimer = null;
+		}
+		this.activePenId = null;
+		this.disarmOwnership();
+	}
+
+	// ---- standing gesture guard ---------------------------------------------
+
+	/** Apply a ManipulationGuard decision to the scroller and timers. */
+	private applyGuard(d: GuardDecision, why: string): void {
+		if (!guardEnabled) {
+			this.restoreGuardStyle();
+			return;
+		}
+		if (d.cancelRearm && this.rearmTimer !== null) {
+			window.clearTimeout(this.rearmTimer);
+			this.rearmTimer = null;
+		}
+		if (d.scheduleRearm) {
+			if (this.rearmTimer !== null) window.clearTimeout(this.rearmTimer);
+			this.rearmTimer = window.setTimeout(() => {
+				this.rearmTimer = null;
+				this.applyGuard(this.manip.rearm(), "rearm");
+			}, GUARD_REARM_MS);
+		}
+		const wantNone = d.touchAction === "none";
+		if (wantNone && !this.guardApplied) {
+			if (!this.savedTouchActionKnown) {
+				this.savedTouchAction = this.scrollEl.style.touchAction;
+				this.savedTouchActionKnown = true;
+			}
+			this.guardApplied = true;
+			armGuardStyle(this.scrollEl);
+			tr("guard", null, `touch-action: none (${why})`);
+		} else if (!wantNone && this.guardApplied) {
+			this.guardApplied = false;
+			disarmGuardStyle(this.scrollEl, this.savedTouchAction);
+			tr("guard", null, `touch-action restored (${why})`);
+		}
+	}
+
+	private restoreGuardStyle(): void {
+		if (this.rearmTimer !== null) {
+			window.clearTimeout(this.rearmTimer);
+			this.rearmTimer = null;
+		}
+		if (this.guardApplied) {
+			this.guardApplied = false;
+			disarmGuardStyle(this.scrollEl, this.savedTouchAction);
+			tr("guard", null, "touch-action restored (guard disabled/disposed)");
+		}
+	}
+
+	/** The transition gesture: 1:1 pan while Chromium's snapshot said none. */
+	private beginAssist(e: PointerEvent): void {
+		this.cancelFling(); // a new finger takes over the glide
+		this.assistSamples = [];
+		this.assistPointerId = e.pointerId;
+		this.assistLastX = e.clientX;
+		this.assistLastY = e.clientY;
+		this.assistMoved = 0;
+		this.assistEngaged = false;
+	}
+
+	private assistMove(e: PointerEvent): boolean {
+		if (e.pointerId !== this.assistPointerId) return false;
+		const dx = e.clientX - this.assistLastX;
+		const dy = e.clientY - this.assistLastY;
+		this.assistLastX = e.clientX;
+		this.assistLastY = e.clientY;
+		this.assistMoved += Math.abs(dx) + Math.abs(dy);
+		if (!this.assistEngaged && this.assistMoved > ASSIST_SLOP_PX) {
+			this.assistEngaged = true;
+			this.gesturePanned = true;
+			// Keep the rest of the gesture off the editor, like a native pan
+			// would (a native pan pointercancels the tap machinery).
+			try {
+				this.scrollEl.setPointerCapture(e.pointerId);
+			} catch {
+				/* best-effort */
+			}
+			tr("guard", e, "assist pan engaged (transition gesture)");
+		}
+		if (this.assistEngaged) {
+			this.scrollEl.scrollLeft -= dx;
+			this.scrollEl.scrollTop -= dy;
+			const now = performance.now();
+			this.assistSamples.push({ t: now, x: e.clientX, y: e.clientY });
+			if (this.assistSamples.length > 12) this.assistSamples.shift();
+			return true;
+		}
+		return false;
+	}
+
+	private endAssist(e: PointerEvent): boolean {
+		if (e.pointerId !== this.assistPointerId) return false;
+		const engaged = this.assistEngaged;
+		this.assistPointerId = null;
+		this.assistEngaged = false;
+		if (engaged) {
+			// A native pan would fling here; give the assist the same physics.
+			const v = releaseVelocity(this.assistSamples, performance.now());
+			if (v) this.startFling(v.vx, v.vy);
+		}
+		this.assistSamples = [];
+		return engaged;
+	}
+
+	/**
+	 * Assist momentum: a finite, self-ending rAF chain (see Fling.ts).
+	 * Cancelled by ANY new pointer contact. The pen always wins instantly.
+	 */
+	private startFling(vx: number, vy: number): void {
+		this.cancelFling();
+		this.flingVx = vx;
+		this.flingVy = vy;
+		this.flingLastT = performance.now();
+		const tick = () => {
+			this.flingRaf = 0;
+			const now = performance.now();
+			const s = flingStep(this.flingVx, this.flingVy, now - this.flingLastT);
+			this.flingLastT = now;
+			this.flingVx = s.vx;
+			this.flingVy = s.vy;
+			const beforeL = this.scrollEl.scrollLeft;
+			const beforeT = this.scrollEl.scrollTop;
+			this.scrollEl.scrollLeft = beforeL - s.dx;
+			this.scrollEl.scrollTop = beforeT - s.dy;
+			const moved =
+				this.scrollEl.scrollLeft !== beforeL || this.scrollEl.scrollTop !== beforeT;
+			// Done when the physics say so, or the scroller is clamped at an
+			// edge and the glide has nowhere left to go.
+			if (s.done || (!moved && Math.abs(s.dx) + Math.abs(s.dy) > 0.5)) return;
+			this.flingRaf = window.requestAnimationFrame(tick);
+		};
+		this.flingRaf = window.requestAnimationFrame(tick);
+	}
+
+	private cancelFling(): void {
+		if (this.flingRaf !== 0) {
+			window.cancelAnimationFrame(this.flingRaf);
+			this.flingRaf = 0;
+		}
+	}
+
+	get isStroking(): boolean {
+		return this.activePenId !== null;
+	}
+
+	refreshRect(): void {
+		this.rect = this.rectEl.getBoundingClientRect();
+	}
+
+	private sampleFrom(e: PointerEvent): PenSample {
+		const scale = this.scaleProvider();
+		return {
+			x: visualToNote(e.clientX - this.rect.left, scale),
+			y: visualToNote(e.clientY - this.rect.top, scale),
+			pressure: e.pressure > 0 ? e.pressure : e.pointerType === "pen" ? 0 : 0.5,
+			timestamp: e.timeStamp,
+			tiltX: e.tiltX,
+			tiltY: e.tiltY,
+		};
+	}
+
+	// ---- pointerdown --------------------------------------------------------
+
+	private pointerDown(e: PointerEvent): void {
+		this.cancelFling(); // any new contact ends the glide (pen wins instantly)
+		if (e.pointerType === "touch") {
+			this.lastTouchAt = performance.now();
+			scrollProbeTouch();
+			// The one piece of touch arbitration Handwriting owns: a palm planted
+			// while the pen is writing or hovering must not scroll the note or
+			// move the caret. Everything else about touch is the editor's.
+			// Palm-blocked contacts never open the guard's touch window.
+			if (this.gate.blocksNewTouch(performance.now())) {
+				this.palmsBlocked++;
+				telemetry.bump("inline.palmBlocked");
+				this.swallowedTouches.add(e.pointerId);
+				// Watch it: a swipe-like start earns parole (assist pan);
+				// a resting palm stays swallowed.
+				this.paroleId = e.pointerId;
+				this.paroleDownX = e.clientX;
+				this.paroleDownY = e.clientY;
+				this.paroleDownAt = performance.now();
+				this.paroleContactPx = Math.max(e.width || 0, e.height || 0);
+				// Landed while the pen is down: the hand that follows the pen,
+				// never a scroll finger. No parole, ever (eraser-scrub fix).
+				this.paroleOverlapped = this.activePenId !== null;
+				tr(
+					"pointerdown",
+					e,
+					this.paroleOverlapped
+						? "touch PALM-BLOCKED (landed mid-stroke: palm for life)"
+						: "touch PALM-BLOCKED (parole watched)"
+				);
+				e.preventDefault();
+				e.stopPropagation();
+				return;
+			}
+			// Non-palm-gated finger. While the guard is armed the gesture runs
+			// UNDER the standing touch-action: none, carried by the assist pan
+			// (v0.12.12: the window no longer opens at touchStart; a cold
+			// slam's leading palm graze must never sell out the pen that lands
+			// milliseconds later). The native window opens on last-finger lift,
+			// and only if the gesture actually panned.
+			this.guardTouches.add(e.pointerId);
+			const d = this.manip.touchStart();
+			this.applyGuard(d, "touch");
+			if (d.assistThisGesture && guardEnabled) {
+				this.beginAssist(e);
+				tr("pointerdown", e, "touch (guard held; assist will carry this gesture)");
+			} else {
+				tr(
+					"pointerdown",
+					e,
+					d.touchAction === "" ? "touch passthrough (native window)" : "touch (guard held)"
+				);
+			}
+			return;
+		}
+		if (e.pointerType !== "pen") return; // mouse: never touched
+		if (this.activePenId !== null) {
+			// one pen at a time
+			tr("pointerdown", e, `pen IGNORED: stroke ${this.activePenId} still active`);
+			if (isHitProbeEnabled()) hitProbeDown(e, false, this.scrollEl);
+			return;
+		}
+
+		// EVERY pen contact is a Handwriting gesture now: tip = ink, eraser end =
+		// erase, barrel held = lasso/manipulate (§52/§53, the interaction the
+		// canvas settled). The overlay reads ev.buttons at pen-down to decide
+		// which; the router's job is only to claim the contact before the
+		// editor can turn it into selection or a context menu.
+		const kind =
+			(e.buttons & 32) !== 0 || e.button === 5
+				? "eraser"
+				: (e.buttons & 2) !== 0
+					? "barrel"
+					: "tip";
+		// COLD = the gesture guard was not pre-armed by hover; if cold contacts
+		// start late, the first-raw trace line below tells us exactly how the
+		// samples arrived (withheld-then-flushed vs genuinely delayed).
+		{
+			const now = performance.now();
+			const ago = (at: number) =>
+				at === Number.NEGATIVE_INFINITY ? "never" : `${(now - at).toFixed(0)}ms ago`;
+			tr(
+				"pointerdown",
+				e,
+				`pen CLAIMED (${kind}) guard=${this.guardApplied ? "prearmed" : "COLD"}` +
+					` | last finger ${ago(this.lastTouchAt)}, last pen hover ${ago(this.lastPenHoverAt)}` +
+					` | touch-action at entry "${this.scrollEl.style.touchAction || "(unset)"}"`
+			);
+		}
+		this.strokeDownAt = performance.now();
+		this.firstRawTraced = false;
+		this.armOwnership();
+		// Pen signal: the standing guard (re-)arms and cancels any pending
+		// touch-window re-arm timer. A touch the assist was carrying is
+		// reclassified as palm. The hand's edge reached the glass just ahead
+		// of the tip on a cold slam, and it must not pan under the writing hand.
+		if (this.assistPointerId !== null) {
+			tr("guard", e, `assist cancelled: leading touch ${this.assistPointerId} reclassified as palm`);
+			this.assistPointerId = null;
+			this.assistEngaged = false;
+		}
+		// A swallowed contact still down when the pen lands is the hand that
+		// follows the pen; it can never earn parole afterwards. Eraser
+		// scrubbing lifts and re-lands the nib every few hundred ms with the
+		// hand's edge sliding in between. Judged by motion alone, that slide
+		// became an assist pan and walked the viewport (RC3).
+		if (this.paroleId !== null && !this.paroleOverlapped) {
+			this.paroleOverlapped = true;
+			tr("guard", e, `parole voided: pen landed while touch ${this.paroleId} was down (palm for life)`);
+		}
+		this.gesturePanned = false;
+		this.applyGuard(this.manip.penSignal(), "pen-down");
+		e.preventDefault();
+		e.stopPropagation();
+		this.refreshRect();
+		this.activePenId = e.pointerId;
+		this.penDowns++;
+		telemetry.bump("inline.penDown");
+		this.armEndBackstop();
+		this.gate.penStrokeStarted();
+		try {
+			this.scrollEl.setPointerCapture(e.pointerId);
+		} catch {
+			/* best-effort; the backstop covers a failed capture */
+		}
+		if (isHitProbeEnabled()) hitProbeDown(e, true, this.scrollEl);
+		this.cb.onPenDown(this.sampleFrom(e), e);
+	}
+
+	/**
+	 * Hover with no active stroke, throttled: one line per 150 ms OR whenever
+	 * `buttons` changes. `buttons !== 0` while hovering means the digitizer
+	 * reports the nib PRESSED yet no pointerdown arrived, the smoking gun the
+	 * summary counts as a pressed-but-undelivered sample.
+	 */
+	private traceHover(e: PointerEvent): void {
+		// RC4: switch first. Hover fires continuously whenever the pen is near
+		// the glass, writing or not.
+		if (!diagnosticsEnabled()) return;
+		const now = performance.now();
+		if (e.buttons === this.lastHoverButtons && now - this.lastHoverTraceAt < 150) return;
+		this.lastHoverTraceAt = now;
+		this.lastHoverButtons = e.buttons;
+		tr(
+			"pen-hover",
+			e,
+			`NO CONTACT CLAIMED; buttons=${e.buttons} pressure=${e.pressure.toFixed(3)}` +
+				(e.buttons !== 0 ? "  <-- PRESSED BUT NO pointerdown" : "")
+		);
+	}
+
+	// ---- pointermove / pointerrawupdate -------------------------------------
+
+	private pointerMove(e: PointerEvent): void {
+		if (e.pointerType === "touch") {
+			this.lastTouchAt = performance.now();
+			scrollProbeTouch();
+			if (this.swallowedTouches.has(e.pointerId)) {
+				if (
+					e.pointerId === this.paroleId &&
+					paroleEarned({
+						travelPx:
+							Math.abs(e.clientX - this.paroleDownX) +
+							Math.abs(e.clientY - this.paroleDownY),
+						sinceDownMs: performance.now() - this.paroleDownAt,
+						penStrokeActive: this.gate.isPenStrokeActive,
+						contactPx: this.paroleContactPx,
+						penContactOverlapped: this.paroleOverlapped,
+					})
+				) {
+					// Swipe-like: this was a deliberate scroll finger the palm
+					// gate swallowed (pen hovering nearby). Convert it into the
+					// assist pan. Its native default died at pointerdown, so the
+					// assist must carry it regardless of guard state; a pen
+					// claim still cancels the assist instantly (pen wins).
+					this.swallowedTouches.delete(e.pointerId);
+					this.paroleId = null;
+					this.paroleOverlapped = false;
+					this.guardTouches.add(e.pointerId);
+					this.applyGuard(this.manip.touchStart(), "touch-parole");
+					this.beginAssist(e);
+					this.assistEngaged = true;
+					this.gesturePanned = true;
+					// Retroactive catch-up: the run-up traveled while being
+					// watched is applied now, so total displacement matches a
+					// 1:1 pan from touchdown, so parole feels like touch slop,
+					// not a dead zone. Seed the velocity window with the down
+					// point so a fast conversion still flings correctly.
+					this.scrollEl.scrollLeft -= e.clientX - this.paroleDownX;
+					this.scrollEl.scrollTop -= e.clientY - this.paroleDownY;
+					this.assistSamples.push({
+						t: this.paroleDownAt,
+						x: this.paroleDownX,
+						y: this.paroleDownY,
+					});
+					try {
+						this.scrollEl.setPointerCapture(e.pointerId);
+					} catch {
+						/* best-effort */
+					}
+					tr("guard", e, "palm parole: swallowed touch became assist pan");
+					e.preventDefault();
+					e.stopPropagation();
+					return;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				return;
+			}
+			// A guard-tracked touch during a claimed stroke is a palm (its
+			// assist, if any, was cancelled at claim): keep it off the editor.
+			if (this.activePenId !== null && this.guardTouches.has(e.pointerId)) {
+				e.preventDefault();
+				e.stopPropagation();
+				return;
+			}
+			// Transition gesture: carry the pan ourselves and keep it off the
+			// editor, exactly as a native pan would.
+			if (this.assistMove(e)) {
+				e.preventDefault();
+				e.stopPropagation();
+			}
+			return;
+		}
+		if (e.pointerType !== "pen") return;
+		if (this.activePenId === null) {
+			// Hovering keeps the palm gate warm ("palm placed before pen") and
+			// re-arms the standing guard instantly if a touch window was open.
+			this.lastPenHoverAt = performance.now();
+			this.gate.penHoverSeen(performance.now());
+			this.applyGuard(this.manip.penSignal(), "pen-hover");
+			this.traceHover(e);
+			if (isHitProbeEnabled()) hitProbeHover(e);
+			return;
+		}
+		if (e.pointerId !== this.activePenId) return;
+		e.preventDefault();
+		e.stopPropagation(); // no link-hover popovers under a moving nib
+		telemetry.bump("inline.penMove");
+		// RC4: nothing here draws. `onPenMove` only feeds the move counter in
+		// StrokeMetrics (ink comes from pointerrawupdate below), so the
+		// coalesced-array allocation and the trace string exist purely to be
+		// counted. While the switch is off they were allocated and thrown
+		// away on every move event of every stroke.
+		if (diagnosticsEnabled()) {
+			const coalesced =
+				typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
+			const n = coalesced.length > 0 ? coalesced.length : 1;
+			tr("pointermove", e, `coalesced=${n}`);
+			this.cb.onPenMove(e, n);
+		} else {
+			this.cb.onPenMove(e, 1);
+		}
+	}
+
+	private pointerRawUpdate(e: PointerEvent): void {
+		if (e.pointerType !== "pen") return;
+		if (this.activePenId === null) {
+			this.lastPenHoverAt = performance.now();
+			this.gate.penHoverSeen(performance.now());
+			this.applyGuard(this.manip.penSignal(), "pen-hover");
+			this.traceHover(e);
+			return;
+		}
+		if (e.pointerId !== this.activePenId) return;
+		// Ground truth for the probe, taken before a single line of the code
+		// under test has run.
+		markRawPointer(e.clientX, e.clientY);
+		telemetry.bump("inline.rawUpdate");
+		const coalesced =
+			typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
+		const events = coalesced.length > 0 ? coalesced : [e];
+		// RC4: the coalesced array above is NOT diagnostic. It is the ink
+		// itself, and stays unconditional. Only the trace rows are gated, and
+		// they are gated here rather than inside tr() so their `toFixed` calls
+		// and template strings are never built while the switch is off. This
+		// is the hottest path in the plugin (200 to 250 Hz on the test Surface).
+		if (diagnosticsEnabled()) {
+			if (!this.firstRawTraced) {
+				this.firstRawTraced = true;
+				const sinceDown = performance.now() - this.strokeDownAt;
+				const span = e.timeStamp - (events[0]?.timeStamp ?? e.timeStamp);
+				// The cold-contact verdict lives in this line: a large `+N ms`
+				// with samples SPANNING the gap = Chromium withheld-then-flushed
+				// the stream (gesture arbitration); a large gap with a tiny span
+				// = input genuinely started late (OS-level).
+				tr(
+					"first-raw",
+					e,
+					`+${sinceDown.toFixed(1)}ms after down, ${events.length} coalesced spanning ${span.toFixed(1)}ms`
+				);
+			}
+			tr("pointerrawupdate", e, `coalesced=${events.length}`);
+		}
+		this.cb.onPenRaw(events.map((ce) => this.sampleFrom(ce)), e);
+	}
+
+	// ---- stroke end ---------------------------------------------------------
+
+	private pointerUpOrCancel(e: PointerEvent): void {
+		if (e.pointerType === "touch") {
+			if (this.swallowedTouches.delete(e.pointerId)) {
+				if (this.paroleId === e.pointerId) {
+					this.paroleId = null;
+					this.paroleOverlapped = false;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				return;
+			}
+			const wasAssistPan = this.endAssist(e);
+			const duringStroke = this.activePenId !== null && this.guardTouches.has(e.pointerId);
+			if (this.guardTouches.delete(e.pointerId)) {
+				// `panned` = this gesture really scrolled (assist engaged at any
+				// point). Only then does the native touch window open on the
+				// last lift; taps and resting palms leave the guard armed.
+				this.applyGuard(this.manip.touchEnd(this.gesturePanned || wasAssistPan), "touch-end");
+				if (this.guardTouches.size === 0) this.gesturePanned = false;
+			}
+			if (wasAssistPan || duringStroke) {
+				// The pan already happened (or a palm is lifting mid-stroke);
+				// keep the trailing tap machinery off the editor, matching a
+				// native pan's cancel semantics.
+				e.preventDefault();
+				e.stopPropagation();
+			}
+			return;
+		}
+		if (e.pointerType !== "pen") return;
+		const wasOurs = this.activePenId !== null && e.pointerId === this.activePenId;
+		tr(e.type, e, wasOurs ? "TERMINATES STROKE" : "");
+		if (wasOurs) {
+			e.preventDefault();
+			e.stopPropagation();
+		}
+		this.endPenStroke(e, false);
+	}
+
+	/** Idempotent single funnel, same as the canvas router. */
+	private endPenStroke(e: PointerEvent, viaFallback: boolean): void {
+		if (this.activePenId === null || e.pointerId !== this.activePenId) return;
+		this.activePenId = null;
+		this.penUps++;
+		telemetry.bump("inline.penUp");
+		if (viaFallback) {
+			this.fallbackEnds++;
+			telemetry.bump("inline.penUp.backstop");
+			tr(e.type, e, "END VIA WINDOW BACKSTOP");
+		}
+		this.disarmEndBackstop();
+		this.gate.penStrokeEnded(performance.now());
+		// Standing guard: no release. Armed IS the resting state.
+		hideProbeMarkers();
+		// Trailing click/auxclick/contextmenu from this contact land AFTER
+		// pointerup, so the ownership guard stays up through the tail.
+		this.scheduleOwnershipDisarm();
+		this.cb.onPenUp(e);
+	}
+
+	/** Armed only while a stroke is active, not a standing document listener. */
+	private armEndBackstop(): void {
+		this.disarmEndBackstop();
+		const fn = (ev: Event) => {
+			const pe = ev as PointerEvent;
+			const path = typeof pe.composedPath === "function" ? pe.composedPath() : [];
+			if (!backstopMayEnd({ pointerType: pe.pointerType, scrollerInPath: path.includes(this.scrollEl) })) {
+				if (pe.pointerType === "pen" && this.activePenId !== null) {
+					tr(`window-${pe.type}`, pe, "backstop stood down: scroller in path, normal handler ends it");
+				}
+				return;
+			}
+			this.endPenStroke(pe, true);
+		};
+		this.winEndFn = fn;
+		window.addEventListener("pointerup", fn, { capture: true });
+		window.addEventListener("pointercancel", fn, { capture: true });
+	}
+
+	private disarmEndBackstop(): void {
+		if (!this.winEndFn) return;
+		window.removeEventListener("pointerup", this.winEndFn, { capture: true });
+		window.removeEventListener("pointercancel", this.winEndFn, { capture: true });
+		this.winEndFn = null;
+	}
+}

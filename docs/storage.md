@@ -1,0 +1,185 @@
+# How Handwriting stores ink
+
+Written against the code in `src/persistence/PageStore.ts`,
+`src/inline/InlineInkStore.ts`, `src/model/PageData.ts` and
+`src/model/MarkdownPage.ts`. Where this document and the code disagree, the
+code is right and this document is a bug.
+
+## the split
+
+Your words stay in the Markdown file. Handwriting never puts ink in it.
+
+Ink and layout live in a sidecar: one JSON file per note, under
+`.handwriting/` at the vault root, named by the note's page id.
+
+```
+<vault>/
+  Some note.md                     your text, plus one frontmatter property
+  .handwriting/
+    3f2a....json                   the ink for that note
+    3f2a....json.tmp               only while a save is in flight
+    trash/
+      3f2a...-1755881041234.json   a copy kept from a delete
+```
+
+## identity
+
+The link between a note and its sidecar is one frontmatter property:
+
+```yaml
+---
+handwriting-page-id: 3f2a91c8-....
+---
+```
+
+Handwriting writes it on the first stroke and never again. A note you never
+ink on is never modified. The property is hidden from the Properties panel,
+which is also what keeps the first stroke from making the note jump.
+
+The sidecar is keyed by that id, not by the filename, so renaming or moving a
+note keeps its ink. Move the note to another vault without `.handwriting/`
+and the ink does not follow; the id stays in the frontmatter, so putting the
+sidecar back later reconnects it.
+
+Two other frontmatter keys exist and Handwriting does not add either on its
+own. `handwriting: page` means "open this note on the canvas view", and is
+written only by `New canvas page`. `handwriting-version` appears only on
+notes that carry canvas block markers.
+
+## the sidecar format
+
+JSON, one object, with `schemaVersion` first. Version 1 is current.
+
+Stable fields, safe to depend on:
+
+- `schemaVersion` (number)
+- `pageId` (string, matches the note's `handwriting-page-id`)
+- `surface` (`"inline"` for editor ink; absent or another value means a
+  canvas page)
+- `strokes` (array; each has `id`, `tool`, `color`, `width`, `createdAt`, and
+  points)
+- `textBoxes` and `images` (canvas pages only; `id`, position, size, `z`)
+
+Internal, and subject to change without a schema bump:
+
+- how stroke points are packed inside a stroke
+- rounding of stored coordinates
+- the exact spelling of tool and color values
+- the naming of conflict, damaged and trash files
+
+**Unknown fields survive.** Anything Handwriting does not recognise, at the
+top level or on an individual stroke or box, is preserved verbatim through a
+load and save. This is deliberate: an older Handwriting must not delete a
+newer Handwriting's data, and in a synced vault both versions are live at
+once. A sidecar that declares a `schemaVersion` higher than this build
+understands is never written to at all; the note opens read-only for ink.
+
+Coordinates are note-space CSS pixels at zoom 1. Zoom is a view transform.
+No stroke is ever rewritten or rescaled when you zoom.
+
+## when saves happen
+
+A save runs **700 ms after the most recent change**, so a burst of strokes
+becomes one write and each pause of that length commits what came before it.
+
+A run of changes with no pause cannot defer a save forever. The first change
+of a batch starts a **five-second** clock that later changes do not reset.
+Whichever expires first writes the current state.
+
+Nothing is written on the pen path. The eraser, which fires at input rate,
+persists once per gesture at pen-up.
+
+The first stroke on a note that has never been inked is a special case: the
+page id must be written into the Markdown before any sidecar keyed to it can
+exist, so that write is awaited, and the first sidecar write follows
+immediately rather than waiting another 700 ms.
+
+A quit before a pending write lands loses what that write was carrying.
+Handwriting flushes on unload, but Obsidian does not wait for the flush, so
+treat it as best effort.
+
+## how a write happens
+
+Every save writes to `<id>.json.tmp` and renames it over `<id>.json`. A
+rename is atomic on the filesystems Obsidian runs on, so an interrupted save
+leaves either the old complete file or the new complete file, never a
+half-written one.
+
+Writes for one page are serialized, so two saves cannot interleave their
+rename dance. A failed write keeps its state queued and retries up to three
+times, 1.5 seconds apart, before telling you once.
+
+## recovery
+
+**Interrupted save.** If `<id>.json` is missing but `<id>.json.tmp` is there,
+the temporary file is loaded and you are told it was recovered.
+
+**Corrupt main file with a good temporary file.** If `<id>.json` cannot be
+parsed and its own `.tmp` is a complete, current-schema page for the same id,
+the corrupt bytes are moved to `.handwriting/<id>.damaged-<mtime>.json`, the
+temporary file is promoted, and you are told what happened and where the
+damaged bytes went. Every condition is re-checked immediately before either
+file moves, so a file that changed while the recovery was queued is left
+alone. If the temporary file is missing, corrupt, for another page, or a
+newer schema, nothing moves and the read-only behaviour below applies.
+
+Handwriting never chooses between two readable files.
+
+**Corrupt sidecar with nothing to recover from.** The note opens read-only
+for ink. The file is not overwritten, so a backup or sync copy can still
+repair it. Fix the file and reopen the note, and saving resumes.
+
+**Changed by something else.** Before each write Handwriting checks whether
+the file on disk is still the one it last read or wrote, by modification time
+and then by a content stamp, because sync tools routinely preserve
+timestamps. If it changed, the other version is moved to
+`.handwriting/<id>.conflict-<mtime>.json`, your session's ink is written, and
+you are told, after the write lands rather than before.
+
+## duplicate notes
+
+A page id must belong to exactly one note. Copying a note copies its
+frontmatter, so both copies would read and write the same sidecar.
+
+Handwriting checks for that once Obsidian's metadata index is complete after
+startup, and again whenever a note's frontmatter changes. The copy gets a
+fresh id and its own copy of the ink; the original is never written.
+
+If Handwriting cannot tell which note is the original, it stops saving on
+both and tells you how to resolve it: delete the `handwriting-page-id` line
+from the copy, and its next stroke mints a new one.
+
+## deletion and trash
+
+When Obsidian reports that a note was deleted while Handwriting is loaded,
+its sidecar is **moved** into `.handwriting/trash/`, not deleted. That covers
+deletion inside Obsidian and deletions Obsidian notices on disk while
+running. A file removed while Obsidian was closed is never reported, so
+nothing moves and the sidecar stays in `.handwriting/`, unreferenced.
+
+`Delete all ink on this note` copies the ink into the trash first, and
+refuses to wipe if that copy cannot be written.
+
+Trash files are named `<id>-<timestamp>.json`, with a counter appended if two
+land in the same millisecond. Nothing in `.handwriting/trash/` is ever
+overwritten, so repeated deletions keep every generation. A sidecar that is
+provably empty is deleted rather than adding a useless generation.
+
+**Handwriting never empties that folder.** It only grows. Delete old files
+yourself if you want the space back; nothing outside the folder refers to
+them.
+
+## what to back up
+
+`.handwriting/` and your Markdown files. Both.
+
+`.handwriting/` is hidden, and not every sync or backup tool includes hidden
+folders by default. Check yours. If it skips them, your text is backed up and
+your ink is not.
+
+Plugin settings live in `.obsidian/plugins/handwriting/data.json`: per-note
+camera positions, the selected nib size and color, and the page-id ownership
+map used for duplicate detection. Losing it costs preferences, not ink.
+
+The atomic-write scheme covers an interrupted save. It does not cover a
+failing disk. Keep an ordinary backup.

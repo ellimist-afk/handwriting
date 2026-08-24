@@ -1,0 +1,18 @@
+{
+	"compilerOptions": {
+		"module": "ESNext",
+		"target": "ES2022",
+		"moduleResolution": "Bundler",
+		"allowJs": true,
+		"noImplicitAny": true,
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"importHelpers": false,
+		"isolatedModules": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"noEmit": true,
+		"lib": ["DOM", "ES2022"]
+	},
+	"include": ["src/**/*.ts"]
+}
