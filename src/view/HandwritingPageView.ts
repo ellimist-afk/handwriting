@@ -17,7 +17,7 @@ import { SelectionModel } from "../objects/SelectionModel";
 import { Point2 } from "../ink/Smoothing";
 import { BBox } from "../ink/Stroke";
 import { History } from "../history/History";
-import { TextLayer, TextBoxModel } from "../objects/TextLayer";
+import { TextLayer } from "../objects/TextLayer";
 import { ImageLayer } from "../objects/ImageLayer";
 import { ImageData, PageData, TextBoxData, newId } from "../model/PageData";
 import { MarkdownBlock, MarkdownImage } from "../model/MarkdownPage";

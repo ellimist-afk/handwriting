@@ -449,11 +449,17 @@
  * block whose ONLY property is handwriting-page-id is hidden as one unit.
  * User properties are untouched: any other key keeps the block visible.
  */
+/*
+ * `!important` because Obsidian 1.13.7 sets display on these with higher
+ * specificity (verified live: the class applied and computed display still
+ * block), and themes stack more rules on top. Hiding the id is an
+ * invariant, so it must win every cascade, same as touch-action above.
+ */
 .metadata-property[data-property-key="handwriting-page-id"] {
-	display: none;
+	display: none !important;
 }
 .metadata-container.handwriting-metadata-id-only {
-	display: none;
+	display: none !important;
 }
 
 /*

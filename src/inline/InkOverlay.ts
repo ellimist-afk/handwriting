@@ -28,7 +28,11 @@ import {
 } from "./InlineSelectionDelete";
 import { StrokeFrame } from "./StrokeFrame";
 import { FollowLayer } from "./FollowLayer";
-import { clearMetadataVisibility, updateMetadataVisibility } from "./MetadataVisibility";
+import {
+	clearMetadataVisibility,
+	frontmatterPropertyKeys,
+	updateMetadataVisibility,
+} from "./MetadataVisibility";
 import { handoffFinishedStroke } from "./StrokeHandoff";
 import { InlineInkStore } from "./InlineInkStore";
 import { focusClaimedPenEditor } from "./InlineFocus";
@@ -625,7 +629,8 @@ class InkOverlayPlugin {
 				this.view.dom.closest(".markdown-source-view") ?? this.view.dom;
 			if (typeof MutationObserver !== "undefined") {
 				this.metadataObserver = new MutationObserver(() => {
-					if (this.pageClassHost) updateMetadataVisibility(this.pageClassHost);
+					if (this.pageClassHost)
+						updateMetadataVisibility(this.pageClassHost, this.headFrontmatterKeys);
 				});
 				this.metadataObserver.observe(this.pageClassHost, {
 					childList: true,
@@ -640,8 +645,14 @@ class InkOverlayPlugin {
 			"handwriting-page",
 			!!path && inlineInk.isHandwritingPage(path)
 		);
-		updateMetadataVisibility(this.pageClassHost);
+		updateMetadataVisibility(this.pageClassHost, this.headFrontmatterKeys);
 	}
+
+	// Property so a detached observer callback cannot arrive with a stray
+	// `this`. 4000 chars is far past any id-only frontmatter; a block the
+	// slice truncates parses as null, and null never hides anything.
+	private headFrontmatterKeys = (): readonly string[] | null =>
+		frontmatterPropertyKeys(this.view.state.sliceDoc(0, 4000));
 
 	unmount(): void {
 		this.router?.dispose();
