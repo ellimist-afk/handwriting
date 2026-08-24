@@ -152,6 +152,11 @@ export function setInlineInkEnabled(on: boolean): void {
 	for (const p of instances) (on ? p.mount() : p.unmount());
 }
 
+/** Repaint every open editor's committed ink (the shaping toggle uses this). */
+export function repaintAllInkOverlays(): void {
+	for (const p of instances) p.scheduleRepaint("shaping-toggle");
+}
+
 /** Everything the A/B comparison against the canvas view needs, as text. */
 export function copyInlineInkMetrics(): string {
 	let downs = 0;
@@ -450,6 +455,7 @@ class InkOverlayPlugin {
 		// Frozen pipeline: plain canvas (desynchronized: false), smoothed tail.
 		this.wet = new WetInkRenderer(this.wetCanvas, INLINE_DESYNCHRONIZED);
 		this.wet.smooth = true;
+		this.wet.shape = true; // pen ink takes the shaped width law (InkShape)
 		this.highlightWet = new WetInkRenderer(this.highlightWetCanvas, INLINE_DESYNCHRONIZED);
 		this.highlightWet.smooth = true;
 		this.activeWet = this.wet;
@@ -897,7 +903,7 @@ class InkOverlayPlugin {
 			sample.tiltY
 		);
 		if (point) {
-			this.activeWet.beginStroke(point);
+			this.activeWet.beginStroke(point, this.activeStyle);
 			// A tap that never moves produces no rawupdate, so without this the
 			// dot only appears at pen-up. Draw the contact point immediately.
 			this.tail.clear();

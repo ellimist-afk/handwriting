@@ -2,7 +2,7 @@
 
 ## supported version
 
-Handwriting v0.13.9 is the supported version. Only the newest release is
+Handwriting v0.13.10 is the supported version. Only the newest release is
 supported.
 
 ## reporting a vulnerability
@@ -19,13 +19,13 @@ reproduction helps more than anything else.
 ## what belongs in the issue tracker instead
 
 Ordinary crashes, hangs, rendering faults and data-loss bugs go in the normal
-issue tracker, unless the defect crosses a security boundary. Losing your own
-ink to a save bug is a serious bug, and it is not a vulnerability. Reading or
+issue tracker, unless the defect crosses a security boundary. Losing your
+own ink to a save bug is a serious bug, but not a vulnerability. Reading or
 writing a file outside the vault, or executing something a note controls,
 would be.
 
-If you are not sure which one you have, use private reporting. It is easy to
-move a report into the open later, and impossible to take one back.
+If you are not sure which one you have, use private reporting. It can
+always be moved into the open later.
 
 ## scope
 

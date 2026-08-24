@@ -3,7 +3,8 @@ import { countPaintedPixels } from "../diag/Raster";
 import { PenStyle } from "./PenStyle";
 import { InkPoint } from "./Stroke";
 import { IncrementalSmoother, Point2 } from "./Smoothing";
-import { RibbonPt, flattenSegment } from "./Ribbon";
+import { RibbonPt, flattenSegment, flattenSegmentHw } from "./Ribbon";
+import { IncrementalShaper, inkShapingEnabled } from "./InkShape";
 import { fillRibbon } from "./RibbonRenderer";
 import { drawSegment } from "./StrokeRenderer";
 
@@ -88,11 +89,27 @@ export class WetInkRenderer {
 	 * canvas is append-only.
 	 */
 	smooth = false;
+	/**
+	 * Shaped width law (InkShape) for this layer's strokes. The overlay sets
+	 * it for pen wet layers only; the highlighter keeps its flat wash. The
+	 * global shaping switch is consulted per stroke at beginStroke.
+	 */
+	shape = false;
+	private shaper = new IncrementalShaper();
+	private shapingThisStroke = false;
+	private lastMidHw: number | undefined;
+	private prevSampleHw = 0;
 
-	beginStroke(first: InkPoint): void {
+	beginStroke(first: InkPoint, style?: PenStyle): void {
 		this.lastPoint = first;
 		this.smoother.reset(first);
 		this.lastRibbon = undefined;
+		this.shapingThisStroke = this.shape && inkShapingEnabled();
+		if (this.shapingThisStroke) {
+			this.shaper.reset(first, style);
+			this.prevSampleHw = this.shaper.last();
+			this.lastMidHw = undefined;
+		}
 	}
 
 	appendPoint(cam: CameraState, style: PenStyle, point: InkPoint): void {
@@ -100,18 +117,35 @@ export class WetInkRenderer {
 			if (this.smooth) {
 				// Emits the segment that just became final, one sample behind
 				// the pen. The head covers the rest.
+				const sampleHw = this.shapingThisStroke
+					? this.shaper.push(style, point)
+					: 0;
 				const seg = this.smoother.push(point);
 				if (seg) {
 					// Same ribbon construction the committed layer uses, emitted
 					// one segment at a time so the pen path stays O(1). The strip
 					// starts at the previous strip's last point, so consecutive
 					// fills share an edge exactly and leave no seam.
+					let flatSeg: RibbonPt[];
+					if (this.shapingThisStroke) {
+						const midHw = (this.prevSampleHw + sampleHw) / 2;
+						flatSeg = flattenSegmentHw(
+							seg,
+							this.lastMidHw ?? this.prevSampleHw,
+							midHw,
+							cam.zoom
+						);
+						this.lastMidHw = midHw;
+					} else {
+						flatSeg = flattenSegment(seg, style, cam.zoom);
+					}
 					const strip: RibbonPt[] = this.lastRibbon
-						? [this.lastRibbon, ...flattenSegment(seg, style, cam.zoom)]
-						: flattenSegment(seg, style, cam.zoom);
+						? [this.lastRibbon, ...flatSeg]
+						: flatSeg;
 					fillRibbon(this.ctx, cam, strip, style.color);
 					this.lastRibbon = strip[strip.length - 1];
 				}
+				if (this.shapingThisStroke) this.prevSampleHw = sampleHw;
 			} else {
 				drawSegment(this.ctx, cam, style, this.lastPoint, point);
 			}
@@ -136,9 +170,17 @@ export class WetInkRenderer {
 		if (!this.smooth) return;
 		const seg = this.smoother.finish();
 		if (!seg) return;
-		const strip: RibbonPt[] = this.lastRibbon
-			? [this.lastRibbon, ...flattenSegment(seg, style, cam.zoom)]
+		const flatSeg = this.shapingThisStroke
+			? flattenSegmentHw(
+					seg,
+					this.lastMidHw ?? this.prevSampleHw,
+					this.shaper.last(),
+					cam.zoom
+				)
 			: flattenSegment(seg, style, cam.zoom);
+		const strip: RibbonPt[] = this.lastRibbon
+			? [this.lastRibbon, ...flatSeg]
+			: flatSeg;
 		fillRibbon(this.ctx, cam, strip, style.color);
 		this.lastRibbon = strip[strip.length - 1];
 	}

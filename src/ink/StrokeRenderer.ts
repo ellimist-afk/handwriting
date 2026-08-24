@@ -2,6 +2,7 @@ import { CameraState } from "../camera/coordinates";
 import { PenStyle, widthForPressure } from "./PenStyle";
 import { SmoothSegment } from "./Smoothing";
 import { flattenStroke } from "./Ribbon";
+import { flattenStrokeShaped, inkShapingEnabled } from "./InkShape";
 import { fillRibbon } from "./RibbonRenderer";
 import { InkPoint, InkStroke } from "./Stroke";
 
@@ -94,8 +95,14 @@ export function drawStroke(
 	ctx.strokeStyle = strokeStyleFor(stroke);
 	if (smooth) {
 		// One path, one fill, one antialiased edge. See Ribbon.ts for why
-		// per-segment stroking looks beaded when magnified.
-		fillRibbon(ctx, cam, flattenStroke(pts, style, cam.zoom), strokeStyleFor(stroke));
+		// per-segment stroking looks beaded when magnified. Pen strokes take
+		// the shaped geometry (InkShape) unless shaping is switched off; the
+		// highlighter's flat chisel wash never shapes.
+		const ribbon =
+			!flat && inkShapingEnabled()
+				? flattenStrokeShaped(pts, style, cam.zoom)
+				: flattenStroke(pts, style, cam.zoom);
+		fillRibbon(ctx, cam, ribbon, strokeStyleFor(stroke));
 		return;
 	}
 	for (let i = 1; i < pts.length; i++) {

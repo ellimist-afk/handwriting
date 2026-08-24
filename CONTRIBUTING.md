@@ -40,8 +40,8 @@ installation.** Handwriting does not phone home, does not need a network, and
 does not fetch code at runtime. A change that adds any of those will not be
 merged.
 
-**Explain causes in comments, not restatements.** The comment that earns its
-place says why the code is shaped that way and what broke without it. Several
+**Comments should explain causes.** The comment that earns its place says
+why the code is shaped that way and what broke without it. Several
 files carry hardware findings that are the only record of why an invariant
 exists; do not delete those.
 

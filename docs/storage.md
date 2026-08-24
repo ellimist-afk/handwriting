@@ -3,7 +3,7 @@
 Written against the code in `src/persistence/PageStore.ts`,
 `src/inline/InlineInkStore.ts`, `src/model/PageData.ts` and
 `src/model/MarkdownPage.ts`. Where this document and the code disagree, the
-code is right and this document is a bug.
+code is right.
 
 ## the split
 
@@ -36,8 +36,8 @@ Handwriting writes it on the first stroke and never again. A note you never
 ink on is never modified. The property is hidden from the Properties panel,
 which is also what keeps the first stroke from making the note jump.
 
-The sidecar is keyed by that id, not by the filename, so renaming or moving a
-note keeps its ink. Move the note to another vault without `.handwriting/`
+The sidecar is keyed by that id rather than the filename, so renaming or
+moving a note keeps its ink. Move the note to another vault without `.handwriting/`
 and the ink does not follow; the id stays in the frontmatter, so putting the
 sidecar back later reconnects it.
 
@@ -152,9 +152,9 @@ from the copy, and its next stroke mints a new one.
 ## deletion and trash
 
 When Obsidian reports that a note was deleted while Handwriting is loaded,
-its sidecar is **moved** into `.handwriting/trash/`, not deleted. That covers
-deletion inside Obsidian and deletions Obsidian notices on disk while
-running. A file removed while Obsidian was closed is never reported, so
+its sidecar is **moved** into `.handwriting/trash/` rather than deleted.
+That covers deletion inside Obsidian and deletions Obsidian notices on disk
+while running. A file removed while Obsidian was closed is never reported, so
 nothing moves and the sidecar stays in `.handwriting/`, unreferenced.
 
 `Delete all ink on this note` copies the ink into the trash first, and
@@ -174,12 +174,12 @@ them.
 `.handwriting/` and your Markdown files. Both.
 
 `.handwriting/` is hidden, and not every sync or backup tool includes hidden
-folders by default. Check yours. If it skips them, your text is backed up and
-your ink is not.
+folders by default. Check yours. If it skips them, the backup is missing
+every sidecar.
 
 Plugin settings live in `.obsidian/plugins/handwriting/data.json`: per-note
 camera positions, the selected nib size and color, and the page-id ownership
-map used for duplicate detection. Losing it costs preferences, not ink.
+map used for duplicate detection. Losing it does not touch any ink.
 
-The atomic-write scheme covers an interrupted save. It does not cover a
-failing disk. Keep an ordinary backup.
+The atomic-write scheme covers an interrupted save. A failing disk still
+needs an ordinary backup.

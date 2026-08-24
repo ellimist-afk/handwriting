@@ -12,9 +12,8 @@ easy way to avoid that, and it is recommended, because a user who installs a
 modified build should be able to tell whose build it is when they go looking
 for support.
 
-Factual references stay fine. "Forked from Handwriting", "compatible with
-Handwriting sidecars" and similar accurate statements describe a
-relationship rather than claim one.
+Factual references stay fine: "Forked from Handwriting", "compatible with
+Handwriting sidecars", and similar accurate statements.
 
 This document has not been legally reviewed. Nothing in it restricts any
 right granted by the AGPL. Where the two appear to disagree, the licence

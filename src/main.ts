@@ -17,6 +17,7 @@ import {
 	inkOverlayExtension,
 	inlineInk,
 	setInlineTool,
+	repaintAllInkOverlays,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
 import { clearInlinePenTrace, formatInlinePenTrace } from "./inline/InlinePenRouter";
@@ -30,6 +31,7 @@ import { clearScrollProbe, formatScrollProbe } from "./inline/ScrollProbe";
 import { surfaceExtents } from "./inline/SurfaceExtent";
 import { claimMarkdown, reassignMarkdown } from "./inline/InlineClaim";
 import { INK_SIZE_STEPS, clampInkSize, nextInkSize } from "./ink/InkSize";
+import { inkShapingEnabled, setInkShaping } from "./ink/InkShape";
 import {
 	HIGHLIGHTER_COLORS,
 	PEN_COLORS,
@@ -56,6 +58,12 @@ interface HandwritingSettings {
 	smoothInk: boolean;
 	/** Nib size multipliers per tool (v0.13.6): 0.6 fine · 1 medium · 1.8 bold. */
 	inkSizes: { pen: number; highlighter: number };
+	/**
+	 * Shaped ink rendering (v0.13.10): velocity thinning, filtered pressure
+	 * and endpoint taper, applied to pen strokes at render time. Stored ink is
+	 * untouched, so flipping this restyles every stroke ever written.
+	 */
+	inkShaping: boolean;
 	/** Selected ink color per tool (v0.13.6), hex. */
 	inkColors: { pen: string; highlighter: string };
 	/**
@@ -71,6 +79,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	cameras: {},
 	smoothInk: true,
 	inkSizes: { pen: 1, highlighter: 1 },
+	inkShaping: true,
 	inkColors: { pen: PEN_COLORS[0]!.hex, highlighter: HIGHLIGHTER_COLORS[0]!.hex },
 	pageOwners: {},
 };
@@ -193,6 +202,19 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				setInlineTool("pen");
 				new Notice("Handwriting: pen");
+			},
+		});
+		this.addCommand({
+			id: "ink-shaping-toggle",
+			name: "Ink shaping: toggle",
+			callback: () => {
+				const on = !inkShapingEnabled();
+				setInkShaping(on);
+				this.settings.inkShaping = on;
+				void this.saveData(this.settings);
+				// Render-time law: a repaint restyles every committed stroke.
+				repaintAllInkOverlays();
+				new Notice(on ? "Handwriting: ink shaping on" : "Handwriting: ink shaping off");
 			},
 		});
 		// Nib sizes (OneNote-style): three steps on the ACTIVE tool, plus a
@@ -983,11 +1005,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				pen: normalizeInkColor("pen", raw?.inkColors?.pen),
 				highlighter: normalizeInkColor("highlighter", raw?.inkColors?.highlighter),
 			},
+			inkShaping: raw?.inkShaping !== false,
 			pageOwners:
 				raw?.pageOwners && typeof raw.pageOwners === "object" ? raw.pageOwners : {},
 		};
 		setInkSizeMult("pen", this.settings.inkSizes.pen);
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
+		setInkShaping(this.settings.inkShaping);
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
 	}

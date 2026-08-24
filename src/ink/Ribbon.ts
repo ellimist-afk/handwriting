@@ -108,6 +108,27 @@ export function flattenSegment(
 	return out;
 }
 
+/**
+ * Like flattenSegment, but the half-width is interpolated from hwFrom to
+ * hwTo along the segment instead of held constant, so width flows through a
+ * sample instead of stepping at it. Used by the shaped pipeline (InkShape).
+ */
+export function flattenSegmentHw(
+	seg: SmoothSegment,
+	hwFrom: number,
+	hwTo: number,
+	pxPerWorld: number
+): RibbonPt[] {
+	const n = subdivisionsFor(seg, pxPerWorld);
+	const out: RibbonPt[] = [];
+	for (let i = 1; i <= n; i++) {
+		const t = i / n;
+		const p = quadAt(seg, t);
+		out.push({ x: p.x, y: p.y, hw: hwFrom + (hwTo - hwFrom) * t });
+	}
+	return out;
+}
+
 /** The whole stroke as ribbon points. Used for committed rendering. */
 export function flattenStroke(
 	points: readonly InkPoint[],
