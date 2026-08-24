@@ -1,7 +1,7 @@
 /* Handwriting: pen ink on ordinary Markdown notes in Obsidian */
 
-.handwriting-content {
-	padding: 0 !important;
+.handwriting-content.view-content {
+	padding: 0;
 	overflow: hidden;
 }
 
@@ -177,14 +177,29 @@
 	}
 }
 
+.handwriting-pen-cursor,
 .handwriting-eraser-cursor {
 	position: absolute;
 	left: 0;
 	top: 0;
 	display: none;
-	border: 1.5px solid var(--text-muted);
 	border-radius: 50%;
 	pointer-events: none;
+}
+
+.handwriting-pen-cursor {
+	box-sizing: border-box;
+	border: 1px solid var(--background-primary);
+	box-shadow: 0 0 0 1px var(--text-muted);
+}
+
+.cm-scroller.handwriting-pen-hover,
+.cm-scroller.handwriting-pen-hover * {
+	cursor: none;
+}
+
+.handwriting-eraser-cursor {
+	border: 1.5px solid var(--text-muted);
 	opacity: 0.7;
 }
 
@@ -341,6 +356,20 @@
 	color: var(--text-error);
 }
 
+.handwriting-diagnostic-text {
+	display: block;
+	width: 100%;
+	min-height: min(60vh, 32rem);
+	resize: vertical;
+	font-family: var(--font-monospace);
+}
+
+.handwriting-diagnostic-text-controls {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: var(--size-4-3);
+}
+
 /* ---- v0.13.0 polish: Handwriting stays out of the way ------------------------- */
 
 /*
@@ -355,10 +384,10 @@
  */
 /* The horizontal axis patch. Obsidian ships `overflow-x: hidden` on the
    scroller; the ScrollAxisGuard adds this class while inline ink needs
-   horizontal scroll room and removes it on unmount. Important because themes
-   set the property with high specificity. */
-.cm-scroller.handwriting-hscroll-axis {
-	overflow-x: auto !important;
+   horizontal scroll room and removes it on unmount. The Handwriting-page
+   ancestor supplies the specificity needed against theme rules. */
+.markdown-source-view.handwriting-page .cm-scroller.handwriting-hscroll-axis {
+	overflow-x: auto;
 }
 
 .cm-scroller.handwriting-hscroll::-webkit-scrollbar:horizontal {
@@ -384,9 +413,8 @@
  * on the embedded backlinks section ("Linked mentions"); remove exactly
  * that line, only on Handwriting pages. The backlinks pane itself is untouched.
  */
-.markdown-source-view.handwriting-page .embedded-backlinks,
-.handwriting-page .embedded-backlinks {
-	border-top: none !important;
+.workspace-leaf-content .markdown-source-view.handwriting-page .embedded-backlinks {
+	border-top: none;
 }
 
 /* ---- inline gesture guard, subtree half ---- */
@@ -418,15 +446,13 @@
  * (source of truth), but it has no business in the Properties UI. Hiding
  * it is also what makes the first stroke jump-free: when the claim
  * writes frontmatter, the hidden row adds zero height, and a Properties
- * block whose ONLY property is handwriting-page-id never materializes at all.
+ * block whose ONLY property is handwriting-page-id is hidden as one unit.
  * User properties are untouched: any other key keeps the block visible.
  */
 .metadata-property[data-property-key="handwriting-page-id"] {
 	display: none;
 }
-.metadata-container:has(.metadata-property[data-property-key="handwriting-page-id"]):not(
-		:has(.metadata-property:not([data-property-key="handwriting-page-id"]))
-	) {
+.metadata-container.handwriting-metadata-id-only {
 	display: none;
 }
 

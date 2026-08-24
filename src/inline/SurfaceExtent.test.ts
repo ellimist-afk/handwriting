@@ -182,13 +182,15 @@ describe("ScrollAxisGuard", () => {
 
 	it("styles.css carries the rule the class relies on", () => {
 		// The guard is inert without its stylesheet half; the packager asserts
-		// this too, but a stale styles.css in dev should fail loudly here.
+		// this too, but a stale styles.css in dev should fail loudly here. The
+		// Handwriting-page ancestor supplies enough specificity without important.
 		const rule = new RegExp(
-			`\\.cm-scroller\\.${HSCROLL_AXIS_CLASS}\\s*\\{([^}]*)\\}`
+			`\\.markdown-source-view\\.handwriting-page\\s+\\.cm-scroller\\.${HSCROLL_AXIS_CLASS}\\s*\\{([^}]*)\\}`
 		);
 		const m = css.match(rule);
 		expect(m, "axis rule present").not.toBeNull();
-		expect(m![1]).toMatch(/overflow-x:\s*auto\s*!important/);
+		expect(m![1]).toMatch(/overflow-x:\s*auto/);
+		expect(m![1]).not.toContain("!important");
 	});
 });
 

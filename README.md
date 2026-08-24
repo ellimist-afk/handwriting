@@ -17,8 +17,8 @@ key, no telemetry, nothing that touches a network.
 Desktop Obsidian 1.13.7 or newer, and an active pen digitizer. An older
 Obsidian refuses to load the plugin rather than misbehaving.
 
-Built and tested on a Surface with a Surface Pen. Other Windows pen devices
-should work but nobody's tested them yet.
+Built and tested on a Microsoft Surface with a Surface Slim Pen 2. Other
+Windows pen devices should work but nobody's tested them yet.
 
 Desktop only, and the manifest says so. Handwriting draws from
 `pointerrawupdate`, which iOS WebKit doesn't implement, and reads Electron
@@ -207,7 +207,8 @@ https://github.com/ellimist-afk/handwriting/issues
 
 Say what you did, what happened, and, for pen problems, which device and pen
 you have. If you can reproduce it, run `Diagnostics: toggle recording`,
-reproduce, then `Diagnostics: copy pen trace` and paste the result in.
+reproduce, then run `Diagnostics: show pen trace`. The report opens selected;
+press Ctrl+C and paste it into the issue.
 
 For a security defect, don't open a normal issue. Use GitHub private
 vulnerability reporting on this repository. `SECURITY.md` has the details.

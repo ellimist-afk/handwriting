@@ -42,10 +42,12 @@ import {
 	setInkColorHex,
 } from "./ink/InkColor";
 import { diagnosticsEnabled, setDiagnosticsEnabled } from "./diag/DiagSwitch";
+import { showDiagnosticText } from "./diag/DiagnosticTextModal";
 import { newPageId } from "./model/PageData";
 import { PageIdIndex } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
+import { runDetached } from "./util/Detached";
 
 interface HandwritingSettings {
 	/** Per-page camera, kept out of the synced note on purpose (§22). */
@@ -156,7 +158,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 
 		// One ribbon entry, for the standalone canvas. Inking on an ordinary
 		// note needs no entry point at all. You write on it.
-		this.addRibbonIcon("pen-tool", "New canvas page", () => void this.newPage());
+		this.addRibbonIcon("pen-tool", "New canvas page", () => {
+			runDetached(this.newPage(), "create a canvas page");
+		});
 
 		// Inline ink on the ordinary Markdown editor (architecture review +
 		// OneNote-coordinates addendum). Pen-only capture; persistence follows
@@ -209,12 +213,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			name: "Ink shaping: toggle",
 			callback: () => {
 				const on = !inkShapingEnabled();
-				setInkShaping(on);
-				this.settings.inkShaping = on;
-				void this.saveData(this.settings);
-				// Render-time law: a repaint restyles every committed stroke.
-				repaintAllInkOverlays();
-				new Notice(on ? "Handwriting: ink shaping on" : "Handwriting: ink shaping off");
+				runDetached(this.applyInkShaping(on), "save the ink shaping setting", () =>
+					new Notice(
+						"Handwriting: ink shaping changed for this session, but the setting could not be saved."
+					)
+				);
 			},
 		});
 		// Nib sizes (OneNote-style): three steps on the ACTIVE tool, plus a
@@ -223,7 +226,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			this.addCommand({
 				id: `ink-size-${step.name}`,
 				name: `Ink size: ${step.name}`,
-				callback: () => void this.setInkSize(step.mult, step.name),
+				callback: () => {
+					runDetached(this.setInkSize(step.mult, step.name), "save the ink size", () =>
+						new Notice("Handwriting: the ink size changed, but the setting could not be saved.")
+					);
+				},
 			});
 		}
 		this.addCommand({
@@ -231,7 +238,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			name: "Ink size: next",
 			callback: () => {
 				const next = nextInkSize(getInkSizeMult(getInlineTool()));
-				void this.setInkSize(next.mult, next.name);
+				runDetached(this.setInkSize(next.mult, next.name), "save the ink size", () =>
+					new Notice("Handwriting: the ink size changed, but the setting could not be saved.")
+				);
 			},
 		});
 		// Ink colors: one command per palette name (union of both palettes),
@@ -256,7 +265,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 							);
 							return;
 						}
-						void this.setInkColor(choice.hex, choice.name);
+						runDetached(this.setInkColor(choice.hex, choice.name), "save the ink color", () =>
+							new Notice("Handwriting: the ink color changed, but the setting could not be saved.")
+						);
 					},
 				});
 			}
@@ -282,7 +293,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const tool = getInlineTool();
 				const next = nextInkColor(tool, getInkColorHex(tool));
-				void this.setInkColor(next.hex, next.name);
+				runDetached(this.setInkColor(next.hex, next.name), "save the ink color", () =>
+					new Notice("Handwriting: the ink color changed, but the setting could not be saved.")
+				);
 			},
 		});
 		this.addCommand({
@@ -303,14 +316,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			},
 		});
 		// The pen lifecycle trace. To capture one failing stroke: turn
-		// diagnostics recording on, clear the trace, draw the stroke, copy the
+		// diagnostics recording on, clear the trace, draw the stroke, show the
 		// trace, turn recording off.
 		this.addCommand({
 			id: "copy-inline-pen-trace",
-			name: "Diagnostics: copy pen trace",
+			name: "Diagnostics: show pen trace",
 			callback: () => {
-				void navigator.clipboard.writeText(formatInlinePenTrace());
-				new Notice("Handwriting: pen trace copied");
+				showDiagnosticText(this.app, "Handwriting pen trace", formatInlinePenTrace());
 			},
 		});
 		this.addCommand({
@@ -323,10 +335,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 		this.addCommand({
 			id: "copy-inline-zoom-report",
-			name: "Diagnostics: copy zoom report",
+			name: "Diagnostics: show zoom report",
 			callback: () => {
-				void navigator.clipboard.writeText(copyInlineZoomReport());
-				new Notice("Handwriting: zoom report copied");
+				showDiagnosticText(this.app, "Handwriting zoom report", copyInlineZoomReport());
 			},
 		});
 		// Dead-region diagnosis: what the page has under a client point, and
@@ -343,10 +354,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 		this.addCommand({
 			id: "copy-inline-hit-report",
-			name: "Diagnostics: copy pointer hit report",
+			name: "Diagnostics: show pointer hit report",
 			callback: () => {
-				void navigator.clipboard.writeText(formatHitReport());
-				new Notice("Handwriting: pointer hit report copied");
+				showDiagnosticText(this.app, "Handwriting pointer hit report", formatHitReport());
 			},
 		});
 		this.addCommand({
@@ -359,27 +369,31 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 		// Touchpad dead-zone diagnosis: the wheel/scroll/repaint pipeline,
 		// always recording. Capture: clear -> touchpad-scroll -> draw inside
-		// and outside the dead zone -> copy. Then repeat with touchscreen
+		// and outside the dead zone -> show the report. Then repeat with touchscreen
 		// scrolling as the control.
 		// Presentation ground truth: what is actually in the composited frame
 		// and what paints above the ink at the last stroke's screen box.
 		this.addCommand({
 			id: "copy-region-census",
-			name: "Diagnostics: copy region census",
+			name: "Diagnostics: show region census",
 			callback: () => {
-				void navigator.clipboard.writeText(copyRegionCensus());
-				new Notice("Handwriting: region census copied");
+				showDiagnosticText(this.app, "Handwriting region census", copyRegionCensus());
 			},
 		});
 		this.addCommand({
 			id: "copy-presentation-capture",
-			name: "Diagnostics: copy presentation capture",
+			name: "Diagnostics: show presentation capture",
 			callback: () => {
-				void (async () => {
-					const report = await copyPresentationReport();
-					await navigator.clipboard.writeText(report);
-					new Notice("Handwriting: presentation capture copied");
-				})();
+				runDetached(
+					copyPresentationReport().then((report) =>
+						showDiagnosticText(this.app, "Handwriting presentation capture", report)
+					),
+					"prepare a presentation capture",
+					() =>
+						new Notice(
+							"Handwriting: could not prepare the presentation capture. See the developer console."
+						)
+				);
 			},
 		});
 		// Investigation instruments (scroll trace, pen trace, presentation
@@ -396,10 +410,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 		this.addCommand({
 			id: "copy-inline-scroll-trace",
-			name: "Diagnostics: copy scroll trace",
+			name: "Diagnostics: show scroll trace",
 			callback: () => {
-				void navigator.clipboard.writeText(formatScrollProbe());
-				new Notice("Handwriting: scroll trace copied");
+				showDiagnosticText(this.app, "Handwriting scroll trace", formatScrollProbe());
 			},
 		});
 		this.addCommand({
@@ -414,7 +427,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.addCommand({
 			id: "new-page",
 			name: "New canvas page",
-			callback: () => void this.newPage(),
+			callback: () => {
+				runDetached(this.newPage(), "create a canvas page");
+			},
 		});
 		this.addCommand({
 			id: "open-as-canvas",
@@ -422,7 +437,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md") return false;
-				if (!checking) void this.openAsHandwriting(file);
+				if (!checking) {
+					runDetached(this.openAsHandwriting(file), `open ${file.path} on the canvas`, () =>
+						new Notice("Handwriting: could not open this note on the canvas.")
+					);
+				}
 				return true;
 			},
 		});
@@ -439,10 +458,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					// `handwriting:` marker gets swapped straight back to the canvas by
 					// the file-open handler, and "Open as Markdown" looks broken.
 					if (file) this.preferMarkdown.add(file.path);
-					void leaf.setViewState({
-						type: "markdown",
-						state: { file: file?.path, mode: "source" },
-					});
+					runDetached(
+						leaf.setViewState({
+							type: "markdown",
+							state: { file: file?.path, mode: "source" },
+						}),
+						"open a canvas page as Markdown",
+						() => new Notice("Handwriting: could not open this page as Markdown.")
+					);
 				}
 				return true;
 			},
@@ -463,16 +486,23 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 
 		// Route Handwriting-marked notes to the canvas view.
 		this.registerEvent(
-			this.app.workspace.on("file-open", (file) => void this.maybeSwapView(file))
+			this.app.workspace.on("file-open", (file) =>
+				runDetached(this.maybeSwapView(file), "switch a marked note to its canvas view")
+			)
 		);
 		this.app.workspace.onLayoutReady(() => {
-			void this.maybeSwapView(this.app.workspace.getActiveFile());
+			runDetached(
+				this.maybeSwapView(this.app.workspace.getActiveFile()),
+				"switch the active marked note to its canvas view"
+			);
 		});
 
 		// Sidecar upkeep (§21): the sidecar is keyed by page id, so renames are
 		// harmless. Deletes should not leave orphans behind, though.
 		this.registerEvent(
-			this.app.vault.on("delete", (file) => void this.onFileDeleted(file))
+			this.app.vault.on("delete", (file) =>
+				runDetached(this.onFileDeleted(file), "preserve ink for a deleted note")
+			)
 		);
 
 		// Inline session ink is keyed by path (an unclaimed note has no other
@@ -577,7 +607,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			if (remembered && paths.includes(remembered)) {
 				this.pageIds.claimOwnership(id, remembered);
 				for (const p of paths) {
-					if (p !== remembered) void this.resolveDuplicate(p, id, remembered);
+					if (p !== remembered) {
+						runDetached(
+							this.resolveDuplicate(p, id, remembered),
+							`repair duplicate page identity for ${p}`
+						);
+					}
 				}
 			} else {
 				this.ambiguousIds.set(id, [...paths]);
@@ -630,7 +665,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			this.persistOwners();
 			return;
 		}
-		void this.resolveDuplicate(path, id, v.ownerPath);
+		runDetached(
+			this.resolveDuplicate(path, id, v.ownerPath),
+			`repair duplicate page identity for ${path}`
+		);
 	}
 
 	/** Ambiguous set changed: if exactly one carrier remains, it owns the id. */
@@ -737,29 +775,43 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.settings.pageOwners = this.pageIds.snapshot();
 		this.settingsDirty = true;
 		if (this.settingsTimer !== null) window.clearTimeout(this.settingsTimer);
-		this.settingsTimer = window.setTimeout(() => void this.flushSettings(), 2000);
+		this.settingsTimer = window.setTimeout(
+			() => runDetached(this.flushSettings(), "flush ownership settings"),
+			2000
+		);
+	}
+
+	private async applyInkShaping(on: boolean): Promise<void> {
+		setInkShaping(on);
+		this.settings.inkShaping = on;
+		// Render-time law: a repaint restyles every committed stroke.
+		repaintAllInkOverlays();
+		await this.saveData(this.settings);
+		new Notice(on ? "Handwriting: ink shaping on" : "Handwriting: ink shaping off");
 	}
 
 	private async setInkColor(hex: string, name: string): Promise<void> {
 		const tool = getInlineTool();
 		this.settings.inkColors[tool] = setInkColorHex(tool, hex);
-		new Notice(`Handwriting: ${tool} ${name}`);
 		await this.saveData(this.settings);
+		new Notice(`Handwriting: ${tool} ${name}`);
 	}
 
 	private async setInkSize(mult: number, name: string): Promise<void> {
 		const tool = getInlineTool();
 		setInkSizeMult(tool, mult);
 		this.settings.inkSizes[tool] = clampInkSize(mult);
-		new Notice(`Handwriting: ${tool} size ${name}`);
 		await this.saveData(this.settings);
+		new Notice(`Handwriting: ${tool} size ${name}`);
 	}
 
 	/** "Delete all ink": confirm first. The count in the dialog is live. */
 	private confirmDeleteAllInk(path: string): void {
 		const count = inlineInk.strokes(path).length;
 		if (count === 0) return;
-		new ConfirmDeleteInkModal(this.app, count, () => void this.deleteAllInk(path)).open();
+		new ConfirmDeleteInkModal(this.app, count, () => {
+			runDetached(this.deleteAllInk(path), `delete all ink on ${path}`);
+		}).open();
 	}
 
 	/**
@@ -823,7 +875,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// wait for asynchronous cleanup. This is best effort, not crash
 		// durability: a process killed before the I/O finishes can still
 		// lose pending ink (README, Limitations).
-		void this.finishPersistence();
+		runDetached(this.finishPersistence(), "finish persistence during unload");
 	}
 
 	/** Best-effort shutdown: settle in-flight claims and loads, then flush. */
@@ -857,7 +909,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.settings.cameras[pageId] = cam;
 		this.settingsDirty = true;
 		if (this.settingsTimer !== null) window.clearTimeout(this.settingsTimer);
-		this.settingsTimer = window.setTimeout(() => void this.flushSettings(), 2000);
+		this.settingsTimer = window.setTimeout(
+			() => runDetached(this.flushSettings(), "flush camera settings"),
+			2000
+		);
 	}
 
 	// ---- pages --------------------------------------------------------------
@@ -882,7 +937,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				state: { file: file.path },
 				active: true,
 			});
-			void this.app.workspace.revealLeaf(leaf);
+			await this.app.workspace.revealLeaf(leaf);
 		} catch (err) {
 			console.error("[handwriting] could not create page", err);
 			new Notice("Handwriting: could not create the page. See the developer console.");
@@ -975,7 +1030,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		delete this.settings.cameras[pageId];
 		delete this.settings.pageOwners[pageId];
 		this.settingsDirty = true;
-		void this.flushSettings();
+		await this.flushSettings();
 	}
 
 	/**

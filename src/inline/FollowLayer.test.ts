@@ -25,8 +25,24 @@ import { Camera } from "../camera/Camera";
 import { InkStroke } from "../ink/Stroke";
 
 /** Stands in for `.handwriting-ink-layer`: the transform is all that is touched. */
-function fakeLayer(): { style: { transform: string } } {
-	return { style: { transform: "" } };
+function fakeLayer(): {
+	style: { transform: string };
+	setCssStyles(styles: { transform: string }): void;
+} {
+	let transform = "";
+	return {
+		style: {
+			get transform() {
+				return transform;
+			},
+			set transform(value: string) {
+				transform = value;
+			},
+		},
+		setCssStyles(styles) {
+			transform = styles.transform;
+		},
+	};
 }
 
 /** A scroller whose offsets the test moves, as a real one would. */
@@ -149,7 +165,7 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		const follow = new FollowLayer();
 		const frame = new StrokeFrame();
 		follow.rebase(layer, 0, 0, UNLOCKED);
-		layer.style.transform = NO_SHIFT;
+		layer.setCssStyles({ transform: NO_SHIFT });
 
 		frame.begin(); // pen-down
 		follow.follow(layer, 0, 300, frame.locked);

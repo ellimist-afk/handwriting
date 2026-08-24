@@ -9,6 +9,7 @@ import { scrollProbeTouch } from "./ScrollProbe";
 import { DIAG_OFF_NOTE, diagnosticsEnabled } from "../diag/DiagSwitch";
 import { VelocitySample, flingStep, releaseVelocity } from "../input/Fling";
 import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
+import { isPenCompatMouseMove } from "./PenCursor";
 
 /**
  * Pen capture for the inline overlay.
@@ -41,6 +42,10 @@ import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
 
 export interface InlinePenCallbacks {
 	onPenDown(sample: PenSample, ev: PointerEvent): void;
+	/** Display-rate pen hover, outside an active contact. */
+	onPenHover(sample: PenSample): void;
+	/** The hovering pen left the editor. */
+	onPenLeave(): void;
 	/** Input-rate coalesced samples while a stroke is active. */
 	onPenRaw(samples: PenSample[], ev: PointerEvent): void;
 	/** rAF-rate move, for metrics only (`coalescedCount`). */
@@ -453,6 +458,8 @@ export class InlinePenRouter {
 	// Acquisition context printed with every CLAIMED pen-down.
 	private lastTouchAt = Number.NEGATIVE_INFINITY;
 	private lastPenHoverAt = Number.NEGATIVE_INFINITY;
+	private lastPenHoverX = Number.NEGATIVE_INFINITY;
+	private lastPenHoverY = Number.NEGATIVE_INFINITY;
 	private lastHoverTraceAt = Number.NEGATIVE_INFINITY;
 	private lastHoverButtons = -1;
 
@@ -514,6 +521,10 @@ export class InlinePenRouter {
 		on("pointerleave", (e) => {
 			if (e.pointerType === "pen") {
 				tr("pointerleave", e, this.activePenId !== null ? "DURING STROKE" : "");
+				const next = e.relatedTarget as Node | null;
+				const stillInside =
+					next !== null && typeof next.nodeType === "number" && this.scrollEl.contains(next);
+				if (this.activePenId === null && !stillInside) this.cb.onPenLeave();
 			}
 		});
 		// Pen-sourced context menus on the note are never wanted: mid-stroke
@@ -942,6 +953,22 @@ export class InlinePenRouter {
 	// ---- pointermove / pointerrawupdate -------------------------------------
 
 	private pointerMove(e: PointerEvent): void {
+		// A real mouse entering while the pen remains nearby gets the ordinary
+		// editor cursor. The same-point compatibility move Windows emits right
+		// after pen hover is still the pen and must not flash the I-beam.
+		if (
+			e.pointerType === "mouse" &&
+			!isPenCompatMouseMove({
+				now: performance.now(),
+				lastPenHoverAt: this.lastPenHoverAt,
+				mouseX: e.clientX,
+				mouseY: e.clientY,
+				penX: this.lastPenHoverX,
+				penY: this.lastPenHoverY,
+			})
+		) {
+			this.cb.onPenLeave();
+		}
 		if (e.pointerType === "touch") {
 			this.lastTouchAt = performance.now();
 			scrollProbeTouch();
@@ -1017,10 +1044,13 @@ export class InlinePenRouter {
 			// Hovering keeps the palm gate warm ("palm placed before pen") and
 			// re-arms the standing guard instantly if a touch window was open.
 			this.lastPenHoverAt = performance.now();
+			this.lastPenHoverX = e.clientX;
+			this.lastPenHoverY = e.clientY;
 			this.gate.penHoverSeen(performance.now());
 			this.applyGuard(this.manip.penSignal(), "pen-hover");
 			this.traceHover(e);
 			if (isHitProbeEnabled()) hitProbeHover(e);
+			this.cb.onPenHover(this.sampleFrom(e));
 			return;
 		}
 		if (e.pointerId !== this.activePenId) return;

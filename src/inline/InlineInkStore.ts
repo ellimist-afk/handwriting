@@ -1,6 +1,7 @@
 import { InkStroke } from "../ink/Stroke";
 import { PageData, ParseResult, emptyPage, newPageId } from "../model/PageData";
 import { translateStroke } from "../objects/Selection";
+import { runDetached } from "../util/Detached";
 
 /**
  * Ink for the inline overlay: session state plus (M1) sidecar persistence,
@@ -268,8 +269,14 @@ export class InlineInkStore {
 
 	/** A finished stroke: visible immediately, persisted behind the id rules. */
 	commit(path: string, stroke: InkStroke): void {
+		this.commitGesture(path, [stroke]);
+	}
+
+	/** One pen contact, possibly split around release travel: persist once. */
+	commitGesture(path: string, strokes: readonly InkStroke[]): void {
+		if (strokes.length === 0) return;
 		const rec = this.record(path);
-		rec.strokes.push(stroke);
+		rec.strokes.push(...strokes);
 		this.persist(path, rec);
 	}
 
@@ -376,7 +383,10 @@ export class InlineInkStore {
 			// the session's strokes and, written, replace the persisted ones.
 			// Persist again once the merge has happened; every mutation path
 			// (commit, erase, move, undo) comes through here.
-			void rec.loadInFlight.then(() => this.persist(path, rec));
+			runDetached(
+				rec.loadInFlight.then(() => this.persist(path, rec)),
+				`persist inline ink after loading ${path}`
+			);
 			return;
 		}
 		if (!rec.pageId && !rec.claimInFlight) {
@@ -392,10 +402,13 @@ export class InlineInkStore {
 			// lands: the quiet period was already spent waiting for the id.
 			if (!rec.claimFollowUpArmed) {
 				rec.claimFollowUpArmed = true;
-				void rec.claimInFlight.then(() => {
-					rec.claimFollowUpArmed = false;
-					this.scheduleFirst(rec);
-				});
+				runDetached(
+					rec.claimInFlight.then(() => {
+						rec.claimFollowUpArmed = false;
+						this.scheduleFirst(rec);
+					}),
+					`save inline ink after claiming ${path}`
+				);
 			}
 			return;
 		}
@@ -455,7 +468,10 @@ export class InlineInkStore {
 			console.error("[handwriting] first sidecar write failed", err);
 		});
 		this.firstWrites.add(write);
-		void write.finally(() => this.firstWrites.delete(write));
+		runDetached(
+			write.finally(() => this.firstWrites.delete(write)),
+			"finish tracking the first inline sidecar write"
+		);
 	}
 
 	/**

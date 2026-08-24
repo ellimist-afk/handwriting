@@ -118,6 +118,43 @@ describe("plain undo/redo over the real history plugin", () => {
 		expect(h.applied[1]!.type).toBe("add");
 	});
 
+	it("a pen contact split around release travel remains one undo step", () => {
+		const h = new Harness("hello");
+		h.gesture({ type: "add", path: "n.md", strokes: [stroke("left"), stroke("right")] });
+
+		expect(h.run(undo)).toBe(true);
+		expect(h.applied).toHaveLength(1);
+		expect(h.applied[0]).toMatchObject({
+			type: "remove",
+			path: "n.md",
+			strokes: [{ id: "left" }, { id: "right" }],
+		});
+		expect(h.run(undo)).toBe(false);
+	});
+
+	it("undoing a lasso delete restores the captured strokes at their original indices", () => {
+		const h = new Harness("hello");
+		h.gesture({
+			type: "remove",
+			path: "n.md",
+			strokes: [stroke("s1"), stroke("s2")],
+			indices: [1, 4],
+		});
+
+		expect(h.run(undo)).toBe(true);
+		expect(h.applied).toEqual([
+			{
+				type: "add",
+				path: "n.md",
+				strokes: expect.arrayContaining([
+					expect.objectContaining({ id: "s1" }),
+					expect.objectContaining({ id: "s2" }),
+				]),
+				indices: [1, 4],
+			},
+		]);
+	});
+
 	it("history is chronological: text and ink interleave in order", () => {
 		const h = new Harness("hello");
 		h.gesture({ type: "add", path: "n.md", strokes: [stroke("s1")] }); // 1: ink

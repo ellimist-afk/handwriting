@@ -32,7 +32,7 @@
  *   coordinate frame at pen-down and every sample maps through that frozen
  *   camera; shifting the layer under it would shear the stroke being drawn.
  *
- * DOM-free by construction (the target is a structural `{ style }`), which
+ * DOM-free by construction (the target is structural), which
  * is what lets the whole cycle be unit-tested. Same reason GuardStyle.ts is
  * shaped this way.
  */
@@ -40,6 +40,7 @@
 /** The bit of an HTMLElement this needs: somewhere to put a transform. */
 export interface FollowTarget {
 	style: { transform: string };
+	setCssStyles(styles: { transform: string }): void;
 }
 
 /** A transform that is exactly "no shift", written once at the boundary. */
@@ -70,7 +71,7 @@ export class FollowLayer {
 		if (frameLocked) return;
 		const x = this.baseLeft - scrollLeft;
 		const y = this.baseTop - scrollTop;
-		if (layer) layer.style.transform = `translate(${x}px, ${y}px)`;
+		if (layer) layer.setCssStyles({ transform: `translate(${x}px, ${y}px)` });
 		this.shiftedFlag = x !== 0 || y !== 0;
 	}
 
@@ -84,7 +85,7 @@ export class FollowLayer {
 		if (frameLocked) return;
 		this.baseLeft = scrollLeft;
 		this.baseTop = scrollTop;
-		if (this.shiftedFlag && layer) layer.style.transform = NO_SHIFT;
+		if (this.shiftedFlag && layer) layer.setCssStyles({ transform: NO_SHIFT });
 		this.shiftedFlag = false;
 	}
 

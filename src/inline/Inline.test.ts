@@ -403,6 +403,16 @@ describe("inline persistence: load and reload", () => {
 // ---- M2: eraser / move / history-target correctness -------------------------
 
 describe("store ink operations (eraser / lasso / undo primitives)", () => {
+	it("commits release-separated segments together and lets the eraser remove either one", () => {
+		const store = new InlineInkStore();
+		store.commitGesture("n.md", [stroke("left"), stroke("right")]);
+		expect(store.strokes("n.md").map((item) => item.id)).toEqual(["left", "right"]);
+
+		const removed = store.takeLive("n.md", ["right"]);
+		expect(removed.map((item) => item.stroke.id)).toEqual(["right"]);
+		expect(store.strokes("n.md").map((item) => item.id)).toEqual(["left"]);
+	});
+
 	it("takeLive captures strokes WITH their original indices", () => {
 		const store = new InlineInkStore();
 		for (const id of ["a", "b", "c", "d"]) store.commit("n.md", stroke(id));

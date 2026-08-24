@@ -1,6 +1,7 @@
 import { App, Component, MarkdownRenderer } from "obsidian";
 import { CameraState } from "../camera/coordinates";
 import { TextBoxData } from "../model/PageData";
+import { runDetached } from "../util/Detached";
 
 /**
  * OneNote-style text containers (handoff §15, §16, §55, §56, §74).
@@ -78,7 +79,9 @@ export class TextLayer {
 
 	setCamera(cam: CameraState): void {
 		this.cam = cam;
-		this.el.style.transform = `translate(${-cam.x * cam.zoom}px, ${-cam.y * cam.zoom}px) scale(${cam.zoom})`;
+		this.el.setCssStyles({
+			transform: `translate(${-cam.x * cam.zoom}px, ${-cam.y * cam.zoom}px) scale(${cam.zoom})`,
+		});
 	}
 
 	/** Rebuild from scratch, used on page load. */
@@ -98,7 +101,7 @@ export class TextLayer {
 			if (existing.editor) {
 				if (textChanged) existing.editor.value = model.text;
 			} else if (textChanged || existing.rendered !== model.text) {
-				void this.renderContent(existing);
+				runDetached(this.renderContent(existing), "render a text box");
 			}
 			return;
 		}
@@ -109,7 +112,7 @@ export class TextLayer {
 		const view: BoxView = { model, el, content, editor: null, handle, rendered: null };
 		this.boxes.set(model.data.id, view);
 		this.applyGeometry(view);
-		void this.renderContent(view);
+		runDetached(this.renderContent(view), "render a text box");
 		this.wireHandle(view);
 	}
 
@@ -130,10 +133,12 @@ export class TextLayer {
 
 	private applyGeometry(view: BoxView): void {
 		const d = view.model.data;
-		view.el.style.left = `${d.x}px`;
-		view.el.style.top = `${d.y}px`;
-		view.el.style.width = `${Math.max(MIN_WIDTH, d.width)}px`;
-		view.el.style.zIndex = String(d.z);
+		view.el.setCssStyles({
+			left: `${d.x}px`,
+			top: `${d.y}px`,
+			width: `${Math.max(MIN_WIDTH, d.width)}px`,
+			zIndex: String(d.z),
+		});
 	}
 
 	private async renderContent(view: BoxView): Promise<void> {
@@ -252,7 +257,7 @@ export class TextLayer {
 			view.editor = null;
 			view.el.removeClass("is-editing");
 			view.content.setCssStyles({ display: "" });
-			void this.renderContent(view);
+			runDetached(this.renderContent(view), "render a text box");
 			this.cb.onTextChanged(id, text);
 			if (text.trim().length === 0) this.cb.onEmptied(id);
 		}

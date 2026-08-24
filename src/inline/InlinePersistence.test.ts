@@ -194,6 +194,17 @@ describe("H1 — load-before-write race", () => {
 		expect(idsOnDisk(t.fake)).toEqual(["A", "B"]);
 	});
 
+	it("release-separated segments enter one snapshot and one scheduled write", async () => {
+		const t = rig({ idInCache: PID });
+		t.fake.externalWrite(FINAL, serialize(PID, ["A"]));
+		await t.ink.ensureLoaded(NOTE);
+		t.ink.commitGesture(NOTE, [stroke("left"), stroke("right")]);
+		await pastEveryTimer();
+
+		expect(idsOnDisk(t.fake)).toEqual(["A", "left", "right"]);
+		expect(t.fake.writes()).toHaveLength(1);
+	});
+
 	it("the damaged-file re-read is held to the same rule; a damaged file is never written", async () => {
 		const t = rig({ idInCache: PID });
 		t.fake.externalWrite(FINAL, "{ garbage ///");

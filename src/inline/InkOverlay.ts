@@ -1,4 +1,5 @@
 import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
+import { Prec } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
 import { isolateHistory } from "@codemirror/commands";
 import { editorInfoField } from "obsidian";
@@ -19,11 +20,20 @@ import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { PenSample } from "../input/PointerRouter";
 import { pointInBBox } from "../objects/Selection";
 import { SelectionModel } from "../objects/SelectionModel";
+import { runDetached } from "../util/Detached";
 import { InkOp, inkApplied, inkEffect, inkHistorySupport } from "./InkHistory";
+import {
+	InlineSelectionDeleteKeys,
+	removeSelectedInlineStrokes,
+} from "./InlineSelectionDelete";
 import { StrokeFrame } from "./StrokeFrame";
 import { FollowLayer } from "./FollowLayer";
+import { clearMetadataVisibility, updateMetadataVisibility } from "./MetadataVisibility";
 import { handoffFinishedStroke } from "./StrokeHandoff";
 import { InlineInkStore } from "./InlineInkStore";
+import { focusClaimedPenEditor } from "./InlineFocus";
+import { PEN_HOVER_CLASS, penCursorLayout } from "./PenCursor";
+import { normalizeInlinePenPressure } from "./PenPressure";
 import { backingScale, effectiveScale, fontZoomFactor, noteToVisual, visualToNote } from "./ZoomScale";
 import {
 	isPenProbeEnabled,
@@ -265,10 +275,15 @@ class InkOverlayPlugin {
 	private mode: PenMode = "ink";
 	private erased: Array<{ stroke: InkStroke; index: number }> = [];
 	private selection = new SelectionModel();
+	private readonly selectionDeleteKeys = new InlineSelectionDeleteKeys(
+		() => !this.selection.isEmpty,
+		() => this.deleteSelectedInk()
+	);
 	private lassoPts: Point2[] = [];
 	private lassoActive = false;
 	private dragFrom: { x: number; y: number } | null = null;
 	private dragTotal: { dx: number; dy: number } | null = null;
+	private penCursorEl: HTMLElement | null = null;
 	private eraserEl: HTMLElement | null = null;
 
 	private cssWidth = 0;
@@ -289,6 +304,8 @@ class InkOverlayPlugin {
 	private axisGuard = new ScrollAxisGuard();
 	/** The `.markdown-source-view` ancestor carrying the `handwriting-page` class. */
 	private pageClassHost: HTMLElement | null = null;
+	/** Keeps the page-id-only Properties block class in step with Obsidian's DOM. */
+	private metadataObserver: MutationObserver | null = null;
 	/** Inner canvas layer the scroll-follow translate is applied to. */
 	private layerEl: HTMLElement | null = null;
 	/**
@@ -397,12 +414,12 @@ class InkOverlayPlugin {
 		// it. Restoring it is render-inert and gives diagnostics a selector.
 		const container = host.createDiv({ cls: "handwriting-ink-overlay" });
 		this.container = container;
-		Object.assign(container.style, {
+		container.setCssStyles({
 			position: "absolute",
 			inset: "0",
 			overflow: "hidden",
 			pointerEvents: "none",
-		} as Partial<CSSStyleDeclaration>);
+		});
 
 		// Transform-follow layer (v0.13.5): the canvases sit in an inner layer
 		// that scroll events TRANSLATE by the delta since the last real
@@ -414,20 +431,20 @@ class InkOverlayPlugin {
 		// never moves.
 		const layer = container.createDiv({ cls: "handwriting-ink-layer" });
 		this.layerEl = layer;
-		Object.assign(layer.style, {
+		layer.setCssStyles({
 			position: "absolute",
 			inset: "0",
 			pointerEvents: "none",
 			willChange: "transform",
-		} as Partial<CSSStyleDeclaration>);
+		});
 
 		const canvas = (): HTMLCanvasElement => {
 			const c = layer.createEl("canvas");
-			Object.assign(c.style, {
+			c.setCssStyles({
 				position: "absolute",
 				inset: "0",
 				pointerEvents: "none",
-			} as Partial<CSSStyleDeclaration>);
+			});
 			return c;
 		};
 		// Highlighter layers first: on the inline surface all ink paints above
@@ -438,8 +455,8 @@ class InkOverlayPlugin {
 		// itself stays a single flat wash instead of double-blending into seams.
 		this.highlightCanvas = canvas();
 		this.highlightWetCanvas = canvas();
-		this.highlightCanvas.style.opacity = String(HIGHLIGHTER_ALPHA);
-		this.highlightWetCanvas.style.opacity = String(HIGHLIGHTER_ALPHA);
+		this.highlightCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
+		this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
 		this.committedCanvas = canvas();
 		this.wetCanvas = canvas();
 		this.tailCanvas = canvas();
@@ -461,13 +478,18 @@ class InkOverlayPlugin {
 		this.activeWet = this.wet;
 		this.tail = new TailRenderer(this.tailCanvas);
 
+		this.penCursorEl = container.createDiv({ cls: "handwriting-pen-cursor" });
+		this.penCursorEl.setAttribute("aria-hidden", "true");
 		this.eraserEl = container.createDiv({ cls: "handwriting-eraser-cursor" });
+		this.eraserEl.setAttribute("aria-hidden", "true");
 
 		this.router = new InlinePenRouter(
 			this.view.scrollDOM,
 			container,
 			{
 				onPenDown: (s, ev) => this.penDown(s, ev),
+				onPenHover: (s) => this.showPenCursor(s),
+				onPenLeave: () => this.hidePenCursor(),
 				onPenRaw: (samples, ev) => this.penRaw(samples, ev),
 				onPenMove: (_ev, count) => metrics.recordEvent("move", count, 0, false),
 				onPenUp: () => this.penUp(),
@@ -578,12 +600,15 @@ class InkOverlayPlugin {
 	/** Persisted ink arrives lazily; an untouched note costs one cache lookup. */
 	private loadInk(path: string | null): void {
 		if (!path) return;
-		void inlineInk.ensureLoaded(path).then((changed) => {
-			if (this.filePath() === path) {
-				this.updateHandwritingPageClass();
-				if (changed) this.scheduleRepaint();
-			}
-		});
+		runDetached(
+			inlineInk.ensureLoaded(path).then((changed) => {
+				if (this.filePath() === path) {
+					this.updateHandwritingPageClass();
+					if (changed) this.scheduleRepaint();
+				}
+			}),
+			`load inline ink for ${path}`
+		);
 	}
 
 	/**
@@ -598,12 +623,24 @@ class InkOverlayPlugin {
 		if (!this.pageClassHost) {
 			this.pageClassHost =
 				this.view.dom.closest(".markdown-source-view") ?? this.view.dom;
+			if (typeof MutationObserver !== "undefined") {
+				this.metadataObserver = new MutationObserver(() => {
+					if (this.pageClassHost) updateMetadataVisibility(this.pageClassHost);
+				});
+				this.metadataObserver.observe(this.pageClassHost, {
+					childList: true,
+					subtree: true,
+					attributes: true,
+					attributeFilter: ["data-property-key"],
+				});
+			}
 		}
 		const path = this.filePath();
 		this.pageClassHost.classList.toggle(
 			"handwriting-page",
 			!!path && inlineInk.isHandwritingPage(path)
 		);
+		updateMetadataVisibility(this.pageClassHost);
 	}
 
 	unmount(): void {
@@ -626,6 +663,9 @@ class InkOverlayPlugin {
 		this.spacerLeft = Number.NaN;
 		this.spacerTop = Number.NaN;
 		this.view.scrollDOM.classList.remove("handwriting-hscroll");
+		this.metadataObserver?.disconnect();
+		this.metadataObserver = null;
+		if (this.pageClassHost) clearMetadataVisibility(this.pageClassHost);
 		this.pageClassHost?.classList.remove("handwriting-page");
 		this.pageClassHost = null;
 		this.restoreScrollableAxis();
@@ -640,6 +680,7 @@ class InkOverlayPlugin {
 		this.layerEl = null;
 		this.follow.forget();
 		this.builder = null;
+		this.penCursorEl = null;
 		this.eraserEl = null;
 		this.resetGestureState();
 		if (this.hostPositionPatched) {
@@ -706,6 +747,14 @@ class InkOverlayPlugin {
 	destroy(): void {
 		this.unmount();
 		instances.delete(this);
+	}
+
+	handleKeyDown(event: KeyboardEvent): boolean {
+		return this.selectionDeleteKeys.keydown(event);
+	}
+
+	handleKeyUp(event: KeyboardEvent): boolean {
+		return this.selectionDeleteKeys.keyup(event);
 	}
 
 	/** Everything needed to identify the zoom mechanism from hardware. */
@@ -798,8 +847,7 @@ class InkOverlayPlugin {
 		]) {
 			c.width = size.backingW;
 			c.height = size.backingH;
-			c.style.width = `${size.cssW}px`;
-			c.style.height = `${size.cssH}px`;
+			c.setCssStyles({ width: `${size.cssW}px`, height: `${size.cssH}px` });
 		}
 		this.committedCtx.setTransform(backing, 0, 0, backing, 0, 0);
 		this.highlightCtx.setTransform(backing, 0, 0, backing, 0, 0);
@@ -848,6 +896,12 @@ class InkOverlayPlugin {
 	// ---- pen path (frozen pipeline) ----------------------------------------
 
 	private penDown(sample: PenSample, ev: PointerEvent): void {
+		// The router cancels pointerdown so the pen cannot move CodeMirror's
+		// caret. That also cancels native focus. Give keyboard ownership back to
+		// this editor before freezing geometry, or Delete and undo go wherever
+		// focus happened to be before the pen landed.
+		focusClaimedPenEditor(this.view);
+		this.hidePenCursor();
 		// The only layout reads on the whole stroke happen here, once. From
 		// here the frame is frozen until pen-up.
 		this.frame.end();
@@ -897,7 +951,7 @@ class InkOverlayPlugin {
 		const point = this.builder.add(
 			w.x,
 			w.y,
-			normalizePressure(sample.pressure),
+			normalizeInlinePenPressure(sample.pressure),
 			sample.timestamp,
 			sample.tiltX,
 			sample.tiltY
@@ -942,7 +996,7 @@ class InkOverlayPlugin {
 			const point = this.builder.add(
 				w.x,
 				w.y,
-				normalizePressure(s.pressure),
+				normalizeInlinePenPressure(s.pressure),
 				s.timestamp,
 				s.tiltX,
 				s.tiltY
@@ -1065,11 +1119,11 @@ class InkOverlayPlugin {
 		metrics.end(performance.now());
 		const builder = this.builder;
 		this.builder = null;
-		// The builder is finished BEFORE the wet layer is cleared, so the
-		// stroke's screen bbox can be pixel-sampled against the wet canvas
-		// it was just drawn on. Behaviorally identical to the old order
-		// (finish() and clear() touch disjoint state, same frame).
-		const stroke = builder?.finish();
+		// Finish before clearing the wet layer. Release filtering may produce
+		// several stored strokes from one contact, but every committed segment
+		// is drawn underneath the still-visible wet pixels before they clear.
+		const strokes = builder?.finishReleaseFiltered() ?? [];
+		const stroke = strokes.at(-1);
 		const path = stroke ? this.filePath() : null;
 		// Paint ground truth, part 1: was the WET ink actually in the backing
 		// store? Sampled over the stroke's screen bbox (clamped to canvas).
@@ -1092,25 +1146,28 @@ class InkOverlayPlugin {
 		}
 		handoffFinishedStroke({
 			store: () => {
-				inlineInk.commit(path, stroke);
+				inlineInk.commitGesture(path, strokes);
 				this.updateHandwritingPageClass();
 			},
 			// Paint underneath the still-visible wet layer. Long strokes can take
 			// long enough to flatten that clearing the desynchronized wet canvas
 			// first produces a visible blank frame, especially over Moonlight.
-			drawCommitted: () =>
-				drawStroke(
-					this.committedCtxFor(stroke.tool),
-					this.camera.snapshot,
-					stroke,
-					undefined,
-					true
-				),
+			drawCommitted: () => {
+				for (const finished of strokes) {
+					drawStroke(
+						this.committedCtxFor(finished.tool),
+						this.camera.snapshot,
+						finished,
+						undefined,
+						true
+					);
+				}
+			},
 			clearTransient: () => {
 				this.activeWet.clear(this.cssWidth, this.cssHeight);
 				this.tail.clearAll(this.cssWidth, this.cssHeight);
 			},
-			publishHistory: () => this.dispatchInk({ type: "add", path, strokes: [stroke] }),
+			publishHistory: () => this.dispatchInk({ type: "add", path, strokes }),
 		});
 		// Diagnostics (explicitly enabled only): paint ground truth part 2
 		// (did the commit draw reach the committed backing store?), plus the
@@ -1395,6 +1452,35 @@ class InkOverlayPlugin {
 
 	// ---- eraser (canvas semantics: whole-stroke, hit-circle, live) -----------
 
+	private showPenCursor(sample: PenSample): void {
+		if (!this.penCursorEl) return;
+		this.view.scrollDOM.classList.add(PEN_HOVER_CLASS);
+		const tool = inlineTool;
+		const strokeWidth =
+			(tool === "highlighter" ? HIGHLIGHTER_PEN.baseWidth : DEFAULT_PEN.baseWidth) *
+			getInkSizeMult(tool);
+		const cursor = penCursorLayout({
+			x: sample.x,
+			y: sample.y,
+			strokeWidth,
+			cameraZoom: this.camera.zoom,
+			cssScale: this.cssScale,
+		});
+		this.penCursorEl.setCssStyles({
+			display: "",
+			width: `${cursor.diameter}px`,
+			height: `${cursor.diameter}px`,
+			transform: `translate(${cursor.x}px, ${cursor.y}px)`,
+			backgroundColor: getInkColorHex(tool),
+			opacity: tool === "highlighter" ? String(HIGHLIGHTER_ALPHA) : "0.9",
+		});
+	}
+
+	private hidePenCursor(): void {
+		this.view.scrollDOM.classList.remove(PEN_HOVER_CLASS);
+		if (this.penCursorEl) this.penCursorEl.setCssStyles({ display: "none" });
+	}
+
 	private eraseAt(sample: PenSample): void {
 		const path = this.filePath();
 		if (!path) return;
@@ -1539,6 +1625,9 @@ class InkOverlayPlugin {
 		this.lassoActive = false;
 		this.dragFrom = null;
 		this.dragTotal = null;
+		this.selectionDeleteKeys.reset();
+		this.hidePenCursor();
+		this.hideEraserCursor();
 	}
 
 	// ---- history --------------------------------------------------------------
@@ -1564,6 +1653,19 @@ class InkOverlayPlugin {
 		this.scheduleRepaint();
 		this.repaintPath(path);
 		return strokes.length;
+	}
+
+	/** Delete the current lasso selection as one normal editor-history step. */
+	private deleteSelectedInk(): void {
+		const path = this.filePath();
+		if (!path) return;
+		const op = removeSelectedInlineStrokes(inlineInk, path, this.selection.strokeIds);
+		this.selection.clear();
+		this.redrawSelectionUI();
+		if (!op) return;
+		this.dispatchInk(op);
+		this.scheduleRepaint();
+		this.repaintPath(path);
 	}
 
 	/**
@@ -1778,13 +1880,13 @@ class InkOverlayPlugin {
 				this.scrollPositionPatched = true;
 			}
 			this.spacer = scroller.createDiv({ cls: "handwriting-surface-extent" });
-			Object.assign(this.spacer.style, {
+			this.spacer.setCssStyles({
 				position: "absolute",
 				width: "1px",
 				height: "1px",
 				visibility: "hidden",
 				pointerEvents: "none",
-			} as Partial<CSSStyleDeclaration>);
+			});
 			scrollProbeExtent("spacer created");
 		}
 		this.ensureScrollableAxis(scroller);
@@ -1808,12 +1910,12 @@ class InkOverlayPlugin {
 		let moved = false;
 		if (pos.left !== this.spacerLeft) {
 			this.spacerLeft = pos.left;
-			this.spacer.style.left = `${pos.left}px`;
+			this.spacer.setCssStyles({ left: `${pos.left}px` });
 			moved = true;
 		}
 		if (pos.top !== this.spacerTop) {
 			this.spacerTop = pos.top;
-			this.spacer.style.top = `${pos.top}px`;
+			this.spacer.setCssStyles({ top: `${pos.top}px` });
 			moved = true;
 		}
 		if (moved) scrollProbeExtent(`spacer -> (${pos.left},${pos.top})`);
@@ -1871,15 +1973,30 @@ class InkOverlayPlugin {
 	}
 }
 
-function normalizePressure(p: number): number {
-	if (!Number.isFinite(p) || p <= 0) return 0.5;
-	return Math.min(1, p);
-}
-
 function padBBox(b: BBox, pad: number): BBox {
 	return { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
 }
 
+const inkOverlayPlugin = ViewPlugin.fromClass(InkOverlayPlugin);
+
+// Obsidian's ordinary editor keymap also handles Delete and Backspace. Put
+// the selected-ink handler first, but claim those keys only while ink is
+// selected. Every other key still falls through untouched.
+const inlineSelectionKeyHandlers = Prec.highest(
+	EditorView.domEventHandlers({
+		keydown(event, view) {
+			return view.plugin(inkOverlayPlugin)?.handleKeyDown(event) ?? false;
+		},
+		keyup(event, view) {
+			return view.plugin(inkOverlayPlugin)?.handleKeyUp(event) ?? false;
+		},
+	})
+);
+
 export function inkOverlayExtension(): Extension {
-	return [ViewPlugin.fromClass(InkOverlayPlugin), inkHistorySupport()];
+	return [
+		inlineSelectionKeyHandlers,
+		inkOverlayPlugin,
+		inkHistorySupport(),
+	];
 }

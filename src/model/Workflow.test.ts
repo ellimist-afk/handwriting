@@ -41,7 +41,7 @@ describe("end-to-end page workflow", () => {
 
 		// 2. Click and type: a container is created with text.
 		page.textBoxes.push({ id: "tb-1", x: 120, y: 80, width: 320, z: 0 });
-		const blocks = [{ id: "tb-1", text: "## Meeting\nTalked about [[LanMouse]] #orion" }];
+		const blocks = [{ id: "tb-1", text: "## Meeting\nTalked about [[LanMouse]] #meeting-notes" }];
 
 		// 3. Write two strokes with the pen.
 		page.strokes.push(ink("s-1", [200, 200]), ink("s-2", [400, 260]));
@@ -75,7 +75,7 @@ describe("end-to-end page workflow", () => {
 		// Text survived, with its wiki link and tag intact.
 		expect(joined.boxes).toHaveLength(1);
 		expect(joined.boxes[0]!.text).toContain("[[LanMouse]]");
-		expect(joined.boxes[0]!.text).toContain("#orion");
+		expect(joined.boxes[0]!.text).toContain("#meeting-notes");
 
 		// The move survived, on both the container and the ink.
 		expect(joined.boxes[0]!.data.x).toBe(160);

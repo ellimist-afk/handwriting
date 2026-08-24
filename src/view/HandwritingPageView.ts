@@ -25,6 +25,7 @@ import { PageDocument } from "../model/PageDocument";
 import { createMoveOp, moveObjects } from "../objects/ObjectOps";
 import { PageStore } from "../persistence/PageStore";
 import { computeCanvasSize, formatRaster, inspectRaster } from "../diag/Raster";
+import { runDetached } from "../util/Detached";
 
 export const HANDWRITING_PAGE_VIEW_TYPE = "handwriting-page";
 
@@ -365,7 +366,11 @@ export class HandwritingPageView extends TextFileView {
 		this.identitySaved = this.doc.identityClaimed;
 		this.caret = null;
 		this.positionCaret();
-		void this.loadPage(parsed.blocks, parsed.images);
+		runDetached(
+			this.loadPage(parsed.blocks, parsed.images),
+			"load a canvas page",
+			() => new Notice("Handwriting: could not load this canvas page. See the developer console.")
+		);
 	}
 
 	clear(): void {
@@ -485,7 +490,10 @@ export class HandwritingPageView extends TextFileView {
 				// and lost ink is not. The next save retries the claim.
 				const pageId = this.pageId;
 				const page = this.doc.page;
-				void this.claimInFlight.then(() => this.host.store.schedule(pageId, page));
+				runDetached(
+					this.claimInFlight.then(() => this.host.store.schedule(pageId, page)),
+					"schedule a canvas sidecar after saving its page id"
+				);
 				return;
 			}
 			// No file / read-only Markdown: fall through and write the sidecar
@@ -1007,7 +1015,7 @@ export class HandwritingPageView extends TextFileView {
 			ev.preventDefault();
 			const rect = this.rootEl.getBoundingClientRect();
 			const w = this.camera.screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
-			void this.insertImages(images, w.x, w.y);
+			runDetached(this.insertImages(images, w.x, w.y), "insert dropped images");
 		});
 		this.registerDomEvent(this.rootEl, "paste", (ev) => {
 			const files = ev.clipboardData?.files;
@@ -1019,7 +1027,7 @@ export class HandwritingPageView extends TextFileView {
 			const at =
 				this.caret ??
 				this.camera.screenToWorld(this.cssWidth / 2, this.cssHeight / 2);
-			void this.insertImages(images, at.x, at.y);
+			runDetached(this.insertImages(images, at.x, at.y), "insert pasted images");
 		});
 	}
 
@@ -1443,8 +1451,7 @@ export class HandwritingPageView extends TextFileView {
 		]) {
 			c.width = size.backingW;
 			c.height = size.backingH;
-			c.style.width = `${size.cssW}px`;
-			c.style.height = `${size.cssH}px`;
+			c.setCssStyles({ width: `${size.cssW}px`, height: `${size.cssH}px` });
 		}
 		this.committedCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 		this.highlightCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -1521,9 +1528,11 @@ export class HandwritingPageView extends TextFileView {
 			sizes.push(`${minorPx}px ${minorPx}px`, `${minorPx}px ${minorPx}px`);
 			positions.push(`${-mod(ox, minorPx)}px 0px`, `0px ${-mod(oy, minorPx)}px`);
 		}
-		this.paperEl.style.backgroundImage = layers.join(", ");
-		this.paperEl.style.backgroundSize = sizes.join(", ");
-		this.paperEl.style.backgroundPosition = positions.join(", ");
+		this.paperEl.setCssStyles({
+			backgroundImage: layers.join(", "),
+			backgroundSize: sizes.join(", "),
+			backgroundPosition: positions.join(", "),
+		});
 	}
 
 	// ---- camera persistence (§22: never in the page file) -------------------

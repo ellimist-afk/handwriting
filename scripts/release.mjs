@@ -22,7 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const EXPECT_VERSION = "0.13.10";
+const EXPECT_VERSION = "0.13.11";
 const EXPECT_MIN_APP = "1.13.7";
 const ASSETS = ["main.js", "manifest.json", "styles.css"];
 

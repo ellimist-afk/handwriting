@@ -336,8 +336,7 @@ export class PenLabView extends ItemView {
 		for (const c of [this.committedCanvas, this.wetCanvas, this.headCanvas]) {
 			c.width = size.backingW;
 			c.height = size.backingH;
-			c.style.width = `${size.cssW}px`;
-			c.style.height = `${size.cssH}px`;
+			c.setCssStyles({ width: `${size.cssW}px`, height: `${size.cssH}px` });
 		}
 		this.committedCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 		this.wetInk.applyDpr(this.dpr);
@@ -392,9 +391,11 @@ export class PenLabView extends ItemView {
 			sizes.push(`${minorPx}px ${minorPx}px`, `${minorPx}px ${minorPx}px`);
 			positions.push(`${-mod(ox, minorPx)}px 0px`, `0px ${-mod(oy, minorPx)}px`);
 		}
-		this.paperEl.style.backgroundImage = layers.join(", ");
-		this.paperEl.style.backgroundSize = sizes.join(", ");
-		this.paperEl.style.backgroundPosition = positions.join(", ");
+		this.paperEl.setCssStyles({
+			backgroundImage: layers.join(", "),
+			backgroundSize: sizes.join(", "),
+			backgroundPosition: positions.join(", "),
+		});
 	}
 }
 

@@ -1,5 +1,6 @@
 import { normalizePath } from "obsidian";
 import { PageData, ParseResult, emptyPage, parsePage, serializePage } from "../model/PageData";
+import { runDetached } from "../util/Detached";
 
 /**
  * The slice of the vault adapter the store uses. Structural, so tests can
@@ -339,7 +340,7 @@ export class PageStore {
 			pageId,
 			window.setTimeout(() => {
 				this.timers.delete(pageId);
-				void this.writePending(pageId);
+				runDetached(this.writePending(pageId), `write queued sidecar ${pageId}`);
 			}, DEBOUNCE_MS)
 		);
 		if (!this.maxTimers.has(pageId)) {
@@ -347,7 +348,7 @@ export class PageStore {
 				pageId,
 				window.setTimeout(() => {
 					this.maxTimers.delete(pageId);
-					void this.writePending(pageId);
+					runDetached(this.writePending(pageId), `write bounded-dirty sidecar ${pageId}`);
 				}, MAX_DIRTY_MS)
 			);
 		}
@@ -517,7 +518,7 @@ export class PageStore {
 						pageId,
 						window.setTimeout(() => {
 							this.timers.delete(pageId);
-							void this.writePending(pageId);
+							runDetached(this.writePending(pageId), `retry sidecar write ${pageId}`);
 						}, WRITE_RETRY_MS)
 					);
 				}

@@ -1,4 +1,5 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
+import { showDiagnosticText } from "../diag/DiagnosticTextModal";
 
 export const HANDWRITING_DIAGNOSTICS_VIEW_TYPE = "handwriting-pen-diagnostics";
 
@@ -33,7 +34,8 @@ const DOM_CAP = 300;
  * - real pressure/tilt/twist ranges
  * - what happens on hover, barrel button, eraser end, palm contact
  *
- * Scoped entirely to this view's capture area. Copy exports JSON lines.
+ * Scoped entirely to this view's capture area. The export opens as selected
+ * text so copying remains an ordinary Ctrl+C operation.
  */
 export class PenDiagnosticsView extends ItemView {
 	private entries: LogEntry[] = [];
@@ -79,7 +81,7 @@ export class PenDiagnosticsView extends ItemView {
 			text:
 				"Use the pen in the box below: normal tip, barrel button held, eraser end, hover, " +
 				"palm, touch, pen+touch together. Every raw PointerEvent is logged. " +
-				"Copy exports JSON lines for analysis.",
+				"Show JSON opens selected text for analysis.",
 		});
 
 		const controls = content.createDiv({ cls: "handwriting-diag-controls" });
@@ -90,22 +92,18 @@ export class PenDiagnosticsView extends ItemView {
 		});
 		const clearBtn = controls.createEl("button", { text: "Clear" });
 		clearBtn.addEventListener("click", () => this.clear());
-		const copyBtn = controls.createEl("button", { text: "Copy JSON" });
-		copyBtn.addEventListener("click", () => {
-			void (async () => {
-				const payload = this.entries.map((e) => JSON.stringify(e)).join("\n");
-				await navigator.clipboard.writeText(payload);
-				copyBtn.setText(`Copied ${this.entries.length}`);
-				window.setTimeout(() => copyBtn.setText("Copy JSON"), 1500);
-			})();
+		const showJsonBtn = controls.createEl("button", { text: "Show JSON" });
+		showJsonBtn.addEventListener("click", () => {
+			const payload = this.entries.map((e) => JSON.stringify(e)).join("\n");
+			showDiagnosticText(this.app, "Handwriting pen diagnostics JSON", payload);
 		});
-		const copySummaryBtn = controls.createEl("button", { text: "Copy summary" });
-		copySummaryBtn.addEventListener("click", () => {
-			void (async () => {
-				await navigator.clipboard.writeText(this.summaryText());
-				copySummaryBtn.setText("Copied");
-				window.setTimeout(() => copySummaryBtn.setText("Copy summary"), 1500);
-			})();
+		const showSummaryBtn = controls.createEl("button", { text: "Show summary" });
+		showSummaryBtn.addEventListener("click", () => {
+			showDiagnosticText(
+				this.app,
+				"Handwriting pen diagnostics summary",
+				this.summaryText()
+			);
 		});
 
 		this.captureEl = content.createDiv({ cls: "handwriting-diag-capture" });

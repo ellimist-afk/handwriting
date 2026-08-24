@@ -51,7 +51,9 @@ export class ImageLayer {
 	}
 
 	setCamera(cam: CameraState): void {
-		this.el.style.transform = `translate(${-cam.x * cam.zoom}px, ${-cam.y * cam.zoom}px) scale(${cam.zoom})`;
+		this.el.setCssStyles({
+			transform: `translate(${-cam.x * cam.zoom}px, ${-cam.y * cam.zoom}px) scale(${cam.zoom})`,
+		});
 	}
 
 	setAll(models: ImageModel[]): void {
@@ -86,11 +88,13 @@ export class ImageLayer {
 
 	private applyGeometry(view: ImageView): void {
 		const d = view.model.data;
-		view.el.style.left = `${d.x}px`;
-		view.el.style.top = `${d.y}px`;
-		view.el.style.width = `${d.width}px`;
-		view.el.style.height = `${d.height}px`;
-		view.el.style.zIndex = String(d.z);
+		view.el.setCssStyles({
+			left: `${d.x}px`,
+			top: `${d.y}px`,
+			width: `${d.width}px`,
+			height: `${d.height}px`,
+			zIndex: String(d.z),
+		});
 	}
 
 	private applySource(view: ImageView): void {

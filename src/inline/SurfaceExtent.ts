@@ -110,9 +110,10 @@ export function isScrollableOverflow(value: string): boolean {
  * Obsidian's `.cm-scroller` ships `overflow-x: hidden`: the extent spacer can
  * grow scrollWidth all it likes and the user still cannot scroll there. This
  * guard toggles a stylesheet class that flips exactly that one property to
- * `auto` (important, because themes set it with high specificity) and drops
- * the class on unmount. Any inline style the scroller carried is never
- * touched, and neither is overflow-y.
+ * `auto`. The stylesheet scopes the rule through `.handwriting-page` for
+ * enough specificity against themes, and the class is dropped on unmount.
+ * Any inline style the scroller carried is never touched, and neither is
+ * overflow-y.
  */
 export const HSCROLL_AXIS_CLASS = "handwriting-hscroll-axis";
 
