@@ -56,11 +56,17 @@ nobody's tested them yet, so treat this as a beta and send reports.
 * image+ink multi selection
 * ink showing in embeds
 * export/print ink
+* lined and grid paper
 
 ## Wishlist
 
+* audio alongside ink
+* handwriting to shapes
+* pen GUI
+* ruler+compass on screen
+* ocr/handwriting to text
+* searchable handwriting
 * native pdf annotation
-* ocr/searchable handwriting
 
 ## reporting problems
 

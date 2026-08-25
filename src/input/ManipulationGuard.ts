@@ -138,6 +138,24 @@ export class ManipulationGuard {
 	}
 
 	/**
+	 * A second finger with no pen near: the gesture is a pinch, and it has to
+	 * own the surface for its whole life. With the native window open from an
+	 * earlier pan, the browser claims the two contacts and pointercancels them
+	 * (observed on the Surface: engaged, then cancelled 12 to 44 ms later,
+	 * released at 0,0). Putting the standing guard back up keeps them ours.
+	 * Touch accounting is untouched; both fingers already registered.
+	 */
+	pinchStart(): GuardDecision {
+		const was = this.state;
+		this.state = "armed-assist";
+		return {
+			...NO_CHANGE,
+			touchAction: "none",
+			cancelRearm: was === "touch-linger",
+		};
+	}
+
+	/**
 	 * A tracked finger lifted (pointerup or pointercancel). `panned` = the
 	 * gesture actually scrolled (the router's assist engaged, or the state
 	 * was already the native window). The window opens (touch-action

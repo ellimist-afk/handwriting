@@ -10,6 +10,7 @@ import { DIAG_OFF_NOTE, diagnosticsEnabled } from "../diag/DiagSwitch";
 import { VelocitySample, flingStep, releaseVelocity } from "../input/Fling";
 import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
 import { isPenCompatMouseMove } from "./PenCursor";
+import { pinchEngaged, pinchRatio, pinchSpread } from "./PinchZoom";
 
 /**
  * Pen capture for the inline overlay.
@@ -46,6 +47,12 @@ export interface InlinePenCallbacks {
 	onPenHover(sample: PenSample): void;
 	/** The hovering pen left the editor. */
 	onPenLeave(): void;
+	/**
+	 * Two-finger pinch with the pen away from the glass. `ratio` is the current
+	 * spread over the spread at gesture start, so the caller scales from what
+	 * it captured on "start" and nothing accumulates.
+	 */
+	onPinch(phase: "start" | "move" | "end", ratio: number): void;
 	/** Input-rate coalesced samples while a stroke is active. */
 	onPenRaw(samples: PenSample[], ev: PointerEvent): void;
 	/** rAF-rate move, for metrics only (`coalescedCount`). */
@@ -426,6 +433,14 @@ export class InlinePenRouter {
 	private savedTouchActionKnown = false;
 	/** Non-palm touches currently counted by the guard's touch window. */
 	private guardTouches = new Set<number>();
+	/**
+	 * Live positions of guard-tracked (non-palm) touches. Only these can pinch:
+	 * a contact the palm gate swallowed is the writing hand, and two of those
+	 * are a hand, not a gesture.
+	 */
+	private touchPos = new Map<number, { x: number; y: number }>();
+	private pinchStartSpread = 0;
+	private pinchLive = false;
 	/** The one transition gesture the assist pan is carrying. */
 	private assistPointerId: number | null = null;
 	private assistLastX = 0;
@@ -624,6 +639,8 @@ export class InlinePenRouter {
 
 	dispose(): void {
 		this.cancelFling();
+		this.touchPos.clear();
+		this.pinchLive = false;
 		liveScrollers.delete(this.scrollEl);
 		disarmWindowMirror();
 		for (const d of this.disposers) d();
@@ -686,6 +703,52 @@ export class InlinePenRouter {
 	}
 
 	/** The transition gesture: 1:1 pan while Chromium's snapshot said none. */
+	// ---- pinch (tier 1: two fingers, pen away) ------------------------------
+
+	/**
+	 * A second non-palm finger turns the gesture into a pinch. The assist pan
+	 * is dropped without a fling: the note must not coast while it resizes.
+	 */
+	private beginPinch(e: PointerEvent): void {
+		const pts = [...this.touchPos.values()];
+		if (pts.length !== 2) return;
+		this.cancelFling();
+		if (this.assistPointerId !== null) {
+			this.assistPointerId = null;
+			this.assistEngaged = false;
+			this.assistSamples = [];
+		}
+		// Take the surface back. Left in the native window, the browser claims
+		// the two contacts and cancels them before the pinch does anything.
+		this.applyGuard(this.manip.pinchStart(), "pinch");
+		this.pinchStartSpread = pinchSpread(pts[0]!, pts[1]!);
+		this.pinchLive = false;
+		tr("guard", e, `pinch watched (spread ${this.pinchStartSpread.toFixed(0)}px)`);
+	}
+
+	/** Returns true when the pinch owned this move. */
+	private updatePinch(e: PointerEvent): boolean {
+		if (this.touchPos.size !== 2) return false;
+		const pts = [...this.touchPos.values()];
+		const spread = pinchSpread(pts[0]!, pts[1]!);
+		if (!this.pinchLive) {
+			if (!pinchEngaged(this.pinchStartSpread, spread)) return false;
+			this.pinchLive = true;
+			this.cb.onPinch("start", 1);
+			tr("guard", e, "pinch engaged");
+		}
+		this.cb.onPinch("move", pinchRatio(this.pinchStartSpread, spread));
+		return true;
+	}
+
+	/** Any lift ends the pinch; the remaining finger does not resume panning. */
+	private endPinch(e: PointerEvent): void {
+		if (!this.pinchLive) return;
+		this.pinchLive = false;
+		this.cb.onPinch("end", 1);
+		tr("guard", e, "pinch released");
+	}
+
 	private beginAssist(e: PointerEvent): void {
 		this.cancelFling(); // a new finger takes over the glide
 		this.assistSamples = [];
@@ -840,7 +903,16 @@ export class InlinePenRouter {
 			// milliseconds later). The native window opens on last-finger lift,
 			// and only if the gesture actually panned.
 			this.guardTouches.add(e.pointerId);
+			this.touchPos.set(e.pointerId, { x: e.clientX, y: e.clientY });
 			const d = this.manip.touchStart();
+			// Second finger down with no pen near: this is a pinch, not a pan.
+			// Registered with the guard first, so the touch count stays honest.
+			if (this.touchPos.size === 2) {
+				this.beginPinch(e);
+				e.preventDefault();
+				e.stopPropagation();
+				return;
+			}
 			this.applyGuard(d, "touch");
 			if (d.assistThisGesture && guardEnabled) {
 				this.beginAssist(e);
@@ -899,6 +971,13 @@ export class InlinePenRouter {
 			tr("guard", e, `assist cancelled: leading touch ${this.assistPointerId} reclassified as palm`);
 			this.assistPointerId = null;
 			this.assistEngaged = false;
+		}
+		// Same for a pinch: fingers still down when the tip lands belong to the
+		// writing hand now, so the note must stop resizing under it.
+		if (this.pinchLive) {
+			this.pinchLive = false;
+			this.cb.onPinch("end", 1);
+			tr("guard", e, "pinch cancelled: pen claimed the surface");
 		}
 		// A swallowed contact still down when the pen lands is the hand that
 		// follows the pen; it can never earn parole afterwards. Eraser
@@ -1024,6 +1103,14 @@ export class InlinePenRouter {
 				e.stopPropagation();
 				return;
 			}
+			if (this.touchPos.has(e.pointerId)) {
+				this.touchPos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+				if (this.updatePinch(e)) {
+					e.preventDefault();
+					e.stopPropagation();
+					return;
+				}
+			}
 			// A guard-tracked touch during a claimed stroke is a palm (its
 			// assist, if any, was cancelled at claim): keep it off the editor.
 			if (this.activePenId !== null && this.guardTouches.has(e.pointerId)) {
@@ -1142,6 +1229,7 @@ export class InlinePenRouter {
 				e.stopPropagation();
 				return;
 			}
+			if (this.touchPos.delete(e.pointerId)) this.endPinch(e);
 			const wasAssistPan = this.endAssist(e);
 			const duringStroke = this.activePenId !== null && this.guardTouches.has(e.pointerId);
 			if (this.guardTouches.delete(e.pointerId)) {

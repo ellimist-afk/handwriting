@@ -1,4 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { MIN_CURSOR_VISUAL_PX } from "./PenCursor";
+import overlaySrc from "./InkOverlay.ts?raw";
+import css from "../../styles.css?raw";
+
+function overlaySource(): string {
+	return overlaySrc;
+}
+
+function cursorCss(): string {
+	return css;
+}
 
 import { isPenCompatMouseMove, penCursorLayout } from "./PenCursor";
 
@@ -12,10 +23,13 @@ describe("inline pen cursor layout", () => {
 			cssScale: 1,
 		});
 
-		expect(cursor).toEqual({ x: 97, y: 47, diameter: 6 });
+		// Pinned to the constant, not a literal: the floor is a presentation
+		// choice that moved once already (6px was a speck under the nib).
+		const d = MIN_CURSOR_VISUAL_PX;
+		expect(cursor).toEqual({ x: 100 - d / 2, y: 50 - d / 2, diameter: d });
 	});
 
-	it("keeps the minimum diameter at six visual pixels under page scaling", () => {
+	it("keeps the minimum diameter constant in VISUAL pixels under page scaling", () => {
 		const cursor = penCursorLayout({
 			x: 100,
 			y: 50,
@@ -24,7 +38,7 @@ describe("inline pen cursor layout", () => {
 			cssScale: 1.25,
 		});
 
-		expect(cursor.diameter * 1.25).toBeCloseTo(6);
+		expect(cursor.diameter * 1.25).toBeCloseTo(MIN_CURSOR_VISUAL_PX);
 		expect(cursor.x + cursor.diameter / 2).toBe(100);
 		expect(cursor.y + cursor.diameter / 2).toBe(50);
 	});
@@ -82,5 +96,29 @@ describe("inline pen cursor ownership", () => {
 				penY: 300,
 			})
 		).toBe(false);
+	});
+});
+
+describe("the cursors have to be shown with a real display value", () => {
+	// Both cursors sat at display:none in the stylesheet and were "shown"
+	// with setCssStyles({ display: "" }). An empty string REMOVES the inline
+	// declaration, so the element fell back to the stylesheet and neither the
+	// pen reticle nor the eraser ring ever appeared on screen. They were
+	// positioned and sized correctly every frame, invisibly.
+	const source = overlaySource();
+
+	it("never uses an empty display string to reveal a cursor", () => {
+		const showBlocks = source.match(/(penCursorEl|eraserEl)\.setCssStyles\(\{[^}]*\}/gs) ?? [];
+		expect(showBlocks.length).toBeGreaterThan(0);
+		for (const block of showBlocks) {
+			if (!block.includes("display")) continue;
+			expect(block).not.toMatch(/display:\s*""/);
+		}
+	});
+
+	it("keeps the stylesheet default that made the bug possible", () => {
+		// If this rule ever goes away the empty-string form would start
+		// working by accident, which is worse than failing loudly.
+		expect(cursorCss()).toMatch(/\.handwriting-pen-cursor[\s\S]*?display:\s*none/);
 	});
 });

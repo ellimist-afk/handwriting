@@ -17,9 +17,14 @@ import {
 	inkOverlayExtension,
 	inlineInk,
 	setInlineTool,
+	getInlineEraserMode,
+	setInlineEraserMode,
+	getEraserRadiusPx,
+	setEraserRadiusPx,
 	repaintAllInkOverlays,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
+import { attachFontZoomHost } from "./inline/EditorFontZoom";
 import { clearInlinePenTrace, formatInlinePenTrace } from "./inline/InlinePenRouter";
 import {
 	clearHitProbe,
@@ -31,6 +36,7 @@ import { clearScrollProbe, formatScrollProbe } from "./inline/ScrollProbe";
 import { surfaceExtents } from "./inline/SurfaceExtent";
 import { claimMarkdown, reassignMarkdown } from "./inline/InlineClaim";
 import { INK_SIZE_STEPS, clampInkSize, nextInkSize } from "./ink/InkSize";
+import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius, nextEraserSize } from "./ink/EraserSize";
 import { inkShapingEnabled, setInkShaping } from "./ink/InkShape";
 import {
 	HIGHLIGHTER_COLORS,
@@ -75,6 +81,8 @@ interface HandwritingSettings {
 	 * path is the original, everything else carrying the id is a copy.
 	 */
 	pageOwners: Record<string, string>;
+	/** Eraser radius in screen px (v0.13.13): 8 fine, 14 medium, 28 bold. */
+	eraserRadiusPx: number;
 }
 
 const DEFAULT_SETTINGS: HandwritingSettings = {
@@ -84,6 +92,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	inkShaping: true,
 	inkColors: { pen: PEN_COLORS[0]!.hex, highlighter: HIGHLIGHTER_COLORS[0]!.hex },
 	pageOwners: {},
+	eraserRadiusPx: DEFAULT_ERASER_RADIUS_PX,
 };
 
 /**
@@ -197,6 +206,23 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			scheduleSidecarNow: (pageId, page) => this.store.saveNow(pageId, page),
 			notify: (message) => new Notice(message),
 		});
+		// Pinch-to-zoom drives Obsidian's own base font size, the same value
+		// its Ctrl+scroll quick-adjust moves. That setting is not part of the
+		// public API, so the reach for it lives here, in one place, behind a
+		// host the inline layer can only call through. If a future Obsidian
+		// drops these calls, pinch stops resizing and nothing else notices.
+		const appConfig = this.app.vault as unknown as {
+			getConfig?(key: string): unknown;
+			setConfig?(key: string, value: unknown): void;
+		};
+		attachFontZoomHost({
+			read: () => {
+				const px = appConfig.getConfig?.("baseFontSize");
+				return typeof px === "number" ? px : null;
+			},
+			write: (px) => appConfig.setConfig?.("baseFontSize", px),
+		});
+
 		this.registerEditorExtension(inkOverlayExtension());
 		// The nib on ordinary notes: pen or highlighter. A property of the tip,
 		// not a mode. The eraser end and the barrel keep their hardware meanings.
@@ -206,6 +232,29 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				setInlineTool("pen");
 				new Notice("Handwriting: pen");
+			},
+		});
+		// The eraser used to need a pen with an eraser end. Plenty of pens do
+		// not have one (and remote-desktop input drops the flag even when they
+		// do), so the mode makes the tip erase. Toggle rather than a one-way
+		// switch: the same key gets you out.
+		this.addCommand({
+			id: "inline-tool-eraser",
+			name: "Eraser: toggle",
+			callback: () => {
+				const on = !getInlineEraserMode();
+				setInlineEraserMode(on);
+				new Notice(on ? "Handwriting: eraser" : `Handwriting: ${getInlineTool()}`);
+			},
+		});
+		this.addCommand({
+			id: "eraser-size-cycle",
+			name: "Eraser size: next",
+			callback: () => {
+				const next = nextEraserSize(getEraserRadiusPx());
+				runDetached(this.setEraserSize(next.radiusPx, next.name), "save the eraser size", () =>
+					new Notice("Handwriting: the eraser size changed, but the setting could not be saved.")
+				);
 			},
 		});
 		this.addCommand({
@@ -805,6 +854,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		new Notice(`Handwriting: ${tool} size ${name}`);
 	}
 
+	private async setEraserSize(radiusPx: number, name: string): Promise<void> {
+		setEraserRadiusPx(radiusPx);
+		this.settings.eraserRadiusPx = clampEraserRadius(radiusPx);
+		await this.saveData(this.settings);
+		new Notice(`Handwriting: eraser ${name}`);
+	}
+
 	/** "Delete all ink": confirm first. The count in the dialog is live. */
 	private confirmDeleteAllInk(path: string): void {
 		const count = inlineInk.strokes(path).length;
@@ -871,6 +927,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		document.body.classList.remove("handwriting-active-page");
 		destroyProbeMarkers();
 		setHitProbeEnabled(false);
+		attachFontZoomHost(null);
 		// Obsidian's lifecycle contract is `onunload(): void`; it does not
 		// wait for asynchronous cleanup. This is best effort, not crash
 		// durability: a process killed before the I/O finishes can still
@@ -1063,12 +1120,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			inkShaping: raw?.inkShaping !== false,
 			pageOwners:
 				raw?.pageOwners && typeof raw.pageOwners === "object" ? raw.pageOwners : {},
+			eraserRadiusPx: clampEraserRadius(raw?.eraserRadiusPx ?? DEFAULT_ERASER_RADIUS_PX),
 		};
 		setInkSizeMult("pen", this.settings.inkSizes.pen);
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
 		setInkShaping(this.settings.inkShaping);
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
+		setEraserRadiusPx(this.settings.eraserRadiusPx);
 	}
 
 	private async flushSettings(): Promise<void> {

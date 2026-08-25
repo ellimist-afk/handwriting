@@ -42,7 +42,21 @@ export type InkOp =
 			indices?: number[];
 	  }
 	| { type: "remove"; path: string; strokes: InkStroke[]; indices: number[] }
-	| { type: "move"; path: string; strokeIds: string[]; dx: number; dy: number };
+	| { type: "move"; path: string; strokeIds: string[]; dx: number; dy: number }
+	/**
+	 * Partial erase (v0.13.13): strokes came out and their surviving pieces
+	 * went in, as ONE step. Undo has to put the original back and take the
+	 * pieces away together, which neither add nor remove can express alone.
+	 * Symmetric by construction: the inverse just swaps the two halves.
+	 */
+	| {
+			type: "replace";
+			path: string;
+			removed: InkStroke[];
+			removedAt: number[];
+			inserted: InkStroke[];
+			insertedAt: number[];
+	  };
 
 export const inkEffect = StateEffect.define<InkOp>();
 
@@ -67,6 +81,15 @@ export function invertInkOp(op: InkOp): InkOp {
 				strokeIds: op.strokeIds,
 				dx: -op.dx,
 				dy: -op.dy,
+			};
+		case "replace":
+			return {
+				type: "replace",
+				path: op.path,
+				removed: op.inserted,
+				removedAt: op.insertedAt,
+				inserted: op.removed,
+				insertedAt: op.removedAt,
 			};
 	}
 }

@@ -6,12 +6,12 @@ import { editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
-import { strokesHitByCircle } from "../ink/Eraser";
+import { splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
 import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
 import { clampInkSize } from "../ink/InkSize";
 import { getInkColorHex } from "../ink/InkColor";
 import { Point2 } from "../ink/Smoothing";
-import { BBox, InkStroke, InkTool } from "../ink/Stroke";
+import { BBox, InkStroke, InkTool, newStrokeId } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
 import { drawCommitted, drawStroke } from "../ink/StrokeRenderer";
@@ -38,6 +38,10 @@ import { InlineInkStore } from "./InlineInkStore";
 import { focusClaimedPenEditor } from "./InlineFocus";
 import { PEN_HOVER_CLASS, penCursorLayout } from "./PenCursor";
 import { normalizeInlinePenPressure } from "./PenPressure";
+import { readBaseFontPx, writeBaseFontPx } from "./EditorFontZoom";
+import { pinchFontSize } from "./PinchZoom";
+import { ERASER_CURSOR_CLASS } from "./PenCursor";
+import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius } from "../ink/EraserSize";
 import { backingScale, effectiveScale, fontZoomFactor, noteToVisual, visualToNote } from "./ZoomScale";
 import {
 	isPenProbeEnabled,
@@ -101,8 +105,6 @@ import {
  * without moving a single coordinate).
  */
 
-/** Eraser radius in screen pixels (same feel as the canvas view). */
-const ERASER_SCREEN_R = 12;
 const SELECTION_COLOR = "#7f9cf5";
 /** How far outside the selection box still counts as grabbing it, in px. */
 const SELECTION_GRAB_PAD = 8;
@@ -150,6 +152,40 @@ export function getInlineTool(): InkTool {
 
 export function setInlineTool(tool: InkTool): void {
 	inlineTool = tool;
+	// Picking a nib is how you put the eraser away.
+	inlineEraserMode = false;
+}
+
+/**
+ * Eraser mode (v0.13.13).
+ *
+ * The pen normally decides what it is at contact and needs no mode at all:
+ * eraser end erases, barrel lassos, tip inks. That only works on a pen that
+ * HAS an eraser end. Plenty do not, and on those the eraser was unreachable.
+ *
+ * So: an explicit mode, off by default, that makes the tip erase. Hardware
+ * keeps every meaning it had. The eraser end still erases whatever the mode
+ * says, and choosing a nib turns the mode off.
+ */
+let inlineEraserMode = false;
+
+export function getInlineEraserMode(): boolean {
+	return inlineEraserMode;
+}
+
+export function setInlineEraserMode(on: boolean): void {
+	inlineEraserMode = on;
+}
+
+/** Eraser radius in screen px, shared by the hit test and both cursors. */
+let inlineEraserRadiusPx: number = DEFAULT_ERASER_RADIUS_PX;
+
+export function getEraserRadiusPx(): number {
+	return inlineEraserRadiusPx;
+}
+
+export function setEraserRadiusPx(px: number): void {
+	inlineEraserRadiusPx = clampEraserRadius(px);
 }
 
 export const inlineInk = new InlineInkStore();
@@ -278,6 +314,12 @@ class InkOverlayPlugin {
 	// gesture state (one pen contact at a time; mode decided at pen-down)
 	private mode: PenMode = "ink";
 	private erased: Array<{ stroke: InkStroke; index: number }> = [];
+	/**
+	 * Ids minted by this erase gesture. A piece cut a moment ago is not an
+	 * original: undo restores what the note held when the gesture began, so a
+	 * second pass over a survivor must not record it as something lost.
+	 */
+	private erasePieces = new Set<string>();
 	private selection = new SelectionModel();
 	private readonly selectionDeleteKeys = new InlineSelectionDeleteKeys(
 		() => !this.selection.isEmpty,
@@ -310,6 +352,8 @@ class InkOverlayPlugin {
 	private pageClassHost: HTMLElement | null = null;
 	/** Keeps the page-id-only Properties block class in step with Obsidian's DOM. */
 	private metadataObserver: MutationObserver | null = null;
+	/** Base font size captured when a pinch began; null when no pinch is live. */
+	private pinchRefFontPx: number | null = null;
 	/** Inner canvas layer the scroll-follow translate is applied to. */
 	private layerEl: HTMLElement | null = null;
 	/**
@@ -494,6 +538,7 @@ class InkOverlayPlugin {
 				onPenDown: (s, ev) => this.penDown(s, ev),
 				onPenHover: (s) => this.showPenCursor(s),
 				onPenLeave: () => this.hidePenCursor(),
+				onPinch: (phase, ratio) => this.pinch(phase, ratio),
 				onPenRaw: (samples, ev) => this.penRaw(samples, ev),
 				onPenMove: (_ev, count) => metrics.recordEvent("move", count, 0, false),
 				onPenUp: () => this.penUp(),
@@ -927,7 +972,7 @@ class InkOverlayPlugin {
 
 		// The pen decides what it is at contact (§52/§53, mode-free):
 		// eraser end erases, barrel held lassos/moves, tip inks.
-		const eraser = (ev.buttons & 32) !== 0 || ev.button === 5;
+		const eraser = (ev.buttons & 32) !== 0 || ev.button === 5 || inlineEraserMode;
 		const barrel = !eraser && (ev.buttons & 2) !== 0;
 		if (barrel) {
 			this.mode = "lasso";
@@ -1118,11 +1163,23 @@ class InkOverlayPlugin {
 			if (erased.length === 0 || !path) return;
 			// One persist per gesture, at pen-up. Never on the erase hot path.
 			inlineInk.save(path);
+			// What survived the gesture, at the positions it now occupies.
+			const inserted: InkStroke[] = [];
+			const insertedAt: number[] = [];
+			inlineInk.strokes(path).forEach((st, i) => {
+				if (this.erasePieces.has(st.id)) {
+					inserted.push(st);
+					insertedAt.push(i);
+				}
+			});
+			this.erasePieces.clear();
 			this.dispatchInk({
-				type: "remove",
+				type: "replace",
 				path,
-				strokes: erased.map((e) => e.stroke),
-				indices: erased.map((e) => e.index),
+				removed: erased.map((e) => e.stroke),
+				removedAt: erased.map((e) => e.index),
+				inserted,
+				insertedAt,
 			});
 			this.repaintPath(path);
 			return;
@@ -1463,9 +1520,62 @@ class InkOverlayPlugin {
 
 	// ---- eraser (canvas semantics: whole-stroke, hit-circle, live) -----------
 
+	/**
+	 * Two-finger pinch resizes the editor's base font, which reflows the note.
+	 * Ink follows through the font-zoom path the overlay already runs, so
+	 * nothing here touches a stored coordinate. The size is always computed
+	 * from what was captured at "start", so a pinch out and back lands exactly
+	 * where it began.
+	 */
+	private pinch(phase: "start" | "move" | "end", ratio: number): void {
+		if (phase === "start") {
+			// Obsidian's own setting first; the computed style is the fallback
+			// when that call is gone, so a pinch still does something sane.
+			const measured = this.contentStyle ? parseFloat(this.contentStyle.fontSize) : Number.NaN;
+			const fromHost = readBaseFontPx();
+			this.pinchRefFontPx =
+				fromHost ?? (Number.isFinite(measured) && measured > 0 ? measured : null);
+			return;
+		}
+		if (phase === "end") {
+			this.pinchRefFontPx = null;
+			return;
+		}
+		if (this.pinchRefFontPx === null) return;
+		const next = pinchFontSize(this.pinchRefFontPx, ratio);
+		if (next === null) return;
+		const changed = writeBaseFontPx(next);
+		// The overlay normally notices a font change through CodeMirror's
+		// geometry update, which is how Ctrl+scroll reaches it. A font size
+		// written from a setting does not reliably produce one, and the ink
+		// sat at its old scale while the text grew. Here the write is ours, so
+		// the rescale is driven straight from it. Reading the computed style
+		// inside handleResize forces the pending style recalc, so the new size
+		// is already visible to it.
+		if (changed) this.handleResize();
+	}
+
 	private showPenCursor(sample: PenSample): void {
 		if (!this.penCursorEl) return;
 		this.view.scrollDOM.classList.add(PEN_HOVER_CLASS);
+		// In eraser mode the nib width is a lie: what the tip is about to do
+		// is bounded by the eraser radius, so the reticle shows THAT. Radius
+		// is screen-space (same physical size at any zoom), like the eraser
+		// cursor that follows a live erase.
+		if (inlineEraserMode) {
+			const r = visualToNote(inlineEraserRadiusPx, this.cssScale);
+			this.penCursorEl.classList.add(ERASER_CURSOR_CLASS);
+			this.penCursorEl.setCssStyles({
+				display: "block",
+				width: `${r * 2}px`,
+				height: `${r * 2}px`,
+				transform: `translate(${sample.x - r}px, ${sample.y - r}px)`,
+				backgroundColor: "transparent",
+				opacity: "1",
+			});
+			return;
+		}
+		this.penCursorEl.classList.remove(ERASER_CURSOR_CLASS);
 		const tool = inlineTool;
 		const strokeWidth =
 			(tool === "highlighter" ? HIGHLIGHTER_PEN.baseWidth : DEFAULT_PEN.baseWidth) *
@@ -1478,7 +1588,7 @@ class InkOverlayPlugin {
 			cssScale: this.cssScale,
 		});
 		this.penCursorEl.setCssStyles({
-			display: "",
+			display: "block",
 			width: `${cursor.diameter}px`,
 			height: `${cursor.diameter}px`,
 			transform: `translate(${cursor.x}px, ${cursor.y}px)`,
@@ -1496,14 +1606,28 @@ class InkOverlayPlugin {
 		const path = this.filePath();
 		if (!path) return;
 		const w = this.camera.screenToWorld(sample.x, sample.y);
-		const hits = strokesHitByCircle(
-			inlineInk.strokes(path),
-			w.x,
-			w.y,
-			visualToNote(ERASER_SCREEN_R, this.scale)
-		);
+		const r = visualToNote(inlineEraserRadiusPx, this.scale);
+		const hits = strokesHitByCircle(inlineInk.strokes(path), w.x, w.y, r);
 		if (hits.length === 0) return;
-		this.erased.push(...inlineInk.takeLive(path, hits));
+		// Partial erase: the ring takes what it covers and the rest of the
+		// stroke stays. Each stroke comes out and its survivors go back in at
+		// the same position, so z-order holds.
+		for (const { stroke, index } of inlineInk.takeLive(path, hits)) {
+			const pieces = splitStrokeByCircle(stroke, w.x, w.y, r, newStrokeId);
+			if (pieces.length === 1 && pieces[0] === stroke) {
+				// Hit by the bbox-then-segment test but the ring never crossed
+				// the line itself. Put it back exactly as it was.
+				inlineInk.applyAdd(path, [stroke], [index]);
+				continue;
+			}
+			if (!this.erasePieces.delete(stroke.id)) {
+				this.erased.push({ stroke, index });
+			}
+			if (pieces.length > 0) {
+				inlineInk.applyAdd(path, pieces, pieces.map((_, i) => index + i));
+				for (const piece of pieces) this.erasePieces.add(piece.id);
+			}
+		}
 		// Batched to the next frame, exactly like the canvas eraser.
 		this.scheduleRepaint();
 		this.repaintPath(path);
@@ -1513,9 +1637,9 @@ class InkOverlayPlugin {
 		if (!this.eraserEl) return;
 		// Screen-space element: convert the visual constant with cssScale
 		// only (samples are screen css px).
-		const r = visualToNote(ERASER_SCREEN_R, this.cssScale);
+		const r = visualToNote(inlineEraserRadiusPx, this.cssScale);
 		this.eraserEl.setCssStyles({
-			display: "",
+			display: "block",
 			width: `${r * 2}px`,
 			height: `${r * 2}px`,
 			transform: `translate(${sample.x - r}px, ${sample.y - r}px)`,
@@ -1708,6 +1832,13 @@ class InkOverlayPlugin {
 			case "move":
 				inlineInk.moveStrokes(op.path, op.strokeIds, op.dx, op.dy);
 				inlineInk.save(op.path);
+				break;
+			case "replace":
+				// Order matters: take the old ones out before putting the new
+				// ones back at their recorded positions, or the indices the op
+				// carries describe a list that no longer exists.
+				inlineInk.applyRemove(op.path, op.removed.map((st) => st.id));
+				inlineInk.applyAdd(op.path, op.inserted, op.insertedAt);
 				break;
 		}
 		const current = this.filePath();

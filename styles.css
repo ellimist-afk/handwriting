@@ -189,8 +189,23 @@
 
 .handwriting-pen-cursor {
 	box-sizing: border-box;
-	border: 1px solid var(--background-primary);
-	box-shadow: 0 0 0 1px var(--text-muted);
+	/* Page-coloured ring separates the dot from whatever is under it, then a
+	   dark ring outside that so the whole thing reads on any background. */
+	border: 1.5px solid var(--background-primary);
+	box-shadow: 0 0 0 1.5px var(--text-normal);
+}
+
+/*
+ * The same reticle in eraser mode: an outline at the erase radius rather than
+ * a filled dot at the nib width, so the ring shows exactly what a tip contact
+ * would take away. Dashed to read as "removes" at a glance, and it keeps the
+ * pen cursor's double border so it stays visible on any theme background.
+ */
+.handwriting-pen-cursor.handwriting-pen-hover-eraser {
+	border: 1.5px dashed var(--text-normal);
+	background-color: transparent;
+	box-shadow: 0 0 0 1px var(--background-primary);
+	opacity: 0.9;
 }
 
 .cm-scroller.handwriting-pen-hover,
@@ -199,8 +214,12 @@
 }
 
 .handwriting-eraser-cursor {
-	border: 1.5px solid var(--text-muted);
-	opacity: 0.7;
+	box-sizing: border-box;
+	border: 1.5px solid var(--text-normal);
+	/* Second ring in the page colour, so the outline stays readable over ink,
+	   over text and over bare background without picking a side. */
+	box-shadow: 0 0 0 1px var(--background-primary);
+	opacity: 0.9;
 }
 
 /* ---- chrome ---- */

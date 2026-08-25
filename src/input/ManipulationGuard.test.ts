@@ -220,3 +220,31 @@ describe("paroleEarned — blocked contacts that move like a swipe (v0.13.3)", (
 		).toBe(true);
 	});
 });
+
+describe("pinchStart", () => {
+	it("takes the surface back when the native window is open", () => {
+		// The bug this fixes: after a real pan the window is open, and the
+		// browser claims a two-finger gesture and cancels both contacts.
+		const g = new ManipulationGuard();
+		g.touchStart();
+		g.touchEnd(true); // panned: window opens
+		g.touchStart();
+		expect(g.pinchStart().touchAction).toBe("none");
+	});
+
+	it("cancels a pending re-arm so the timer cannot reopen mid-pinch", () => {
+		const g = new ManipulationGuard();
+		g.touchStart();
+		g.touchEnd(true);
+		expect(g.pinchStart().cancelRearm).toBe(true);
+	});
+
+	it("leaves the guard armed once both fingers lift", () => {
+		const g = new ManipulationGuard();
+		g.touchStart();
+		g.touchStart();
+		g.pinchStart();
+		g.touchEnd(false);
+		expect(g.touchEnd(false).touchAction).toBe("none");
+	});
+});

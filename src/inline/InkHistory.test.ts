@@ -222,3 +222,64 @@ describe("plain undo/redo over the real history plugin", () => {
 		expect(h.doc).toBe("abcdef");
 	});
 });
+
+describe("partial erase is one undo step", () => {
+	const piece = (id: string): InkStroke => ({
+		id,
+		tool: "pen",
+		color: "#4b7bec",
+		width: 2,
+		points: [
+			{ x: 0, y: 0, pressure: 0.5, t: 1 },
+			{ x: 1, y: 0, pressure: 0.5, t: 2 },
+		],
+		bbox: { x: 0, y: 0, width: 1, height: 0 },
+		createdAt: 1,
+	});
+
+	it("inverts by swapping what came out with what went in", () => {
+		const op: InkOp = {
+			type: "replace",
+			path: "note.md",
+			removed: [piece("original")],
+			removedAt: [3],
+			inserted: [piece("left"), piece("right")],
+			insertedAt: [3, 4],
+		};
+		const undo = invertInkOp(op);
+		expect(undo).toEqual({
+			type: "replace",
+			path: "note.md",
+			removed: [piece("left"), piece("right")],
+			removedAt: [3, 4],
+			inserted: [piece("original")],
+			insertedAt: [3],
+		});
+	});
+
+	it("round-trips: undo then redo is the original op", () => {
+		const op: InkOp = {
+			type: "replace",
+			path: "note.md",
+			removed: [piece("original")],
+			removedAt: [0],
+			inserted: [piece("left")],
+			insertedAt: [0],
+		};
+		expect(invertInkOp(invertInkOp(op))).toEqual(op);
+	});
+
+	it("covers a gesture that left nothing behind", () => {
+		const op: InkOp = {
+			type: "replace",
+			path: "note.md",
+			removed: [piece("original")],
+			removedAt: [2],
+			inserted: [],
+			insertedAt: [],
+		};
+		const undo = invertInkOp(op);
+		expect(undo.type).toBe("replace");
+		expect(undo).toMatchObject({ inserted: [piece("original")], insertedAt: [2] });
+	});
+});

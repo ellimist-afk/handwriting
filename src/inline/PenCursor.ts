@@ -1,4 +1,10 @@
-const MIN_CURSOR_VISUAL_PX = 6;
+/**
+ * A reticle has to be findable before it can be useful. A pen nib is about
+ * 2px, and a 6px floor put a 4px speck under the tip where the hand hides it,
+ * which read as "the cursor does not work". 12 is small enough to aim with
+ * and big enough to see.
+ */
+export const MIN_CURSOR_VISUAL_PX = 12;
 const PEN_COMPAT_MOUSE_WINDOW_MS = 120;
 const PEN_COMPAT_MOUSE_DISTANCE_PX = 4;
 export const PEN_HOVER_CLASS = "handwriting-pen-hover";
@@ -51,3 +57,9 @@ export function isPenCompatMouseMove(input: {
 			PEN_COMPAT_MOUSE_DISTANCE_PX
 	);
 }
+
+/**
+ * Marks the hover reticle as showing an eraser rather than a nib: an outline
+ * at the erase radius instead of a filled dot at the ink width.
+ */
+export const ERASER_CURSOR_CLASS = "handwriting-pen-hover-eraser";
