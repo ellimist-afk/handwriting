@@ -4,17 +4,22 @@ Pen ink on ordinary Markdown notes in Obsidian.
 
 Open a note and write. The note stays a plain `.md` file.
 
-## what it does
+## right now you can
 
-- pressure sensitive ink and a highlighter, three sizes, multiple colors
-- the eraser end works to erase. the side button lassos; you can move the
-  selection around and delete it
-- undo/redo
-- palm rejection
-- infinite canvas
-- ink scales with zoom
-- completely offline. You own your data; ink is stored in JSON format in
-  the vault root.
+* write ink, erase strokes with eraser end, highlight, in multiple colors, three sizes
+* side button lassos; you can move the selection around and delete it
+* undo/redo ink
+* zoom in, out
+
+## Features
+
+* data safety
+   * your ink is all stored here: `<your vault>/.handwriting/`
+   * https://imgur.com/a/60GBWnn
+* palm rejection
+* handwriting shaper
+* pressure sensitivity
+* infinite canvas
 
 ## installing
 
@@ -43,6 +48,21 @@ paste this in : ellimist-afk/handwriting > hit add plugin
 desktop Obsidian 1.13.7 or newer. a pen. built and tested on a Microsoft
 Surface with a Surface Slim Pen 2. other Windows pens should work but
 nobody's tested them yet, so treat this as a beta and send reports.
+
+## Coming
+
+* eraser size slider
+* mobile support (ios first, android after)
+* mouse input
+* copy/paste ink + across notes
+* image+ink multi selection
+* ink showing in embeds
+* export/print ink
+
+## Wishlist
+
+* native pdf annotation
+* ocr/searchable handwriting
 
 ## reporting problems
 
