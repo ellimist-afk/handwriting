@@ -23,13 +23,11 @@ Open a note and write. The note stays a plain `.md` file.
 
 ## installing
 
-three different ways:
+it's in the community plugin directory: Settings > Community plugins > Browse > search Handwriting > Install and enable
 
-1) it's in the community plugin directory: Settings > Community plugins > Browse > search Handwriting > Install and enable
+plugin page: https://community.obsidian.md/plugins/handwriting
 
-2) can also find here: https://community.obsidian.md/plugins/handwriting
-
-3) (!!!!) must install via BRAT for now until plugin gets reviewed:
+if you want beta builds before they're released, use BRAT:
 
 open your Obsidian vault > Settings > community plugins in left side bar
 
