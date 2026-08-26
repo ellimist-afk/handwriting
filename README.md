@@ -35,9 +35,9 @@ macos
 
 linux
 
-ios!! ( at least ipads )
+ios
 
-## Probably doesn't work on
+## Probably works on
 
 android
 
