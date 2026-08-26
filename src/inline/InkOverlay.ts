@@ -2,8 +2,9 @@ import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { Prec } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
 import { isolateHistory } from "@codemirror/commands";
-import { editorInfoField } from "obsidian";
+import { Platform, editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
+import { MobileTools } from "./MobileTools";
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
@@ -330,6 +331,7 @@ class InkOverlayPlugin {
 	private dragFrom: { x: number; y: number } | null = null;
 	private dragTotal: { dx: number; dy: number } | null = null;
 	private penCursorEl: HTMLElement | null = null;
+	private mobileTools: MobileTools | null = null;
 	private eraserEl: HTMLElement | null = null;
 
 	private cssWidth = 0;
@@ -530,6 +532,27 @@ class InkOverlayPlugin {
 		this.penCursorEl.setAttribute("aria-hidden", "true");
 		this.eraserEl = container.createDiv({ cls: "handwriting-eraser-cursor" });
 		this.eraserEl.setAttribute("aria-hidden", "true");
+
+		// iOS port: every control lives in the command palette, and on mobile
+		// the palette lives in the toolbar above the keyboard - which the
+		// stylus fix correctly keeps down. A pencil-only user would have no
+		// path to the eraser at all. The strip is that path; it mounts on the
+		// EDITOR element (sibling of the scroller) so a pencil tap on it never
+		// enters the router. Desktop keeps the palette and stays strip-free.
+		if (Platform.isMobileApp) {
+			const info = this.view.state.field(editorInfoField, false);
+			const app = info?.app as
+				| { commands?: { executeCommandById(id: string): void } }
+				| undefined;
+			if (app?.commands) {
+				const commands = app.commands;
+				this.mobileTools = new MobileTools(this.view.dom, {
+					exec: (id) => commands.executeCommandById(id),
+					activeTool: () => getInlineTool(),
+					eraserOn: () => getInlineEraserMode(),
+				});
+			}
+		}
 
 		this.router = new InlinePenRouter(
 			this.view.scrollDOM,
@@ -738,6 +761,8 @@ class InkOverlayPlugin {
 		this.builder = null;
 		this.penCursorEl = null;
 		this.eraserEl = null;
+		this.mobileTools?.destroy();
+		this.mobileTools = null;
 		this.resetGestureState();
 		if (this.hostPositionPatched) {
 			this.view.dom.setCssStyles({ position: "" });
