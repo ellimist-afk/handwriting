@@ -325,6 +325,28 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	touch-action: manipulation;
 }
 
+/*
+ * setIcon svgs carry no width/height attributes: their whole rendered size
+ * is `svg.svg-icon { width: var(--icon-size) }` (obsidian app.css). If
+ * that variable fails to resolve here, the icon renders at zero size -
+ * present in the dom, invisible, which one ipad on 1.13.7 exhibited on
+ * release day. Explicit minimums make that failure impossible. The font
+ * rules cover the glyph-initial fallback path.
+ */
+.handwriting-mobile-tool {
+	font-size: 15px;
+	font-weight: 600;
+}
+
+.handwriting-mobile-tool .svg-icon,
+.handwriting-pen-pill .svg-icon {
+	width: var(--icon-size, 18px);
+	height: var(--icon-size, 18px);
+	min-width: 18px;
+	min-height: 18px;
+	opacity: 1;
+}
+
 .handwriting-mobile-tool.is-active {
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);

@@ -174,9 +174,7 @@ export class MobileTools {
 				attr: { "aria-label": spec.label, type: "button" },
 			});
 			setIcon(b, spec.icon);
-			// Blank-button insurance (release day, an ipad on 1.13.7 showed
-			// every glyph empty): when the icon set yields no svg, the button
-			// says its initial instead of saying nothing.
+			// If the icon set yields no svg, the button says its initial.
 			if (!b.querySelector("svg")) b.setText(spec.glyph);
 			noFocus(b);
 			b.addEventListener("click", (ev) => {
