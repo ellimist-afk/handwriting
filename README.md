@@ -21,11 +21,39 @@ Open a note and write. The note stays a plain `.md` file.
 * pressure sensitivity
 * infinite canvas
 
+## Works on
+
+windows
+
+macos
+
+linux
+
+ios!! ( at least ipads )
+
+## Probably doesn't work on
+
+android
+
 ## installing
 
-it's in the community plugin directory: Settings > Community plugins > Browse > search Handwriting > Install and enable
+### Method 1 
 
-plugin page: https://community.obsidian.md/plugins/handwriting
+it's in the community plugin directory unreviewed: 
+
+1) Settings
+2) Community plugins
+3) Browse
+4) search Handwriting
+5) Install and enable
+
+### Method 2
+
+can also just get it here:
+
+https://community.obsidian.md/plugins/handwriting
+
+### Method 3
 
 if you want beta builds before they're released, use BRAT:
 
@@ -49,9 +77,8 @@ nobody's tested them yet, so treat this as a beta and send reports.
 
 ## Coming
 
-* eraser size slider
-* mobile support (ios first, android after)
 * mouse input
+* eraser size slider
 * copy/paste ink + across notes
 * image+ink multi selection
 * ink showing in embeds
