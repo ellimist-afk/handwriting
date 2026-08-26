@@ -1,7 +1,7 @@
 {
 	"id": "handwriting",
 	"name": "Handwriting",
-	"version": "1.0.2",
+	"version": "1.0.3",
 	"minAppVersion": "1.12.3",
 	"description": "Write on your notes with a pen. Pressure ink, highlighter, eraser, and lasso directly on Markdown, saved beside your files.",
 	"author": "Alan",

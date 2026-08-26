@@ -56,6 +56,8 @@ export interface MobileToolsHost {
 
 interface ButtonSpec {
 	icon: string;
+	/** Two-char fallback shown when the icon set has no such glyph. */
+	glyph: string;
 	label: string;
 	commandId: string;
 	/** Marks the button active from current state; omitted = never marked. */
@@ -67,49 +69,56 @@ interface ButtonSpec {
 const BUTTONS: ButtonSpec[] = [
 	{
 		icon: "pen",
+		glyph: "P",
 		label: "Pen",
 		commandId: "handwriting:inline-tool-pen",
 		isActive: (h) => !h.eraserOn() && h.activeTool() === "pen",
 	},
 	{
 		icon: "highlighter",
+		glyph: "H",
 		label: "Highlighter",
 		commandId: "handwriting:inline-tool-highlighter",
 		isActive: (h) => !h.eraserOn() && h.activeTool() === "highlighter",
 	},
 	{
 		icon: "eraser",
+		glyph: "E",
 		label: "Eraser",
 		commandId: "handwriting:inline-tool-eraser",
 		isActive: (h) => h.eraserOn(),
 	},
 	{
 		icon: "lasso",
+		glyph: "L",
 		label: "Lasso",
 		commandId: "handwriting:inline-tool-lasso",
 		isActive: (h) => h.lassoOn(),
 	},
 	{
 		icon: "trash-2",
+		glyph: "D",
 		label: "Delete selection",
 		commandId: "handwriting:delete-selected-ink",
 		isEnabled: (h) => h.hasInkSelection(),
 	},
 	{
 		icon: "copy",
+		glyph: "C",
 		label: "Copy selected ink",
 		commandId: "handwriting:copy-selected-ink",
 		isEnabled: (h) => h.hasInkSelection(),
 	},
 	{
 		icon: "clipboard-paste",
+		glyph: "V",
 		label: "Paste ink",
 		commandId: "handwriting:paste-ink",
 		isEnabled: (h) => h.canPasteInk(),
 	},
-	{ icon: "palette", label: "Ink color", commandId: "handwriting:ink-color-cycle" },
-	{ icon: "undo-2", label: "Undo", commandId: "editor:undo", isEnabled: (h) => h.canUndo() },
-	{ icon: "redo-2", label: "Redo", commandId: "editor:redo", isEnabled: (h) => h.canRedo() },
+	{ icon: "palette", glyph: "Co", label: "Ink color", commandId: "handwriting:ink-color-cycle" },
+	{ icon: "undo-2", glyph: "U", label: "Undo", commandId: "editor:undo", isEnabled: (h) => h.canUndo() },
+	{ icon: "redo-2", glyph: "R", label: "Redo", commandId: "editor:redo", isEnabled: (h) => h.canRedo() },
 ];
 
 /**
@@ -137,6 +146,7 @@ export class MobileTools {
 			attr: { "aria-label": "Pen tools", type: "button" },
 		});
 		setIcon(this.pill, "pen");
+		if (!this.pill.querySelector("svg")) this.pill.setText("P");
 		// Buttons must not take focus from the editor: undo/redo route to the
 		// active editor, and a focus-stealing toolbar makes that a coin flip.
 		const noFocus = (el: HTMLElement) =>
@@ -152,6 +162,7 @@ export class MobileTools {
 			attr: { "aria-label": "Collapse pen tools", type: "button" },
 		});
 		setIcon(collapse, "chevron-right");
+		if (!collapse.querySelector("svg")) collapse.setText(">");
 		noFocus(collapse);
 		collapse.addEventListener("click", (ev) => {
 			ev.preventDefault();
@@ -163,6 +174,10 @@ export class MobileTools {
 				attr: { "aria-label": spec.label, type: "button" },
 			});
 			setIcon(b, spec.icon);
+			// Blank-button insurance (release day, an ipad on 1.13.7 showed
+			// every glyph empty): when the icon set yields no svg, the button
+			// says its initial instead of saying nothing.
+			if (!b.querySelector("svg")) b.setText(spec.glyph);
 			noFocus(b);
 			b.addEventListener("click", (ev) => {
 				ev.preventDefault();

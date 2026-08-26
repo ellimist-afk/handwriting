@@ -359,12 +359,20 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	display: flex;
 }
 
+/*
+ * Vertical by ROTATION, deliberately. Native vertical range inputs are a
+ * compatibility minefield: chromium removed -webkit-appearance:
+ * slider-vertical (129), writing-mode on range landed late everywhere, and
+ * older webkit has neither - both a chromium 150 and an old ipados build
+ * rendered the "vertical" slider horizontal on release day. A transform
+ * renders identically on every engine ever shipped, and pointer hit-testing
+ * follows the transform natively. Right end points UP, so up = bigger.
+ */
 .handwriting-eraser-slider {
-	width: 24px;
-	height: 110px;
-	writing-mode: vertical-lr;
-	direction: rtl;
-	-webkit-appearance: slider-vertical;
+	width: 96px;
+	height: 24px;
+	transform: rotate(-90deg);
+	margin: 36px -36px;
 	touch-action: manipulation;
 }
 
