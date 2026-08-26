@@ -22,8 +22,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const EXPECT_VERSION = "1.0.0";
-const EXPECT_MIN_APP = "1.13.7";
+const EXPECT_VERSION = "1.0.1";
+const EXPECT_MIN_APP = "1.0.0";
 const ASSETS = ["main.js", "manifest.json", "styles.css"];
 
 /**

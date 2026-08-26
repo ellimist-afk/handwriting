@@ -597,7 +597,16 @@ class InkOverlayPlugin {
 		// actually seen (PenToolsMode owns the rule). Mount-time check plus
 		// re-checks from pen events, so a Surface picking up its pen mid-
 		// session gets the strip without a remount.
-		this.ensurePenTools();
+		//
+		// BULKHEADED (1.0.1): this call sits before the router is created,
+		// so a throw here would kill the pen entirely while text kept
+		// working - the exact iPad symptom reported on release day. Chrome
+		// must never take the ink down with it.
+		try {
+			this.ensurePenTools();
+		} catch (err) {
+			console.error("[handwriting] pen tools strip failed to mount", err);
+		}
 
 		this.router = new InlinePenRouter(
 			this.view.scrollDOM,
@@ -773,6 +782,14 @@ class InkOverlayPlugin {
 	 * refreshPenToolsAll. Cheap when nothing changes.
 	 */
 	ensurePenTools(): void {
+		try {
+			this.ensurePenToolsInner();
+		} catch (err) {
+			console.error("[handwriting] pen tools strip failed", err);
+		}
+	}
+
+	private ensurePenToolsInner(): void {
 		const want =
 			this.container !== null &&
 			penToolsVisible(getPenToolsMode(), Platform.isMobileApp, penSeenThisSession());
