@@ -88,9 +88,32 @@ describe("strokeInLasso", () => {
 		expect(strokeInLasso(stroke([[200, 200], [300, 300]]), square, squareBounds)).toBe(false);
 	});
 
-	it("selects a stroke that crosses the lasso with no sample inside", () => {
-		// Enters at the left edge and leaves at the right, sampled only outside.
-		expect(strokeInLasso(stroke([[-50, 50], [150, 50]]), square, squareBounds)).toBe(true);
+	it("ignores a stroke the lasso merely crosses (samples outside)", () => {
+		// The old any-touch rule took this whole stroke for two grazed
+		// points; majority-inside leaves it be.
+		expect(strokeInLasso(stroke([[-50, 50], [150, 50]]), square, squareBounds)).toBe(false);
+	});
+
+	it("ignores a stroke only clipped at its edge", () => {
+		// One sample of four inside: grazed while circling something else.
+		expect(
+			strokeInLasso(
+				stroke([[90, 50], [150, 50], [210, 50], [270, 50]]),
+				square,
+				squareBounds
+			)
+		).toBe(false);
+	});
+
+	it("selects a stroke mostly inside", () => {
+		// Three of four samples in the loop: that is what was circled.
+		expect(
+			strokeInLasso(
+				stroke([[20, 50], [50, 50], [80, 50], [150, 50]]),
+				square,
+				squareBounds
+			)
+		).toBe(true);
 	});
 
 	it("ignores a stroke whose bbox overlaps but whose ink does not", () => {

@@ -98,8 +98,10 @@ export function drawStroke(
 		// per-segment stroking looks beaded when magnified. Pen strokes take
 		// the shaped geometry (InkShape) unless shaping is switched off; the
 		// highlighter's flat chisel wash never shapes.
+		// Mouse strokes take the flat law: no pressure, and velocity says
+		// nothing about intent (see InkStroke.device).
 		const ribbon =
-			!flat && inkShapingEnabled()
+			!flat && stroke.device !== "mouse" && inkShapingEnabled()
 				? flattenStrokeShaped(pts, style, cam.zoom)
 				: flattenStroke(pts, style, cam.zoom);
 		fillRibbon(ctx, cam, ribbon, strokeStyleFor(stroke));

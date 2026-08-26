@@ -65,9 +65,9 @@ export class DiagnosticTextModal extends Modal {
 
 	/**
 	 * The clipboard write has to happen inside the click handler to count as a
-	 * user gesture in WKWebView. `execCommand` is the fallback for hosts where
-	 * the async API is missing or blocked; it is deprecated and still the only
-	 * thing that works in some embedded webviews.
+	 * user gesture in WKWebView. When the async API is missing or blocked the
+	 * Save to vault button is the fallback; the old execCommand path retired
+	 * with the directory review (both real platforms take the API path).
 	 */
 	private async copyToClipboard(
 		field: HTMLTextAreaElement,
@@ -86,19 +86,9 @@ export class DiagnosticTextModal extends Modal {
 		} catch {
 			/* fall through to the selection path */
 		}
-		try {
-			field.readOnly = false;
-			field.focus();
-			field.setSelectionRange(0, this.text.length);
-			const ok = document.execCommand("copy");
-			field.readOnly = true;
-			if (ok) {
-				done();
-				return;
-			}
-		} catch {
-			field.readOnly = true;
-		}
+		// No execCommand fallback: it is deprecated, the directory flags
+		// it, and both real platforms take the clipboard API path (verified
+		// on the ipads 2026-08-26). Anything left over has Save to vault.
 		new Notice("Could not copy. Use Save to vault instead.", 8000);
 	}
 

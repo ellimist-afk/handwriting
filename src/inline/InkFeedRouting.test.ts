@@ -12,9 +12,11 @@
  * the end backstop. No jsdom; the suite runs where every other test runs.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { InlinePenCallbacks, InlinePenRouter } from "./InlinePenRouter";
 import { PenSample } from "../input/PointerRouter";
+import { setMouseInk } from "./MouseInk";
+import { markPenSeen, resetPenToolsForTest } from "./PenToolsMode";
 
 // ---- window stub -----------------------------------------------------------
 
@@ -282,5 +284,73 @@ describe("raw-fed ink through the real router (Chromium stream)", () => {
 		h.fire(penEvent("pointerdown", 200));
 		h.fire(penEvent("pointermove", 208, { coalesced: [204, 208] }));
 		expect(fedTimestamps(h.rec.rawCalls)).toEqual([104]);
+	});
+});
+
+describe("mouse ink through the real router", () => {
+	let h: ReturnType<typeof harness>;
+	beforeEach(() => {
+		setMouseInk(false);
+		h = harness();
+	});
+	afterEach(() => setMouseInk(false));
+
+	function mouseEvent(type: string, ts: number, buttons: number, coalesced?: number[]) {
+		const ev = penEvent(type, ts, { buttons, pressure: buttons & 1 ? 0.5 : 0, coalesced });
+		(ev as unknown as Record<string, unknown>).pointerType = "mouse";
+		return ev;
+	}
+
+	it("off: the mouse is never touched", () => {
+		h.fire(mouseEvent("pointerdown", 100, 1));
+		expect(h.rec.downs).toBe(0);
+		h.fire(mouseEvent("pointermove", 108, 1, [104, 108]));
+		expect(h.rec.rawCalls.length).toBe(0);
+	});
+
+	it("on: the left button inks like a pen tip", () => {
+		setMouseInk(true);
+		h.fire(mouseEvent("pointerdown", 100, 1));
+		expect(h.rec.downs).toBe(1);
+		h.fire(mouseEvent("pointermove", 108, 1, [104, 108]));
+		expect(fedTimestamps(h.rec.rawCalls)).toEqual([104, 108]);
+		h.fire(mouseEvent("pointerup", 112, 0));
+		expect(h.rec.ups).toBe(1);
+	});
+
+	it("on: the right button stays native", () => {
+		setMouseInk(true);
+		h.fire(mouseEvent("pointerdown", 100, 2));
+		expect(h.rec.downs).toBe(0);
+	});
+});
+
+describe("stabilizing-hand contextmenu", () => {
+	let h: ReturnType<typeof harness>;
+	beforeEach(() => {
+		resetPenToolsForTest();
+		h = harness();
+	});
+	afterEach(resetPenToolsForTest);
+
+	function touchMenu() {
+		let prevented = 0;
+		const ev = {
+			type: "contextmenu",
+			pointerType: "touch",
+			preventDefault: () => void prevented++,
+			stopPropagation: () => {},
+		} as unknown as PointerEvent;
+		h.fire(ev);
+		return prevented;
+	}
+
+	it("suppressed once a pen has been seen this session", () => {
+		markPenSeen();
+		expect(touchMenu()).toBe(1);
+	});
+
+	it("kept for sessions that never see a pen", () => {
+		expect(touchMenu()).toBe(0);
 	});
 });

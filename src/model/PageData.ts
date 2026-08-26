@@ -133,7 +133,7 @@ const KNOWN_TOP = new Set([
 ]);
 const KNOWN_BOX = new Set(["id", "x", "y", "width", "z"]);
 const KNOWN_IMAGE = new Set(["id", "x", "y", "width", "height", "z"]);
-const KNOWN_STROKE = new Set(["id", "tool", "color", "width", "createdAt", "pts", "points"]);
+const KNOWN_STROKE = new Set(["id", "tool", "color", "width", "createdAt", "device", "pts", "points"]);
 
 /** Everything in `raw` that is not a key we claim to own. */
 function unknownKeys(raw: Record<string, unknown>, known: Set<string>): Record<string, unknown> {
@@ -241,6 +241,7 @@ export function serializePage(page: PageData): string {
 							color: s.color,
 							width: round(s.width, 3),
 							createdAt: s.createdAt,
+							...(s.device === "mouse" ? { device: s.device } : {}),
 							pts: packPoints(s.points),
 						},
 						page.unknownByObject[s.id]
@@ -332,6 +333,7 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 				// culling and eraser hit-testing.
 				bbox: computeBBox(points, width * 2),
 				createdAt: num(s.createdAt) ?? Date.now(),
+				...(s.device === "mouse" ? { device: "mouse" as const } : {}),
 			});
 			const extra = unknownKeys(s, KNOWN_STROKE);
 			if (Object.keys(extra).length > 0) page.unknownByObject[id] = extra;

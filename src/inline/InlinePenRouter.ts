@@ -13,6 +13,8 @@ import { isPenCompatMouseMove } from "./PenCursor";
 import { pinchEngaged, pinchRatio, pinchSpread } from "./PinchZoom";
 import { InkFeedArbiter } from "./InkFeed";
 import { stylusOnlyTouches } from "./StylusTouch";
+import { mouseInkEnabled } from "./MouseInk";
+import { penSeenThisSession } from "./PenToolsMode";
 
 /**
  * Pen capture for the inline overlay.
@@ -533,7 +535,7 @@ export class InlinePenRouter {
 			if (e.pointerType === "pen") tr("gotpointercapture", e);
 		});
 		on("lostpointercapture", (e) => {
-			if (e.pointerType !== "pen") return;
+			if (e.pointerType !== "pen" && !this.mouseActsAsPen(e)) return;
 			tr("lostpointercapture", e, this.activePenId !== null ? "DURING STROKE" : "");
 			this.endPenStroke(e, false);
 		});
@@ -583,13 +585,31 @@ export class InlinePenRouter {
 		// while merely hovering. Mouse right-click away from the pen passes.
 		{
 			const h = (ev: Event) => {
-				const suppress = contextMenuSuppressed({
-					activeStroke: this.activePenId !== null,
-					now: performance.now(),
-					ownershipTailUntil: this.ownershipTailUntil,
-					pointerType: (ev as PointerEvent).pointerType,
-					penNear: this.gate.isPenNear(performance.now()),
-				});
+				// Mouse-ink mode: hover moves run the pen-hover path, so the
+				// palm gate reads "pen near" whenever the mouse just moved -
+				// and a right-click straight after moving is the NORMAL case.
+				// The first click ate the menu (orion 2026-08-26); the mouse
+				// keeps its menu, and only its own stroke/tail suppress it.
+				const pt = (ev as PointerEvent).pointerType;
+				// A finger planted to stabilize the hand BEFORE the pen
+				// arrives long-presses into a right-click on windows (orion
+				// 2026-08-26: switch note, plant finger, menu). Chromium
+				// stamps that contextmenu pointerType "touch". Once a pen
+				// has been seen this session, a touch long-press on the
+				// writing surface is a stabilizing hand; sessions that never
+				// see a pen keep their long-press menu.
+				const stabilizingHand = pt === "touch" && penSeenThisSession();
+				const suppress =
+					stabilizingHand ||
+					contextMenuSuppressed({
+						activeStroke: this.activePenId !== null,
+						now: performance.now(),
+						ownershipTailUntil: this.ownershipTailUntil,
+						pointerType: pt,
+						penNear:
+							this.gate.isPenNear(performance.now()) &&
+							!(pt === "mouse" && mouseInkEnabled()),
+					});
 				if (suppress) {
 					this.traceSuppressed("contextmenu(scroller)");
 					ev.preventDefault();
@@ -883,6 +903,16 @@ export class InlinePenRouter {
 		this.rect = this.rectEl.getBoundingClientRect();
 	}
 
+	/**
+	 * Mouse-ink mode (roadmap: mouse input): while the switch is on, the
+	 * mouse's LEFT button is treated as a pen tip. Right and middle stay
+	 * native so the context menu and paste-click keep working; everything
+	 * downstream of the claim is the ordinary pen path.
+	 */
+	private mouseActsAsPen(e: PointerEvent): boolean {
+		return e.pointerType === "mouse" && mouseInkEnabled();
+	}
+
 	private sampleFrom(e: PointerEvent): PenSample {
 		const scale = this.scaleProvider();
 		return {
@@ -961,7 +991,11 @@ export class InlinePenRouter {
 			}
 			return;
 		}
-		if (e.pointerType !== "pen") return; // mouse: never touched
+		// Mouse: never touched, unless mouse-ink mode is on - then the left
+		// button is a pen tip and other buttons stay native.
+		if (e.pointerType !== "pen") {
+			if (!this.mouseActsAsPen(e) || (e.buttons & 1) === 0) return;
+		}
 		if (this.activePenId !== null) {
 			// one pen at a time
 			tr("pointerdown", e, `pen IGNORED: stroke ${this.activePenId} still active`);
@@ -1076,6 +1110,7 @@ export class InlinePenRouter {
 		// after pen hover is still the pen and must not flash the I-beam.
 		if (
 			e.pointerType === "mouse" &&
+			!mouseInkEnabled() &&
 			!isPenCompatMouseMove({
 				now: performance.now(),
 				lastPenHoverAt: this.lastPenHoverAt,
@@ -1165,7 +1200,7 @@ export class InlinePenRouter {
 			}
 			return;
 		}
-		if (e.pointerType !== "pen") return;
+		if (e.pointerType !== "pen" && !this.mouseActsAsPen(e)) return;
 		if (this.activePenId === null) {
 			// Hovering keeps the palm gate warm ("palm placed before pen") and
 			// re-arms the standing guard instantly if a touch window was open.
@@ -1245,7 +1280,7 @@ export class InlinePenRouter {
 	}
 
 	private pointerRawUpdate(e: PointerEvent): void {
-		if (e.pointerType !== "pen") return;
+		if (e.pointerType !== "pen" && !this.mouseActsAsPen(e)) return;
 		// Any pen raw, hover included, proves the channel exists for the
 		// session and keeps the move handler out of the ink business.
 		this.inkFeed.noteRawChannel();
@@ -1337,7 +1372,7 @@ export class InlinePenRouter {
 			}
 			return;
 		}
-		if (e.pointerType !== "pen") return;
+		if (e.pointerType !== "pen" && !this.mouseActsAsPen(e)) return;
 		const wasOurs = this.activePenId !== null && e.pointerId === this.activePenId;
 		tr(e.type, e, wasOurs ? "TERMINATES STROKE" : "");
 		if (wasOurs) {

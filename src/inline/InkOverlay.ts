@@ -1,10 +1,14 @@
 import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { Prec } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
-import { isolateHistory } from "@codemirror/commands";
-import { Platform, editorInfoField } from "obsidian";
+import { isolateHistory, redoDepth, undoDepth } from "@codemirror/commands";
+import { Notice, Platform, editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
 import { MobileTools } from "./MobileTools";
+import { clipboardSize, copyInk, pasteInk } from "./InkClipboard";
+
+const LASSO_CURSOR_CLASS = "handwriting-pen-hover-lasso";
+import { getPenToolsMode, markPenSeen, penSeenThisSession, penToolsVisible } from "./PenToolsMode";
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
@@ -169,13 +173,29 @@ export function setInlineTool(tool: InkTool): void {
  * says, and choosing a nib turns the mode off.
  */
 let inlineEraserMode = false;
+let inlineLassoMode = false;
 
 export function getInlineEraserMode(): boolean {
 	return inlineEraserMode;
 }
 
+/** Eraser and lasso modes are exclusive: the tip can only be one thing. */
 export function setInlineEraserMode(on: boolean): void {
 	inlineEraserMode = on;
+	if (on) inlineLassoMode = false;
+}
+
+export function getInlineLassoMode(): boolean {
+	return inlineLassoMode;
+}
+
+/**
+ * Lasso as a MODE (roadmap: pen GUI): the barrel button was the only way
+ * in, and iPads and mice have no barrel. While on, the tip lassos.
+ */
+export function setInlineLassoMode(on: boolean): void {
+	inlineLassoMode = on;
+	if (on) inlineEraserMode = false;
 }
 
 /** Eraser radius in screen px, shared by the hit test and both cursors. */
@@ -187,6 +207,27 @@ export function getEraserRadiusPx(): number {
 
 export function setEraserRadiusPx(px: number): void {
 	inlineEraserRadiusPx = clampEraserRadius(px);
+}
+
+/**
+ * The eraser slider changes module state live and persists on release;
+ * persistence lives with the plugin, which registers here at load.
+ */
+let persistEraserRadius: ((px: number) => void) | null = null;
+
+export function setPersistEraserRadius(fn: ((px: number) => void) | null): void {
+	persistEraserRadius = fn;
+}
+
+export function commitEraserRadius(): void {
+	persistEraserRadius?.(inlineEraserRadiusPx);
+}
+
+/** Same shape for the nib-size sliders: live module state, plugin persists. */
+let persistInkSize: ((tool: InkTool, mult: number) => void) | null = null;
+
+export function setPersistInkSize(fn: ((tool: InkTool, mult: number) => void) | null): void {
+	persistInkSize = fn;
 }
 
 export const inlineInk = new InlineInkStore();
@@ -201,6 +242,19 @@ export function isInlineInkEnabled(): boolean {
 export function setInlineInkEnabled(on: boolean): void {
 	enabled = on;
 	for (const p of instances) (on ? p.mount() : p.unmount());
+}
+
+/** The mounted overlay showing `path`, if any editor has it open. */
+export function overlayForPath(path: string): InkOverlayPlugin | null {
+	for (const p of instances) {
+		if (p.showsPath(path)) return p;
+	}
+	return null;
+}
+
+/** Re-evaluate the pen-tools strip on every open editor (mode command). */
+export function refreshPenToolsAll(): void {
+	for (const p of instances) p.ensurePenTools();
 }
 
 /** Repaint every open editor's committed ink (the shaping toggle uses this). */
@@ -443,6 +497,11 @@ class InkOverlayPlugin {
 
 	// ---- lifecycle ----------------------------------------------------------
 
+	/** Whether this mounted overlay is showing `path` right now. */
+	showsPath(path: string): boolean {
+		return this.container !== null && this.filePath() === path;
+	}
+
 	/** The file behind this editor, resolved live, because Obsidian reuses editors. */
 	private filePath(): string | null {
 		const info = this.view.state.field(editorInfoField, false);
@@ -533,26 +592,12 @@ class InkOverlayPlugin {
 		this.eraserEl = container.createDiv({ cls: "handwriting-eraser-cursor" });
 		this.eraserEl.setAttribute("aria-hidden", "true");
 
-		// iOS port: every control lives in the command palette, and on mobile
-		// the palette lives in the toolbar above the keyboard - which the
-		// stylus fix correctly keeps down. A pencil-only user would have no
-		// path to the eraser at all. The strip is that path; it mounts on the
-		// EDITOR element (sibling of the scroller) so a pencil tap on it never
-		// enters the router. Desktop keeps the palette and stays strip-free.
-		if (Platform.isMobileApp) {
-			const info = this.view.state.field(editorInfoField, false);
-			const app = info?.app as
-				| { commands?: { executeCommandById(id: string): void } }
-				| undefined;
-			if (app?.commands) {
-				const commands = app.commands;
-				this.mobileTools = new MobileTools(this.view.dom, {
-					exec: (id) => commands.executeCommandById(id),
-					activeTool: () => getInlineTool(),
-					eraserOn: () => getInlineEraserMode(),
-				});
-			}
-		}
+		// Pen tools strip: on mobile the palette hides with the keyboard, so
+		// the strip is the only path; on desktop it appears once a pen is
+		// actually seen (PenToolsMode owns the rule). Mount-time check plus
+		// re-checks from pen events, so a Surface picking up its pen mid-
+		// session gets the strip without a remount.
+		this.ensurePenTools();
 
 		this.router = new InlinePenRouter(
 			this.view.scrollDOM,
@@ -722,6 +767,50 @@ class InkOverlayPlugin {
 	private headFrontmatterKeys = (): readonly string[] | null =>
 		frontmatterPropertyKeys(this.view.state.sliceDoc(0, 4000));
 
+	/**
+	 * Create or destroy the strip to match the visibility rule. Called at
+	 * mount, from pen sightings, and by the mode command via
+	 * refreshPenToolsAll. Cheap when nothing changes.
+	 */
+	ensurePenTools(): void {
+		const want =
+			this.container !== null &&
+			penToolsVisible(getPenToolsMode(), Platform.isMobileApp, penSeenThisSession());
+		if (want === (this.mobileTools !== null)) return;
+		if (!want) {
+			this.mobileTools?.destroy();
+			this.mobileTools = null;
+			return;
+		}
+		const info = this.view.state.field(editorInfoField, false);
+		const app = info?.app as
+			| { commands?: { executeCommandById(id: string): void } }
+			| undefined;
+		if (!app?.commands) return;
+		const commands = app.commands;
+		this.mobileTools = new MobileTools(this.view.dom, {
+			exec: (id) => commands.executeCommandById(id),
+			activeTool: () => getInlineTool(),
+			eraserOn: () => getInlineEraserMode(),
+			lassoOn: () => getInlineLassoMode(),
+			activeColor: () => getInkColorHex(getInlineTool()),
+			eraserRadiusPx: () => getEraserRadiusPx(),
+			setEraserRadiusPx: (px, commit) => {
+				setEraserRadiusPx(px);
+				if (commit) commitEraserRadius();
+			},
+			canUndo: () => undoDepth(this.view.state) > 0,
+			canRedo: () => redoDepth(this.view.state) > 0,
+			canPasteInk: () => clipboardSize() > 0,
+			hasInkSelection: () => !this.selection.isEmpty,
+			inkSizeMult: (tool) => getInkSizeMult(tool as InkTool),
+			setInkSizeMult: (tool, mult, commit) => {
+				setInkSizeMult(tool as InkTool, mult);
+				if (commit) persistInkSize?.(tool as InkTool, getInkSizeMult(tool as InkTool));
+			},
+		});
+	}
+
 	unmount(): void {
 		this.router?.dispose();
 		this.router = null;
@@ -831,6 +920,33 @@ class InkOverlayPlugin {
 	}
 
 	handleKeyDown(event: KeyboardEvent): boolean {
+		// Ctrl/Cmd+C and X act on lassoed INK while any is selected: that is
+		// what a lasso means everywhere else (orion 2026-08-26: ctrl+c after
+		// a lasso copied nothing, and a stale ink clipboard pasted a page).
+		// Mod-V stays the editor's - pasting text with nothing selected is
+		// normal, so ink paste keeps its command and its strip button.
+		// Only while the EDITOR's own selection is empty: someone who lassoed
+		// ink and then swept text with the mouse means the text when they
+		// press ctrl+c, and stealing that copy would be the worse surprise.
+		if (
+			(event.ctrlKey || event.metaKey) &&
+			!event.altKey &&
+			!this.selection.isEmpty &&
+			this.view.state.selection.main.empty
+		) {
+			const k = event.key.toLowerCase();
+			if (k === "c" || k === "x") {
+				const n = k === "c" ? this.copySelectedInk() : this.cutSelectedInk();
+				if (n > 0) {
+					event.preventDefault();
+					new Notice(`Handwriting: ${k === "c" ? "copied" : "cut"} ${n} stroke(s)`);
+					// The strip's paste button wakes now, without waiting for
+					// the next tap or stroke.
+					this.mobileTools?.refresh();
+					return true;
+				}
+			}
+		}
 		return this.selectionDeleteKeys.keydown(event);
 	}
 
@@ -1004,7 +1120,9 @@ class InkOverlayPlugin {
 		// The pen decides what it is at contact (§52/§53, mode-free):
 		// eraser end erases, barrel held lassos/moves, tip inks.
 		const eraser = (ev.buttons & 32) !== 0 || ev.button === 5 || inlineEraserMode;
-		const barrel = !eraser && (ev.buttons & 2) !== 0;
+		// Lasso mode makes the TIP lasso: the barrel path for hardware that
+		// has no barrel (every apple pencil, every mouse).
+		const barrel = !eraser && ((ev.buttons & 2) !== 0 || inlineLassoMode);
 		if (barrel) {
 			this.mode = "lasso";
 			this.lassoDown(sample);
@@ -1031,8 +1149,22 @@ class InkOverlayPlugin {
 			(tool === "highlighter" ? HIGHLIGHTER_PEN.baseWidth : DEFAULT_PEN.baseWidth) *
 			getInkSizeMult(tool);
 		this.activeStyle.color = getInkColorHex(tool);
+		markPenSeen();
+		this.ensurePenTools();
+		// Writing starts: drop-down chrome gets out of the way.
+		this.mobileTools?.closeInkSliders();
 		this.activeWet = tool === "highlighter" ? this.highlightWet : this.wet;
-		this.builder = new StrokeBuilder(tool, this.activeStyle.color, this.activeStyle.baseWidth);
+		// The wet layer's shaping follows the device per stroke: a mouse
+		// stroke draws flat live, exactly as it will commit.
+		const fromMouse = ev.pointerType === "mouse";
+		this.wet.shape = !fromMouse;
+		this.builder = new StrokeBuilder(
+			tool,
+			this.activeStyle.color,
+			this.activeStyle.baseWidth,
+			undefined,
+			fromMouse ? "mouse" : undefined
+		);
 		this.builder.start(sample.timestamp);
 		const w = this.camera.screenToWorld(sample.x, sample.y);
 		const point = this.builder.add(
@@ -1178,6 +1310,8 @@ class InkOverlayPlugin {
 		// Whatever the gesture was, it is over: the frame is live again and
 		// re-reads the editor's current origin.
 		this.frame.end();
+		// One stroke changed what undo can do; the strip's buttons follow.
+		this.mobileTools?.refresh();
 		if (this.mode === "lasso") {
 			this.mode = "ink";
 			this.lassoUp();
@@ -1587,6 +1721,8 @@ class InkOverlayPlugin {
 	}
 
 	private showPenCursor(sample: PenSample): void {
+		markPenSeen();
+		this.ensurePenTools();
 		if (!this.penCursorEl) return;
 		this.view.scrollDOM.classList.add(PEN_HOVER_CLASS);
 		// In eraser mode the nib width is a lie: what the tip is about to do
@@ -1595,6 +1731,7 @@ class InkOverlayPlugin {
 		// cursor that follows a live erase.
 		if (inlineEraserMode) {
 			const r = visualToNote(inlineEraserRadiusPx, this.cssScale);
+			this.penCursorEl.classList.remove(LASSO_CURSOR_CLASS);
 			this.penCursorEl.classList.add(ERASER_CURSOR_CLASS);
 			this.penCursorEl.setCssStyles({
 				display: "block",
@@ -1607,6 +1744,22 @@ class InkOverlayPlugin {
 			return;
 		}
 		this.penCursorEl.classList.remove(ERASER_CURSOR_CLASS);
+		// Lasso mode: the nib is about to select, and the reticle says so - a
+		// dashed ring, fixed size, visually distinct from both nib and eraser.
+		if (inlineLassoMode) {
+			const r = visualToNote(9, this.cssScale);
+			this.penCursorEl.classList.add(LASSO_CURSOR_CLASS);
+			this.penCursorEl.setCssStyles({
+				display: "block",
+				width: `${r * 2}px`,
+				height: `${r * 2}px`,
+				transform: `translate(${sample.x - r}px, ${sample.y - r}px)`,
+				backgroundColor: "transparent",
+				opacity: "1",
+			});
+			return;
+		}
+		this.penCursorEl.classList.remove(LASSO_CURSOR_CLASS);
 		const tool = inlineTool;
 		const strokeWidth =
 			(tool === "highlighter" ? HIGHLIGHTER_PEN.baseWidth : DEFAULT_PEN.baseWidth) *
@@ -1821,17 +1974,74 @@ class InkOverlayPlugin {
 		return strokes.length;
 	}
 
-	/** Delete the current lasso selection as one normal editor-history step. */
-	private deleteSelectedInk(): void {
+	/**
+	 * Copy the lasso selection to the session ink clipboard (roadmap:
+	 * copy/paste ink). Returns how many strokes were copied; 0 = no selection.
+	 */
+	copySelectedInk(): number {
 		const path = this.filePath();
-		if (!path) return;
+		if (!path || this.selection.isEmpty) return 0;
+		const ids = new Set(this.selection.strokeIds);
+		const strokes = this.strokesHere().filter((s) => ids.has(s.id));
+		return copyInk(strokes, path);
+	}
+
+	/** Copy, then delete as one normal history step. Returns the count. */
+	cutSelectedInk(): number {
+		const n = this.copySelectedInk();
+		if (n > 0) this.deleteSelectedInk();
+		return n;
+	}
+
+	/**
+	 * Paste the clipboard into this note as one history step. Coordinates
+	 * are kept (fixed grid); pastes into the source note stagger. Returns
+	 * how many strokes landed.
+	 */
+	pasteInkHere(): number {
+		const path = this.filePath();
+		if (!path || clipboardSize() === 0) return 0;
+		const strokes = pasteInk(path);
+		if (strokes.length === 0) return 0;
+		inlineInk.applyAdd(path, strokes);
+		inlineInk.save(path);
+		this.dispatchInk({ type: "add", path, strokes });
+		this.scheduleRepaint();
+		this.repaintPath(path);
+		// Seamlessness: what was pasted is SELECTED, so it is visible and
+		// movable at once - and if the fixed-grid coordinates put it outside
+		// the viewport, scroll to it rather than pasting into the void.
+		this.selection.selectExactly(strokes.map((st) => st.id));
+		this.redrawSelectionUI();
+		const bounds = this.selectionBounds();
+		if (bounds) {
+			const cam = this.camera.snapshot;
+			const topY = (bounds.y - cam.y) * cam.zoom;
+			const viewH = this.view.scrollDOM.clientHeight;
+			if (topY < 0 || topY > viewH - 40) {
+				this.view.scrollDOM.scrollTop += topY - Math.min(120, viewH / 4);
+			}
+		}
+		this.mobileTools?.refresh();
+		return strokes.length;
+	}
+
+	/**
+	 * Delete the current lasso selection as one normal editor-history step.
+	 * Returns how many strokes went, so callers can say "nothing selected".
+	 */
+	deleteSelectedInk(): number {
+		const path = this.filePath();
+		if (!path) return 0;
+		const n = this.selection.strokeIds.length;
 		const op = removeSelectedInlineStrokes(inlineInk, path, this.selection.strokeIds);
 		this.selection.clear();
 		this.redrawSelectionUI();
-		if (!op) return;
+		if (!op) return 0;
 		this.dispatchInk(op);
 		this.scheduleRepaint();
 		this.repaintPath(path);
+		return n;
 	}
 
 	/**

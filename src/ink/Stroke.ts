@@ -32,6 +32,14 @@ export interface InkStroke {
 	points: InkPoint[];
 	bbox: BBox;
 	createdAt: number;
+	/**
+	 * Present only for mouse-drawn strokes (v0.13.16). A mouse has no
+	 * pressure and its speed says nothing about intent, so the shaped width
+	 * law (velocity thinning, taper) does not apply to it - at mouse speeds
+	 * the thinning filter oscillates around its floor and the width flicker
+	 * reads as scratchiness. Absent = a pen drew it.
+	 */
+	device?: "mouse";
 }
 
 export function computeBBox(points: InkPoint[], padWorld: number): BBox {

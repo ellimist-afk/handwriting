@@ -94,7 +94,6 @@ function caps(
 	return {
 		pluginVersion: "0.13.12",
 		apiVersion: "1.13.7",
-		userAgent: "test-agent",
 		devicePixelRatio: 2,
 		maxTouchPoints: 5,
 		viewportWidth: 1024,
@@ -189,12 +188,11 @@ describe("the full header", () => {
 		expect(text.indexOf("ink path:")).toBeLessThan(text.indexOf("pointerrawupdate events:"));
 	});
 
-	it("carries the versions, the host and the user agent", () => {
+	it("carries the versions and the host", () => {
 		const text = formatCapabilities(caps(webkitObserved, webkitApis, ipadHost));
 		expect(text).toContain("0.13.12");
 		expect(text).toContain("1.13.7");
 		expect(text).toContain("ios");
-		expect(text).toContain("test-agent");
 	});
 
 	it("reports the advertised surface separately from what was observed", () => {

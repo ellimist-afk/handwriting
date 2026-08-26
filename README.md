@@ -6,10 +6,16 @@ Open a note and write. The note stays a plain `.md` file.
 
 ## right now you can
 
-* write ink, erase strokes with eraser end, highlight, in multiple colors, three sizes
-* side button lassos; you can move the selection around and delete it
+* write ink, highlight, in multiple colors, size sliders
+* erase strokes, no eraser end needed, size slider
+* lasso with the side button or lasso mode; move the selection, delete it, copy/paste it across notes
 * undo/redo ink
 * zoom in, out
+* draw with the mouse if you want (Mouse ink: toggle)
+* lined and grid paper
+* ink shows in embeds and reading view
+* export a note's ink as svg
+* floating pen toolbar that shows up when your pen does
 
 ## Features
 
@@ -71,25 +77,15 @@ paste this in : ellimist-afk/handwriting > hit add plugin
 
 ## required
 
-desktop Obsidian 1.13.7 or newer. a pen. built and tested on a Microsoft
-Surface with a Surface Slim Pen 2. other Windows pens should work but
-nobody's tested them yet, so treat this as a beta and send reports.
-
-## Coming
-
-* mouse input
-* eraser size slider
-* copy/paste ink + across notes
-* image+ink multi selection
-* ink showing in embeds
-* export/print ink
-* lined and grid paper
+Obsidian 1.13.7 or newer. a pen, or the mouse ink mode. built and tested
+on a Microsoft Surface with a Surface Slim Pen 2 and two iPads with
+apple pencils. other pens should work but nobody's tested them yet, so
+treat this as a beta and send reports.
 
 ## Wishlist
 
 * audio alongside ink
 * handwriting to shapes
-* pen GUI
 * ruler+compass on screen
 * ocr/handwriting to text
 * searchable handwriting
@@ -109,4 +105,4 @@ Free and open source, `AGPL-3.0-only`. No CLA, no copyright assignment
 ## money
 
 Handwriting is free. if you want to chip in to development anyway:
-https://ko-fi.com/ellimistafk
+https://ko-fi.com/ellimist-afk

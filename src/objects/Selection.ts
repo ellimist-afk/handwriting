@@ -80,6 +80,16 @@ function polygonCrossesSegment(poly: readonly Point2[], a: Point2, b: Point2): b
 	return false;
 }
 
+/**
+ * A stroke needs a MAJORITY of its samples inside to be selected. The old
+ * rule was any-touch: one sample inside, or the lasso line merely crossing
+ * the stroke, took the whole thing - so circling a word while clipping the
+ * neighbour's descender grabbed the neighbour too (orion 2026-08-26,
+ * "keeps picking up other stuff"). Half is the honest threshold: what you
+ * circled comes, what you grazed stays.
+ */
+const LASSO_INSIDE_FRACTION = 0.5;
+
 export function strokeInLasso(
 	stroke: InkStroke,
 	poly: readonly Point2[],
@@ -88,14 +98,12 @@ export function strokeInLasso(
 	if (poly.length < 3) return false;
 	if (!bboxOverlaps(stroke.bbox, bounds)) return false;
 	const pts = stroke.points;
+	if (pts.length === 0) return false;
+	let inside = 0;
 	for (const p of pts) {
-		if (pointInPolygon(p.x, p.y, poly)) return true;
+		if (pointInPolygon(p.x, p.y, poly)) inside++;
 	}
-	// A long stroke can cross the lasso without any sample landing inside it.
-	for (let i = 1; i < pts.length; i++) {
-		if (polygonCrossesSegment(poly, pts[i - 1]!, pts[i]!)) return true;
-	}
-	return false;
+	return inside >= pts.length * LASSO_INSIDE_FRACTION && inside > 0;
 }
 
 export function rectInLasso(

@@ -117,3 +117,14 @@ describe("SelectionModel", () => {
 		expect(sel.isEmpty).toBe(true);
 	});
 });
+
+describe("selectExactly", () => {
+	it("replaces the whole selection with the given strokes", () => {
+		const m = new SelectionModel();
+		m.selectExactly(["a", "b"]);
+		expect(m.strokeIds.sort()).toEqual(["a", "b"]);
+		expect(m.boxIds).toEqual([]);
+		m.selectExactly(["c"]);
+		expect(m.strokeIds).toEqual(["c"]);
+	});
+});

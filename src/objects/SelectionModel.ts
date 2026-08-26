@@ -97,6 +97,16 @@ export class SelectionModel {
 		}
 	}
 
+	/**
+	 * Replace the selection with exactly these strokes (paste selects what
+	 * it pasted, so the user can see it and move it immediately).
+	 */
+	selectExactly(strokeIds: readonly string[]): void {
+		this.strokes = new Set(strokeIds);
+		this.boxes.clear();
+		this.images.clear();
+	}
+
 	/** World bounds of the whole selection, for the outline and the grab test. */
 	bounds(
 		allStrokes: readonly InkStroke[],

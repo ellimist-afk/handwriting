@@ -204,6 +204,15 @@
  * would take away. Dashed to read as "removes" at a glance, and it keeps the
  * pen cursor's double border so it stays visible on any theme background.
  */
+/* Lasso mode at the nib: a dashed ring, distinct from nib dot and eraser
+   outline, so the mode is visible before the tip commits. */
+.handwriting-pen-cursor.handwriting-pen-hover-lasso {
+	border: 1.5px dashed var(--text-accent);
+	background-color: transparent;
+	box-shadow: 0 0 0 1px var(--background-primary);
+	opacity: 0.9;
+}
+
 .handwriting-pen-cursor.handwriting-pen-hover-eraser {
 	border: 1.5px dashed var(--text-normal);
 	background-color: transparent;
@@ -225,6 +234,56 @@
 	opacity: 0.9;
 }
 
+/* ---- embed ink ---- */
+
+/* Read-only ink over rendered markdown (embeds, reading view). Never takes
+   a pointer: the rendered page is the editor's problem, this is a picture. */
+.handwriting-embed-ink {
+	position: absolute;
+	left: 0;
+	top: 0;
+	pointer-events: none;
+	max-width: none;
+}
+
+/* ---- paper ---- */
+
+/*
+ * Ruled backgrounds, chosen per device (body class), drawn on the editor
+ * scroller. background-attachment: local scrolls the ruling with the text -
+ * paper, and never a window decal. 28px pitch, the border color at 1px so it
+ * stays quiet under ink in both themes.
+ */
+body.handwriting-paper-lines .markdown-source-view .cm-scroller {
+	background-image: repeating-linear-gradient(
+		to bottom,
+		transparent,
+		transparent 27px,
+		var(--background-modifier-border) 27px,
+		var(--background-modifier-border) 28px
+	);
+	background-attachment: local;
+}
+
+body.handwriting-paper-grid .markdown-source-view .cm-scroller {
+	background-image:
+		repeating-linear-gradient(
+			to bottom,
+			transparent,
+			transparent 27px,
+			var(--background-modifier-border) 27px,
+			var(--background-modifier-border) 28px
+		),
+		repeating-linear-gradient(
+			to right,
+			transparent,
+			transparent 27px,
+			var(--background-modifier-border) 27px,
+			var(--background-modifier-border) 28px
+		);
+	background-attachment: local, local;
+}
+
 /* ---- mobile tool strip ---- */
 
 /*
@@ -239,6 +298,10 @@
 	right: 8px;
 	z-index: 12;
 	display: flex;
+	/* Phones: the row is wider than the screen wants; wrap instead of clip. */
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	max-width: calc(100% - 16px);
 	gap: 2px;
 	padding: 4px;
 	background: var(--background-secondary);
@@ -265,6 +328,80 @@
 .handwriting-mobile-tool.is-active {
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
+}
+
+/* Nothing to undo (or redo): the button says so instead of lying. */
+.handwriting-mobile-tool.is-disabled {
+	opacity: 0.35;
+}
+
+/* Slider pops: a vertical drop-down under its tool button (up = bigger,
+   vertical-lr + rtl; the -webkit-appearance fallback covers webkit builds
+   that predate vertical writing-mode on range inputs), with a live value
+   readout underneath - on glass without hover there is no other feedback.
+   Positioned per-show in refresh(), wrap-safe. */
+.handwriting-slider-pop {
+	display: none;
+	position: absolute;
+	top: 100%;
+	margin-top: 4px;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	padding: 8px 4px 6px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	opacity: 0.92;
+}
+
+.handwriting-slider-pop.is-showing {
+	display: flex;
+}
+
+.handwriting-eraser-slider {
+	width: 24px;
+	height: 110px;
+	writing-mode: vertical-lr;
+	direction: rtl;
+	-webkit-appearance: slider-vertical;
+	touch-action: manipulation;
+}
+
+.handwriting-slider-val {
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	color: var(--text-muted);
+}
+
+/* Collapsed: the strip yields to a single pill (PencilKit's move). Both
+   elements always exist; classes swap which one shows. */
+.handwriting-mobile-tools.is-collapsed {
+	display: none;
+}
+
+.handwriting-pen-pill {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	z-index: 12;
+	display: none;
+	width: 34px;
+	height: 34px;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 50%;
+	background: var(--background-secondary);
+	box-shadow: none;
+	color: var(--text-muted);
+	opacity: 0.92;
+	touch-action: manipulation;
+}
+
+.handwriting-pen-pill.is-showing {
+	display: flex;
 }
 
 /* ---- chrome ---- */

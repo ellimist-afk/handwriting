@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Plugin, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { App, MarkdownRenderChild, Modal, Notice, Plugin, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import { CameraState } from "./camera/coordinates";
 import { HANDWRITING_PAGE_VIEW_TYPE, HandwritingHost, HandwritingPageView } from "./view/HandwritingPageView";
 import {
@@ -22,6 +22,12 @@ import {
 	getEraserRadiusPx,
 	setEraserRadiusPx,
 	repaintAllInkOverlays,
+	overlayForPath,
+	refreshPenToolsAll,
+	getInlineLassoMode,
+	setInlineLassoMode,
+	setPersistEraserRadius,
+	setPersistInkSize,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
 import { attachFontZoomHost } from "./inline/EditorFontZoom";
@@ -48,6 +54,19 @@ import {
 	setInkColorHex,
 } from "./ink/InkColor";
 import { diagnosticsEnabled, setDiagnosticsEnabled } from "./diag/DiagSwitch";
+import { mouseInkEnabled, setMouseInk } from "./inline/MouseInk";
+import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
+import { inkToSvg } from "./ink/SvgExport";
+import { clipboardSize } from "./inline/InkClipboard";
+import { attachEmbedInk, embedInkRoot } from "./inline/EmbedInk";
+import {
+	PenToolsMode,
+	getPenToolsMode,
+	markPenSeen,
+	nextPenToolsMode,
+	normalizePenToolsMode,
+	setPenToolsMode,
+} from "./inline/PenToolsMode";
 import { showDiagnosticText } from "./diag/DiagnosticTextModal";
 import { newPageId } from "./model/PageData";
 import { PageIdIndex } from "./model/PageIdIndex";
@@ -83,6 +102,12 @@ interface HandwritingSettings {
 	pageOwners: Record<string, string>;
 	/** Eraser radius in screen px (v0.13.13): 8 fine, 14 medium, 28 bold. */
 	eraserRadiusPx: number;
+	/** Mouse-ink mode (v0.13.16): left mouse button draws like a pen tip. */
+	mouseInk: boolean;
+	/** Ruled paper background (v0.13.16): none, lines or grid. Per device. */
+	paperStyle: PaperStyle;
+	/** Pen tools strip (v0.13.16): auto (pen summons it), show, or hide. */
+	penTools: PenToolsMode;
 }
 
 const DEFAULT_SETTINGS: HandwritingSettings = {
@@ -93,6 +118,9 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	inkColors: { pen: PEN_COLORS[0]!.hex, highlighter: HIGHLIGHTER_COLORS[0]!.hex },
 	pageOwners: {},
 	eraserRadiusPx: DEFAULT_ERASER_RADIUS_PX,
+	mouseInk: false,
+	paperStyle: "none",
+	penTools: "auto",
 };
 
 /**
@@ -167,9 +195,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 
 		// One ribbon entry, for the standalone canvas. Inking on an ordinary
 		// note needs no entry point at all. You write on it.
-		this.addRibbonIcon("pen-tool", "New canvas page", () => {
-			runDetached(this.newPage(), "create a canvas page");
-		});
+		// No ribbon icon. The canvas is the older surface, and the most
+		// prominent button the plugin ships must not lead a first-time user
+		// away from the product (ink on ordinary notes). The view, the
+		// commands and the frontmatter routing all stay: existing canvas
+		// pages keep working, the palette still reaches it. The icon comes
+		// back if the canvas ever gets its own release.
 
 		// Inline ink on the ordinary Markdown editor (architecture review +
 		// OneNote-coordinates addendum). Pen-only capture; persistence follows
@@ -224,13 +255,39 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 
 		this.registerEditorExtension(inkOverlayExtension());
+
+		// Ink in rendered markdown: embeds and reading view (roadmap). Each
+		// section defers via a render child (the element is not in the
+		// document during processing); on load it finds the rendered root and
+		// the first one attaches the single ink layer. See EmbedInk.ts.
+		this.registerMarkdownPostProcessor((el, ctx) => {
+			const path = ctx.sourcePath;
+			if (!path || !path.endsWith(".md")) return;
+			const child = new MarkdownRenderChild(el);
+			child.onload = () => {
+				runDetached(
+					inlineInk.ensureLoaded(path).then(() => {
+						const strokes = inlineInk.strokes(path);
+						if (strokes.length === 0) return;
+						const root = embedInkRoot(el);
+						if (root) attachEmbedInk(root, path, strokes);
+					}),
+					"render ink into an embed"
+				);
+			};
+			ctx.addChild(child);
+		});
 		// The nib on ordinary notes: pen or highlighter. A property of the tip,
 		// not a mode. The eraser end and the barrel keep their hardware meanings.
 		this.addCommand({
 			id: "inline-tool-pen",
 			name: "Pen",
 			callback: () => {
+				// Picking a nib is also the exit from eraser and lasso modes:
+				// on the strip, Pen LOOKS like the way out, so it has to be.
 				setInlineTool("pen");
+				setInlineEraserMode(false);
+				setInlineLassoMode(false);
 				new Notice("Handwriting: pen");
 			},
 		});
@@ -238,6 +295,48 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// not have one (and remote-desktop input drops the flag even when they
 		// do), so the mode makes the tip erase. Toggle rather than a one-way
 		// switch: the same key gets you out.
+		// Mouse ink is a MODE, not a default: claiming the mouse costs text
+		// selection, so it stays off until someone without a pen asks for it.
+		this.addCommand({
+			id: "mouse-ink-toggle",
+			name: "Mouse ink: toggle",
+			callback: () => {
+				const on = !mouseInkEnabled();
+				setMouseInk(on);
+				this.settings.mouseInk = on;
+				runDetached(this.saveData(this.settings), "save the mouse ink setting");
+				// Turning mouse ink on IS declaring yourself a pen person: the
+				// strip appears without waiting for hardware that never comes.
+				if (on) {
+					markPenSeen();
+					refreshPenToolsAll();
+				}
+				new Notice(on ? "Handwriting: mouse draws (left button)" : "Handwriting: mouse is a mouse again");
+			},
+		});
+		this.addCommand({
+			id: "pen-tools-cycle",
+			name: "Pen tools: cycle (auto / show / hide)",
+			callback: () => {
+				const next = nextPenToolsMode(getPenToolsMode());
+				setPenToolsMode(next);
+				this.settings.penTools = next;
+				runDetached(this.saveData(this.settings), "save the pen tools mode");
+				refreshPenToolsAll();
+				new Notice(`Handwriting: pen tools ${next}`);
+			},
+		});
+		this.addCommand({
+			id: "paper-cycle",
+			name: "Paper: cycle (none / lines / grid)",
+			callback: () => {
+				const next = nextPaperStyle(this.settings.paperStyle);
+				this.settings.paperStyle = next;
+				this.applyPaper(next);
+				runDetached(this.saveData(this.settings), "save the paper style");
+				new Notice(`Handwriting: paper ${next}`);
+			},
+		});
 		this.addCommand({
 			id: "inline-tool-eraser",
 			name: "Eraser: toggle",
@@ -245,6 +344,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const on = !getInlineEraserMode();
 				setInlineEraserMode(on);
 				new Notice(on ? "Handwriting: eraser" : `Handwriting: ${getInlineTool()}`);
+			},
+		});
+		// Lasso as a mode: the barrel button was the only way in, and every
+		// apple pencil and every mouse lacks one. Exclusive with the eraser.
+		this.addCommand({
+			id: "inline-tool-lasso",
+			name: "Lasso: toggle",
+			callback: () => {
+				const on = !getInlineLassoMode();
+				setInlineLassoMode(on);
+				new Notice(on ? "Handwriting: lasso (tip selects)" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		this.addCommand({
@@ -324,15 +434,115 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// Delete all ink on the active note: explicit, and recoverable three
 		// ways. The confirm dialog in front, a .handwriting/trash/ copy made FIRST,
 		// and one Ctrl+Z (a single history entry) while the session lives.
+		// Export: the ink's first existence outside the plugin. Same geometry
+		// as the committed layer, written as an .svg BESIDE the note so vault
+		// search and sync treat it as an ordinary attachment.
 		this.addCommand({
-			id: "delete-all-ink",
-			name: "Delete all ink on this note",
+			id: "export-ink-svg",
+			name: "Export this note's ink as SVG",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md" || !inlineInk.hasInk(file.path)) {
 					return false;
 				}
-				if (!checking) this.confirmDeleteAllInk(file.path);
+				if (!checking) {
+					const svg = inkToSvg(inlineInk.strokes(file.path));
+					if (!svg) {
+						new Notice("Handwriting: no ink to export on this note.");
+						return true;
+					}
+					const out = normalizePath(file.path.replace(/\.md$/, "") + ".ink.svg");
+					runDetached(
+						this.app.vault.adapter.write(out, svg).then(() => {
+							new Notice(`Handwriting: exported ${out}`);
+						}),
+						"export ink as svg",
+						() => new Notice("Handwriting: the SVG export could not be written.")
+					);
+				}
+				return true;
+			},
+		});
+		// Copy/paste ink, across notes too. The clipboard is the session's,
+		// never the system's: note-space coordinates mean nothing to other
+		// applications (the SVG export is for leaving the vault).
+		this.addCommand({
+			id: "delete-selected-ink",
+			name: "Delete selected ink",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				const overlay = file ? overlayForPath(file.path) : null;
+				if (!overlay) return false;
+				if (!checking) {
+					const n = overlay.deleteSelectedInk();
+					if (n === 0) new Notice("Handwriting: lasso some ink first");
+				}
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "copy-selected-ink",
+			name: "Copy selected ink",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				const overlay = file ? overlayForPath(file.path) : null;
+				if (!overlay) return false;
+				if (!checking) {
+					const n = overlay.copySelectedInk();
+					new Notice(n > 0 ? `Handwriting: copied ${n} stroke(s)` : "Handwriting: lasso some ink first");
+				}
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "cut-selected-ink",
+			name: "Cut selected ink",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				const overlay = file ? overlayForPath(file.path) : null;
+				if (!overlay) return false;
+				if (!checking) {
+					const n = overlay.cutSelectedInk();
+					new Notice(n > 0 ? `Handwriting: cut ${n} stroke(s)` : "Handwriting: lasso some ink first");
+				}
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "paste-ink",
+			name: "Paste ink",
+			checkCallback: (checking) => {
+				// Listed whenever a note is open: a paste hidden by an empty
+				// clipboard reads as broken, and the empty case can just say so.
+				const file = this.app.workspace.getActiveFile();
+				const overlay = file ? overlayForPath(file.path) : null;
+				if (!overlay) return false;
+				if (!checking) {
+					if (clipboardSize() === 0) {
+						new Notice("Handwriting: the ink clipboard is empty. Copy selected ink first.");
+					} else {
+						const n = overlay.pasteInkHere();
+						new Notice(`Handwriting: pasted ${n} stroke(s)`);
+					}
+				}
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "delete-all-ink",
+			name: "Delete all ink on this note",
+			checkCallback: (checking) => {
+				// Listed on every note: a command hidden by a hasInk gate
+				// reads as "does not exist" to someone searching for it.
+				const file = this.app.workspace.getActiveFile();
+				if (!file || file.extension !== "md") return false;
+				if (!checking) {
+					if (!inlineInk.hasInk(file.path)) {
+						new Notice("Handwriting: no ink on this note.");
+					} else {
+						this.confirmDeleteAllInk(file.path);
+					}
+				}
 				return true;
 			},
 		});
@@ -352,6 +562,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			name: "Highlighter",
 			callback: () => {
 				setInlineTool("highlighter");
+				setInlineEraserMode(false);
+				setInlineLassoMode(false);
 				new Notice("Handwriting: highlighter");
 			},
 		});
@@ -935,6 +1147,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	}
 
 	onunload(): void {
+		this.applyPaper("none");
 		document.body.classList.remove("handwriting-active-page");
 		destroyProbeMarkers();
 		setHitProbeEnabled(false);
@@ -1124,6 +1337,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 
 	// ---- settings -----------------------------------------------------------
 
+	/** One ruled style at a time: clear both classes, then set the one asked for. */
+	private applyPaper(style: PaperStyle): void {
+		document.body.classList.remove("handwriting-paper-lines", "handwriting-paper-grid");
+		const cls = paperClass(style);
+		if (cls) document.body.classList.add(cls);
+	}
+
 	private async loadSettings(): Promise<void> {
 		const raw = (await this.loadData()) as Partial<HandwritingSettings> | null;
 		this.settings = {
@@ -1141,7 +1361,22 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			pageOwners:
 				raw?.pageOwners && typeof raw.pageOwners === "object" ? raw.pageOwners : {},
 			eraserRadiusPx: clampEraserRadius(raw?.eraserRadiusPx ?? DEFAULT_ERASER_RADIUS_PX),
+			mouseInk: raw?.mouseInk === true,
+			paperStyle: normalizePaperStyle(raw?.paperStyle),
+			penTools: normalizePenToolsMode(raw?.penTools),
 		};
+		setPenToolsMode(this.settings.penTools);
+		// The strip's eraser slider persists through here on release.
+		setPersistEraserRadius((px) => {
+			this.settings.eraserRadiusPx = px;
+			runDetached(this.saveData(this.settings), "save the eraser size");
+		});
+		setPersistInkSize((tool, mult) => {
+			this.settings.inkSizes[tool] = clampInkSize(mult);
+			runDetached(this.saveData(this.settings), "save the ink size");
+		});
+		setMouseInk(this.settings.mouseInk);
+		this.applyPaper(this.settings.paperStyle);
 		setInkSizeMult("pen", this.settings.inkSizes.pen);
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
 		setInkShaping(this.settings.inkShaping);

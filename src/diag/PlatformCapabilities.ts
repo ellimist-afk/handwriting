@@ -66,7 +66,6 @@ export interface HostCapabilities {
 export interface PlatformCapabilities {
 	pluginVersion: string;
 	apiVersion: string;
-	userAgent: string;
 	devicePixelRatio: number;
 	maxTouchPoints: number;
 	viewportWidth: number;
@@ -158,7 +157,6 @@ export function formatCapabilities(c: PlatformCapabilities): string {
 		"",
 		`devicePixelRatio: ${c.devicePixelRatio}   maxTouchPoints: ${c.maxTouchPoints}`,
 		`viewport: ${c.viewportWidth} x ${c.viewportHeight}`,
-		`userAgent: ${c.userAgent}`,
 		"==========================================",
 	].join("\n");
 }
@@ -179,7 +177,9 @@ export function readCapabilities(
 	return {
 		pluginVersion,
 		apiVersion: obsidianApiVersion || "(unknown)",
-		userAgent: navigator?.userAgent ?? "(unknown)",
+		// No navigator.userAgent: the directory review flags it as OS
+		// sniffing, and the host flags (Platform, passed in by the view)
+		// answer the same question honestly.
 		devicePixelRatio: window.devicePixelRatio || 1,
 		maxTouchPoints: navigator?.maxTouchPoints ?? 0,
 		viewportWidth: window.innerWidth,
