@@ -11,6 +11,8 @@ import { VelocitySample, flingStep, releaseVelocity } from "../input/Fling";
 import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
 import { isPenCompatMouseMove } from "./PenCursor";
 import { pinchEngaged, pinchRatio, pinchSpread } from "./PinchZoom";
+import { InkFeedArbiter } from "./InkFeed";
+import { stylusOnlyTouches } from "./StylusTouch";
 
 /**
  * Pen capture for the inline overlay.
@@ -469,6 +471,8 @@ export class InlinePenRouter {
 	// and how late did its first input-rate samples arrive?
 	private strokeDownAt = 0;
 	private firstRawTraced = false;
+	/** Raw-vs-move ink arbitration; see InkFeed.ts for the whole story. */
+	private inkFeed = new InkFeedArbiter();
 
 	// Acquisition context printed with every CLAIMED pen-down.
 	private lastTouchAt = Number.NEGATIVE_INFINITY;
@@ -542,6 +546,37 @@ export class InlinePenRouter {
 				if (this.activePenId === null && !stillInside) this.cb.onPenLeave();
 			}
 		});
+		// iOS port: on iPadOS the Pencil produces a SECOND event stream, the
+		// touch events Safari synthesizes for compatibility, and that stream
+		// is the one CodeMirror and the system read for text interaction.
+		// preventDefault on our pointer events never touches it, which is why
+		// the keyboard rose on every stroke and the selection wash painted
+		// over fresh ink on both test iPads. WebKit marks these touches
+		// `touchType: "stylus"`; eat any touch event made only of them, in
+		// the capture phase, before the editor sees it. Finger touches pass
+		// (scroll and caret placement by hand keep working), and on engines
+		// without the property nothing matches, so this is inert on the
+		// Surface. Registered non-passive explicitly: preventDefault is the
+		// entire point.
+		{
+			const eatStylus = (ev: Event) => {
+				const te = ev as TouchEvent;
+				if (!te.changedTouches || !stylusOnlyTouches(te.changedTouches)) return;
+				te.preventDefault();
+				te.stopPropagation();
+				tr(te.type, null, "stylus touch eaten (webkit text layer)");
+			};
+			for (const type of ["touchstart", "touchmove", "touchend"]) {
+				this.scrollEl.addEventListener(type, eatStylus, {
+					capture: true,
+					passive: false,
+				});
+				this.disposers.push(() =>
+					this.scrollEl.removeEventListener(type, eatStylus, { capture: true })
+				);
+			}
+		}
+
 		// Pen-sourced context menus on the note are never wanted: mid-stroke
 		// long-press, barrel press at contact (fires AFTER pointerup, so the old
 		// during-stroke check missed it and menus stacked), and barrel press
@@ -962,6 +997,10 @@ export class InlinePenRouter {
 		}
 		this.strokeDownAt = performance.now();
 		this.firstRawTraced = false;
+		// Ink feed floor: samples stamped at or before the down never ink
+		// (the down itself goes through onPenDown). Same clock as the
+		// coalesced samples', so the comparison is apples to apples.
+		this.inkFeed.strokeStart(e.timeStamp);
 		this.armOwnership();
 		// Pen signal: the standing guard (re-)arms and cancels any pending
 		// touch-window re-arm timer. A touch the assist was carrying is
@@ -1151,6 +1190,44 @@ export class InlinePenRouter {
 		e.preventDefault();
 		e.stopPropagation(); // no link-hover popovers under a moving nib
 		telemetry.bump("inline.penMove");
+		// iOS port: WebKit never fires pointerrawupdate, so while no pen raw
+		// has ever arrived this session the move stream carries the ink,
+		// expanded from its coalesced list (up to 4 samples per move on the
+		// iPad that proved this out; hardware report 2026-08-25). The first
+		// raw anywhere, hover included, retires this branch for the session,
+		// and on Chromium that has happened before any stroke exists. Same
+		// downstream contract as the raw path: onPenRaw feeds StrokeBuilder,
+		// the tools, the wet layer, all of it.
+		if (this.inkFeed.moveFeedsInk()) {
+			markRawPointer(e.clientX, e.clientY);
+			telemetry.bump("inline.moveFedInk");
+			const coalesced =
+				typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
+			const events = coalesced.length > 0 ? coalesced : [e];
+			const fed = this.inkFeed.feed(events.map((ce) => ce.timeStamp));
+			const samples: PenSample[] = [];
+			for (const i of fed) {
+				const ce = events[i];
+				if (ce !== undefined) samples.push(this.sampleFrom(ce));
+			}
+			if (diagnosticsEnabled()) {
+				// The label reports what the arbiter DECIDED, after the
+				// timestamp gate: the ipad trace of 2026-08-26 delivered every
+				// move twice, and the duplicates printed "INK-FED" while
+				// feeding nothing.
+				tr(
+					"pointermove",
+					e,
+					`coalesced=${events.length} ` +
+						(samples.length > 0
+							? `INK-FED ${samples.length} sample(s), no rawupdate this session`
+							: "fed nothing (all samples at or below the stroke's high-water mark)")
+				);
+			}
+			if (samples.length > 0) this.cb.onPenRaw(samples, e);
+			this.cb.onPenMove(e, events.length);
+			return;
+		}
 		// RC4: nothing here draws. `onPenMove` only feeds the move counter in
 		// StrokeMetrics (ink comes from pointerrawupdate below), so the
 		// coalesced-array allocation and the trace string exist purely to be
@@ -1169,6 +1246,9 @@ export class InlinePenRouter {
 
 	private pointerRawUpdate(e: PointerEvent): void {
 		if (e.pointerType !== "pen") return;
+		// Any pen raw, hover included, proves the channel exists for the
+		// session and keeps the move handler out of the ink business.
+		this.inkFeed.noteRawChannel();
 		if (this.activePenId === null) {
 			this.lastPenHoverAt = performance.now();
 			this.gate.penHoverSeen(performance.now());
@@ -1213,7 +1293,16 @@ export class InlinePenRouter {
 			}
 			tr("pointerrawupdate", e, `coalesced=${events.length}`);
 		}
-		this.cb.onPenRaw(events.map((ce) => this.sampleFrom(ce)), e);
+		// Through the arbiter like every ink delivery, so a raw flushing the
+		// samples a move already fed (session-first cold strike) drops its
+		// duplicates by timestamp. The normal Chromium stroke passes intact.
+		const fed = this.inkFeed.feed(events.map((ce) => ce.timeStamp));
+		const samples: PenSample[] = [];
+		for (const i of fed) {
+			const ce = events[i];
+			if (ce !== undefined) samples.push(this.sampleFrom(ce));
+		}
+		if (samples.length > 0) this.cb.onPenRaw(samples, e);
 	}
 
 	// ---- stroke end ---------------------------------------------------------
@@ -1270,6 +1359,7 @@ export class InlinePenRouter {
 			tr(e.type, e, "END VIA WINDOW BACKSTOP");
 		}
 		this.disarmEndBackstop();
+		this.inkFeed.strokeEnd();
 		this.gate.penStrokeEnded(performance.now());
 		// Standing guard: no release. Armed IS the resting state.
 		hideProbeMarkers();

@@ -957,7 +957,13 @@ class InkOverlayPlugin {
 		// this editor before freezing geometry, or Delete and undo go wherever
 		// focus happened to be before the pen landed.
 		focusClaimedPenEditor(this.view);
-		this.hidePenCursor();
+		// Hide the DOT only. The hover class stays on: it is what holds
+		// `cursor: none` over the scroller, and dropping it here handed every
+		// stroke to CodeMirror's I-beam - the reticle "flickered" because each
+		// pen-down swapped it for a text cursor and each pen-up swapped it
+		// back. The class comes off when the pen leaves (onPenLeave), not
+		// when it touches down.
+		if (this.penCursorEl) this.penCursorEl.setCssStyles({ display: "none" });
 		// The only layout reads on the whole stroke happen here, once. From
 		// here the frame is frozen until pen-up.
 		this.frame.end();

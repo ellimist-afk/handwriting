@@ -17,7 +17,7 @@ function toScreenY(cam: CameraState, y: number): number {
 }
 
 /** Shoelace. Sign tells us which way the outline is wound. */
-function signedArea(poly: ReadonlyArray<readonly [number, number]>): number {
+export function signedArea(poly: ReadonlyArray<readonly [number, number]>): number {
 	let sum = 0;
 	for (let i = 0; i < poly.length; i++) {
 		const a = poly[i]!;
@@ -61,7 +61,6 @@ export function fillRibbon(
 	// only add. Everything still goes into one path and one fill, which is what
 	// keeps the antialiased edge single-pass.
 	ctx.beginPath();
-	let anticlockwise = false;
 	for (let i = 0; i < n - 1; i++) {
 		const quad: Array<[number, number]> = [
 			[toScreenX(cam, left[i]!.x), toScreenY(cam, left[i]!.y)],
@@ -69,12 +68,17 @@ export function fillRibbon(
 			[toScreenX(cam, right[i + 1]!.x), toScreenY(cam, right[i + 1]!.y)],
 			[toScreenX(cam, right[i]!.x), toScreenY(cam, right[i]!.y)],
 		];
-		// `arc(..., anticlockwise=false)` traces a positively-signed loop, so a
-		// disc only ADDS to a negatively-signed ribbon when it is drawn
-		// anticlockwise. Getting this backwards subtracts the caps and joints
-		// instead of filling them: invisible on a hairline pen, and a bite out
-		// of every stroke end at highlighter width.
-		if (i === 0) anticlockwise = signedArea(quad) < 0;
+		// Every quad is normalised to NEGATIVE winding by construction. The
+		// old code guessed one winding for the whole stroke from quad 0's
+		// sign, and the ipad showed why that guess goes wrong: a stationary
+		// pen repeats coordinates (webkit delivers moves for a nib that is
+		// not travelling), quad 0 collapses to zero area, and its sign is
+		// numeric noise. Guessed wrong, every disc below subtracts instead of
+		// filling, and a tight loop has a joint disc at nearly every point at
+		// one-sample-per-frame density, so the whole stroke was eaten. Each
+		// frame re-flattens and the guess could flip back, which is the
+		// "disappears, then repairs itself" both ipad testers reported.
+		if (signedArea(quad) > 0) quad.reverse();
 		ctx.moveTo(quad[0]![0], quad[0]![1]);
 		for (let k = 1; k < 4; k++) ctx.lineTo(quad[k]![0], quad[k]![1]);
 		ctx.closePath();
@@ -82,13 +86,15 @@ export function fillRibbon(
 
 	// Discs must wind the same way as the quads, or they subtract instead of
 	// filling. Round caps at both ends; joints only where the path bends hard
-	// enough for the sides to pinch.
+	// enough for the sides to pinch. `arc(..., anticlockwise=true)` traces a
+	// negatively-signed loop, matching the quads' enforced winding, so a disc
+	// can only add.
 	const disc = (p: RibbonPt) => {
 		const r = Math.max(0.25, p.hw * cam.zoom);
 		const sx = toScreenX(cam, p.x);
 		const sy = toScreenY(cam, p.y);
 		ctx.moveTo(sx + r, sy);
-		ctx.arc(sx, sy, r, 0, Math.PI * 2, anticlockwise);
+		ctx.arc(sx, sy, r, 0, Math.PI * 2, true);
 	};
 	disc(pts[0]!);
 	disc(pts[n - 1]!);

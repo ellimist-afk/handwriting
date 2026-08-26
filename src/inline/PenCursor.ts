@@ -1,10 +1,15 @@
 /**
- * A reticle has to be findable before it can be useful. A pen nib is about
- * 2px, and a 6px floor put a 4px speck under the tip where the hand hides it,
- * which read as "the cursor does not work". 12 is small enough to aim with
- * and big enough to see.
+ * A reticle has to be findable before it can be useful, and small enough to
+ * aim with. A pen nib is about 2px. A 6px floor put a 4px speck under the tip
+ * where the hand hides it, which read as "the cursor does not work"; 12 was
+ * the correction and overshot, reading as a blob on Orion.
+ *
+ * The floor is not the whole footprint: styles.css rings the reticle with a
+ * 1.5px shadow OUTSIDE the border box, so what lands on screen is this plus 3.
+ * At 6 that is 9 painted. The old 6 that read as a speck was 6 painted,
+ * before the ring existed.
  */
-export const MIN_CURSOR_VISUAL_PX = 12;
+export const MIN_CURSOR_VISUAL_PX = 6;
 const PEN_COMPAT_MOUSE_WINDOW_MS = 120;
 const PEN_COMPAT_MOUSE_DISTANCE_PX = 4;
 export const PEN_HOVER_CLASS = "handwriting-pen-hover";

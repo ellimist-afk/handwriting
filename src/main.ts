@@ -162,7 +162,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.registerView(HANDWRITING_PEN_LAB_VIEW_TYPE, (leaf) => new PenLabView(leaf));
 		this.registerView(
 			HANDWRITING_DIAGNOSTICS_VIEW_TYPE,
-			(leaf) => new PenDiagnosticsView(leaf)
+			(leaf) => new PenDiagnosticsView(leaf, this.manifest.version)
 		);
 
 		// One ribbon entry, for the standalone canvas. Inking on an ordinary
@@ -470,6 +470,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				clearScrollProbe();
 				new Notice("Handwriting: scroll trace cleared");
+			},
+		});
+
+		// The probe view is the whole point of this build, and a registered view
+		// with nothing to open it is unreachable: there is no UI in Obsidian for
+		// opening a view type by name. A remote tester needs one palette entry.
+		this.addCommand({
+			id: "open-pen-diagnostics",
+			name: "Diagnostics: open pen probe",
+			callback: () => {
+				runDetached(this.openPenDiagnostics(), "open the pen probe");
 			},
 		});
 
@@ -1019,6 +1030,15 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		await leaf.setViewState({
 			type: HANDWRITING_PAGE_VIEW_TYPE,
 			state: { file: file.path },
+			active: true,
+		});
+	}
+
+	/** Open the pen probe in a new tab. Its own leaf, so the note stays put. */
+	private async openPenDiagnostics(): Promise<void> {
+		const leaf = this.app.workspace.getLeaf(true);
+		await leaf.setViewState({
+			type: HANDWRITING_DIAGNOSTICS_VIEW_TYPE,
 			active: true,
 		});
 	}

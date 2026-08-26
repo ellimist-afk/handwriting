@@ -190,9 +190,12 @@
 .handwriting-pen-cursor {
 	box-sizing: border-box;
 	/* Page-coloured ring separates the dot from whatever is under it, then a
-	   dark ring outside that so the whole thing reads on any background. */
+	   dark ring outside that so the whole thing reads on any background. The
+	   outer ring is the only part that adds to the footprint (the border is
+	   inside the border box), so it is kept at 1px: at 1.5 it was carrying a
+	   third of the reticle's apparent size. */
 	border: 1.5px solid var(--background-primary);
-	box-shadow: 0 0 0 1.5px var(--text-normal);
+	box-shadow: 0 0 0 1px var(--text-normal);
 }
 
 /*
@@ -350,7 +353,7 @@
 	font-family: var(--font-monospace);
 	font-size: 11px;
 	line-height: 1.5;
-	color: var(--text-muted);
+	color: var(--text-normal);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 8px;
 	padding: 6px 10px;
@@ -362,13 +365,37 @@
 	font-family: var(--font-monospace);
 	font-size: 11px;
 	line-height: 1.45;
+	color: var(--text-normal);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 8px;
 	padding: 6px 10px;
 }
 
+/*
+ * Mobile readability. 11px monospace is a desktop density and iOS renders
+ * it lighter again; the tester on an iPad couldn't read the log. Bigger,
+ * and antialiased rather than subpixel-smoothed, which is what stops
+ * WebKit thinning the glyph strokes.
+ */
+.is-mobile .handwriting-diag-stats,
+.is-mobile .handwriting-diag-log {
+	font-size: 13px;
+	line-height: 1.55;
+	-webkit-font-smoothing: antialiased;
+}
+
+.is-mobile .handwriting-diag-help {
+	font-size: 14px;
+	color: var(--text-normal);
+}
+
 .handwriting-diag-row {
 	white-space: pre;
+}
+
+.handwriting-diag-mark {
+	color: var(--text-accent);
+	font-weight: var(--font-bold);
 }
 
 .handwriting-diag-note {
@@ -381,6 +408,18 @@
 	min-height: min(60vh, 32rem);
 	resize: vertical;
 	font-family: var(--font-monospace);
+	color: var(--text-normal);
+}
+
+/*
+ * 16px is the floor that keeps iOS from zooming the whole page in when the
+ * textarea takes focus, and the report is meant to be read here as well as
+ * copied out.
+ */
+.is-mobile .handwriting-diagnostic-text {
+	font-size: 16px;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
 }
 
 .handwriting-diagnostic-text-controls {
