@@ -62,6 +62,32 @@ export interface InlinePenCallbacks {
 	/** rAF-rate move, for metrics only (`coalescedCount`). */
 	onPenMove(ev: PointerEvent, coalescedCount: number): void;
 	onPenUp(ev: PointerEvent): void;
+	/**
+	 * Should a contact OUTSIDE the scroller (the linked-mentions band renders
+	 * outside it, in the same view) be claimed as a Handwriting gesture? The
+	 * overlay answers yes only for eraser intent - see bandEraserIntent.
+	 */
+	claimBandContact?(ev: PointerEvent): boolean;
+}
+
+/**
+ * Pure: should a contact landing on the linked-mentions band claim as an
+ * eraser? Eraser end and eraser mode say yes for the pen; the mouse only
+ * when it is a pen (mouse ink) in eraser mode with the left button down.
+ * Tip and barrel stay native: tapping a backlink row with the pen must
+ * keep clicking.
+ */
+export function bandEraserIntent(
+	pointerType: string,
+	buttons: number,
+	button: number,
+	eraserMode: boolean,
+	mouseInk: boolean
+): boolean {
+	const eraserEnd = (buttons & 32) !== 0 || button === 5;
+	if (pointerType === "pen") return eraserEnd || eraserMode;
+	if (pointerType === "mouse") return eraserMode && mouseInk && (buttons & 1) !== 0;
+	return false;
 }
 
 // ---- lifecycle trace -------------------------------------------------------
@@ -548,6 +574,37 @@ export class InlinePenRouter {
 				if (this.activePenId === null && !stillInside) this.cb.onPenLeave();
 			}
 		});
+		// The linked-mentions band (`.embedded-backlinks`) renders in the SAME
+		// view but OUTSIDE the scroller, so a pen landing there was never
+		// claimed: the contact stayed native and the browser synthesized a
+		// click - erasing near the band pressed its buttons (orion
+		// 2026-08-26). One capture listener on the view root claims
+		// eraser-intent contacts whose target sits inside the band; after the
+		// claim, setPointerCapture retargets the rest of the gesture to the
+		// scroller and every existing listener takes over. Tip and barrel
+		// contacts on the band stay native so backlink rows keep clicking.
+		const bandRoot =
+			typeof scrollEl.closest === "function"
+				? scrollEl.closest(".markdown-source-view")
+				: null;
+		if (bandRoot && bandRoot !== scrollEl) {
+			const h = (ev: Event) => {
+				const pe = ev as PointerEvent;
+				const t = pe.target as Element | null;
+				// Duck-typed, not instanceof: a popout window's elements are
+				// another realm's and instanceof would refuse them.
+				if (!t || typeof t.closest !== "function") return;
+				if (this.scrollEl.contains(t)) return; // scroller listeners own it
+				if (!t.closest(".embedded-backlinks")) return;
+				if (!(this.cb.claimBandContact?.(pe) ?? false)) return;
+				this.pointerDown(pe);
+			};
+			bandRoot.addEventListener("pointerdown", h, { capture: true });
+			this.disposers.push(() =>
+				bandRoot.removeEventListener("pointerdown", h, { capture: true })
+			);
+		}
+
 		// iOS port: on iPadOS the Pencil produces a SECOND event stream, the
 		// touch events Safari synthesizes for compatibility, and that stream
 		// is the one CodeMirror and the system read for text interaction.
@@ -662,7 +719,7 @@ export class InlinePenRouter {
 		};
 		this.ownershipFn = fn;
 		for (const type of OWNED_NATIVE_EVENTS) {
-			window.addEventListener(type, fn, { capture: true });
+			this.winRef.addEventListener(type, fn, { capture: true });
 		}
 	}
 
@@ -680,7 +737,7 @@ export class InlinePenRouter {
 		if (!this.ownershipFn) return;
 		if (this.activePenId !== null) return; // a new stroke re-claimed meanwhile
 		for (const type of OWNED_NATIVE_EVENTS) {
-			window.removeEventListener(type, this.ownershipFn, { capture: true });
+			this.winRef.removeEventListener(type, this.ownershipFn, { capture: true });
 		}
 		this.ownershipFn = null;
 	}
@@ -883,14 +940,14 @@ export class InlinePenRouter {
 			// Done when the physics say so, or the scroller is clamped at an
 			// edge and the glide has nowhere left to go.
 			if (s.done || (!moved && Math.abs(s.dx) + Math.abs(s.dy) > 0.5)) return;
-			this.flingRaf = window.requestAnimationFrame(tick);
+			this.flingRaf = this.winRef.requestAnimationFrame(tick);
 		};
-		this.flingRaf = window.requestAnimationFrame(tick);
+		this.flingRaf = this.winRef.requestAnimationFrame(tick);
 	}
 
 	private cancelFling(): void {
 		if (this.flingRaf !== 0) {
-			window.cancelAnimationFrame(this.flingRaf);
+			this.winRef.cancelAnimationFrame(this.flingRaf);
 			this.flingRaf = 0;
 		}
 	}
@@ -909,6 +966,16 @@ export class InlinePenRouter {
 	 * native so the context menu and paste-click keep working; everything
 	 * downstream of the claim is the ordinary pen path.
 	 */
+	/**
+	 * The window this view's editor actually lives in. A popout is another
+	 * BrowserWindow: its events never reach the main window's listeners, so
+	 * the ownership guards and the end backstop must arm where the pen is.
+	 * On the main window this is `window` itself - identical behavior.
+	 */
+	private get winRef(): Window {
+		return this.scrollEl.ownerDocument?.defaultView ?? window;
+	}
+
 	private mouseActsAsPen(e: PointerEvent): boolean {
 		return e.pointerType === "mouse" && mouseInkEnabled();
 	}
@@ -1419,14 +1486,14 @@ export class InlinePenRouter {
 			this.endPenStroke(pe, true);
 		};
 		this.winEndFn = fn;
-		window.addEventListener("pointerup", fn, { capture: true });
-		window.addEventListener("pointercancel", fn, { capture: true });
+		this.winRef.addEventListener("pointerup", fn, { capture: true });
+		this.winRef.addEventListener("pointercancel", fn, { capture: true });
 	}
 
 	private disarmEndBackstop(): void {
 		if (!this.winEndFn) return;
-		window.removeEventListener("pointerup", this.winEndFn, { capture: true });
-		window.removeEventListener("pointercancel", this.winEndFn, { capture: true });
+		this.winRef.removeEventListener("pointerup", this.winEndFn, { capture: true });
+		this.winRef.removeEventListener("pointercancel", this.winEndFn, { capture: true });
 		this.winEndFn = null;
 	}
 }

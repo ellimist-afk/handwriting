@@ -407,11 +407,25 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
  * renders identically on every engine ever shipped, and pointer hit-testing
  * follows the transform natively. Right end points UP, so up = bigger.
  */
-.handwriting-eraser-slider {
+.handwriting-slider-slot {
+	position: relative;
+	width: 28px;
+	height: 104px;
+}
+
+.handwriting-slider-pop .handwriting-eraser-slider {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	/* Two classes on purpose: app.css styles `input[type='range']`
+	   (0,1,1), which beats a single class - its width: 100px and 4px
+	   track height silently won here, and the rotated slider spilled
+	   12px past both ends of the old margin-derived slot (the thumb
+	   crossed the pop's border at max). The slot div is the layout
+	   truth; the input just centers inside it. */
 	width: 96px;
-	height: 24px;
-	transform: rotate(-90deg);
-	margin: 36px -36px;
+	margin: 0;
+	transform: translate(-50%, -50%) rotate(-90deg);
 	touch-action: manipulation;
 }
 

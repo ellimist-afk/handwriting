@@ -44,6 +44,9 @@ import { focusClaimedPenEditor } from "./InlineFocus";
 import { PEN_HOVER_CLASS, penCursorLayout } from "./PenCursor";
 import { normalizeInlinePenPressure } from "./PenPressure";
 import { observeStrokeMax, strokeGain } from "../ink/PressureGain";
+import { embedInkLayerCount } from "./EmbedInk";
+
+const sessionStartMs = Date.now();
 import { readBaseFontPx, writeBaseFontPx } from "./EditorFontZoom";
 import { pinchFontSize } from "./PinchZoom";
 import { ERASER_CURSOR_CLASS } from "./PenCursor";
@@ -56,7 +59,8 @@ import {
 	recordProbe,
 	setProbeGeometry,
 } from "./PenProbe";
-import { InlinePenRouter } from "./InlinePenRouter";
+import { InlinePenRouter, bandEraserIntent } from "./InlinePenRouter";
+import { mouseInkEnabled } from "./MouseInk";
 import { describeEl, setHitProbeContext } from "./PenHitProbe";
 import {
 	Extent,
@@ -300,9 +304,15 @@ export function copyInlineInkMetrics(): string {
 		silentLifts += p.routerCounters().silentLifts;
 		palms += p.routerCounters().palms;
 	}
+	// Session health: the accumulation suspects for slow-after-hours
+	// reports. If draw times in the summaries below stay flat but strokes
+	// FEEL late, the lag is upstream of the canvas (input or compositor).
+	const cache = inlineInk.cacheStats();
 	const lines = [
 		`Handwriting ink metrics: ${metrics.summaries.length} stroke(s)`,
 		`down/up/backstop/silent: ${downs}/${ups}/${backstops}/${silentLifts}  palms blocked: ${palms}`,
+		`session: up ${((Date.now() - sessionStartMs) / 60000).toFixed(0)} min  overlays ${instances.size}  embed layers ${embedInkLayerCount()}`,
+		`ink cache: ${cache.notes} note(s), ${cache.strokes} strokes, ${cache.points} points`,
 		"",
 		...metrics.summaries.map((s) => StrokeMetrics.summaryText(s)),
 	];
@@ -538,13 +548,22 @@ class InkOverlayPlugin {
 		return info?.file?.path ?? null;
 	}
 
+	/**
+	 * The window this editor actually lives in. A popout editor's frames,
+	 * devicePixelRatio, and media queries belong to ITS window; the main
+	 * window's values are wrong there (mixed-DPI monitors, page zoom).
+	 */
+	private get winRef(): Window {
+		return this.view.dom.ownerDocument.defaultView ?? window;
+	}
+
 	mount(): void {
 		if (this.container || !enabled) return;
 		// Not a file-backed markdown editor (e.g. a bare CM instance): stay inert.
 		if (this.view.state.field(editorInfoField, false) === undefined) return;
 
 		const host = this.view.dom;
-		if (getComputedStyle(host).position === "static") {
+		if (this.winRef.getComputedStyle(host).position === "static") {
 			host.setCssStyles({ position: "relative" });
 			this.hostPositionPatched = true;
 		}
@@ -649,6 +668,14 @@ class InkOverlayPlugin {
 				onPenRaw: (samples, ev) => this.penRaw(samples, ev),
 				onPenMove: (_ev, count) => metrics.recordEvent("move", count, 0, false),
 				onPenUp: () => this.penUp(),
+			claimBandContact: (ev) =>
+				bandEraserIntent(
+					ev.pointerType,
+					ev.buttons,
+					ev.button,
+					inlineEraserMode,
+					mouseInkEnabled()
+				),
 			},
 			() => this.cssScale
 		);
@@ -734,8 +761,8 @@ class InkOverlayPlugin {
 	 */
 	private watchResolution(): void {
 		this.unwatchResolution();
-		const dpr = window.devicePixelRatio || 1;
-		const mq = window.matchMedia(`(resolution: ${dpr}dppx)`);
+		const dpr = this.winRef.devicePixelRatio || 1;
+		const mq = this.winRef.matchMedia(`(resolution: ${dpr}dppx)`);
 		const fn = () => {
 			this.handleResize();
 			this.watchResolution();
@@ -1016,10 +1043,10 @@ class InkOverlayPlugin {
 	zoomReport(): string {
 		const rect = this.container?.getBoundingClientRect();
 		const content = this.view.contentDOM.getBoundingClientRect();
-		const cs = getComputedStyle(this.view.contentDOM);
+		const cs = this.winRef.getComputedStyle(this.view.contentDOM);
 		return [
 			`file: ${this.filePath() ?? "(none)"}`,
-			`devicePixelRatio: ${window.devicePixelRatio}`,
+			`devicePixelRatio: ${this.winRef.devicePixelRatio}`,
 			`measured scale: ${this.scale}  (cssScale ${this.cssScale} × fontZoom ${this.fontZoom}; CM scaleX ${this.view.scaleX}, scaleY ${this.view.scaleY})`,
 			`font: current ${this.lastFontStr || "(unread)"} reference ${this.refFontPx}px  camera zoom ${this.camera.zoom}`,
 			`overlay rect: ${rect?.width.toFixed(2)} x ${rect?.height.toFixed(2)} (visual px)`,
@@ -1062,7 +1089,7 @@ class InkOverlayPlugin {
 		if (!this.container) return;
 		const rect = this.container.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) return;
-		this.dpr = window.devicePixelRatio || 1;
+		this.dpr = this.winRef.devicePixelRatio || 1;
 		// The canvases live INSIDE whatever is scaled, so their coordinate
 		// space is layout px, the same unit ink is stored in. Size them from
 		// the untransformed box and give the backing store the extra device
@@ -1076,7 +1103,7 @@ class InkOverlayPlugin {
 		// Quick-font-size zoom (Ctrl+scroll / touchpad pinch) is a reflow:
 		// dpr and the transform scale both stay put while the text grows.
 		// The current/mount-time font ratio is the missing zoom factor.
-		this.contentStyle ??= getComputedStyle(this.view.contentDOM);
+		this.contentStyle ??= this.winRef.getComputedStyle(this.view.contentDOM);
 		this.lastFontStr = this.contentStyle.fontSize;
 		const fontPx = Number.parseFloat(this.lastFontStr);
 		if (this.refFontPx <= 0 && Number.isFinite(fontPx) && fontPx > 0) {
@@ -1323,7 +1350,7 @@ class InkOverlayPlugin {
 	private schedulePresentProbe(newestTs: number): void {
 		if (this.presentProbePending) return;
 		this.presentProbePending = true;
-		window.requestAnimationFrame(() => {
+		this.winRef.requestAnimationFrame(() => {
 			this.presentProbePending = false;
 			metrics.recordPresent(performance.now() - newestTs);
 		});
@@ -1680,7 +1707,7 @@ class InkOverlayPlugin {
 		const cx = this.lastSyncRectLeft + noteToVisual(sample.x + sample.w / 2, this.cssScale);
 		const cy = this.lastSyncRectTop + noteToVisual(sample.y + sample.h / 2, this.cssScale);
 		try {
-			return describeEl(document.elementFromPoint(cx, cy));
+			return describeEl(this.view.dom.ownerDocument.elementFromPoint(cx, cy));
 		} catch {
 			return "(err)";
 		}
@@ -2201,7 +2228,7 @@ class InkOverlayPlugin {
 		if (this.repaintQueued || !this.container) return;
 		this.repaintQueued = true;
 		scrollProbeSchedule(via);
-		window.requestAnimationFrame(() => {
+		this.winRef.requestAnimationFrame(() => {
 			this.repaintQueued = false;
 			this.repaint();
 		});
@@ -2214,7 +2241,7 @@ class InkOverlayPlugin {
 
 	private repaint(): void {
 		if (!this.container) return;
-		if ((window.devicePixelRatio || 1) !== this.dpr) {
+		if ((this.winRef.devicePixelRatio || 1) !== this.dpr) {
 			this.handleResize();
 			return;
 		}
@@ -2352,7 +2379,7 @@ class InkOverlayPlugin {
 		if (!this.spacer && granted.x === 0 && granted.y === 0) return;
 		const scroller = this.view.scrollDOM;
 		if (!this.spacer) {
-			if (getComputedStyle(scroller).position === "static") {
+			if (this.winRef.getComputedStyle(scroller).position === "static") {
 				scroller.setCssStyles({ position: "relative" });
 				this.scrollPositionPatched = true;
 			}
@@ -2403,7 +2430,7 @@ class InkOverlayPlugin {
 	private ensureScrollableAxis(scroller: HTMLElement): void {
 		if (this.axisChecked || this.axisGuard.patched) return;
 		this.axisChecked = true;
-		const overflowX = getComputedStyle(scroller).overflowX;
+		const overflowX = this.winRef.getComputedStyle(scroller).overflowX;
 		this.axisGuard.assert(scroller, overflowX);
 		if (this.axisGuard.patched) {
 			scrollProbeExtent(`axis guard: overflow-x "${overflowX}" -> auto`);
@@ -2419,7 +2446,7 @@ class InkOverlayPlugin {
 			required,
 			scrollWidth: scroller.scrollWidth,
 			clientWidth: scroller.clientWidth,
-			overflowX: getComputedStyle(scroller).overflowX,
+			overflowX: this.winRef.getComputedStyle(scroller).overflowX,
 			patched: this.axisGuard.patched,
 		};
 	}
@@ -2436,7 +2463,7 @@ class InkOverlayPlugin {
 			`granted extent: ${granted.x}, ${granted.y}`,
 			`spacer: ${this.spacer ? `present at ${this.spacerLeft}, ${this.spacerTop}` : "none"}  parent: ${this.spacer?.parentElement?.className ?? "-"}`,
 			`scroller: client ${scroller.clientWidth} x ${scroller.clientHeight}  scroll ${scroller.scrollWidth} x ${scroller.scrollHeight}  at ${scroller.scrollLeft}, ${scroller.scrollTop}`,
-			`computed overflow-x: ${getComputedStyle(scroller).overflowX}  overflow-y: ${getComputedStyle(scroller).overflowY}  position: ${getComputedStyle(scroller).position}`,
+			`computed overflow-x: ${this.winRef.getComputedStyle(scroller).overflowX}  overflow-y: ${this.winRef.getComputedStyle(scroller).overflowY}  position: ${this.winRef.getComputedStyle(scroller).position}`,
 			`axis asserted by Handwriting: ${this.axisGuard.patched}`,
 			reach
 				? `last reconcile: required ${reach.required}, scrollWidth ${reach.scrollWidth}, client ${reach.clientWidth}: ` +

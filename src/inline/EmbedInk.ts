@@ -77,6 +77,11 @@ export function embedInkMarker(path: string, rev: number): string {
 	return `${path}@${rev}`;
 }
 
+/** Diagnostics: how many rendered roots the registry currently holds. */
+export function embedInkLayerCount(): number {
+	return layers.size;
+}
+
 /** Where repaints read fresh strokes from. Wired once at plugin load. */
 export function initEmbedInkRefresh(provider: (path: string) => readonly InkStroke[]): void {
 	strokesFor = provider;
@@ -127,7 +132,8 @@ function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): 
 		canvas?.remove();
 		return;
 	}
-	if (getComputedStyle(root).position === "static") {
+	const view = root.ownerDocument.defaultView ?? window;
+	if (view.getComputedStyle(root).position === "static") {
 		root.setCssStyles({ position: "relative" });
 	}
 	if (!canvas) {

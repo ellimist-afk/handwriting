@@ -352,6 +352,17 @@ export class InlineInkStore {
 		}
 	}
 
+	/** Diagnostics: what the session cache holds (it never evicts). */
+	cacheStats(): { notes: number; strokes: number; points: number } {
+		let strokes = 0;
+		let points = 0;
+		for (const rec of this.byPath.values()) {
+			strokes += rec.strokes.length;
+			for (const s of rec.strokes) points += s.points.length;
+		}
+		return { notes: this.byPath.size, strokes, points };
+	}
+
 	/** Persist the current state of a note (gesture end, or an applied op). */
 	save(path: string): void {
 		this.persist(path, this.record(path));

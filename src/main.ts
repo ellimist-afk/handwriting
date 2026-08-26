@@ -294,6 +294,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		initEmbedInkRefresh((p) => inlineInk.strokes(p));
 		this.register(onInkChanged((p) => embedInkChanged(p)));
 		this.addSettingTab(new HandwritingSettingTab(this.app, this));
+		// A popout is born without the paper class; stamp it as it opens.
+		this.registerEvent(
+			this.app.workspace.on("window-open", (_ww, win) => {
+				this.applyPaperTo(win.document, this.settings.paperStyle);
+			})
+		);
 		// The nib on ordinary notes: pen or highlighter. A property of the tip,
 		// not a mode. The eraser end and the barrel keep their hardware meanings.
 		this.addCommand({
@@ -1356,9 +1362,20 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 
 	/** One ruled style at a time: clear both classes, then set the one asked for. */
 	applyPaper(style: PaperStyle): void {
-		document.body.classList.remove("handwriting-paper-lines", "handwriting-paper-grid");
+		// Every window, not just the main one: popout editors carry their
+		// own document, and paper that stops at the popout border reads as
+		// broken. window-open (registered at load) stamps late arrivals.
+		const docs = new Set<Document>([document]);
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			docs.add(leaf.view.containerEl.ownerDocument);
+		});
+		for (const doc of docs) this.applyPaperTo(doc, style);
+	}
+
+	private applyPaperTo(doc: Document, style: PaperStyle): void {
+		doc.body.classList.remove("handwriting-paper-lines", "handwriting-paper-grid");
 		const cls = paperClass(style);
-		if (cls) document.body.classList.add(cls);
+		if (cls) doc.body.classList.add(cls);
 	}
 
 	private async loadSettings(): Promise<void> {

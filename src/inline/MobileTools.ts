@@ -222,7 +222,10 @@ export class MobileTools {
 			onValue: (v: number, commit: boolean) => void
 		): { pop: HTMLElement; input: HTMLInputElement; val: HTMLElement } => {
 			const pop = this.el.createDiv({ cls: "handwriting-slider-pop" });
-			const input = pop.createEl("input", {
+			// The slot owns the layout (28x104); the input centers inside it,
+			// so whatever app.css does to range inputs cannot move the pop.
+			const slot = pop.createDiv({ cls: "handwriting-slider-slot" });
+			const input = slot.createEl("input", {
 				cls: "handwriting-eraser-slider",
 				attr: { type: "range", min, max, step, "aria-label": aria },
 			});
@@ -270,7 +273,8 @@ export class MobileTools {
 	refresh(): void {
 		if (this.refreshQueued) return;
 		this.refreshQueued = true;
-		requestAnimationFrame(() => {
+		// The strip's own window, so a popout editor ticks on its own frames.
+		(this.el.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
 			this.refreshQueued = false;
 			this.refreshNow();
 		});
