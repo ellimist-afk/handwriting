@@ -14,7 +14,7 @@ import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
 import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
 import { clampInkSize } from "../ink/InkSize";
-import { getInkColorHex } from "../ink/InkColor";
+import { colorsFor, getInkColorHex } from "../ink/InkColor";
 import { Point2 } from "../ink/Smoothing";
 import { BBox, InkStroke, InkTool, newStrokeId } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
@@ -43,6 +43,7 @@ import { InlineInkStore } from "./InlineInkStore";
 import { focusClaimedPenEditor } from "./InlineFocus";
 import { PEN_HOVER_CLASS, penCursorLayout } from "./PenCursor";
 import { normalizeInlinePenPressure } from "./PenPressure";
+import { observeStrokeMax, strokeGain } from "../ink/PressureGain";
 import { readBaseFontPx, writeBaseFontPx } from "./EditorFontZoom";
 import { pinchFontSize } from "./PinchZoom";
 import { ERASER_CURSOR_CLASS } from "./PenCursor";
@@ -219,6 +220,29 @@ export function setPersistEraserRadius(fn: ((px: number) => void) | null): void 
 	persistEraserRadius = fn;
 }
 
+/**
+ * True while a command is being invoked FROM THE STRIP, whose buttons show
+ * their own state - the palette's confirmation toasts are noise there.
+ * Commands read it through stripQuiet() and skip their Notice.
+ */
+// Settings-tab flags (1.0.5), device-level like the modes above them.
+let penReticleOn = true;
+let eraserEndWholeStrokes = false;
+
+export function setPenReticle(on: boolean): void {
+	penReticleOn = on;
+}
+
+export function setEraserEndWholeStrokes(on: boolean): void {
+	eraserEndWholeStrokes = on;
+}
+
+let stripInvoked = false;
+
+export function stripQuiet(): boolean {
+	return stripInvoked;
+}
+
 export function commitEraserRadius(): void {
 	persistEraserRadius?.(inlineEraserRadiusPx);
 }
@@ -365,6 +389,11 @@ class InkOverlayPlugin {
 	private activeWet!: WetInkRenderer;
 	private activeStyle: PenStyle = this.penStyle;
 	private builder: StrokeBuilder | null = null;
+	// Adaptive pressure gain, frozen at pen-down for the whole stroke so a
+	// mid-stroke ratchet of the learned device max cannot kink the width.
+	private strokeGain = 1;
+	private strokeRawMax = 0;
+	private strokePenGesture = false;
 
 	// gesture state (one pen contact at a time; mode decided at pen-down)
 	private mode: PenMode = "ink";
@@ -375,6 +404,7 @@ class InkOverlayPlugin {
 	 * second pass over a survivor must not record it as something lost.
 	 */
 	private erasePieces = new Set<string>();
+	private eraseWhole = false;
 	private selection = new SelectionModel();
 	private readonly selectionDeleteKeys = new InlineSelectionDeleteKeys(
 		() => !this.selection.isEmpty,
@@ -806,7 +836,14 @@ class InkOverlayPlugin {
 		if (!app?.commands) return;
 		const commands = app.commands;
 		this.mobileTools = new MobileTools(this.view.dom, {
-			exec: (id) => commands.executeCommandById(id),
+			exec: (id) => {
+				stripInvoked = true;
+				try {
+					commands.executeCommandById(id);
+				} finally {
+					stripInvoked = false;
+				}
+			},
 			activeTool: () => getInlineTool(),
 			eraserOn: () => getInlineEraserMode(),
 			lassoOn: () => getInlineLassoMode(),
@@ -820,6 +857,7 @@ class InkOverlayPlugin {
 			canRedo: () => redoDepth(this.view.state) > 0,
 			canPasteInk: () => clipboardSize() > 0,
 			hasInkSelection: () => !this.selection.isEmpty,
+			palette: () => colorsFor(getInlineTool()),
 			inkSizeMult: (tool) => getInkSizeMult(tool as InkTool),
 			setInkSizeMult: (tool, mult, commit) => {
 				setInkSizeMult(tool as InkTool, mult);
@@ -904,6 +942,9 @@ class InkOverlayPlugin {
 		if (path !== this.lastPath) {
 			this.lastPath = path;
 			this.updateHandwritingPageClass();
+			// A fresh note starts reading, so the strip starts as the pill.
+			this.mobileTools?.closeInkSliders();
+			this.mobileTools?.setCollapsed(true);
 			this.builder = null;
 			this.resetGestureState();
 			this.wet.clear(this.cssWidth, this.cssHeight);
@@ -1136,7 +1177,8 @@ class InkOverlayPlugin {
 
 		// The pen decides what it is at contact (§52/§53, mode-free):
 		// eraser end erases, barrel held lassos/moves, tip inks.
-		const eraser = (ev.buttons & 32) !== 0 || ev.button === 5 || inlineEraserMode;
+		const eraserEnd = (ev.buttons & 32) !== 0 || ev.button === 5;
+		const eraser = eraserEnd || inlineEraserMode;
 		// Lasso mode makes the TIP lasso: the barrel path for hardware that
 		// has no barrel (every apple pencil, every mouse).
 		const barrel = !eraser && ((ev.buttons & 2) !== 0 || inlineLassoMode);
@@ -1150,6 +1192,9 @@ class InkOverlayPlugin {
 		if (eraser) {
 			this.mode = "erase";
 			this.erased = [];
+			// Whole-stroke deletion is the HARDWARE eraser end's opt-in; the
+			// eraser tool keeps taking only what the ring covers.
+			this.eraseWhole = eraserEnd && eraserEndWholeStrokes;
 			metrics.begin("erase", performance.now());
 			this.showEraserCursor(sample);
 			this.eraseAt(sample);
@@ -1168,13 +1213,20 @@ class InkOverlayPlugin {
 		this.activeStyle.color = getInkColorHex(tool);
 		markPenSeen();
 		this.ensurePenTools();
-		// Writing starts: drop-down chrome gets out of the way.
+		// Writing starts: the whole strip steps aside (overlap demotes the
+		// low-latency canvas), and drop-down chrome closes.
+		this.mobileTools?.setInking(true);
 		this.mobileTools?.closeInkSliders();
 		this.activeWet = tool === "highlighter" ? this.highlightWet : this.wet;
 		// The wet layer's shaping follows the device per stroke: a mouse
 		// stroke draws flat live, exactly as it will commit.
 		const fromMouse = ev.pointerType === "mouse";
 		this.wet.shape = !fromMouse;
+		// A mouse's constant 0.5 is neither evidence about the pen hardware
+		// nor something to amplify: gain 1, and its max is never reported.
+		this.strokeGain = fromMouse ? 1 : strokeGain();
+		this.strokeRawMax = 0;
+		this.strokePenGesture = !fromMouse;
 		this.builder = new StrokeBuilder(
 			tool,
 			this.activeStyle.color,
@@ -1187,7 +1239,7 @@ class InkOverlayPlugin {
 		const point = this.builder.add(
 			w.x,
 			w.y,
-			normalizeInlinePenPressure(sample.pressure),
+			this.gainedPressure(sample.pressure),
 			sample.timestamp,
 			sample.tiltX,
 			sample.tiltY
@@ -1232,7 +1284,7 @@ class InkOverlayPlugin {
 			const point = this.builder.add(
 				w.x,
 				w.y,
-				normalizeInlinePenPressure(s.pressure),
+				this.gainedPressure(s.pressure),
 				s.timestamp,
 				s.tiltX,
 				s.tiltY
@@ -1323,11 +1375,20 @@ class InkOverlayPlugin {
 		});
 	}
 
+	/** Adaptive gain, then the existing clamp; tracks the raw per-stroke max. */
+	private gainedPressure(raw: number): number {
+		if (Number.isFinite(raw) && raw > this.strokeRawMax) this.strokeRawMax = raw;
+		return normalizeInlinePenPressure(raw * this.strokeGain);
+	}
+
 	private penUp(): void {
 		// Whatever the gesture was, it is over: the frame is live again and
 		// re-reads the editor's current origin.
 		this.frame.end();
-		// One stroke changed what undo can do; the strip's buttons follow.
+		// The stroke is over: the strip returns (a beat later, so an eraser
+		// scrub's rapid lift-and-reland does not strobe it) and its buttons
+		// catch up with what undo can do now.
+		this.mobileTools?.setInking(false);
 		this.mobileTools?.refresh();
 		if (this.mode === "lasso") {
 			this.mode = "ink";
@@ -1372,6 +1433,8 @@ class InkOverlayPlugin {
 		// Finish before clearing the wet layer. Release filtering may produce
 		// several stored strokes from one contact, but every committed segment
 		// is drawn underneath the still-visible wet pixels before they clear.
+		if (this.strokePenGesture) observeStrokeMax(this.strokeRawMax);
+		this.strokePenGesture = false;
 		const strokes = builder?.finishReleaseFiltered() ?? [];
 		const stroke = strokes.at(-1);
 		const path = stroke ? this.filePath() : null;
@@ -1740,6 +1803,8 @@ class InkOverlayPlugin {
 	private showPenCursor(sample: PenSample): void {
 		markPenSeen();
 		this.ensurePenTools();
+		// Reticle off: the native cursor stays, so no hover class either.
+		if (!penReticleOn) return;
 		if (!this.penCursorEl) return;
 		this.view.scrollDOM.classList.add(PEN_HOVER_CLASS);
 		// In eraser mode the nib width is a lie: what the tip is about to do
@@ -1810,6 +1875,18 @@ class InkOverlayPlugin {
 		const r = visualToNote(inlineEraserRadiusPx, this.scale);
 		const hits = strokesHitByCircle(inlineInk.strokes(path), w.x, w.y, r);
 		if (hits.length === 0) return;
+		if (this.eraseWhole) {
+			// Contact deletes the stroke, no split - v0.13.12's behavior,
+			// back by request as a setting.
+			for (const { stroke, index } of inlineInk.takeLive(path, hits)) {
+				if (!this.erasePieces.delete(stroke.id)) {
+					this.erased.push({ stroke, index });
+				}
+			}
+			this.scheduleRepaint();
+			this.repaintPath(path);
+			return;
+		}
 		// Partial erase: the ring takes what it covers and the rest of the
 		// stroke stays. Each stroke comes out and its survivors go back in at
 		// the same position, so z-order holds.

@@ -1,4 +1,4 @@
-import { App, MarkdownRenderChild, Modal, Notice, Plugin, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { App, MarkdownRenderChild, Modal, Notice, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import { CameraState } from "./camera/coordinates";
 import { HANDWRITING_PAGE_VIEW_TYPE, HandwritingHost, HandwritingPageView } from "./view/HandwritingPageView";
 import {
@@ -24,10 +24,13 @@ import {
 	repaintAllInkOverlays,
 	overlayForPath,
 	refreshPenToolsAll,
+	stripQuiet,
 	getInlineLassoMode,
 	setInlineLassoMode,
 	setPersistEraserRadius,
 	setPersistInkSize,
+	setPenReticle,
+	setEraserEndWholeStrokes,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
 import { attachFontZoomHost } from "./inline/EditorFontZoom";
@@ -58,7 +61,8 @@ import { mouseInkEnabled, setMouseInk } from "./inline/MouseInk";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
 import { inkToSvg } from "./ink/SvgExport";
 import { clipboardSize } from "./inline/InkClipboard";
-import { attachEmbedInk, embedInkRoot } from "./inline/EmbedInk";
+import { attachEmbedInk, embedInkChanged, embedInkRoot, initEmbedInkRefresh } from "./inline/EmbedInk";
+import { onInkChanged } from "./inline/InkEvents";
 import {
 	PenToolsMode,
 	getPenToolsMode,
@@ -73,6 +77,7 @@ import { PageIdIndex } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
+import { initPressureGain } from "./ink/PressureGain";
 
 interface HandwritingSettings {
 	/** Per-page camera, kept out of the synced note on purpose (§22). */
@@ -108,6 +113,10 @@ interface HandwritingSettings {
 	paperStyle: PaperStyle;
 	/** Pen tools strip (v0.13.16): auto (pen summons it), show, or hide. */
 	penTools: PenToolsMode;
+	/** The stylus's eraser end deletes whole strokes (1.0.5). Ring is default. */
+	eraserEndWholeStroke: boolean;
+	/** The reticle that follows the pen tip (1.0.5). On by default. */
+	penReticle: boolean;
 }
 
 const DEFAULT_SETTINGS: HandwritingSettings = {
@@ -121,6 +130,8 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	mouseInk: false,
 	paperStyle: "none",
 	penTools: "auto",
+	eraserEndWholeStroke: false,
+	penReticle: true,
 };
 
 /**
@@ -150,6 +161,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	private resolvingDuplicates = new Set<string>();
 
 	async onload(): Promise<void> {
+		initPressureGain();
 		this.store = new PageStore(this.app);
 		// Persistence must never fail silently: a write that keeps failing
 		// after bounded retries, or an external revision preserved as a
@@ -267,16 +279,21 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			child.onload = () => {
 				runDetached(
 					inlineInk.ensureLoaded(path).then(() => {
-						const strokes = inlineInk.strokes(path);
-						if (strokes.length === 0) return;
+						// Registered even with zero strokes: a note drawn on
+						// AFTER its embed rendered still gains ink live.
 						const root = embedInkRoot(el);
-						if (root) attachEmbedInk(root, path, strokes);
+						if (root) attachEmbedInk(root, path, inlineInk.strokes(path));
 					}),
 					"render ink into an embed"
 				);
 			};
 			ctx.addChild(child);
 		});
+		// Embed layers stop going stale: every persisted gesture repaints the
+		// rendered roots showing that note. See EmbedInk.ts.
+		initEmbedInkRefresh((p) => inlineInk.strokes(p));
+		this.register(onInkChanged((p) => embedInkChanged(p)));
+		this.addSettingTab(new HandwritingSettingTab(this.app, this));
 		// The nib on ordinary notes: pen or highlighter. A property of the tip,
 		// not a mode. The eraser end and the barrel keep their hardware meanings.
 		this.addCommand({
@@ -288,7 +305,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				setInlineTool("pen");
 				setInlineEraserMode(false);
 				setInlineLassoMode(false);
-				new Notice("Handwriting: pen");
+				if (!stripQuiet()) new Notice("Handwriting: pen");
 			},
 		});
 		// The eraser used to need a pen with an eraser end. Plenty of pens do
@@ -343,7 +360,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const on = !getInlineEraserMode();
 				setInlineEraserMode(on);
-				new Notice(on ? "Handwriting: eraser" : `Handwriting: ${getInlineTool()}`);
+				if (!stripQuiet()) new Notice(on ? "Handwriting: eraser" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		// Lasso as a mode: the barrel button was the only way in, and every
@@ -354,7 +371,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const on = !getInlineLassoMode();
 				setInlineLassoMode(on);
-				new Notice(on ? "Handwriting: lasso (tip selects)" : `Handwriting: ${getInlineTool()}`);
+				if (!stripQuiet()) new Notice(on ? "Handwriting: lasso (tip selects)" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		this.addCommand({
@@ -564,7 +581,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				setInlineTool("highlighter");
 				setInlineEraserMode(false);
 				setInlineLassoMode(false);
-				new Notice("Handwriting: highlighter");
+				if (!stripQuiet()) new Notice("Handwriting: highlighter");
 			},
 		});
 		this.addCommand({
@@ -1338,7 +1355,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	// ---- settings -----------------------------------------------------------
 
 	/** One ruled style at a time: clear both classes, then set the one asked for. */
-	private applyPaper(style: PaperStyle): void {
+	applyPaper(style: PaperStyle): void {
 		document.body.classList.remove("handwriting-paper-lines", "handwriting-paper-grid");
 		const cls = paperClass(style);
 		if (cls) document.body.classList.add(cls);
@@ -1364,6 +1381,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			mouseInk: raw?.mouseInk === true,
 			paperStyle: normalizePaperStyle(raw?.paperStyle),
 			penTools: normalizePenToolsMode(raw?.penTools),
+			eraserEndWholeStroke: raw?.eraserEndWholeStroke === true,
+			penReticle: raw?.penReticle !== false,
 		};
 		setPenToolsMode(this.settings.penTools);
 		// The strip's eraser slider persists through here on release.
@@ -1383,6 +1402,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
+		setEraserEndWholeStrokes(this.settings.eraserEndWholeStroke);
+		setPenReticle(this.settings.penReticle);
+	}
+
+	/** Settings-tab writes: persist now, quietly. */
+	saveSettingsNow(): void {
+		runDetached(this.saveData(this.settings), "save settings");
 	}
 
 	private async flushSettings(): Promise<void> {
@@ -1436,5 +1462,102 @@ class ConfirmDeleteInkModal extends Modal {
 
 	onClose(): void {
 		this.contentEl.empty();
+	}
+}
+
+/**
+ * The device-level knobs, most of which already existed as commands. The
+ * strip's sliders stay the source of truth for sizes and colors, so those
+ * are not duplicated here.
+ */
+class HandwritingSettingTab extends PluginSettingTab {
+	constructor(
+		app: App,
+		private plugin: HandwritingPlugin
+	) {
+		super(app, plugin);
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+		new Setting(containerEl)
+			.setName("Pen toolbar")
+			.setDesc("Auto summons the floating toolbar the first time a pen is seen.")
+			.addDropdown((d) =>
+				d
+					.addOption("auto", "Auto")
+					.addOption("show", "Show")
+					.addOption("hide", "Hide")
+					.setValue(this.plugin.settings.penTools)
+					.onChange((v) => {
+						const m = normalizePenToolsMode(v);
+						this.plugin.settings.penTools = m;
+						setPenToolsMode(m);
+						refreshPenToolsAll();
+						this.plugin.saveSettingsNow();
+					})
+			);
+		new Setting(containerEl)
+			.setName("Paper")
+			.setDesc("Ruled background on every editor. A writing aid on this device; nothing is written into notes.")
+			.addDropdown((d) =>
+				d
+					.addOption("none", "None")
+					.addOption("lines", "Lines")
+					.addOption("grid", "Grid")
+					.setValue(this.plugin.settings.paperStyle)
+					.onChange((v) => {
+						const style = normalizePaperStyle(v);
+						this.plugin.settings.paperStyle = style;
+						this.plugin.applyPaper(style);
+						this.plugin.saveSettingsNow();
+					})
+			);
+		new Setting(containerEl)
+			.setName("Mouse ink")
+			.setDesc("The left mouse button draws like a pen tip. Costs text selection while on.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.mouseInk).onChange((on) => {
+					this.plugin.settings.mouseInk = on;
+					setMouseInk(on);
+					if (on) {
+						markPenSeen();
+						refreshPenToolsAll();
+					}
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Ink shaping")
+			.setDesc("Pressure and speed shape the line. Off draws uniform width.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.inkShaping).onChange((on) => {
+					this.plugin.settings.inkShaping = on;
+					setInkShaping(on);
+					repaintAllInkOverlays();
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Eraser end takes whole strokes")
+			.setDesc("The stylus's built-in eraser deletes whole strokes on contact. The eraser tool keeps taking only what the ring covers.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.eraserEndWholeStroke).onChange((on) => {
+					this.plugin.settings.eraserEndWholeStroke = on;
+					setEraserEndWholeStrokes(on);
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Pen cursor ring")
+			.setDesc("The reticle that follows the pen tip while hovering.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.penReticle).onChange((on) => {
+					this.plugin.settings.penReticle = on;
+					setPenReticle(on);
+					this.plugin.saveSettingsNow();
+				})
+			);
 	}
 }

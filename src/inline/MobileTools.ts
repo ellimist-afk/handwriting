@@ -52,6 +52,8 @@ export interface MobileToolsHost {
 	canPasteInk(): boolean;
 	/** Whether a lasso selection exists, so copy and trash can dim. */
 	hasInkSelection(): boolean;
+	/** The active tool's palette, for the swatch pop. */
+	palette(): ReadonlyArray<{ name: string; hex: string }>;
 }
 
 interface ButtonSpec {
@@ -136,6 +138,9 @@ export class MobileTools {
 	private hlSlider!: { pop: HTMLElement; input: HTMLInputElement; val: HTMLElement };
 	/** Which nib's size slider is open; tap the active tool again to toggle. */
 	private openInkSlider: "pen" | "highlighter" | null = null;
+	/** Whether the color swatch pop is open. */
+	private colorsOpen = false;
+	private colorPop!: HTMLElement;
 
 	private pill: HTMLElement;
 
@@ -189,8 +194,14 @@ export class MobileTools {
 							: null;
 				if (nib && spec.isActive?.(this.host)) {
 					this.openInkSlider = this.openInkSlider === nib ? null : nib;
+				} else if (spec.commandId === "handwriting:ink-color-cycle") {
+					// The palette button opens SWATCHES: picking a color you
+					// can see beats cycling one you cannot.
+					this.colorsOpen = !this.colorsOpen;
+					this.openInkSlider = null;
 				} else {
 					this.openInkSlider = null;
+					this.colorsOpen = false;
 					this.host.exec(spec.commandId);
 				}
 				this.refresh();
@@ -243,12 +254,30 @@ export class MobileTools {
 			(v) => `${v.toFixed(2)}x`,
 			(v, c) => this.host.setInkSizeMult("highlighter", v, c)
 		);
-		this.refresh();
+		this.colorPop = this.el.createDiv({ cls: "handwriting-slider-pop handwriting-color-pop" });
+		this.refreshNow();
 		this.setCollapsed(collapsedSession);
 	}
 
-	/** Re-mark active buttons, tint the color button, show/size the slider. */
+	private refreshQueued = false;
+
+	/**
+	 * Coalesced, off-the-input-handler refresh: pen-up and pen-down call
+	 * this from latency-critical handlers, and the body does forced layout
+	 * reads (hangUnder measures offsets). One rAF defers the work past the
+	 * stroke's frame and collapses bursts into a single pass.
+	 */
 	refresh(): void {
+		if (this.refreshQueued) return;
+		this.refreshQueued = true;
+		requestAnimationFrame(() => {
+			this.refreshQueued = false;
+			this.refreshNow();
+		});
+	}
+
+	/** The synchronous body; the constructor uses it before first paint. */
+	refreshNow(): void {
 		for (const { el, spec } of this.buttons) {
 			el.classList.toggle("is-active", spec.isActive?.(this.host) ?? false);
 			el.classList.toggle("is-disabled", !(spec.isEnabled?.(this.host) ?? true));
@@ -298,13 +327,54 @@ export class MobileTools {
 			this.host.inkSizeMult("highlighter"),
 			(v) => `${v.toFixed(2)}x`
 		);
+		// Swatches: rebuilt per refresh (the palette is tiny), current color
+		// ringed, each executes the existing per-name color command.
+		this.colorPop.toggleClass("is-showing", this.colorsOpen);
+		if (this.colorsOpen) {
+			this.colorPop.empty();
+			const current = this.host.activeColor();
+			for (const c of this.host.palette()) {
+				const sw = this.colorPop.createEl("button", {
+					cls: "handwriting-color-swatch",
+					attr: { "aria-label": c.name, type: "button" },
+				});
+				sw.setCssStyles({ backgroundColor: c.hex });
+				sw.toggleClass("is-current", c.hex.toLowerCase() === current.toLowerCase());
+				sw.addEventListener("pointerdown", (ev) => ev.preventDefault());
+				sw.addEventListener("click", (ev) => {
+					ev.preventDefault();
+					this.host.exec(`handwriting:ink-color-${c.name}`);
+					this.colorsOpen = false;
+					this.refresh();
+				});
+			}
+			const btn = this.buttons.find(
+				(b) => b.spec.commandId === "handwriting:ink-color-cycle"
+			)?.el;
+			if (btn) {
+				const right = this.el.offsetWidth - btn.offsetLeft - btn.offsetWidth;
+				this.colorPop.setCssStyles({ right: `${Math.max(0, right - 4)}px` });
+			}
+		}
 	}
 
 	/** Writing started: nib-size drop-downs get out of the way. */
 	closeInkSliders(): void {
-		if (this.openInkSlider === null) return;
+		if (this.openInkSlider === null && !this.colorsOpen) return;
 		this.openInkSlider = null;
+		this.colorsOpen = false;
 		this.refresh();
+	}
+
+	/**
+	 * The chrome steps aside while the pen is down: anything overlapping a
+	 * desynchronized canvas can demote it off the low-latency path, so
+	 * during a stroke nothing overlaps it at all. Pure class toggles - no
+	 * reads, nothing forced, safe inside the pen-down handler.
+	 */
+	setInking(on: boolean): void {
+		this.el.toggleClass("is-inking", on);
+		this.pill.toggleClass("is-inking", on);
 	}
 
 	setCollapsed(on: boolean): void {

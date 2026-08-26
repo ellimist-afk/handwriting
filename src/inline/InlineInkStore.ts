@@ -2,6 +2,7 @@ import { InkStroke } from "../ink/Stroke";
 import { PageData, ParseResult, emptyPage, newPageId } from "../model/PageData";
 import { translateStroke } from "../objects/Selection";
 import { runDetached } from "../util/Detached";
+import { notifyInkChanged } from "./InkEvents";
 
 /**
  * Ink for the inline overlay: session state plus (M1) sidecar persistence,
@@ -354,6 +355,9 @@ export class InlineInkStore {
 	/** Persist the current state of a note (gesture end, or an applied op). */
 	save(path: string): void {
 		this.persist(path, this.record(path));
+		// The in-memory strokes are already the truth even when the disk
+		// write is deferred, so rendered embeds repaint from here.
+		notifyInkChanged(path);
 	}
 
 	private persist(path: string, rec: NoteRecord): void {

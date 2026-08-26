@@ -297,6 +297,18 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	top: 8px;
 	right: 8px;
 	z-index: 12;
+	/* Own compositor layer, isolated paints: the strip floats OVER the
+	   low-latency wet canvas, and without isolation its repaints and the
+	   canvas's invalidate each other - measured as stroke lag whenever the
+	   toolbar was unfolded (orion, 1.0.4 era). */
+	will-change: transform;
+	/* NO paint containment here: the drop-downs (sliders, swatches) hang
+	   BELOW the strip's box, and contain:paint clips children to the box -
+	   it silently swallowed every pop. layout+style keep the isolation. */
+	contain: layout style;
+	/* Reappear 160ms after the last pen-up; vanish near-instantly at
+	   pen-down. The delay keeps an eraser scrub from strobing the strip. */
+	transition: opacity 60ms linear 160ms, visibility 0s linear 160ms;
 	display: flex;
 	/* Phones: the row is wider than the screen wants; wrap instead of clip. */
 	flex-wrap: wrap;
@@ -310,9 +322,10 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	opacity: 0.92;
 }
 
+/* Desktop trims the chrome; mobile keeps 40px touch targets. */
 .handwriting-mobile-tool {
-	width: 40px;
-	height: 40px;
+	width: 32px;
+	height: 32px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -365,6 +378,10 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 .handwriting-slider-pop {
 	display: none;
 	position: absolute;
+	will-change: transform;
+	/* layout+style only: the rotated slider paints outside its layout box
+	   by design, and paint containment clips it (and the value readout). */
+	contain: layout style;
 	top: 100%;
 	margin-top: 4px;
 	flex-direction: column;
@@ -398,6 +415,27 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	touch-action: manipulation;
 }
 
+/* Color swatches: a row of the active tool's palette; current one ringed. */
+.handwriting-color-pop {
+	flex-direction: row;
+	gap: 6px;
+	padding: 8px;
+}
+
+.handwriting-color-swatch {
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 50%;
+	box-shadow: none;
+	cursor: pointer;
+}
+
+.handwriting-color-swatch.is-current {
+	box-shadow: 0 0 0 2px var(--background-secondary), 0 0 0 3.5px var(--interactive-accent);
+}
+
 .handwriting-slider-val {
 	font-size: 11px;
 	font-variant-numeric: tabular-nums;
@@ -410,11 +448,21 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	display: none;
 }
 
+.handwriting-mobile-tools.is-inking,
+.handwriting-pen-pill.is-inking {
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 40ms linear, visibility 0s linear 40ms;
+}
+
 .handwriting-pen-pill {
 	position: absolute;
 	top: 8px;
 	right: 8px;
 	z-index: 12;
+	will-change: transform;
+	contain: layout style paint;
+	transition: opacity 60ms linear 160ms, visibility 0s linear 160ms;
 	display: none;
 	width: 34px;
 	height: 34px;
@@ -586,6 +634,11 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
  * and antialiased rather than subpixel-smoothed, which is what stops
  * WebKit thinning the glyph strokes.
  */
+.is-mobile .handwriting-mobile-tool {
+	width: 40px;
+	height: 40px;
+}
+
 .is-mobile .handwriting-diag-stats,
 .is-mobile .handwriting-diag-log {
 	font-size: 13px;
