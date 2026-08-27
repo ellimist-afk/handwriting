@@ -1,4 +1,4 @@
-import { App, MarkdownRenderChild, Modal, Notice, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { App, MarkdownRenderChild, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import { CameraState } from "./camera/coordinates";
 import { HANDWRITING_PAGE_VIEW_TYPE, HandwritingHost, HandwritingPageView } from "./view/HandwritingPageView";
 import {
@@ -77,7 +77,7 @@ import { PageIdIndex } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
-import { initPressureGain } from "./ink/PressureGain";
+import { IOS_WEBKIT_CEILING, initPressureGain, resetPressureCalibration } from "./ink/PressureGain";
 
 interface HandwritingSettings {
 	/** Per-page camera, kept out of the synced note on purpose (§22). */
@@ -161,7 +161,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	private resolvingDuplicates = new Set<string>();
 
 	async onload(): Promise<void> {
-		initPressureGain();
+		initPressureGain(Platform.isIosApp ? IOS_WEBKIT_CEILING : 0);
 		this.store = new PageStore(this.app);
 		// Persistence must never fail silently: a write that keeps failing
 		// after bounded retries, or an external revision preserved as a
@@ -347,6 +347,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				runDetached(this.saveData(this.settings), "save the pen tools mode");
 				refreshPenToolsAll();
 				new Notice(`Handwriting: pen tools ${next}`);
+			},
+		});
+		this.addCommand({
+			id: "pressure-recalibrate",
+			name: "Pen pressure: recalibrate",
+			callback: () => {
+				resetPressureCalibration();
+				new Notice("Handwriting: pressure relearns from your next strokes");
 			},
 		});
 		this.addCommand({

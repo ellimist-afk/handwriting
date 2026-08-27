@@ -41,6 +41,16 @@ ios
 
 android
 
+## ipad notes
+
+* turn off Scribble (iPad Settings > Apple Pencil > Scribble) or ios
+  draws its own black ink over your strokes and scratch-out deletes text
+* pressure calibrates from how you write. the first stroke on a fresh
+  install can come out thin; it learns within a few strokes. if ink ever
+  feels flat, run `Pen pressure: recalibrate` from the command palette
+* the floating toolbar is your tools on ipad. the pen keeps the keyboard
+  down on purpose, so the palette stays out of reach while writing
+
 ## installing
 
 ### Method 1 
@@ -77,7 +87,7 @@ paste this in : ellimist-afk/handwriting > hit add plugin
 
 ## required
 
-Obsidian 1.13.7 or newer. a pen, or the mouse ink mode. built and tested
+Obsidian 1.12.3 or newer. a pen, or the mouse ink mode. built and tested
 on a Microsoft Surface with a Surface Slim Pen 2 and two iPads with
 apple pencils. other pens should work but nobody's tested them yet, so
 treat this as a beta and send reports.

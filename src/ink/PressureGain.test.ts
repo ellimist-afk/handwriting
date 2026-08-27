@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
 	initPressureGain,
 	observeStrokeMax,
+	resetPressureCalibration,
 	resetPressureGainForTest,
 	strokeGain,
 } from "./PressureGain";
@@ -58,5 +59,33 @@ describe("PressureGain", () => {
 	it("test seam can preload a max", () => {
 		resetPressureGainForTest(0.275);
 		expect(strokeGain()).toBeCloseTo(2, 5);
+	});
+
+	it("cold-start assumption applies while nothing is learned", () => {
+		resetPressureGainForTest(0, 0.24);
+		expect(strokeGain()).toBeCloseTo(0.55 / 0.24, 5);
+	});
+
+	it("a learned max beats the assumption, even a smaller one", () => {
+		resetPressureGainForTest(0, 0.24);
+		observeStrokeMax(0.15);
+		expect(strokeGain()).toBe(3); // 0.55/0.15 capped
+		observeStrokeMax(0.3);
+		expect(strokeGain()).toBeCloseTo(0.55 / 0.3, 5);
+	});
+
+	it("recalibrate forgets the learned max and keeps the assumption", () => {
+		resetPressureGainForTest(0, 0.24);
+		observeStrokeMax(0.9); // freak spike pins gain at 1
+		expect(strokeGain()).toBe(1);
+		resetPressureCalibration();
+		expect(strokeGain()).toBeCloseTo(0.55 / 0.24, 5);
+	});
+
+	it("recalibrate without an assumption returns to status quo", () => {
+		resetPressureGainForTest();
+		observeStrokeMax(0.4);
+		resetPressureCalibration();
+		expect(strokeGain()).toBe(1);
 	});
 });

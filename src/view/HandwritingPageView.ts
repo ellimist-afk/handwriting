@@ -1433,7 +1433,7 @@ export class HandwritingPageView extends TextFileView {
 	private handleResize(): void {
 		const rect = this.rootEl.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) return;
-		this.dpr = window.devicePixelRatio || 1;
+		this.dpr = (this.containerEl.ownerDocument.defaultView ?? window).devicePixelRatio || 1;
 
 		// Backing store and CSS box are kept exactly `dpr` apart. Rounding the
 		// backing store while leaving the CSS box fractional (the obvious
@@ -1470,7 +1470,7 @@ export class HandwritingPageView extends TextFileView {
 			// Electron changes devicePixelRatio on app zoom and on moving to a
 			// different-DPI monitor. Without this the canvas keeps a stale
 			// backing store and the compositor upscales it.
-			if ((window.devicePixelRatio || 1) !== this.dpr) {
+			if (((this.containerEl.ownerDocument.defaultView ?? window).devicePixelRatio || 1) !== this.dpr) {
 				this.handleResize();
 				return;
 			}

@@ -26,7 +26,16 @@ const REFERENCE_MAX = 0.55;
 const GAIN_CAP = 3;
 const STORAGE_KEY = "handwriting-device-pressure-max";
 
+/**
+ * What two test iPads topped out at. On iOS, where WebKit's compression is
+ * a hardware certainty rather than a guess, this seeds the gain BEFORE the
+ * first stroke - otherwise the first stroke of a fresh install draws thin
+ * while the max learns. Everything learned afterwards wins over it.
+ */
+export const IOS_WEBKIT_CEILING = 0.24;
+
 let deviceMax = 0;
+let assumedMax = 0;
 
 function readStored(): number {
 	try {
@@ -48,14 +57,32 @@ function writeStored(v: number): void {
 	}
 }
 
-export function initPressureGain(): void {
+export function initPressureGain(coldStartMax = 0): void {
 	deviceMax = readStored();
+	assumedMax = coldStartMax;
 }
 
 /** The gain a stroke starting now should use, frozen by the caller. */
 export function strokeGain(): number {
-	if (deviceMax <= 0) return 1; // nothing learned yet: status quo
-	return Math.min(GAIN_CAP, Math.max(1, REFERENCE_MAX / deviceMax));
+	// Anything actually learned beats the platform assumption, even a
+	// lighter writer's smaller max - the design normalizes against how
+	// THIS person writes, and the assumption only covers the blank slate.
+	const max = deviceMax > 0 ? deviceMax : assumedMax;
+	if (max <= 0) return 1; // nothing learned, nothing assumed: status quo
+	return Math.min(GAIN_CAP, Math.max(1, REFERENCE_MAX / max));
+}
+
+/**
+ * Forget the learned max (a freak spike pins the gain at 1 with no way
+ * back). The platform assumption survives; the next strokes relearn.
+ */
+export function resetPressureCalibration(): void {
+	deviceMax = 0;
+	try {
+		if (typeof localStorage !== "undefined") localStorage.removeItem(STORAGE_KEY);
+	} catch {
+		/* nothing stored, nothing to clear */
+	}
 }
 
 /**
@@ -72,6 +99,7 @@ export function observeStrokeMax(rawMax: number): void {
 }
 
 /** Test seam. */
-export function resetPressureGainForTest(max = 0): void {
+export function resetPressureGainForTest(max = 0, assumed = 0): void {
 	deviceMax = max;
+	assumedMax = assumed;
 }
