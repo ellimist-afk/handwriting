@@ -1104,7 +1104,28 @@ class InkOverlayPlugin {
 	private handleResize(): void {
 		if (!this.container) return;
 		const rect = this.container.getBoundingClientRect();
-		if (rect.width === 0 || rect.height === 0) return;
+		if (rect.width === 0 || rect.height === 0) {
+			// A background tab keeps its editor - and this overlay - alive
+			// at zero size. Five full-size backings on an invisible surface
+			// are ~70MB at high dpr (seen live: a 0x0 editor holding a
+			// 2239x1620 backing), and it climbs with every background tab
+			// over a session. Release them; the ResizeObserver refires when
+			// the tab fronts, and the non-zero path reallocates and
+			// repaints synchronously, so nothing is ever shown blank.
+			if (!this.frame.locked && this.committedCanvas.width > 0) {
+				for (const c of [
+					this.committedCanvas,
+					this.wetCanvas,
+					this.tailCanvas,
+					this.highlightCanvas,
+					this.highlightWetCanvas,
+				]) {
+					c.width = 0;
+					c.height = 0;
+				}
+			}
+			return;
+		}
 		this.dpr = this.winRef.devicePixelRatio || 1;
 		// The canvases live INSIDE whatever is scaled, so their coordinate
 		// space is layout px, the same unit ink is stored in. Size them from

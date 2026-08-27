@@ -1,6 +1,6 @@
 {
 	"name": "handwriting",
-	"version": "1.0.9",
+	"version": "1.0.10",
 	"description": "Pen ink on ordinary Markdown notes in Obsidian",
 	"main": "main.js",
 	"private": true,

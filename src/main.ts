@@ -7,6 +7,7 @@ import {
 } from "./input/PenDiagnosticsView";
 import { HANDWRITING_PEN_LAB_VIEW_TYPE, PenLabView } from "./view/PenLabView";
 import {
+	copyInlineInkMetrics,
 	copyInlineZoomReport,
 	copyPresentationReport,
 	copyRegionCensus,
@@ -644,6 +645,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			name: "Diagnostics: show pen trace",
 			callback: () => {
 				showDiagnosticText(this.app, "Handwriting pen trace", formatInlinePenTrace());
+			},
+		});
+		this.addCommand({
+			id: "show-ink-metrics",
+			name: "Diagnostics: show ink metrics",
+			callback: () => {
+				showDiagnosticText(this.app, "Handwriting ink metrics", copyInlineInkMetrics());
 			},
 		});
 		this.addCommand({
