@@ -4,10 +4,27 @@ import type { Extension } from "@codemirror/state";
 import { isolateHistory, redoDepth, undoDepth } from "@codemirror/commands";
 import { Notice, Platform, editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
+import {
+	blankLinesAbove,
+	boundsOf,
+	lineSteps,
+	rowsOf,
+	snapLine,
+	strokeIdsBelow,
+	sweptRect,
+} from "./InsertSpace";
 import { MobileTools } from "./MobileTools";
-import { clipboardSize, copyInk, pasteInk } from "./InkClipboard";
+import {
+	clipboardSize,
+	copyInk,
+	inkClipboardMarker,
+	markerIsCurrent,
+	markerToken,
+	pasteInk,
+} from "./InkClipboard";
 
 const LASSO_CURSOR_CLASS = "handwriting-pen-hover-lasso";
+const SPACE_CURSOR_CLASS = "handwriting-pen-hover-space";
 import { getPenToolsMode, markPenSeen, penSeenThisSession, penToolsVisible } from "./PenToolsMode";
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
@@ -126,7 +143,7 @@ const SELECTION_GRAB_PAD = 8;
 /** Minimum spacing between lasso vertices, in screen px. */
 const LASSO_MIN_STEP_PX = 2;
 
-type PenMode = "ink" | "erase" | "lasso";
+type PenMode = "ink" | "erase" | "lasso" | "space";
 
 let enabled = true;
 /**
@@ -184,15 +201,19 @@ export function setInlineTool(tool: InkTool): void {
  */
 let inlineEraserMode = false;
 let inlineLassoMode = false;
+let inlineSpaceMode = false;
 
 export function getInlineEraserMode(): boolean {
 	return inlineEraserMode;
 }
 
-/** Eraser and lasso modes are exclusive: the tip can only be one thing. */
+/** Eraser, lasso and space modes are exclusive: the tip can only be one thing. */
 export function setInlineEraserMode(on: boolean): void {
 	inlineEraserMode = on;
-	if (on) inlineLassoMode = false;
+	if (on) {
+		inlineLassoMode = false;
+		inlineSpaceMode = false;
+	}
 }
 
 export function getInlineLassoMode(): boolean {
@@ -205,7 +226,27 @@ export function getInlineLassoMode(): boolean {
  */
 export function setInlineLassoMode(on: boolean): void {
 	inlineLassoMode = on;
-	if (on) inlineEraserMode = false;
+	if (on) {
+		inlineEraserMode = false;
+		inlineSpaceMode = false;
+	}
+}
+
+export function getInlineSpaceMode(): boolean {
+	return inlineSpaceMode;
+}
+
+/**
+ * Insert space as a MODE, same grammar as eraser and lasso: while on, the
+ * tip plants a divider and everything below it follows the pen vertically.
+ * The barrel and the eraser end keep their hardware meanings.
+ */
+export function setInlineSpaceMode(on: boolean): void {
+	inlineSpaceMode = on;
+	if (on) {
+		inlineEraserMode = false;
+		inlineLassoMode = false;
+	}
 }
 
 /** Eraser radius in screen px, shared by the hit test and both cursors. */
@@ -263,6 +304,24 @@ export function setPersistEraserMode(fn: ((on: boolean) => void) | null): void {
  * Commands read it through stripQuiet() and skip their Notice.
  */
 let stripInvoked = false;
+
+/**
+ * Put the ink marker on the system clipboard so ctrl+v can recognize it.
+ * Best-effort by design: a denied clipboard (no user gesture, locked-down
+ * platform) costs the keyboard paste and nothing else - the command and
+ * the strip's paste button read module state and still work.
+ */
+function publishInkMarker(): void {
+	const marker = inkClipboardMarker();
+	if (marker === null) return;
+	try {
+		void navigator.clipboard?.writeText(marker).catch(() => {
+			/* denied: keyboard paste falls back to the command */
+		});
+	} catch {
+		/* no clipboard api at all */
+	}
+}
 
 export function stripQuiet(): boolean {
 	return stripInvoked;
@@ -477,6 +536,16 @@ class InkOverlayPlugin {
 	private lassoActive = false;
 	private dragFrom: { x: number; y: number } | null = null;
 	private dragTotal: { dx: number; dy: number } | null = null;
+	/** Insert-space gesture: divider world y, or null when no gesture. */
+	private spaceLineY: number | null = null;
+	/** Ids frozen at pen-down; the live drag and the op both use this list. */
+	private spaceIds: string[] = [];
+	/** Box around those ids, tracked through the drag so damage stays bounded. */
+	private spaceBounds: BBox | null = null;
+	/** Viewport point of the contact, for locating the text line to open. */
+	private spaceClient: { x: number; y: number } | null = null;
+	private spaceFromY = 0;
+	private spaceTotalDy = 0;
 	private penCursorEl: HTMLElement | null = null;
 	private mobileTools: MobileTools | null = null;
 	private eraserEl: HTMLElement | null = null;
@@ -932,6 +1001,7 @@ class InkOverlayPlugin {
 				persistEraserMode?.(on);
 			},
 			lassoOn: () => getInlineLassoMode(),
+			spaceOn: () => getInlineSpaceMode(),
 			activeColor: () => getInkColorHex(getInlineTool()),
 			eraserRadiusPx: () => getEraserRadiusPx(),
 			setEraserRadiusPx: (px, commit) => {
@@ -1099,6 +1169,30 @@ class InkOverlayPlugin {
 			}
 		}
 		return this.selectionDeleteKeys.keydown(event);
+	}
+
+	/**
+	 * Ctrl+V (and right-click paste, and a clipboard manager's history)
+	 * pastes INK when the system clipboard carries our marker. Anything
+	 * else is somebody's text and passes straight through, which is what
+	 * makes this safe: copying text after ink pastes the text.
+	 */
+	handlePaste(event: ClipboardEvent): boolean {
+		const text = event.clipboardData?.getData("text/plain") ?? "";
+		if (text === "" || markerToken(text) === null) return false;
+		// Ours either way now: the marker is bookkeeping, and letting it
+		// land in a note as literal text would be the worse outcome.
+		event.preventDefault();
+		event.stopPropagation();
+		if (!markerIsCurrent(text)) {
+			// A marker outliving the ink it named: a clipboard manager
+			// replaying an entry from a previous run of the app.
+			new Notice("Handwriting: that ink was copied before the app restarted");
+			return true;
+		}
+		const n = this.pasteInkHere();
+		if (n > 0) new Notice(`Handwriting: pasted ${n} stroke(s)`);
+		return true;
 	}
 
 	handleKeyUp(event: KeyboardEvent): boolean {
@@ -1337,6 +1431,14 @@ class InkOverlayPlugin {
 		if (isPenProbeEnabled()) this.captureProbeGeometry();
 		this.recordPenDownState(sample);
 
+		// A gesture is starting, whichever one: the strip steps aside and its
+		// drop-down chrome closes. This sat in the ink branch alone, so the
+		// toolbar stayed put under an eraser and covered the ink being
+		// rubbed out (alan, 2026-08-27). penUp restores it for every gesture
+		// already, so only the hide was one-sided.
+		this.mobileTools?.setInking(true);
+		this.mobileTools?.closeInkSliders();
+
 		// The pen decides what it is at contact (§52/§53, mode-free):
 		// eraser end erases, barrel held lassos/moves, tip inks.
 		const eraserEnd = (ev.buttons & 32) !== 0 || ev.button === 5;
@@ -1379,6 +1481,11 @@ class InkOverlayPlugin {
 			this.eraseAt(sample);
 			return;
 		}
+		if (inlineSpaceMode) {
+			this.mode = "space";
+			this.spaceDown(sample, ev);
+			return;
+		}
 		this.mode = "ink";
 		metrics.begin("ink", performance.now());
 		// Bind the nib once: the raw loop never asks which tool is active.
@@ -1392,10 +1499,9 @@ class InkOverlayPlugin {
 		this.activeStyle.color = getInkColorHex(tool);
 		markPenSeen();
 		this.ensurePenTools();
-		// Writing starts: the whole strip steps aside (overlap demotes the
-		// low-latency canvas), and drop-down chrome closes.
+		// The strip stepped aside at contact, above; a strip only just created
+		// by ensurePenTools has not heard that yet, so tell it now.
 		this.mobileTools?.setInking(true);
-		this.mobileTools?.closeInkSliders();
 		this.activeWet = tool === "highlighter" ? this.highlightWet : this.wet;
 		// The wet layer's shaping follows the device per stroke: a mouse
 		// stroke draws flat live, exactly as it will commit.
@@ -1446,6 +1552,10 @@ class InkOverlayPlugin {
 	private penRaw(samples: PenSample[], ev: PointerEvent): void {
 		if (this.mode === "lasso") {
 			this.lassoMove(samples);
+			return;
+		}
+		if (this.mode === "space") {
+			this.spaceMove(samples);
 			return;
 		}
 		if (this.mode === "erase") {
@@ -1577,6 +1687,12 @@ class InkOverlayPlugin {
 		// catch up with what undo can do now.
 		this.mobileTools?.setInking(false);
 		this.mobileTools?.refresh();
+		if (this.mode === "space") {
+			this.mode = "ink";
+			this.spaceUp();
+			this.updateExtent();
+			return;
+		}
 		if (this.mode === "lasso") {
 			this.mode = "ink";
 			this.lassoUp();
@@ -2031,6 +2147,7 @@ class InkOverlayPlugin {
 		if (inlineEraserMode) {
 			const r = visualToNote(inlineEraserRadiusPx, this.cssScale);
 			this.penCursorEl.classList.remove(LASSO_CURSOR_CLASS);
+			this.penCursorEl.classList.remove(SPACE_CURSOR_CLASS);
 			this.penCursorEl.classList.add(ERASER_CURSOR_CLASS);
 			this.penCursorEl.setCssStyles({
 				display: "block",
@@ -2047,6 +2164,7 @@ class InkOverlayPlugin {
 		// dashed ring, fixed size, visually distinct from both nib and eraser.
 		if (inlineLassoMode) {
 			const r = visualToNote(9, this.cssScale);
+			this.penCursorEl.classList.remove(SPACE_CURSOR_CLASS);
 			this.penCursorEl.classList.add(LASSO_CURSOR_CLASS);
 			this.penCursorEl.setCssStyles({
 				display: "block",
@@ -2059,6 +2177,23 @@ class InkOverlayPlugin {
 			return;
 		}
 		this.penCursorEl.classList.remove(LASSO_CURSOR_CLASS);
+		// Insert-space mode: the reticle IS the divider, in miniature - a
+		// short dashed rule lying where the seam would be planted. The nib
+		// dot would say "pen" for a tip that is about to move rows instead.
+		if (inlineSpaceMode) {
+			const half = visualToNote(24, this.cssScale);
+			this.penCursorEl.classList.add(SPACE_CURSOR_CLASS);
+			this.penCursorEl.setCssStyles({
+				display: "block",
+				width: `${half * 2}px`,
+				height: "0px",
+				transform: `translate(${sample.x - half}px, ${sample.y}px)`,
+				backgroundColor: "transparent",
+				opacity: "1",
+			});
+			return;
+		}
+		this.penCursorEl.classList.remove(SPACE_CURSOR_CLASS);
 		const tool = inlineTool;
 		const strokeWidth =
 			(tool === "highlighter" ? HIGHLIGHTER_PEN.baseWidth : DEFAULT_PEN.baseWidth) *
@@ -2242,12 +2377,158 @@ class InkOverlayPlugin {
 		this.redrawSelectionUI();
 	}
 
+	// ---- insert space (divider gesture: ink below the line follows the pen) --
+
+	private spaceDown(sample: PenSample, ev: PointerEvent): void {
+		const w = this.camera.screenToWorld(sample.x, sample.y);
+		const here = this.strokesHere();
+		// Snap out of any row the line was drawn through, and DRAW it where it
+		// snapped: the seam the gesture will actually cut at is the one worth
+		// showing, and seeing it jump into the gap is how the rule explains
+		// itself without a word of documentation.
+		const cut = snapLine(rowsOf(here), w.y);
+		this.spaceLineY = cut;
+		this.spaceFromY = w.y;
+		this.spaceTotalDy = 0;
+		// The id list freezes at pen-down, and so does the box around it:
+		// membership cannot change mid-drag, so the damage region is just
+		// that box swept by the distance travelled.
+		this.spaceIds = strokeIdsBelow(here, w.y);
+		this.spaceBounds = boundsOf(here, this.spaceIds);
+		// The contact's CLIENT point, kept as-is: the editor can turn that
+		// into a document position exactly, with no world-to-viewport
+		// conversion of ours to drift out of step with the camera.
+		this.spaceClient = { x: ev.clientX, y: ev.clientY };
+		if (this.spaceIds.length === 0 && !stripQuiet()) {
+			// A gesture that moves nothing is indistinguishable from a broken
+			// one - it cost an evening of hardware testing to learn that once.
+			new Notice("Handwriting: no ink below the line");
+		}
+		this.redrawSelectionUI();
+	}
+
+	private spaceMove(samples: PenSample[]): void {
+		const last = samples[samples.length - 1];
+		if (!last || this.spaceLineY === null) return;
+		const path = this.filePath();
+		if (!path) return;
+		const w = this.camera.screenToWorld(last.x, last.y);
+		const dy = w.y - this.spaceFromY;
+		if (dy === 0) return;
+		// Live drag only translates coordinates in the store; the history op
+		// is pushed once at release with the total (the lasso drag's shape).
+		// Vertical only: the divider is a seam, not a joystick.
+		inlineInk.moveStrokes(path, this.spaceIds, 0, dy);
+		this.spaceTotalDy += dy;
+		this.spaceFromY = w.y;
+		// The line rides with the pen, leading the ink it is pushing: it stays
+		// under the nib all through the drag, so the gesture reads as shoving a
+		// seam down the page rather than watching a mark sit still.
+		if (this.spaceLineY !== null) this.spaceLineY += dy;
+		// Damage the swept band only. Marking the whole page dirty per frame
+		// re-rasterized every stroke in the note and the drag went jagged on
+		// a full page; the moved ink is one contiguous band moving straight
+		// down, so one rect covers where it was and where it landed.
+		if (this.spaceBounds) {
+			this.damage.addRect(sweptRect(this.spaceBounds, dy));
+			this.spaceBounds = { ...this.spaceBounds, y: this.spaceBounds.y + dy };
+		} else {
+			this.damage.addAll();
+		}
+		this.indexDirty = true;
+		this.scheduleRepaint("partial");
+		this.repaintPath(path);
+		this.redrawSelectionUI();
+	}
+
+	private spaceUp(): void {
+		const path = this.filePath();
+		const applied = this.spaceTotalDy;
+		const strokeIds = this.spaceIds;
+		const client = this.spaceClient;
+		this.spaceLineY = null;
+		this.spaceIds = [];
+		this.spaceBounds = null;
+		this.spaceClient = null;
+		this.spaceTotalDy = 0;
+		if (!path || applied === 0 || strokeIds.length === 0) {
+			this.redrawSelectionUI();
+			return;
+		}
+		// Open (or close) the same distance in the TEXT, so the note keeps
+		// its shape instead of the ink sliding off the words it belongs to.
+		// Both halves ride one transaction: undo puts the lines and the ink
+		// back together, which is the only way this can be reversible.
+		const change = this.spaceTextChange(client, applied);
+		const dy = change ? change.dy : applied;
+		const correction = dy - applied;
+		if (correction !== 0) inlineInk.moveStrokes(path, strokeIds, 0, correction);
+		inlineInk.save(path);
+		const op: InkOp = { type: "move", path, strokeIds, dx: 0, dy };
+		try {
+			this.view.dispatch({
+				changes: change?.changes,
+				effects: inkEffect.of(op),
+				annotations: [inkApplied.of(true), isolateHistory.of("full")],
+			});
+		} catch (err) {
+			console.error("[handwriting] insert-space dispatch failed", err);
+		}
+		this.scheduleRepaint();
+		this.repaintPath(path);
+		this.redrawSelectionUI();
+	}
+
+	/**
+	 * The document edit that matches a drag of `applied` note units: blank
+	 * lines inserted at the divider, or blank ones taken back when the drag
+	 * closed a gap. Returns the SNAPPED distance too, because the ink has to
+	 * land on the same whole number of lines the text just moved by.
+	 *
+	 * Null when there is nothing honest to do - no contact point, a drag
+	 * shorter than half a line, or a close-up drag over text that is not
+	 * blank. In every one of those the ink still moves; only the text is
+	 * left alone.
+	 */
+	private spaceTextChange(
+		client: { x: number; y: number } | null,
+		applied: number
+	): { changes: { from: number; to: number; insert: string }; dy: number } | null {
+		if (!client) return null;
+		const lineHeight = visualToNote(this.view.defaultLineHeight, this.scale);
+		const steps = lineSteps(applied, lineHeight);
+		if (steps === 0) return null;
+		const pos = this.view.posAtCoords(client);
+		if (pos === null) return null;
+		const doc = this.view.state.doc;
+		const line = doc.lineAt(pos);
+		if (steps > 0) {
+			return {
+				changes: { from: line.from, to: line.from, insert: "\n".repeat(steps) },
+				dy: steps * lineHeight,
+			};
+		}
+		// Closing up: take back only blank lines, never a word of writing.
+		const lines: string[] = [];
+		for (let i = 1; i <= doc.lines; i++) lines.push(doc.line(i).text);
+		const removable = blankLinesAbove(lines, line.number, -steps);
+		if (removable === 0) return null;
+		const first = doc.line(line.number - removable);
+		return {
+			changes: { from: first.from, to: line.from, insert: "" },
+			dy: -removable * lineHeight,
+		};
+	}
+
 	private redrawSelectionUI(): void {
 		if (!this.tail) return;
 		this.tail.clearAll(this.cssWidth, this.cssHeight);
 		const cam = this.camera.snapshot;
 		if (this.lassoActive && this.lassoPts.length > 1) {
 			this.tail.drawLasso(cam, this.lassoPts, SELECTION_COLOR);
+		}
+		if (this.spaceLineY !== null) {
+			this.tail.drawSpaceDivider(cam, this.spaceLineY, SELECTION_COLOR, this.cssWidth);
 		}
 		const bounds = this.selectionBounds();
 		if (bounds) this.tail.drawSelectionBox(cam, bounds, SELECTION_COLOR);
@@ -2267,6 +2548,11 @@ class InkOverlayPlugin {
 		this.lassoActive = false;
 		this.dragFrom = null;
 		this.dragTotal = null;
+		this.spaceLineY = null;
+		this.spaceIds = [];
+		this.spaceBounds = null;
+		this.spaceClient = null;
+		this.spaceTotalDy = 0;
 		this.selectionDeleteKeys.reset();
 		this.hidePenCursor();
 		this.hideEraserCursor();
@@ -2306,7 +2592,9 @@ class InkOverlayPlugin {
 		if (!path || this.selection.isEmpty) return 0;
 		const ids = new Set(this.selection.strokeIds);
 		const strokes = this.strokesHere().filter((s) => ids.has(s.id));
-		return copyInk(strokes, path);
+		const n = copyInk(strokes, path);
+		if (n > 0) publishInkMarker();
+		return n;
 	}
 
 	/** Copy, then delete as one normal history step. Returns the count. */
@@ -2492,7 +2780,8 @@ class InkOverlayPlugin {
 		}
 		// Selection chrome lives in world coordinates: scrolling and reflow
 		// repaint it at the strokes' current position.
-		if (!this.selection.isEmpty || this.lassoActive) this.redrawSelectionUI();
+		if (!this.selection.isEmpty || this.lassoActive || this.spaceLineY !== null)
+			this.redrawSelectionUI();
 		// While a stroke is active this repaint ran with the LOCKED pen-down
 		// camera (syncCamera above was a no-op); measure how far that frame
 		// has diverged from a fresh read: the ink layer's on-screen error.
@@ -2717,6 +3006,9 @@ const inlineSelectionKeyHandlers = Prec.highest(
 		},
 		keyup(event, view) {
 			return view.plugin(inkOverlayPlugin)?.handleKeyUp(event) ?? false;
+		},
+		paste(event, view) {
+			return view.plugin(inkOverlayPlugin)?.handlePaste(event) ?? false;
 		},
 	})
 );

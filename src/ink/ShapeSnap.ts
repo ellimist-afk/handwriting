@@ -26,7 +26,6 @@ const MIN_PATH_LENGTH = 24;
 /** Endpoints closer than this fraction of path length close the figure. */
 const CLOSURE_FRACTION = 0.22;
 /** RDP simplification tolerance as a fraction of the bbox diagonal. */
-const RDP_FRACTION = 0.04;
 /** Max mean radial error for a circle/ellipse, fraction of mean radius. */
 const ROUND_TOLERANCE = 0.16;
 /** Max perpendicular deviation for a line, fraction of its length. */

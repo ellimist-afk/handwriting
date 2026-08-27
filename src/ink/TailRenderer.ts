@@ -92,6 +92,27 @@ export class TailRenderer {
 	}
 
 	/**
+	 * Insert-space divider: a full-width dashed rule at the gesture's world
+	 * y. World-anchored like the rest of the selection chrome, so it stays
+	 * glued to the seam it marks; the ink below it follows the pen, the
+	 * rule itself never moves.
+	 */
+	drawSpaceDivider(cam: CameraState, yWorld: number, color: string, cssWidth: number): void {
+		const y = (yWorld - cam.y) * cam.zoom;
+		const ctx = this.ctx;
+		ctx.save();
+		ctx.strokeStyle = color;
+		ctx.lineWidth = 1.5;
+		ctx.setLineDash([8, 5]);
+		ctx.beginPath();
+		ctx.moveTo(0, y);
+		ctx.lineTo(cssWidth, y);
+		ctx.stroke();
+		ctx.restore();
+		this.dirty = null;
+	}
+
+	/**
 	 * Draw the live head: one straight world-space segment, widthed by the
 	 * same pressure law as the rest of the stroke so the join is invisible.
 	 * Accumulates into the dirty rect, so it can be combined with a predicted

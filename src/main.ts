@@ -29,7 +29,9 @@ import {
 	inlineReloadCandidates,
 	inkExternallyReloaded,
 	getInlineLassoMode,
+	getInlineSpaceMode,
 	setInlineLassoMode,
+	setInlineSpaceMode,
 	setPersistEraserRadius,
 	setPersistInkSize,
 	setPenReticle,
@@ -82,7 +84,12 @@ import { PageIdIndex } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
-import { IOS_WEBKIT_CEILING, initPressureGain, resetPressureCalibration } from "./ink/PressureGain";
+import {
+	IOS_WEBKIT_CEILING,
+	initPressureGain,
+	resetPressureCalibration,
+	setPressureStore,
+} from "./ink/PressureGain";
 
 interface HandwritingSettings {
 	/** Per-page camera, kept out of the synced note on purpose (§22). */
@@ -171,6 +178,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	canvasIntent = new Set<string>();
 
 	async onload(): Promise<void> {
+		// Pressure calibration is per DEVICE, so it uses the app's per-vault
+		// local store rather than data.json (which syncs, and would let one
+		// device's range silence another's). Registered before init, which
+		// reads through it.
+		setPressureStore({
+			load: (key) => this.app.loadLocalStorage(key) as string | null,
+			save: (key, value) => this.app.saveLocalStorage(key, value),
+		});
 		initPressureGain(Platform.isIosApp ? IOS_WEBKIT_CEILING : 0);
 		this.store = new PageStore(this.app);
 		// Persistence must never fail silently: a write that keeps failing
@@ -354,6 +369,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				setInlineTool("pen");
 				setInlineEraserMode(false);
 				setInlineLassoMode(false);
+				setInlineSpaceMode(false);
 				if (!stripQuiet()) new Notice("Handwriting: pen");
 			},
 		});
@@ -429,6 +445,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const on = !getInlineLassoMode();
 				setInlineLassoMode(on);
 				if (!stripQuiet()) new Notice(on ? "Handwriting: lasso (tip selects)" : `Handwriting: ${getInlineTool()}`);
+			},
+		});
+		// Insert space as a mode, same shape as lasso: plant a divider with
+		// the tip, drag down to open room, drag up to close it. Pen exits.
+		this.addCommand({
+			id: "inline-tool-space",
+			name: "Insert space: toggle",
+			callback: () => {
+				const on = !getInlineSpaceMode();
+				setInlineSpaceMode(on);
+				if (!stripQuiet()) new Notice(on ? "Handwriting: insert space (tip shifts ink below)" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		this.addCommand({
@@ -638,6 +665,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				setInlineTool("highlighter");
 				setInlineEraserMode(false);
 				setInlineLassoMode(false);
+				setInlineSpaceMode(false);
 				if (!stripQuiet()) new Notice("Handwriting: highlighter");
 			},
 		});

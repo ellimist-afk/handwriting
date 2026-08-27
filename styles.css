@@ -213,6 +213,16 @@
 	opacity: 0.9;
 }
 
+/* Insert-space mode at the nib: the divider in miniature, so the tip shows
+   the seam it will plant instead of a nib dot that would say "pen". */
+.handwriting-pen-cursor.handwriting-pen-hover-space {
+	border: 0;
+	border-top: 1.5px dashed var(--text-accent);
+	border-radius: 0;
+	background-color: transparent;
+	opacity: 0.9;
+}
+
 .handwriting-pen-cursor.handwriting-pen-hover-eraser {
 	border: 1.5px dashed var(--text-normal);
 	background-color: transparent;

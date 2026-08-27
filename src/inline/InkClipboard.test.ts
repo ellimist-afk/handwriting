@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { computeBBox } from "../ink/Stroke";
-import { clearInkClipboard, clipboardSize, copyInk, pasteInk } from "./InkClipboard";
+import {
+	clearInkClipboard,
+	clipboardSize,
+	copyInk,
+	inkClipboardMarker,
+	markerIsCurrent,
+	markerToken,
+	pasteInk,
+} from "./InkClipboard";
 
 function stroke(id: string, x: number) {
 	const points = [
@@ -52,5 +60,60 @@ describe("ink clipboard", () => {
 	it("empty clipboard pastes nothing", () => {
 		expect(pasteInk("one.md")).toEqual([]);
 		expect(clipboardSize()).toBe(0);
+	});
+});
+
+describe("clipboard marker", () => {
+	beforeEach(() => clearInkClipboard());
+
+	it("no marker while the clipboard is empty", () => {
+		expect(inkClipboardMarker()).toBeNull();
+	});
+
+	it("a copy mints a marker that names its own ink", () => {
+		copyInk([stroke("s1", 0), stroke("s2", 40)], "a.md");
+		const marker = inkClipboardMarker()!;
+		expect(marker.startsWith("handwriting-ink/v1 ")).toBe(true);
+		expect(marker).toContain("(2 strokes)");
+		expect(markerToken(marker)).not.toBeNull();
+		expect(markerIsCurrent(marker)).toBe(true);
+	});
+
+	it("one stroke reads as one stroke", () => {
+		copyInk([stroke("s1", 0)], "a.md");
+		expect(inkClipboardMarker()).toContain("(1 stroke)");
+	});
+
+	it("ordinary text is never mistaken for a marker", () => {
+		copyInk([stroke("s1", 0)], "a.md");
+		for (const text of ["", "hello", "handwriting ink", "  notes about handwriting-ink/v1  "]) {
+			expect(markerToken(text)).toBeNull();
+			expect(markerIsCurrent(text)).toBe(false);
+		}
+	});
+
+	it("surrounding whitespace survives a clipboard round trip", () => {
+		copyInk([stroke("s1", 0)], "a.md");
+		const marker = inkClipboardMarker()!;
+		expect(markerIsCurrent(`
+${marker}
+`)).toBe(true);
+	});
+
+	it("a marker from a previous copy stops being current", () => {
+		copyInk([stroke("s1", 0)], "a.md");
+		const stale = inkClipboardMarker()!;
+		copyInk([stroke("s2", 40)], "b.md");
+		expect(markerToken(stale)).not.toBeNull(); // still recognized as ours
+		expect(markerIsCurrent(stale)).toBe(false); // but not what we hold
+		expect(markerIsCurrent(inkClipboardMarker()!)).toBe(true);
+	});
+
+	it("a marker outliving its ink is recognized and refused", () => {
+		copyInk([stroke("s1", 0)], "a.md");
+		const marker = inkClipboardMarker()!;
+		clearInkClipboard(); // app restart: module state gone, marker still in a clipboard manager
+		expect(markerToken(marker)).not.toBeNull();
+		expect(markerIsCurrent(marker)).toBe(false);
 	});
 });

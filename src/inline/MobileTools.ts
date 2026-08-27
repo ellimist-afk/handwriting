@@ -39,6 +39,8 @@ export interface MobileToolsHost {
 	setEraserWholeStroke(on: boolean): void;
 	/** Whether lasso mode makes the tip lasso. */
 	lassoOn(): boolean;
+	/** Whether insert-space mode makes the tip plant a divider. */
+	spaceOn(): boolean;
 	/** The active tool's current ink color, for the tinted palette button. */
 	activeColor(): string;
 	/** Eraser radius in screen px, for the slider. */
@@ -59,6 +61,15 @@ export interface MobileToolsHost {
 	palette(): ReadonlyArray<{ name: string; hex: string }>;
 }
 
+/**
+ * The tip inks only when nothing has taken it over. A nib button asked
+ * only whether the eraser was on, so turning on lasso - or insert space,
+ * which copied lasso's shape - left Pen lit alongside the mode that had
+ * actually claimed the tip, and the strip showed two active tools at once
+ * (alan, 2026-08-27). Every mode that steals the tip belongs in here.
+ */
+const tipInks = (h: MobileToolsHost): boolean => !h.eraserOn() && !h.lassoOn() && !h.spaceOn();
+
 interface ButtonSpec {
 	icon: string;
 	/** Two-char fallback shown when the icon set has no such glyph. */
@@ -77,14 +88,14 @@ const BUTTONS: ButtonSpec[] = [
 		glyph: "P",
 		label: "Pen",
 		commandId: "handwriting:inline-tool-pen",
-		isActive: (h) => !h.eraserOn() && h.activeTool() === "pen",
+		isActive: (h) => tipInks(h) && h.activeTool() === "pen",
 	},
 	{
 		icon: "highlighter",
 		glyph: "H",
 		label: "Highlighter",
 		commandId: "handwriting:inline-tool-highlighter",
-		isActive: (h) => !h.eraserOn() && h.activeTool() === "highlighter",
+		isActive: (h) => tipInks(h) && h.activeTool() === "highlighter",
 	},
 	{
 		icon: "eraser",
@@ -99,6 +110,13 @@ const BUTTONS: ButtonSpec[] = [
 		label: "Lasso",
 		commandId: "handwriting:inline-tool-lasso",
 		isActive: (h) => h.lassoOn(),
+	},
+	{
+		icon: "unfold-vertical",
+		glyph: "S",
+		label: "Insert space",
+		commandId: "handwriting:inline-tool-space",
+		isActive: (h) => h.spaceOn(),
 	},
 	{
 		icon: "trash-2",

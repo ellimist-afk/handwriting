@@ -9,6 +9,7 @@ Open a note and write. The note stays a plain `.md` file.
 * write ink, highlight, in multiple colors, size sliders
 * erase, two modes, size slider
 * lasso with the side button; move the selection, delete it, copy/paste it across notes
+* insert space, drag a divider and the ink below moves down, text and all
 * undo/redo ink just like text
 * zoom in, out
 * draw with the mouse if you want
@@ -77,7 +78,7 @@ search for BRAT > hit install and enable > click Settings >
 
 Scroll down till you see this and hit the plus in upper right hand
 
-<img width="464" height="167" alt="image" src="https://github.com/user-attachments/assets/049f790d-7e7f-452b-94ae-36d50f06b6ae" />
+<img width="464" height="167" alt="the BRAT settings panel, with the add-plugin button in the upper right" src="https://github.com/user-attachments/assets/049f790d-7e7f-452b-94ae-36d50f06b6ae" />
 
 paste this in : ellimist-afk/handwriting > hit add plugin
 

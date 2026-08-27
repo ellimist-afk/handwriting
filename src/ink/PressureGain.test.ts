@@ -4,6 +4,7 @@ import {
 	observeStrokeMax,
 	resetPressureCalibration,
 	resetPressureGainForTest,
+	setPressureStore,
 	strokeGain,
 } from "./PressureGain";
 
@@ -51,9 +52,59 @@ describe("PressureGain", () => {
 		expect(strokeGain()).toBe(1);
 	});
 
-	it("init without localStorage (node) leaves the default and does not throw", () => {
+	it("init with no host store leaves the default and does not throw", () => {
+		setPressureStore(null);
 		expect(() => initPressureGain()).not.toThrow();
 		expect(strokeGain()).toBe(1);
+	});
+
+	it("a learned max round trips through the host store", () => {
+		// The swap off the localStorage global (scorecard, 2026-08-27) is
+		// only correct if what one session writes, the next session reads.
+		const kv = new Map<string, string>();
+		setPressureStore({
+			load: (k) => kv.get(k) ?? null,
+			save: (k, v) => void kv.set(k, v),
+		});
+		resetPressureGainForTest(0);
+		observeStrokeMax(0.275);
+		expect(kv.size).toBe(1);
+
+		// A fresh session: nothing in memory, everything from the store.
+		resetPressureGainForTest(0);
+		initPressureGain();
+		expect(strokeGain()).toBeCloseTo(2, 5);
+		setPressureStore(null);
+	});
+
+	it("resetting calibration clears what was stored", () => {
+		const kv = new Map<string, string>();
+		setPressureStore({
+			load: (k) => kv.get(k) ?? null,
+			save: (k, v) => void kv.set(k, v),
+		});
+		resetPressureGainForTest(0);
+		observeStrokeMax(0.275);
+		resetPressureCalibration();
+		initPressureGain();
+		expect(strokeGain()).toBe(1);
+		setPressureStore(null);
+	});
+
+	it("a store that throws costs the calibration, not the stroke", () => {
+		setPressureStore({
+			load: () => {
+				throw new Error("denied");
+			},
+			save: () => {
+				throw new Error("denied");
+			},
+		});
+		resetPressureGainForTest(0);
+		expect(() => initPressureGain()).not.toThrow();
+		expect(() => observeStrokeMax(0.275)).not.toThrow();
+		expect(() => resetPressureCalibration()).not.toThrow();
+		setPressureStore(null);
 	});
 
 	it("test seam can preload a max", () => {
