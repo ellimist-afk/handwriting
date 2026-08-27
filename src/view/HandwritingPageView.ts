@@ -49,6 +49,12 @@ export interface HandwritingHost {
 	setCamera(pageId: string, cam: CameraState): void;
 	/** Geometry smoothing verdict from the pen lab; false = approved pipeline. */
 	settings: { smoothInk: boolean };
+	/**
+	 * Paths deliberately sent to the canvas (the open-on-canvas command).
+	 * Everything else that lands in a live canvas view bounces back to
+	 * Markdown - see onLoadFile.
+	 */
+	canvasIntent: Set<string>;
 }
 
 type Tool = "pen" | "highlighter" | "eraser" | "lasso";
@@ -268,6 +274,26 @@ export class HandwritingPageView extends TextFileView {
 	}
 
 	async onLoadFile(file: TFile): Promise<void> {
+		// canAcceptExtension says "md", and Obsidian REUSES a live view for
+		// any file it accepts: once a leaf shows the canvas, every note
+		// opened in that leaf loads INTO the canvas (seen live 2026-08-27 -
+		// "every page turned into a slate canvas"). Only marked pages and
+		// deliberate open-on-canvas targets belong here; anything else
+		// bounces the leaf back to Markdown.
+		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		const marker: unknown = fm?.["handwriting"];
+		const belongs =
+			marker === "page" || marker === true || this.host.canvasIntent.has(file.path);
+		if (!belongs) {
+			const leaf = this.leaf;
+			queueMicrotask(() => {
+				void leaf.setViewState({
+					type: "markdown",
+					state: { file: file.path, mode: "source" },
+				});
+			});
+			return;
+		}
 		this.textLayer?.setSourcePath(file.path);
 		this.imageLayer?.setSourcePath(file.path);
 		await super.onLoadFile(file);

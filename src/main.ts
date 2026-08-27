@@ -162,6 +162,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	private ambiguousIds = new Map<string, string[]>();
 	private pageIdWatchReady = false;
 	private resolvingDuplicates = new Set<string>();
+	/** Paths the user deliberately opened on the canvas (host contract). */
+	canvasIntent = new Set<string>();
 
 	async onload(): Promise<void> {
 		initPressureGain(Platform.isIosApp ? IOS_WEBKIT_CEILING : 0);
@@ -1313,6 +1315,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	 */
 	private async openAsHandwriting(file: TFile): Promise<void> {
 		this.preferMarkdown.delete(file.path);
+		this.canvasIntent.add(file.path);
 		const leaf = this.app.workspace.getLeaf(false);
 		await leaf.setViewState({
 			type: HANDWRITING_PAGE_VIEW_TYPE,
