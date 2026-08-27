@@ -352,6 +352,37 @@ export class InlineInkStore {
 		}
 	}
 
+	/** The recorded page id behind a loaded note, for the reload poll. */
+	pageIdFor(path: string): string | null {
+		return this.byPath.get(path)?.pageId ?? null;
+	}
+
+	/**
+	 * Adopt an external sidecar edit (another device, via sync) by
+	 * rebuilding the record through the NORMAL load path, so the damage,
+	 * future-version and legacy-surface locks all re-apply and basePage is
+	 * replaced wholesale from the fresh parse. Only a settled, clean record
+	 * reloads: the caller has verified the disk actually changed and that
+	 * no gesture is active; this guards the record's own state. CM ink
+	 * history survives a reload - an op that no longer matches skips its
+	 * missing ids, which is bounded weirdness, and clearing a user's undo
+	 * because another machine wrote would be worse.
+	 */
+	async reloadExternal(path: string): Promise<boolean> {
+		const rec = this.byPath.get(path);
+		if (!rec || rec.load !== "yes") return false;
+		if (rec.loadInFlight || rec.claimInFlight) return false;
+		if (rec.damagedLocked || rec.legacyLocked || rec.futureLocked) return false;
+		this.byPath.delete(path);
+		// The load result's changed flag means strokes were ADOPTED, which
+		// reads an erase-to-empty as a non-event - and the caller only got
+		// here because the disk content really differs. A reload that ran
+		// is a repaint, whatever the stroke count (the empty page most of
+		// all: it is the one state the old pixels misrepresent forever).
+		await this.ensureLoaded(path);
+		return true;
+	}
+
 	/** Diagnostics: what the session cache holds (it never evicts). */
 	cacheStats(): { notes: number; strokes: number; points: number } {
 		let strokes = 0;

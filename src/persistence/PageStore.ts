@@ -160,6 +160,38 @@ export class PageStore {
 		return candidate;
 	}
 
+	/**
+	 * Cheap poll primitive for live reload: has the sidecar on disk changed
+	 * behind our back? One stat on the fast path; a read only when the mtime
+	 * moved (sync tools preserve mtimes, so the content stamp decides).
+	 * Never answers while a write for this page is queued - a half-landed
+	 * save of our own must not read as an external edit - and never for a
+	 * page this store has not read or written (nothing to compare against).
+	 * The write-path conflict guard stays the last word either way.
+	 */
+	async externallyChanged(pageId: string): Promise<boolean> {
+		if (this.pending.has(pageId) || this.timers.has(pageId) || this.maxTimers.has(pageId)) {
+			return false;
+		}
+		const known = this.knownMtime.get(pageId);
+		if (known === undefined) return false;
+		const adapter = this.app.vault.adapter;
+		try {
+			const st = await adapter.stat(this.path(pageId)).catch(() => null);
+			if (!st || st.mtime === known) return false;
+			const stamp = contentStamp(await adapter.read(this.path(pageId)));
+			if (stamp === this.knownHash.get(pageId)) {
+				// mtime churn without content change (a sync tool touching
+				// the file): remember it so the next poll stays one stat.
+				this.knownMtime.set(pageId, st.mtime);
+				return false;
+			}
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	async load(pageId: string): Promise<ParseResult | null> {
 		const adapter = this.app.vault.adapter;
 		const final = this.path(pageId);

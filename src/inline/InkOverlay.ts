@@ -320,6 +320,16 @@ export function copyInlineInkMetrics(): string {
 }
 
 
+/** Paths whose editors are quiet enough to adopt an external reload. */
+export function inlineReloadCandidates(): string[] {
+	const out = new Set<string>();
+	for (const p of instances) {
+		const path = p.reloadCandidatePath();
+		if (path) out.add(path);
+	}
+	return [...out];
+}
+
 /** Zoom diagnostics for every live editor. Run at 100% and at zoom, then diff. */
 export function copyInlineZoomReport(): string {
 	if (instances.size === 0) return "Handwriting zoom report: no editors mounted";
@@ -1060,6 +1070,12 @@ class InkOverlayPlugin {
 			`camera origin (note space): ${this.camera.x.toFixed(2)}, ${this.camera.y.toFixed(2)}`,
 			`strokes on this note: ${this.filePath() ? inlineInk.strokes(this.filePath()!).length : 0}`,
 		].join("\n");
+	}
+
+	/** This editor's path, when no gesture is active (the reload poll gate). */
+	reloadCandidatePath(): string | null {
+		if (this.builder !== null || this.mode !== "ink") return null;
+		return this.filePath();
 	}
 
 	/** The live overlay container, for the census's ghost detection. */

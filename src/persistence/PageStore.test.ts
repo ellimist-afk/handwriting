@@ -677,6 +677,58 @@ describe("discardPending — orphaned queue entries", () => {
 	});
 });
 
+describe("externallyChanged — the live-reload poll primitive", () => {
+	it("false for a page this store never read or wrote", async () => {
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "S")));
+		fake.mtimes.set(".handwriting/p1.json", 5000);
+		expect(await store.externallyChanged("p1")).toBe(false);
+	});
+
+	it("false while nothing on disk moved", async () => {
+		store.schedule("p1", pageWith("p1", "S"));
+		await store.flush();
+		expect(await store.externallyChanged("p1")).toBe(false);
+	});
+
+	it("true when an external writer replaced the content", async () => {
+		store.schedule("p1", pageWith("p1", "S"));
+		await store.flush();
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "REMOTE")));
+		fake.mtimes.set(".handwriting/p1.json", 999999);
+		expect(await store.externallyChanged("p1")).toBe(true);
+	});
+
+	it("false for mtime churn with identical content, and remembers the new stamp", async () => {
+		store.schedule("p1", pageWith("p1", "S"));
+		await store.flush();
+		const text = fake.files.get(".handwriting/p1.json")!;
+		fake.files.set(".handwriting/p1.json", text);
+		fake.mtimes.set(".handwriting/p1.json", 999999);
+		expect(await store.externallyChanged("p1")).toBe(false);
+		// second poll never re-reads: the stamp was remembered
+		expect(await store.externallyChanged("p1")).toBe(false);
+	});
+
+	it("false while a write for the page is queued", async () => {
+		store.schedule("p1", pageWith("p1", "S"));
+		await store.flush();
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "REMOTE")));
+		fake.mtimes.set(".handwriting/p1.json", 999999);
+		store.schedule("p1", pageWith("p1", "LOCAL")); // pending again
+		expect(await store.externallyChanged("p1")).toBe(false);
+	});
+
+	it("load refreshes the stamps, so a poll after reload goes quiet", async () => {
+		store.schedule("p1", pageWith("p1", "S"));
+		await store.flush();
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "REMOTE")));
+		fake.mtimes.set(".handwriting/p1.json", 999999);
+		expect(await store.externallyChanged("p1")).toBe(true);
+		await store.load("p1");
+		expect(await store.externallyChanged("p1")).toBe(false);
+	});
+});
+
 describe("round trips and deletion", () => {
 	it("save → load returns the same strokes, undamaged", async () => {
 		store.schedule("p1", pageWith("p1", "R"));

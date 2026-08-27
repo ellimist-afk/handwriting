@@ -25,6 +25,7 @@ import {
 	overlayForPath,
 	refreshPenToolsAll,
 	stripQuiet,
+	inlineReloadCandidates,
 	getInlineLassoMode,
 	setInlineLassoMode,
 	setPersistEraserRadius,
@@ -62,7 +63,7 @@ import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./i
 import { inkToSvg } from "./ink/SvgExport";
 import { clipboardSize } from "./inline/InkClipboard";
 import { attachEmbedInk, embedInkChanged, embedInkRoot, initEmbedInkRefresh } from "./inline/EmbedInk";
-import { onInkChanged } from "./inline/InkEvents";
+import { notifyInkChanged, onInkChanged } from "./inline/InkEvents";
 import {
 	PenToolsMode,
 	getPenToolsMode,
@@ -299,6 +300,34 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			this.app.workspace.on("window-open", (_ww, win) => {
 				this.applyPaperTo(win.document, this.settings.paperStyle);
 			})
+		);
+		// Live reload: ink synced in from another device appears without a
+		// restart. One stat per open, quiet editor every 2s; the store
+		// adopts a changed sidecar only when nothing local is unsaved and no
+		// gesture is active, and the write-path conflict guard keeps its
+		// last word. Dot-folders are invisible to vault events (sidecars
+		// are not vault-indexed files), which is why this polls.
+		let reloadTickBusy = false;
+		this.registerInterval(
+			window.setInterval(() => {
+				if (reloadTickBusy) return;
+				reloadTickBusy = true;
+				runDetached(
+					(async () => {
+						for (const path of inlineReloadCandidates()) {
+							const id = inlineInk.pageIdFor(path);
+							if (!id || !(await this.store.externallyChanged(id))) continue;
+							if (await inlineInk.reloadExternal(path)) {
+								repaintAllInkOverlays();
+								notifyInkChanged(path);
+							}
+						}
+					})().finally(() => {
+						reloadTickBusy = false;
+					}),
+					"live-reload poll"
+				);
+			}, 2000)
 		);
 		// The nib on ordinary notes: pen or highlighter. A property of the tip,
 		// not a mode. The eraser end and the barrel keep their hardware meanings.
