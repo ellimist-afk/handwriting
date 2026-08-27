@@ -9,6 +9,8 @@ interface DeleteKeyEvent {
 	altKey: boolean;
 	ctrlKey: boolean;
 	metaKey: boolean;
+	/** OS key-repeat flag; absent on synthetic events, treated as false. */
+	repeat?: boolean;
 	preventDefault(): void;
 }
 
@@ -45,8 +47,17 @@ export class InlineSelectionDeleteKeys {
 		const key = this.deleteKey(event.key);
 		if (!key) return false;
 		if (this.held === key) {
-			event.preventDefault();
-			return true;
+			// The latch exists ONLY to keep key-repeat from cascading into
+			// Markdown after the first event cleared the selection. A FRESH
+			// press means the matching keyup was lost (focus moved between
+			// down and up), and swallowing it made Delete silently dead for
+			// the rest of the session (hardware, 2026-08-27): heal the latch
+			// and let the press through.
+			if (event.repeat) {
+				event.preventDefault();
+				return true;
+			}
+			this.held = null;
 		}
 		if (event.altKey || event.ctrlKey || event.metaKey || !this.hasSelection()) return false;
 		this.held = key;

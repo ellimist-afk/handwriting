@@ -21,12 +21,16 @@ function stroke(id: string): InkStroke {
 	};
 }
 
-function keyEvent(key: string, mods: Partial<Pick<KeyboardEvent, "altKey" | "ctrlKey" | "metaKey">> = {}) {
+function keyEvent(
+	key: string,
+	mods: Partial<Pick<KeyboardEvent, "altKey" | "ctrlKey" | "metaKey" | "repeat">> = {}
+) {
 	return {
 		key,
 		altKey: mods.altKey ?? false,
 		ctrlKey: mods.ctrlKey ?? false,
 		metaKey: mods.metaKey ?? false,
+		repeat: mods.repeat ?? false,
 		preventDefault: vi.fn(),
 	};
 }
@@ -87,10 +91,25 @@ describe("inline lasso deletion", () => {
 		const keys = new InlineSelectionDeleteKeys(() => selected, remove);
 
 		expect(keys.keydown(keyEvent("Delete"))).toBe(true);
-		const repeat = keyEvent("Delete");
+		const repeat = keyEvent("Delete", { repeat: true });
 		expect(keys.keydown(repeat)).toBe(true);
 		expect(repeat.preventDefault).toHaveBeenCalledOnce();
 		expect(remove).toHaveBeenCalledOnce();
+	});
+
+	it("a fresh press heals a stale latch instead of dying silently", () => {
+		// The keyup after a successful delete gets lost (focus moved between
+		// down and up). The latch must not eat every later Delete press.
+		let selected = true;
+		const remove = vi.fn(() => {
+			selected = false;
+		});
+		const keys = new InlineSelectionDeleteKeys(() => selected, remove);
+		expect(keys.keydown(keyEvent("Delete"))).toBe(true); // latch set, keyup never arrives
+		selected = true; // a new lasso
+		const fresh = keyEvent("Delete"); // repeat: false - a real press
+		expect(keys.keydown(fresh)).toBe(true);
+		expect(remove).toHaveBeenCalledTimes(2);
 	});
 
 	it("leaves modified shortcuts and ordinary Markdown keys alone", () => {
