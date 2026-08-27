@@ -443,7 +443,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 		this.addCommand({
 			id: "ink-shaping-toggle",
-			name: "Ink shaping: toggle",
+			name: "Pressure sensitivity: toggle",
 			callback: () => {
 				const on = !inkShapingEnabled();
 				runDetached(this.applyInkShaping(on), "save the ink shaping setting", () =>
@@ -1615,8 +1615,8 @@ class HandwritingSettingTab extends PluginSettingTab {
 				})
 			);
 		new Setting(containerEl)
-			.setName("Ink shaping")
-			.setDesc("Pressure sensitivity. Default on.")
+			.setName("Pressure sensitivity")
+			.setDesc("Default on.")
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.inkShaping).onChange((on) => {
 					this.plugin.settings.inkShaping = on;

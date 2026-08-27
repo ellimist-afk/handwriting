@@ -7,7 +7,7 @@ Open a note and write. The note stays a plain `.md` file.
 ## right now you can
 
 * write ink, highlight, in multiple colors, size sliders
-* erase, size slider
+* erase, two modes, size slider
 * lasso with the side button; move the selection, delete it, copy/paste it across notes
 * undo/redo ink just like text
 * zoom in, out
@@ -21,10 +21,12 @@ Open a note and write. The note stays a plain `.md` file.
 * pressure sensitivity
 * palm rejection
 * floating pen toolbar with auto-hide behavior
-* handwriting shaper
+* ink smoothing
 * lined and grid paper background
 * export ink as svg
 * infinite canvas
+* ink embeds + reading view
+* handwriting to shape
 
 ## Works on
 
@@ -75,7 +77,7 @@ search for BRAT > hit install and enable > click Settings >
 
 Scroll down till you see this and hit the plus in upper right hand
 
-<img width="928" height="334" alt="image" src="https://github.com/user-attachments/assets/049f790d-7e7f-452b-94ae-36d50f06b6ae" />
+<img width="464" height="167" alt="image" src="https://github.com/user-attachments/assets/049f790d-7e7f-452b-94ae-36d50f06b6ae" />
 
 paste this in : ellimist-afk/handwriting > hit add plugin
 
@@ -86,12 +88,12 @@ on a Surface Pro and my gf's iPad. please send reports.
 
 ## Coming soon
 
+* native pdf annotation
 * audio alongside ink
-* handwriting to shapes
 * ruler+compass on screen
 * ocr/handwriting to text
 * searchable handwriting
-* native pdf annotation
+* handwriting to math/latex
 
 ## reporting problems
 
