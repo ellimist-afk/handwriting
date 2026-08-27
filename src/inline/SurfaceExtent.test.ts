@@ -13,6 +13,7 @@ import {
 	isScrollableOverflow,
 	spacerPosition,
 	surfaceOriginInScroller,
+	zoomFrontier,
 } from "./SurfaceExtent";
 import { InkStroke } from "../ink/Stroke";
 import css from "../../styles.css?raw";
@@ -224,5 +225,43 @@ describe("SurfaceExtents", () => {
 		s.grow("a.md", { x: 300, y: 300 });
 		s.handleDelete("a.md");
 		expect(s.get("a.md")).toBe(ZERO_EXTENT);
+	});
+});
+
+describe("zoomFrontier (the magnified note must be reachable)", () => {
+	const base = {
+		clientWidth: 800,
+		clientHeight: 600,
+		contentBottom: 2000,
+		origin: { left: 100, top: 0 },
+		fontZoom: 1,
+	};
+
+	it("grants nothing at scale 1 or below", () => {
+		expect(zoomFrontier({ ...base, pinchScale: 1 })).toEqual({ x: 0, y: 0 });
+		expect(zoomFrontier({ ...base, pinchScale: 0.5 })).toEqual({ x: 0, y: 0 });
+	});
+
+	it("at 2x, reaches the far half the transform pushed past the pane", () => {
+		// The pane shows a 1/2 slice of the scroller at 2x, so reaching the
+		// content's far edge needs scroll up to size * (1 - 1/2) beyond what
+		// scale 1 needed - on both axes, past the document bottom too.
+		const f = zoomFrontier({ ...base, pinchScale: 2 });
+		expect(f.x).toBe(800 * 1.5 - 100);
+		expect(f.y).toBe(2000 + 600 * 0.5);
+	});
+
+	it("scales down with font zoom, since the spacer scales it back up", () => {
+		const f = zoomFrontier({ ...base, fontZoom: 2, pinchScale: 2 });
+		expect(f.x).toBe((800 * 1.5 - 100) / 2);
+	});
+
+	it("never returns a negative axis", () => {
+		const f = zoomFrontier({ ...base, origin: { left: 5000, top: 5000 }, pinchScale: 1.1 });
+		expect(f.x).toBe(0);
+	});
+
+	it("holds still on junk scales", () => {
+		expect(zoomFrontier({ ...base, pinchScale: Number.NaN })).toEqual({ x: 0, y: 0 });
 	});
 });

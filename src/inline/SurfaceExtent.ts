@@ -89,6 +89,35 @@ export function surfaceOriginInScroller(g: {
 	};
 }
 
+/**
+ * The extent a pinch zoom needs, in note px, so the whole magnified note is
+ * reachable.
+ *
+ * The transform sits on the editor and the scroller is inside it, so scaling
+ * paints the scroller bigger but does not add ONE pixel of scroll range: at
+ * 2x the right half of every line and the bottom of the viewport were simply
+ * unreachable. The pane shows a `1/k` slice of the scroller, so bringing the
+ * far edge of the content into view needs scroll up to `size * (1 - 1/k)`
+ * past where `k = 1` needed - which is exactly what the extent spacer is
+ * for. Zero at `k <= 1`, so an unzoomed note grants nothing.
+ */
+export function zoomFrontier(g: {
+	clientWidth: number;
+	clientHeight: number;
+	/** Document bottom in scroller-content px, so vertical reach clears it. */
+	contentBottom: number;
+	origin: { left: number; top: number };
+	pinchScale: number;
+	fontZoom: number;
+}): Extent {
+	const k = g.pinchScale;
+	if (!Number.isFinite(k) || k <= 1 || g.fontZoom <= 0) return ZERO_EXTENT;
+	const over = 1 - 1 / k;
+	const x = (g.clientWidth * (1 + over) - g.origin.left) / g.fontZoom;
+	const y = (g.contentBottom + g.clientHeight * over - g.origin.top) / g.fontZoom;
+	return { x: Math.max(0, x), y: Math.max(0, y) };
+}
+
 /** Spacer style position: origin plus granted extent, whole px. */
 export function spacerPosition(
 	origin: { left: number; top: number },

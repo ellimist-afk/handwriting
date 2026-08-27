@@ -38,12 +38,13 @@ export function pinchScale(referenceScale: number, ratio: number): number {
 }
 
 /**
- * The layout size the scaled box needs so it still fills its pane.
- *
- * A transform paints at a different size without changing layout, so a box
- * scaled to 2 would paint twice as wide while still claiming the pane's width,
- * and half of it would hang outside. Sizing the box to 100/k percent first
- * means the painted result lands back at exactly 100%.
+ * RETIRED, kept only so an old import fails loudly in review rather than
+ * silently at runtime: counter-sizing the box was wrong twice over. The
+ * narrower layout box made the text RE-WRAP while zooming, so words changed
+ * lines while world-anchored ink stayed put - the exact misregistration this
+ * module exists to prevent - and the re-wrap is a full document reflow,
+ * which is why every variant of it was laggy. A magnified note keeps its
+ * layout and overhangs the pane; that is what the scroller is for.
  */
 export function counterSizePercent(scale: number): number {
 	const k = clampPinchScale(scale);
@@ -51,23 +52,36 @@ export function counterSizePercent(scale: number): number {
 }
 
 /**
- * Scroll offset that keeps the point under the fingers still while the scale
- * changes, on one axis.
+ * Scroll offset that keeps the point you STARTED pinching at under the place
+ * you started pinching it, on one axis.
  *
- * The content coordinate under the centroid is `(scroll + centroid) / from`.
- * Holding that coordinate under the same screen position at the new scale
- * gives the offset below. Returns 0 rather than a NaN for junk input, which
- * shows up as the view jumping to the origin instead of vanishing.
+ * Absolute, from the gesture's own start state - never from the previous
+ * frame. The first version recomputed each frame against the live centroid
+ * and the live scale, which failed twice over: fingers move during a pinch,
+ * so the anchor point moved with them and the view chased both fingers
+ * around; and each frame's rounding fed into the next, so the drift
+ * accumulated the longer you pinched.
+ *
+ * The geometry, and it matters: the transform sits on the EDITOR, and the
+ * scroller is a child INSIDE it. Scroll offsets are therefore layout px in
+ * the scroller's untransformed space, while the centroid offset is painted
+ * px measured against the scroller's transformed rect: o = k * (p - s).
+ * The content point under the start centroid is p = s0 + o0/f, and holding
+ * it under the same painted offset at scale t gives
+ * s = s0 + o0 * (1/f - 1/t). Getting this backwards (treating the content
+ * as a transformed child inside a still scroller) anchors nothing: the
+ * zoom slides around the point instead of holding it.
  */
 export function anchoredScroll(
-	scroll: number,
-	centroid: number,
-	from: number,
-	to: number
+	startScroll: number,
+	startOffset: number,
+	fromScale: number,
+	toScale: number
 ): number {
-	if (!Number.isFinite(scroll) || !Number.isFinite(centroid)) return 0;
-	if (!Number.isFinite(from) || from <= 0 || !Number.isFinite(to) || to <= 0) return scroll;
-	const next = (scroll + centroid) * (to / from) - centroid;
+	if (!Number.isFinite(startScroll) || !Number.isFinite(startOffset)) return 0;
+	if (!Number.isFinite(fromScale) || fromScale <= 0) return startScroll;
+	if (!Number.isFinite(toScale) || toScale <= 0) return startScroll;
+	const next = startScroll + startOffset * (1 / fromScale - 1 / toScale);
 	return Number.isFinite(next) ? Math.max(0, next) : 0;
 }
 

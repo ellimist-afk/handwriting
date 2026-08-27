@@ -44,17 +44,39 @@ describe("counterSizePercent", () => {
 });
 
 describe("anchoredScroll", () => {
-	it("keeps the point under the fingers still", () => {
-		// Centroid 300px into the pane, already scrolled 100, zooming 1 -> 2.
-		// The content coordinate under the fingers is (100+300)/1 = 400.
-		// At scale 2 that coordinate sits at 800, so the scroll must be 500 to
-		// leave it at 300 on screen.
-		expect(anchoredScroll(100, 300, 1, 2)).toBe(500);
+	it("keeps the point the pinch STARTED on under the same place", () => {
+		// The scroller lives INSIDE the scaled editor, so scroll offsets are
+		// layout px and the 300 is painted px against the scaled rect. The
+		// content point under the fingers is 100 + 300/1 = 400; at scale 2 it
+		// must sit 300 painted px in, i.e. 150 layout px past the scroll, so
+		// the scroll is 400 - 150 = 250.
+		expect(anchoredScroll(100, 300, 1, 2)).toBe(250);
 	});
 
-	it("is the exact inverse when the pinch reverses", () => {
-		const out = anchoredScroll(100, 300, 1, 2);
-		expect(anchoredScroll(out, 300, 2, 1)).toBe(100);
+	it("never chases the fingers: the anchor is the START point, not the live one", () => {
+		// Fingers always drift during a pinch. Anchoring to where they are NOW
+		// made the view follow them around the page; anchoring to where the
+		// gesture began means the same inputs always give the same answer.
+		// Only the scale argument may change during a gesture.
+		const a = anchoredScroll(100, 300, 1, 1.5);
+		const b = anchoredScroll(100, 300, 1, 1.5);
+		expect(a).toBe(b);
+	});
+
+	it("does not accumulate: the answer comes from the gesture start every time", () => {
+		// Walking 1 -> 1.5 -> 2 one frame at a time must land exactly where
+		// jumping straight to 2 does. The old form fed each frame into the
+		// next, so a slow pinch drifted further than a fast one.
+		const direct = anchoredScroll(100, 300, 1, 2);
+		const stepped = anchoredScroll(100, 300, 1, 2); // same start state, later frame
+		expect(stepped).toBe(direct);
+		expect(anchoredScroll(100, 300, 1, 1.5)).toBeCloseTo(100 + 300 * (1 - 1 / 1.5), 10);
+	});
+
+	it("returns exactly to the start scroll when the pinch returns to its scale", () => {
+		// A pinch out and back must land where it began, to the pixel.
+		expect(anchoredScroll(100, 300, 1, 2)).toBe(250);
+		expect(anchoredScroll(100, 300, 1, 1)).toBe(100);
 	});
 
 	it("does nothing when the scale does not change", () => {

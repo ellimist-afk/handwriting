@@ -77,7 +77,7 @@ import { StrokeIndex } from "../ink/StrokeIndex";
 import { DWELL_MS, snapStroke } from "../ink/ShapeSnap";
 
 const sessionStartMs = Date.now();
-import { anchoredScroll, counterSizePercent, pinchScale } from "./PinchScale";
+import { anchoredScroll, pinchScale } from "./PinchScale";
 import { ERASER_CURSOR_CLASS } from "./PenCursor";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius } from "../ink/EraserSize";
 import { backingScale, effectiveScale, fontZoomFactor, noteToVisual, visualToNote } from "./ZoomScale";
@@ -91,16 +91,7 @@ import {
 import { InlinePenRouter, bandEraserIntent } from "./InlinePenRouter";
 import { mouseInkEnabled } from "./MouseInk";
 import { describeEl, setHitProbeContext } from "./PenHitProbe";
-import {
-	Extent,
-	ScrollAxisGuard,
-	inkFrontier,
-	isScrollableOverflow,
-	spacerPosition,
-	surfaceExtents,
-	surfaceOriginInScroller,
-	ZERO_EXTENT,
-} from "./SurfaceExtent";
+import { Extent, inkFrontier, isScrollableOverflow, ScrollAxisGuard, spacerPosition, surfaceExtents, surfaceOriginInScroller, ZERO_EXTENT, zoomFrontier } from "./SurfaceExtent";
 import { ProbeBox, capturePresented, parseHexColor, regionCensus } from "./PresentProbe";
 import {
 	bboxVisibleInViewport,
@@ -604,11 +595,20 @@ class InkOverlayPlugin {
 	/** The scale this gesture started from, so a pinch never accumulates. */
 	private pinchRefScale: number | null = null;
 	/** The pinch this frame owes, coalesced from however many moves arrived. */
-	private pinchPending: { next: number; centroid: { x: number; y: number } } | null = null;
+	private pinchPending: { next: number } | null = null;
+	/** True from pinch engagement to release; the gesture owns the scroll. */
+	private pinchGestureLive = false;
+	/** Gesture-start state the whole pinch is computed from; see anchoredScroll. */
+	private pinchAnchor: {
+		scrollLeft: number;
+		scrollTop: number;
+		offsetX: number;
+		offsetY: number;
+	} | null = null;
 	private pinchRaf = 0;
-	/** The scale the laid-out box currently reflects, so a settle that would
+	/** The scale the ink raster currently reflects, so a settle that would
 	 * change nothing does not reallocate every canvas. */
-	private pinchBoxScale = 1;
+	private pinchRasterScale = 1;
 	/** Inner canvas layer the scroll-follow translate is applied to. */
 	private layerEl: HTMLElement | null = null;
 	/**
@@ -887,6 +887,15 @@ class InkOverlayPlugin {
 			if (diagnosticsEnabled()) {
 				scrollProbeScroll(scrollLeft, scrollTop, during);
 			}
+			// A live pinch writes the scroll itself, every frame, and any
+			// camera motion makes repaint() re-raster every visible stroke.
+			// Zooming OUT grows the visible set, so the gesture stuttered in
+			// exactly one direction. Mid-pinch the repaint buys nothing: the
+			// canvases sit inside the transformed host, so the raster the
+			// note already has scales with it, and the settle re-rasters
+			// crisply once. The follow translate above still runs - it is
+			// one transform write, and it is what keeps ink glued to text.
+			if (this.pinchGestureLive) return;
 			this.scheduleRepaint("scroll");
 		};
 		this.view.scrollDOM.addEventListener("scroll", this.scrollFn, { passive: true });
@@ -1114,8 +1123,10 @@ class InkOverlayPlugin {
 		host.style.removeProperty("width");
 		host.style.removeProperty("height");
 		this.pinchScaleNow = 1;
-		this.pinchBoxScale = 1;
+		this.pinchRasterScale = 1;
 		this.pinchRefScale = null;
+		this.pinchAnchor = null;
+		this.pinchGestureLive = false;
 		this.builder = null;
 		this.penCursorEl = null;
 		this.eraserEl = null;
@@ -2210,11 +2221,25 @@ class InkOverlayPlugin {
 		centroid: { x: number; y: number }
 	): void {
 		if (phase === "start") {
+			this.pinchGestureLive = true;
 			this.pinchRefScale = this.pinchScaleNow;
+			// The anchor is captured ONCE, here. Every frame of the gesture
+			// is then computed from this state, so the view cannot chase the
+			// fingers as they drift and rounding cannot accumulate.
+			const scroller = this.view.scrollDOM;
+			const rect = scroller.getBoundingClientRect();
+			this.pinchAnchor = {
+				scrollLeft: scroller.scrollLeft,
+				scrollTop: scroller.scrollTop,
+				offsetX: centroid.x - rect.left,
+				offsetY: centroid.y - rect.top,
+			};
 			return;
 		}
 		if (phase === "end") {
+			this.pinchGestureLive = false;
 			this.pinchRefScale = null;
+			this.pinchAnchor = null;
 			// Nothing may still be queued behind the settle: a live frame
 			// running after it would write the mid-gesture styles back.
 			if (this.pinchRaf !== 0) {
@@ -2226,13 +2251,13 @@ class InkOverlayPlugin {
 			this.flushPinch(true);
 			return;
 		}
-		if (this.pinchRefScale === null) return;
+		if (this.pinchRefScale === null || this.pinchAnchor === null) return;
 		const next = pinchScale(this.pinchRefScale, ratio);
 		if (next === this.pinchScaleNow) return;
 		// Coalesce to one update per FRAME. Two fingers deliver pointermoves
 		// faster than the display refreshes, and the work below is not the
 		// kind you do twice for one frame.
-		this.pinchPending = { next, centroid };
+		this.pinchPending = { next };
 		if (this.pinchRaf === 0) {
 			this.pinchRaf = this.winRef.requestAnimationFrame(() => {
 				this.pinchRaf = 0;
@@ -2261,8 +2286,8 @@ class InkOverlayPlugin {
 		const pending = this.pinchPending;
 		this.pinchPending = null;
 		if (!pending && !settle) return;
-		if (pending) this.applyPinchScale(pending.next, pending.centroid, settle);
-		else if (settle) this.settlePinchBox();
+		if (pending) this.applyPinchScale(pending.next, settle);
+		else if (settle) this.settlePinchRaster();
 	}
 
 	/**
@@ -2275,82 +2300,48 @@ class InkOverlayPlugin {
 	 * changes. Sizing the box to 100/k percent first keeps the painted result
 	 * filling the pane instead of hanging outside it.
 	 */
-	private applyPinchScale(
-		next: number,
-		centroid: { x: number; y: number },
-		settle: boolean
-	): void {
+	private applyPinchScale(next: number, settle: boolean): void {
+		const anchor = this.pinchAnchor;
+		if (!anchor) return;
 		const host = this.view.dom as HTMLElement;
 		const scroller = this.view.scrollDOM;
-		const from = this.pinchScaleNow;
-		// The scroller's box, not the host's: scroll offsets live in the
-		// scroller's space and it sits inset inside the host by the editor's
-		// own chrome, so measuring against the host anchored the zoom tens of
-		// px off and the page crept under the fingers.
-		const rect = scroller.getBoundingClientRect();
-		// Client px are PAINTED px; at scale k a painted offset is k layout
-		// px. Scroll offsets are layout px, so the centroid has to be divided
-		// by the scale it was measured at before the two are added.
-		const localX = (centroid.x - rect.left) / from;
-		const localY = (centroid.y - rect.top) / from;
-		const nextLeft = anchoredScroll(scroller.scrollLeft, localX, from, next);
-		const nextTop = anchoredScroll(scroller.scrollTop, localY, from, next);
+		// Both scales come from the GESTURE, not from the previous frame: the
+		// reference the gesture started at, and where it is being asked to go.
+		const from = this.pinchRefScale ?? this.pinchScaleNow;
+		const nextLeft = anchoredScroll(anchor.scrollLeft, anchor.offsetX, from, next);
+		const nextTop = anchoredScroll(anchor.scrollTop, anchor.offsetY, from, next);
 
 		this.pinchScaleNow = next;
-		if (settle) this.pinchBoxScale = next;
-		if (next === 1 && settle) {
+		// Transform ONLY - never width or height. The counter-sized box made
+		// the text re-wrap while zooming (words changed lines while the
+		// world-anchored ink stayed put), and the re-wrap is a full document
+		// reflow, which is why every variant of it was laggy. A magnified
+		// note keeps its exact layout: lines overhang the pane and the
+		// scroller reaches them, the same as any canvas or pdf viewer. The
+		// transform is compositor work, so the live gesture costs nothing.
+		if (next === 1) {
 			host.style.removeProperty("transform");
 			host.style.removeProperty("transform-origin");
-			host.style.removeProperty("width");
-			host.style.removeProperty("height");
-		} else if (settle) {
-			const box = `${counterSizePercent(next)}%`;
-			host.setCssStyles({
-				transform: `scale(${next})`,
-				transformOrigin: "0 0",
-				width: box,
-				height: box,
-			});
 		} else {
-			// Compositor only. Width/height are a full editor reflow and are
-			// what the settle pass exists for; mid-gesture the painted box
-			// simply overhangs, which no one can see while it is moving.
 			host.setCssStyles({ transform: `scale(${next})`, transformOrigin: "0 0" });
 		}
 		scroller.scrollLeft = nextLeft;
 		scroller.scrollTop = nextTop;
 		// The measured scale changed, so the ink geometry has to be rebuilt at
 		// the new backing resolution - but only once the fingers are gone.
-		if (settle) this.handleResize();
+		if (settle) this.settlePinchRaster();
 	}
 
 	/**
-	 * Pinch over: give the box its counter-size and re-raster ink crisply.
-	 *
-	 * A no-op when the box already reflects the current scale, because
-	 * `handleResize` reallocates both committed canvases and redraws every
-	 * stroke - too much to spend on a two-finger settle that crossed the
-	 * slop and changed nothing.
+	 * Pinch over: re-raster the ink crisply at the final scale. A no-op when
+	 * nothing changed since the last raster, because `handleResize`
+	 * reallocates both committed canvases and redraws every stroke - too
+	 * much to spend on a two-finger settle that crossed the slop and
+	 * changed nothing.
 	 */
-	private settlePinchBox(): void {
-		const host = this.view.dom as HTMLElement;
-		const k = this.pinchScaleNow;
-		if (k === this.pinchBoxScale) return;
-		this.pinchBoxScale = k;
-		if (k === 1) {
-			host.style.removeProperty("transform");
-			host.style.removeProperty("transform-origin");
-			host.style.removeProperty("width");
-			host.style.removeProperty("height");
-		} else {
-			const box = `${counterSizePercent(k)}%`;
-			host.setCssStyles({
-				transform: `scale(${k})`,
-				transformOrigin: "0 0",
-				width: box,
-				height: box,
-			});
-		}
+	private settlePinchRaster(): void {
+		if (this.pinchScaleNow === this.pinchRasterScale) return;
+		this.pinchRasterScale = this.pinchScaleNow;
 		this.handleResize();
 	}
 
@@ -3178,9 +3169,35 @@ class InkOverlayPlugin {
 		if (!this.container || this.frame.locked) return;
 		const path = this.filePath();
 		if (!path) return;
-		const granted = surfaceExtents.grow(path, inkFrontier(inlineInk.strokes(path)));
-		if (!this.spacer && granted.x === 0 && granted.y === 0) return;
 		const scroller = this.view.scrollDOM;
+		// The origin is needed BEFORE growing now: the zoom frontier is
+		// origin-relative, and it joins the ink frontier in one grow so a
+		// magnified note's overhang is scrollable (see zoomFrontier).
+		const contentRect = this.view.contentDOM.getBoundingClientRect();
+		const preRect = scroller.getBoundingClientRect();
+		const origin = surfaceOriginInScroller({
+			contentLeftVisual: contentRect.left,
+			documentTopVisual: this.view.documentTop,
+			scrollRectLeft: preRect.left,
+			scrollRectTop: preRect.top,
+			scrollLeft: scroller.scrollLeft,
+			scrollTop: scroller.scrollTop,
+			scale: this.cssScale,
+		});
+		const ink = inkFrontier(inlineInk.strokes(path));
+		const zoom = zoomFrontier({
+			clientWidth: scroller.clientWidth,
+			clientHeight: scroller.clientHeight,
+			contentBottom: (contentRect.bottom - preRect.top) / this.cssScale + scroller.scrollTop,
+			origin,
+			pinchScale: this.pinchScaleNow,
+			fontZoom: this.fontZoom,
+		});
+		const granted = surfaceExtents.grow(path, {
+			x: Math.max(ink.x, zoom.x),
+			y: Math.max(ink.y, zoom.y),
+		});
+		if (!this.spacer && granted.x === 0 && granted.y === 0) return;
 		if (!this.spacer) {
 			if (this.winRef.getComputedStyle(scroller).position === "static") {
 				scroller.setCssStyles({ position: "relative" });
@@ -3197,23 +3214,13 @@ class InkOverlayPlugin {
 			scrollProbeExtent("spacer created");
 		}
 		this.ensureScrollableAxis(scroller);
-		const scrollRect = scroller.getBoundingClientRect();
-		const pos = spacerPosition(
-			surfaceOriginInScroller({
-				contentLeftVisual: this.view.contentDOM.getBoundingClientRect().left,
-				documentTopVisual: this.view.documentTop,
-				scrollRectLeft: scrollRect.left,
-				scrollRectTop: scrollRect.top,
-				scrollLeft: scroller.scrollLeft,
-				scrollTop: scroller.scrollTop,
-				// Scroller-content coordinates are LAYOUT px: convert the
-				// visual rect offsets with the transform scale alone…
-				scale: this.cssScale,
-			}),
-			// …and the granted extent (note px) with the font zoom, so the
-			// scroll range tracks the ink's rendered size.
-			{ x: granted.x * this.fontZoom, y: granted.y * this.fontZoom }
-		);
+		// The origin computed above, and the granted extent (note px)
+		// converted with the font zoom, so the scroll range tracks the
+		// ink's rendered size.
+		const pos = spacerPosition(origin, {
+			x: granted.x * this.fontZoom,
+			y: granted.y * this.fontZoom,
+		});
 		let moved = false;
 		if (pos.left !== this.spacerLeft) {
 			this.spacerLeft = pos.left;
