@@ -6,22 +6,22 @@ Open a note and write. The note stays a plain `.md` file.
 
 ## right now you can
 
-* write ink, highlight, in multiple colors, size sliders
+* write ink, highlight, color palette, size sliders
 * erase, two modes, size slider
-* lasso with the side button; move the selection, delete it, copy/paste it across notes
-* insert space, drag a divider and the ink below moves down, text and all
-* undo/redo ink just like text
-* zoom in, out
-* draw with the mouse if you want
+* lasso, compatible with side button; move the selection, delete it, copy/paste it across notes
+* insert space
+* undo/redo ink+text
+* draw+pan with the mouse if you want
 
 ## Features
 
-* data safety
+* data yours forever
    * your ink is all stored here: `<your vault>/.handwriting/`
    * https://imgur.com/a/60GBWnn
 * pressure sensitivity
 * palm rejection
 * floating pen toolbar with auto-hide behavior
+* pinch to zoom
 * ink smoothing
 * lined and grid paper background
 * export ink as svg
