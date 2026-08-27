@@ -581,6 +581,8 @@ class InkOverlayPlugin {
 	private scrollFn: (() => void) | null = null;
 	private wheelFn: ((e: WheelEvent) => void) | null = null;
 	private hostPositionPatched = false;
+	/** True when chromeHost() had to make the editor's container positioned. */
+	private chromeHostPatched = false;
 
 	// ---- surface extent (reconstructed from the 2026-08-20 hardware build) --
 	/** 1×1 invisible child of the scroller that extends its scroll range. */
@@ -1042,7 +1044,7 @@ class InkOverlayPlugin {
 			| undefined;
 		if (!app?.commands) return;
 		const commands = app.commands;
-		this.mobileTools = new MobileTools(this.view.dom, {
+		this.mobileTools = new MobileTools(this.chromeHost(), {
 			exec: (id) => {
 				stripInvoked = true;
 				try {
@@ -1146,6 +1148,10 @@ class InkOverlayPlugin {
 		if (this.hostPositionPatched) {
 			this.view.dom.setCssStyles({ position: "" });
 			this.hostPositionPatched = false;
+		}
+		if (this.chromeHostPatched) {
+			this.view.dom.parentElement?.setCssStyles({ position: "" });
+			this.chromeHostPatched = false;
 		}
 	}
 
@@ -1474,6 +1480,31 @@ class InkOverlayPlugin {
 	 * ever disagreed, ink would rasterise at one resolution and be drawn
 	 * through a transform built for another.
 	 */
+	/**
+	 * Where floating chrome hangs: OUTSIDE the element pinch zoom scales.
+	 *
+	 * The strip lived on `view.dom`, which is the element the zoom transform
+	 * is applied to. That was invisible while the box was counter-sized -
+	 * the narrower layout box and the scale cancelled out - but the moment
+	 * zoom became a pure transform, `right: 8px` started meaning "the right
+	 * edge of a box painted k times too wide", and the toolbar flew off the
+	 * screen (alan, 1.3.2, hardware).
+	 *
+	 * The parent is the editor's own container, which never scales, so the
+	 * strip stays put and stays its own size at any magnification - which is
+	 * what chrome should do anyway: nobody wants 4x buttons. Falls back to
+	 * the editor itself if there is no parent to hang from.
+	 */
+	private chromeHost(): HTMLElement {
+		const parent = this.view.dom.parentElement;
+		if (!parent) return this.view.dom;
+		if (this.winRef.getComputedStyle(parent).position === "static") {
+			parent.setCssStyles({ position: "relative" });
+			this.chromeHostPatched = true;
+		}
+		return parent;
+	}
+
 	private backingNow(layoutW?: number, layoutH?: number): number {
 		const w = layoutW ?? this.container?.offsetWidth ?? 0;
 		const h = layoutH ?? this.container?.offsetHeight ?? 0;
