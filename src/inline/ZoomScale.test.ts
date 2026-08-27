@@ -18,6 +18,8 @@ import { describe, expect, it } from "vitest";
 import { clampInkSize, nextInkSize } from "../ink/InkSize";
 import {
 	backingScale,
+	MAX_BACKING_AREA,
+	MAX_ZOOM_BACKING,
 	clampScale,
 	effectiveScale,
 	fontZoomFactor,
@@ -190,5 +192,62 @@ describe("ink size helpers (v0.13.6)", () => {
 
 	it("an off-scale current value cycles back onto the scale", () => {
 		expect(nextInkSize(2.7).name).toBe("fine");
+	});
+});
+
+describe("backingScale — bounded so a zoomed canvas can still be allocated", () => {
+	it("is unchanged for every unzoomed case", () => {
+		// The cap must never cost resolution at the scales that already work.
+		expect(backingScale(2, 1, 1000, 800)).toBe(2);
+		expect(backingScale(1, 1, 1000, 800)).toBe(1);
+		// Real panes at full device resolution, untouched: a retina desktop
+		// editor, and an iPad in landscape.
+		expect(backingScale(2, 1, 1400, 900)).toBe(2);
+		expect(backingScale(2, 1, 1180, 820)).toBe(2);
+		expect(backingScale(3, 1, 1400, 900)).toBe(3);
+	});
+
+	it("stops following the zoom past the cap", () => {
+		// A 4x pinch on a dpr-2 tablet wanted 8x linear - 64x the pixels,
+		// across five canvases. WebKit refuses that and blanks the canvas.
+		expect(backingScale(2, 4, 100, 100)).toBe(2 * MAX_ZOOM_BACKING);
+		expect(backingScale(2, 2.5, 100, 100)).toBe(2 * MAX_ZOOM_BACKING);
+	});
+
+	it("still tracks the zoom below the cap", () => {
+		expect(backingScale(2, 1.5, 100, 100)).toBe(3);
+	});
+
+	it("spends the zoom's resolution but never the device's", () => {
+		// A dense display at 100% keeps every device pixel; the budget may
+		// only take back what magnification added.
+		expect(backingScale(3, 1, 2000, 1400)).toBe(3);
+		const zoomed = backingScale(3, 2, 2000, 1400);
+		expect(zoomed).toBeGreaterThanOrEqual(3);
+		expect(zoomed).toBeLessThan(6);
+	});
+
+	it("holds a zoomed pane inside the area budget", () => {
+		const w = 1180; // an iPad pane, where the budget is the whole point
+		const h = 820;
+		const b = backingScale(2, 4, w, h);
+		expect(w * b * (h * b)).toBeLessThanOrEqual(MAX_BACKING_AREA + 1);
+		// ...while still spending more than unzoomed on the magnified ink.
+		expect(b).toBeGreaterThan(2);
+	});
+
+	it("lets the device floor win when even unzoomed is over budget", () => {
+		// A very large pane at high dpr exceeds the budget before any zoom is
+		// applied. That is today's behaviour on such a display and not the
+		// zoom cap's business to change: it keeps its device pixels, and the
+		// cap only declines to ADD more.
+		expect(backingScale(2, 2, 3000, 2000)).toBe(2);
+	});
+
+	it("never returns zero or a NaN, whatever it is handed", () => {
+		expect(backingScale(0, 1, 100, 100)).toBe(1);
+		expect(backingScale(NaN, 1, 100, 100)).toBe(1);
+		expect(backingScale(2, 1, Number.NaN, 100)).toBe(2);
+		expect(backingScale(2, 1, 0, 0)).toBe(2);
 	});
 });

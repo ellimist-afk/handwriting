@@ -89,9 +89,66 @@ export function noteToVisual(distance: number, scale: number): number {
  * The device-pixel factor a canvas needs so its layout-px coordinate space
  * still rasterises 1:1 with physical pixels when the editor is scaled.
  */
-export function backingScale(dpr: number, scale: number): number {
+/**
+ * How much of the ZOOM may be spent on resolution. Past this the ink is
+ * rasterised below the painted size and upscaled by the transform: visibly
+ * softer at high magnification, which is a far better failure than the
+ * alternative below.
+ */
+export const MAX_ZOOM_BACKING = 2;
+
+/**
+ * Total device pixels ONE canvas may claim.
+ *
+ * WebKit refuses to allocate much past 16M and does it SILENTLY - the canvas
+ * simply stays blank, with no error to find it by. The budget here is lower
+ * than that limit on purpose, because five of these exist per editor
+ * (committed, wet, tail, and the two highlighter layers): at 4 bytes a pixel
+ * this ceiling is about 200MB for the set, and the naive limit would be over
+ * 300MB on a tablet. Chosen so no UNZOOMED pane on any plausible display is
+ * touched - only magnification can reach it.
+ */
+export const MAX_BACKING_AREA = 10_000_000;
+
+/**
+ * The device-pixel factor a canvas needs so its layout-px coordinate space
+ * still rasterises 1:1 with physical pixels when the editor is scaled -
+ * bounded, because 1:1 is not always affordable.
+ *
+ * Pinch zoom is a transform on the editor, so `effectiveScale` measures it
+ * and the backing would follow it multiplicatively: at 4x on a dpr-2 tablet
+ * that is 8x linear, 64x the pixels, across five canvases. iPadOS would
+ * refuse the allocation and the ink would simply vanish at high zoom, with
+ * no error to find it by. So the zoom's contribution is capped, and an
+ * absolute area budget backstops it for panes large enough to blow the
+ * budget on their own. Ink that is soft at 4x is a non-event; ink that
+ * disappears is a bug report nobody can reproduce.
+ *
+ * Pass the layout box to get the area cap; without it only the zoom cap
+ * applies, which is what every pre-existing caller wants.
+ */
+export function backingScale(
+	dpr: number,
+	scale: number,
+	layoutW = 0,
+	layoutH = 0
+): number {
 	const d = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
-	return d * clampScale(scale);
+	let b = d * Math.min(clampScale(scale), MAX_ZOOM_BACKING);
+	if (layoutW > 0 && layoutH > 0 && Number.isFinite(layoutW) && Number.isFinite(layoutH)) {
+		const area = layoutW * b * layoutH * b;
+		if (area > MAX_BACKING_AREA) {
+			// Only the ZOOM's share of the resolution is ever spent. The
+			// floor is what this pane would use unzoomed, so a dense display
+			// (dpr 3 at 100%) keeps every device pixel it has today and only
+			// magnification can be traded away. Without the floor the budget
+			// quietly downgraded ordinary editors on high-dpi hardware -
+			// caught by the test that pins exactly that.
+			const floor = d * Math.min(1, clampScale(scale));
+			b = Math.max(floor, b * Math.sqrt(MAX_BACKING_AREA / area));
+		}
+	}
+	return b > 0 && Number.isFinite(b) ? b : 1;
 }
 
 /**

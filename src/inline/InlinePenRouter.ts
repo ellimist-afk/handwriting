@@ -840,6 +840,16 @@ export class InlinePenRouter {
 		// the two contacts and cancels them before the pinch does anything.
 		this.applyGuard(this.manip.pinchStart(), "pinch");
 		this.pinchStartSpread = pinchSpread(pts[0]!, pts[1]!);
+		// Re-arming over a LIVE pinch (a third finger lands, or one lifts and
+		// another takes its place) used to clear the flag silently, so the
+		// listener never heard "end" for a pinch it had heard "start" for.
+		// Every start is matched by an end, or state built on that pairing
+		// wedges - which is exactly what happened downstream.
+		if (this.pinchLive) {
+			this.pinchLive = false;
+			this.cb.onPinch("end", 1, this.pinchCentroid());
+			tr("guard", e, "pinch re-armed: ended the live one first");
+		}
 		this.pinchLive = false;
 		tr("guard", e, `pinch watched (spread ${this.pinchStartSpread.toFixed(0)}px)`);
 	}

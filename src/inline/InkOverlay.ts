@@ -30,6 +30,9 @@ import {
 	pasteInk,
 } from "./InkClipboard";
 
+/** How long after a pinch-driven scroll write repaints stay suppressed. */
+const PINCH_SCROLL_QUIET_MS = 120;
+
 const LASSO_CURSOR_CLASS = "handwriting-pen-hover-lasso";
 const SPACE_CURSOR_CLASS = "handwriting-pen-hover-space";
 const PAN_CURSOR_CLASS = "handwriting-pen-hover-pan";
@@ -596,8 +599,8 @@ class InkOverlayPlugin {
 	private pinchRefScale: number | null = null;
 	/** The pinch this frame owes, coalesced from however many moves arrived. */
 	private pinchPending: { next: number } | null = null;
-	/** True from pinch engagement to release; the gesture owns the scroll. */
-	private pinchGestureLive = false;
+	/** When the pinch last wrote the scroll itself; see the scroll handler. */
+	private pinchScrollAt = 0;
 	/** Gesture-start state the whole pinch is computed from; see anchoredScroll. */
 	private pinchAnchor: {
 		scrollLeft: number;
@@ -893,9 +896,16 @@ class InkOverlayPlugin {
 			// exactly one direction. Mid-pinch the repaint buys nothing: the
 			// canvases sit inside the transformed host, so the raster the
 			// note already has scales with it, and the settle re-rasters
-			// crisply once. The follow translate above still runs - it is
-			// one transform write, and it is what keeps ink glued to text.
-			if (this.pinchGestureLive) return;
+			// crisply once.
+			//
+			// A TIME WINDOW, not a flag. The first cut was a boolean cleared
+			// on pinch-end, and a pinch that never delivered its end left it
+			// stuck - suppressing every repaint for the rest of the session,
+			// so the camera went stale and the reticle drew far from the pen
+			// (alan, 1.3.1, hardware). This cannot wedge: it expires on its
+			// own a few frames after the last pinch-driven scroll, whatever
+			// happens to the gesture.
+			if (performance.now() - this.pinchScrollAt < PINCH_SCROLL_QUIET_MS) return;
 			this.scheduleRepaint("scroll");
 		};
 		this.view.scrollDOM.addEventListener("scroll", this.scrollFn, { passive: true });
@@ -1126,7 +1136,7 @@ class InkOverlayPlugin {
 		this.pinchRasterScale = 1;
 		this.pinchRefScale = null;
 		this.pinchAnchor = null;
-		this.pinchGestureLive = false;
+		this.pinchScrollAt = 0;
 		this.builder = null;
 		this.penCursorEl = null;
 		this.eraserEl = null;
@@ -1392,7 +1402,7 @@ class InkOverlayPlugin {
 		// Backing resolution: device px per SCREEN css px. The font zoom is
 		// GEOMETRY (applied by the camera before rasterization), not
 		// resolution. Folding it in here was the part-2 bug's sibling.
-		const backing = backingScale(this.dpr, this.cssScale);
+		const backing = this.backingNow(layoutW, layoutH);
 		const size = computeCanvasSize(layoutW, layoutH, backing);
 		// Same backing, same box: reallocating would blank five canvases
 		// for nothing (setting width clears a canvas even to the same
@@ -1458,6 +1468,18 @@ class InkOverlayPlugin {
 	 * "top of the document in screen coordinates", so this is two subtractions.
 	 * No scrollTop bookkeeping; padding is handled by CM.
 	 */
+	/**
+	 * The backing factor every canvas and every probe must agree on. One
+	 * accessor because five call sites computed it independently: if they
+	 * ever disagreed, ink would rasterise at one resolution and be drawn
+	 * through a transform built for another.
+	 */
+	private backingNow(layoutW?: number, layoutH?: number): number {
+		const w = layoutW ?? this.container?.offsetWidth ?? 0;
+		const h = layoutH ?? this.container?.offsetHeight ?? 0;
+		return backingScale(this.dpr, this.cssScale, w, h);
+	}
+
 	private syncCamera(): void {
 		if (!this.container) return;
 		// A stroke in flight owns its coordinate frame until it ends.
@@ -1880,7 +1902,7 @@ class InkOverlayPlugin {
 				sample.y,
 				sample.w,
 				sample.h,
-				backingScale(this.dpr, this.cssScale)
+				this.backingNow()
 			);
 		}
 		if (!stroke || !path) {
@@ -2010,7 +2032,7 @@ class InkOverlayPlugin {
 			t.canvas.y,
 			t.canvas.w,
 			t.canvas.h,
-			backingScale(this.dpr, this.cssScale)
+			this.backingNow()
 		);
 		if (backingNow <= 0) {
 			return `${header}\nINVALID: committed backing has ${backingNow === 0 ? "no pixels" : "unreadable pixels"} at the recomputed target (canvas box ${t.canvas.x.toFixed(0)},${t.canvas.y.toFixed(0)} ${t.canvas.w.toFixed(0)}x${t.canvas.h.toFixed(0)}); no verdict. A repaint may not have run since a camera move. Nudge scroll by one notch and rerun.`;
@@ -2054,7 +2076,7 @@ class InkOverlayPlugin {
 			sample.y,
 			sample.w,
 			sample.h,
-			backingScale(this.dpr, this.cssScale)
+			this.backingNow()
 		);
 		// Frame-desync measure: the stroke was committed with the PEN-DOWN
 		// camera; if the scroller moved during the stroke, a fresh frame
@@ -2138,7 +2160,7 @@ class InkOverlayPlugin {
 			rectTop: rect?.top ?? 0,
 			scale: this.cssScale,
 			dpr: this.dpr,
-			backing: backingScale(this.dpr, this.cssScale),
+			backing: this.backingNow(),
 			canvasCssW: this.cssWidth,
 			canvasCssH: this.cssHeight,
 			canvasBackingW: this.committedCanvas?.width ?? 0,
@@ -2221,7 +2243,6 @@ class InkOverlayPlugin {
 		centroid: { x: number; y: number }
 	): void {
 		if (phase === "start") {
-			this.pinchGestureLive = true;
 			this.pinchRefScale = this.pinchScaleNow;
 			// The anchor is captured ONCE, here. Every frame of the gesture
 			// is then computed from this state, so the view cannot chase the
@@ -2237,7 +2258,6 @@ class InkOverlayPlugin {
 			return;
 		}
 		if (phase === "end") {
-			this.pinchGestureLive = false;
 			this.pinchRefScale = null;
 			this.pinchAnchor = null;
 			// Nothing may still be queued behind the settle: a live frame
@@ -2327,6 +2347,9 @@ class InkOverlayPlugin {
 		}
 		scroller.scrollLeft = nextLeft;
 		scroller.scrollTop = nextTop;
+		// Stamp AFTER the writes: the scroll events they queue are the ones
+		// the handler above should let pass without a repaint.
+		this.pinchScrollAt = performance.now();
 		// The measured scale changed, so the ink geometry has to be rebuilt at
 		// the new backing resolution - but only once the fingers are gone.
 		if (settle) this.settlePinchRaster();
