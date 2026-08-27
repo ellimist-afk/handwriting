@@ -284,6 +284,9 @@ export class InlineInkStore {
 		const rec = this.record(path);
 		rec.strokes.push(...strokes);
 		this.persist(path, rec);
+		// Once per pen gesture: the most common mutation of all was the one
+		// path that never told the embed layers (ultrareview 2026-08-26).
+		notifyInkChanged(path);
 	}
 
 	// ---- ink operations (eraser / lasso / history) ------------------------------
@@ -314,7 +317,13 @@ export class InlineInkStore {
 		ids: readonly string[]
 	): Array<{ stroke: InkStroke; index: number }> {
 		const removed = this.take(path, ids);
-		if (removed.length > 0) this.persist(path, this.record(path));
+		if (removed.length > 0) {
+			this.persist(path, this.record(path));
+			// Deletes are never on the erase hot path (that is applyAdd
+			// putting pieces back), so notifying here covers selection
+			// delete, delete all, and the remove leg of undo/redo ops.
+			notifyInkChanged(path);
+		}
 		return removed;
 	}
 
@@ -357,11 +366,6 @@ export class InlineInkStore {
 		}
 	}
 
-	/** The recorded page id behind a loaded note, for the reload poll. */
-	pageIdFor(path: string): string | null {
-		return this.byPath.get(path)?.pageId ?? null;
-	}
-
 	/**
 	 * Adopt an external sidecar edit (another device, via sync) by
 	 * rebuilding the record through the NORMAL load path, so the damage,
@@ -377,7 +381,12 @@ export class InlineInkStore {
 		const rec = this.byPath.get(path);
 		if (!rec || rec.load !== "yes") return false;
 		if (rec.loadInFlight || rec.claimInFlight) return false;
-		if (rec.damagedLocked || rec.legacyLocked || rec.futureLocked) return false;
+		// duplicateLocked included: dropping the record resets the lock to
+		// false and the next stroke would write into the SHARED sidecar -
+		// the exact corruption the lock fails closed against (ultrareview).
+		if (rec.damagedLocked || rec.legacyLocked || rec.futureLocked || rec.duplicateLocked) {
+			return false;
+		}
 		// Repaint only when the INK differs. The adopted-strokes flag from
 		// the load reads an erase-to-empty as a non-event; a blanket true
 		// (the first fix) made every reload repaint, and a platform whose

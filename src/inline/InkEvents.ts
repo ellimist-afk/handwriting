@@ -1,9 +1,11 @@
 /**
- * One event: a note's ink changed and was persisted. Fired from
- * InlineInkStore.save, which every mutation path (commit, erase, move,
- * undo) already funnels through - so this is once per gesture, never on
- * the erase hot path. Embed layers listen so a rendered picture stops
- * going stale the moment its note is drawn on.
+ * One event: a note's ink changed. Fired at gesture boundaries - save
+ * (erase end, lasso move, paste, move ops), commitGesture (a drawn
+ * stroke), applyRemove (deletes and the remove leg of undo/redo), and
+ * the add op's application - never per erase move: the hot path is
+ * applyAdd putting split pieces back, and it stays silent. Embed layers
+ * listen so a rendered picture stops going stale the moment its note
+ * changes.
  */
 
 const listeners = new Set<(path: string) => void>();

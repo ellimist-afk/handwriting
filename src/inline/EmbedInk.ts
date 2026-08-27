@@ -93,13 +93,22 @@ export function initEmbedInkRefresh(provider: (path: string) => readonly InkStro
  */
 export function embedInkChanged(path: string): void {
 	revisions.set(path, (revisions.get(path) ?? 0) + 1);
-	for (const [root, p] of [...layers]) {
-		if (!root.isConnected) {
-			layers.delete(root);
-			continue;
-		}
+	sweepDisconnected();
+	for (const [root, p] of layers) {
 		if (p !== path) continue;
 		paint(root, path, strokesFor ? strokesFor(path) : []);
+	}
+}
+
+/**
+ * Drop roots the DOM let go of. Runs on every attach AND every change
+ * notification, so growth is bounded by render activity as well as save
+ * activity - a session that only READS (hover previews register roots and
+ * never draws) must not accumulate detached trees and their canvases.
+ */
+function sweepDisconnected(): void {
+	for (const root of [...layers.keys()]) {
+		if (!root.isConnected) layers.delete(root);
 	}
 }
 
@@ -115,6 +124,7 @@ export function attachEmbedInk(
 	path: string,
 	strokes: readonly InkStroke[]
 ): void {
+	sweepDisconnected();
 	layers.set(root, path);
 	paint(root, path, strokes);
 }

@@ -45,6 +45,7 @@ import { PEN_HOVER_CLASS, penCursorLayout } from "./PenCursor";
 import { normalizeInlinePenPressure } from "./PenPressure";
 import { observeStrokeMax, strokeGain } from "../ink/PressureGain";
 import { embedInkLayerCount } from "./EmbedInk";
+import { notifyInkChanged } from "./InkEvents";
 
 const sessionStartMs = Date.now();
 import { readBaseFontPx, writeBaseFontPx } from "./EditorFontZoom";
@@ -224,11 +225,6 @@ export function setPersistEraserRadius(fn: ((px: number) => void) | null): void 
 	persistEraserRadius = fn;
 }
 
-/**
- * True while a command is being invoked FROM THE STRIP, whose buttons show
- * their own state - the palette's confirmation toasts are noise there.
- * Commands read it through stripQuiet() and skip their Notice.
- */
 // Settings-tab flags (1.0.5), device-level like the modes above them.
 let penReticleOn = true;
 let eraserWholeStrokes = true;
@@ -241,6 +237,11 @@ export function setEraserWholeStrokes(on: boolean): void {
 	eraserWholeStrokes = on;
 }
 
+/**
+ * True while a command is being invoked FROM THE STRIP, whose buttons show
+ * their own state - the palette's confirmation toasts are noise there.
+ * Commands read it through stripQuiet() and skip their Notice.
+ */
 let stripInvoked = false;
 
 export function stripQuiet(): boolean {
@@ -319,6 +320,15 @@ export function copyInlineInkMetrics(): string {
 	return lines.join("\n");
 }
 
+
+/**
+ * A note's ink was replaced by an external reload: the overlays showing it
+ * drop any lasso selection (its stroke ids may no longer exist) and repaint.
+ * Path-scoped on purpose - other notes' overlays have nothing to redraw.
+ */
+export function inkExternallyReloaded(path: string): void {
+	for (const p of instances) p.noteExternallyReloaded(path);
+}
 
 /** Paths whose editors are quiet enough to adopt an external reload. */
 export function inlineReloadCandidates(): string[] {
@@ -1072,6 +1082,13 @@ class InkOverlayPlugin {
 		].join("\n");
 	}
 
+	/** See inkExternallyReloaded. */
+	noteExternallyReloaded(path: string): void {
+		if (this.filePath() !== path) return;
+		if (this.selection.clear()) this.redrawSelectionUI();
+		this.scheduleRepaint("external-reload");
+	}
+
 	/** This editor's path, when no gesture is active (the reload poll gate). */
 	reloadCandidatePath(): string | null {
 		if (this.builder !== null || this.mode !== "ink") return null;
@@ -1286,11 +1303,9 @@ class InkOverlayPlugin {
 		if (eraser) {
 			this.mode = "erase";
 			this.erased = [];
-			// Whole-stroke deletion is the HARDWARE eraser end's opt-in; the
-			// eraser tool keeps taking only what the ring covers.
-			// Global per Alan: stroke or reticle is a property of the ERASER,
-			// whichever way it was reached (eraser end or the mode). The
-			// radius still decides what counts as touched either way.
+			// Stroke or reticle is a property of the ERASER, whichever way
+			// it was reached (eraser end or the mode). The radius still
+			// decides what counts as touched either way.
 			this.eraseWhole = eraserWholeStrokes;
 			metrics.begin("erase", performance.now());
 			this.showEraserCursor(sample);
@@ -2257,6 +2272,9 @@ class InkOverlayPlugin {
 		switch (op.type) {
 			case "add":
 				inlineInk.applyAdd(op.path, op.strokes, op.indices);
+				// applyAdd is silent by design (erase hot path); an undone
+				// remove is a gesture boundary, so the embeds hear it here.
+				notifyInkChanged(op.path);
 				break;
 			case "remove":
 				inlineInk.applyRemove(op.path, op.strokes.map((s) => s.id));

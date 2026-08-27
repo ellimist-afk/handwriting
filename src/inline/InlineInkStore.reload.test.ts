@@ -95,8 +95,19 @@ describe("InlineInkStore.reloadExternal", () => {
 	it("exposes the recorded page id for the poll", async () => {
 		host.sidecars.set("p1", ok(pageWith("p1", "a")));
 		await store.ensureLoaded("note.md");
-		expect(store.pageIdFor("note.md")).toBe("p1");
-		expect(store.pageIdFor("other.md")).toBe(null);
+		expect(store.pageIdOf("note.md")).toBe("p1");
+		expect(store.pageIdOf("other.md")).toBe(null);
+	});
+
+	it("refuses a duplicate-locked record: the lock must not silently reset", async () => {
+		host.sidecars.set("p1", ok(pageWith("p1", "a")));
+		await store.ensureLoaded("note.md");
+		store.markDuplicateLocked("note.md", "copy of note.md");
+
+		host.sidecars.set("p1", ok(pageWith("p1", "a", "b")));
+		expect(await store.reloadExternal("note.md")).toBe(false);
+		// the lock survived: the record was not rebuilt
+		expect(store.strokes("note.md").map((s) => s.id)).toEqual(["a"]);
 	});
 
 	it("refuses a record that was never loaded", async () => {

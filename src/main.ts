@@ -27,6 +27,7 @@ import {
 	refreshPenToolsAll,
 	stripQuiet,
 	inlineReloadCandidates,
+	inkExternallyReloaded,
 	getInlineLassoMode,
 	setInlineLassoMode,
 	setPersistEraserRadius,
@@ -115,8 +116,8 @@ interface HandwritingSettings {
 	paperStyle: PaperStyle;
 	/** Pen tools strip (v0.13.16): auto (pen summons it), show, or hide. */
 	penTools: PenToolsMode;
-	/** The stylus's eraser end deletes whole strokes (1.0.5). Ring is default. */
-	eraserWholeStroke: boolean;
+	/** What the eraser erases, globally (1.0.9): whole strokes by default. */
+	eraserMode: "stroke" | "reticle";
 	/** The reticle that follows the pen tip (1.0.5). On by default. */
 	penReticle: boolean;
 }
@@ -132,7 +133,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	mouseInk: false,
 	paperStyle: "none",
 	penTools: "auto",
-	eraserWholeStroke: true,
+	eraserMode: "stroke",
 	penReticle: true,
 };
 
@@ -316,10 +317,15 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				runDetached(
 					(async () => {
 						for (const path of inlineReloadCandidates()) {
-							const id = inlineInk.pageIdFor(path);
+							const id = inlineInk.pageIdOf(path);
 							if (!id || !(await this.store.externallyChanged(id))) continue;
+							// The quiet check above is a tick old and the stat
+							// awaited: a pen can have landed meanwhile. This
+							// recheck runs in the same microtask as the
+							// record drop, so no gesture can interleave.
+							if (!inlineReloadCandidates().includes(path)) continue;
 							if (await inlineInk.reloadExternal(path)) {
-								repaintAllInkOverlays();
+								inkExternallyReloaded(path);
 								notifyInkChanged(path);
 							}
 						}
@@ -1443,7 +1449,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			mouseInk: raw?.mouseInk === true,
 			paperStyle: normalizePaperStyle(raw?.paperStyle),
 			penTools: normalizePenToolsMode(raw?.penTools),
-			eraserWholeStroke: (raw?.eraserWholeStroke ?? (raw as { eraserEndWholeStroke?: boolean } | null)?.eraserEndWholeStroke) !== false,
+			// A fresh key on purpose: the old boolean keys carried the OLD
+			// default in every data.json (full-object saves), so reading
+			// them pinned the whole fleet to reticle and the stroke default
+			// reached nobody. Reticle is chosen from here on, never inherited.
+			eraserMode: raw?.eraserMode === "reticle" ? "reticle" : "stroke",
 			penReticle: raw?.penReticle !== false,
 		};
 		setPenToolsMode(this.settings.penTools);
@@ -1464,7 +1474,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
-		setEraserWholeStrokes(this.settings.eraserWholeStroke);
+		setEraserWholeStrokes(this.settings.eraserMode === "stroke");
 		setPenReticle(this.settings.penReticle);
 	}
 
@@ -1608,11 +1618,11 @@ class HandwritingSettingTab extends PluginSettingTab {
 				d
 					.addOption("stroke", "Stroke")
 					.addOption("reticle", "Reticle")
-					.setValue(this.plugin.settings.eraserWholeStroke ? "stroke" : "reticle")
+					.setValue(this.plugin.settings.eraserMode)
 					.onChange((v) => {
-						const on = v === "stroke";
-						this.plugin.settings.eraserWholeStroke = on;
-						setEraserWholeStrokes(on);
+						const mode = v === "reticle" ? "reticle" : "stroke";
+						this.plugin.settings.eraserMode = mode;
+						setEraserWholeStrokes(mode === "stroke");
 						this.plugin.saveSettingsNow();
 					})
 			);
