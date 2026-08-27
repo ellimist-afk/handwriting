@@ -19,7 +19,8 @@ import { Point2 } from "../ink/Smoothing";
 import { BBox, InkStroke, InkTool, newStrokeId } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
-import { drawCommitted, drawStroke } from "../ink/StrokeRenderer";
+import { drawCommitted,
+	drawRegion, drawStroke } from "../ink/StrokeRenderer";
 import { TailRenderer } from "../ink/TailRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { PenSample } from "../input/PointerRouter";
@@ -46,6 +47,9 @@ import { normalizeInlinePenPressure } from "./PenPressure";
 import { observeStrokeMax, strokeGain } from "../ink/PressureGain";
 import { embedInkLayerCount } from "./EmbedInk";
 import { notifyInkChanged } from "./InkEvents";
+import { DamageLedger } from "../ink/DamageLedger";
+import { StrokeIndex } from "../ink/StrokeIndex";
+import { DWELL_MS, snapStroke } from "../ink/ShapeSnap";
 
 const sessionStartMs = Date.now();
 import { readBaseFontPx, writeBaseFontPx } from "./EditorFontZoom";
@@ -228,6 +232,11 @@ export function setPersistEraserRadius(fn: ((px: number) => void) | null): void 
 // Settings-tab flags (1.0.5), device-level like the modes above them.
 let penReticleOn = true;
 let eraserWholeStrokes = true;
+let shapeSnapOn = true;
+
+export function setShapeSnap(on: boolean): void {
+	shapeSnapOn = on;
+}
 
 export function setPenReticle(on: boolean): void {
 	penReticleOn = on;
@@ -235,6 +244,17 @@ export function setPenReticle(on: boolean): void {
 
 export function setEraserWholeStrokes(on: boolean): void {
 	eraserWholeStrokes = on;
+}
+
+export function getEraserWholeStrokes(): boolean {
+	return eraserWholeStrokes;
+}
+
+/** The strip's chips persist through here on flip (settings stay agreed). */
+let persistEraserMode: ((on: boolean) => void) | null = null;
+
+export function setPersistEraserMode(fn: ((on: boolean) => void) | null): void {
+	persistEraserMode = fn;
 }
 
 /**
@@ -424,6 +444,12 @@ class InkOverlayPlugin {
 	private strokeGain = 1;
 	private strokeRawMax = 0;
 	private strokePenGesture = false;
+	// Raw-layer dwell tracking: the last time the pen actually MOVED. The
+	// builder filters stationary samples out of the stroke, so the hold
+	// that requests a shape snap is only visible here.
+	private rawLastMoveT = 0;
+	private rawLastMoveX = 0;
+	private rawLastMoveY = 0;
 
 	// gesture state (one pen contact at a time; mode decided at pen-down)
 	private mode: PenMode = "ink";
@@ -435,6 +461,13 @@ class InkOverlayPlugin {
 	 */
 	private erasePieces = new Set<string>();
 	private eraseWhole = false;
+	// Damage-repaint state (renderer debt): the committed canvases are their
+	// own cache. The ledger says what changed; the index answers per-rect
+	// stroke queries; lastPaintCam turns camera motion into a blit.
+	private damage = new DamageLedger();
+	private strokeIndex = new StrokeIndex();
+	private indexDirty = true;
+	private lastPaintCam: { x: number; y: number; zoom: number } | null = null;
 	private selection = new SelectionModel();
 	private readonly selectionDeleteKeys = new InlineSelectionDeleteKeys(
 		() => !this.selection.isEmpty,
@@ -893,6 +926,11 @@ class InkOverlayPlugin {
 			},
 			activeTool: () => getInlineTool(),
 			eraserOn: () => getInlineEraserMode(),
+			eraserWholeStroke: () => getEraserWholeStrokes(),
+			setEraserWholeStroke: (on) => {
+				setEraserWholeStrokes(on);
+				persistEraserMode?.(on);
+			},
 			lassoOn: () => getInlineLassoMode(),
 			activeColor: () => getInkColorHex(getInlineTool()),
 			eraserRadiusPx: () => getEraserRadiusPx(),
@@ -1025,6 +1063,14 @@ class InkOverlayPlugin {
 	}
 
 	handleKeyDown(event: KeyboardEvent): boolean {
+		// Escape deselects, like everywhere else lassos exist.
+		if (event.key === "Escape" && !this.selection.isEmpty) {
+			this.selection.clear();
+			this.redrawSelectionUI();
+			this.mobileTools?.refresh();
+			event.preventDefault();
+			return true;
+		}
 		// Ctrl/Cmd+C and X act on lassoed INK while any is selected: that is
 		// what a lasso means everywhere else (orion 2026-08-26: ctrl+c after
 		// a lasso copied nothing, and a stale ink clipboard pasted a page).
@@ -1213,6 +1259,11 @@ class InkOverlayPlugin {
 		this.router?.refreshRect();
 		this.syncFollowLayer();
 		this.axisChecked = false;
+		// Reallocation blanked the canvases: the ledger and the camera latch
+		// must both know, or the sync repaint below would paint nothing.
+		this.damage.addAll();
+		this.indexDirty = true;
+		this.lastPaintCam = null;
 		// Reallocation just blanked the backing. Painting NOW, in the same
 		// task, means no frame is ever presented empty; the scheduled path
 		// waits for the next animation frame and shows one blank frame per
@@ -1298,6 +1349,22 @@ class InkOverlayPlugin {
 			this.lassoDown(sample);
 			return;
 		}
+		// A bare tip landing INSIDE an active selection drags it - OneNote's
+		// grammar (alan, 2026-08-27): the side button selects, then either
+		// the tip or the held barrel moves. Outside, the tip dissolves the
+		// selection and inks, same as always. Esc backs out without a move.
+		if (!this.selection.isEmpty) {
+			const w = this.camera.screenToWorld(sample.x, sample.y);
+			const bounds = this.selectionBounds();
+			if (
+				bounds &&
+				pointInBBox(w.x, w.y, padBBox(bounds, visualToNote(SELECTION_GRAB_PAD, this.scale)))
+			) {
+				this.mode = "lasso";
+				this.lassoDown(sample);
+				return;
+			}
+		}
 		// Tip and eraser return the pen to normal behavior: selection dissolves.
 		if (this.selection.clear()) this.redrawSelectionUI();
 		if (eraser) {
@@ -1339,6 +1406,9 @@ class InkOverlayPlugin {
 		this.strokeGain = fromMouse ? 1 : strokeGain();
 		this.strokeRawMax = 0;
 		this.strokePenGesture = !fromMouse;
+		this.rawLastMoveT = sample.timestamp;
+		this.rawLastMoveX = sample.x;
+		this.rawLastMoveY = sample.y;
 		this.builder = new StrokeBuilder(
 			tool,
 			this.activeStyle.color,
@@ -1392,6 +1462,11 @@ class InkOverlayPlugin {
 		let accepted = 0;
 		let lastAccepted: { x: number; y: number } | undefined;
 		for (const s of samples) {
+			if (Math.hypot(s.x - this.rawLastMoveX, s.y - this.rawLastMoveY) > 4) {
+				this.rawLastMoveT = s.timestamp;
+				this.rawLastMoveX = s.x;
+				this.rawLastMoveY = s.y;
+			}
 			const w = this.camera.screenToWorld(s.x, s.y);
 			const point = this.builder.add(
 				w.x,
@@ -1547,7 +1622,23 @@ class InkOverlayPlugin {
 		// is drawn underneath the still-visible wet pixels before they clear.
 		if (this.strokePenGesture) observeStrokeMax(this.strokeRawMax);
 		this.strokePenGesture = false;
-		const strokes = builder?.finishReleaseFiltered() ?? [];
+		let strokes = builder?.finishReleaseFiltered() ?? [];
+		// Hold the pen still at the end and the figure snaps to the clean
+		// shape it meant (line, triangle, rectangle, circle, ellipse). The
+		// dwell is the request; an ordinary lift never gets here.
+		let snapReplaced: InkStroke | null = null;
+		if (shapeSnapOn && strokes.length === 1) {
+			const heldMs = performance.now() - this.rawLastMoveT;
+			if (heldMs >= DWELL_MS) {
+				const snapped = snapStroke(strokes[0]!, true);
+				if (snapped) {
+					// Kept for history: undo UN-SNAPS back to the freehand
+					// (replace inverts to replace), a second undo removes.
+					snapReplaced = strokes[0]!;
+					strokes = [snapped];
+				}
+			}
+		}
 		const stroke = strokes.at(-1);
 		const path = stroke ? this.filePath() : null;
 		// Paint ground truth, part 1: was the WET ink actually in the backing
@@ -1592,7 +1683,21 @@ class InkOverlayPlugin {
 				this.activeWet.clear(this.cssWidth, this.cssHeight);
 				this.tail.clearAll(this.cssWidth, this.cssHeight);
 			},
-			publishHistory: () => this.dispatchInk({ type: "add", path, strokes }),
+			publishHistory: () => {
+				if (snapReplaced) {
+					const at = inlineInk.strokes(path).length - 1;
+					this.dispatchInk({
+						type: "replace",
+						path,
+						removed: [snapReplaced],
+						removedAt: [at],
+						inserted: strokes,
+						insertedAt: [at],
+					});
+				} else {
+					this.dispatchInk({ type: "add", path, strokes });
+				}
+			},
 		});
 		// Diagnostics (explicitly enabled only): paint ground truth part 2
 		// (did the commit draw reach the committed backing store?), plus the
@@ -1994,8 +2099,10 @@ class InkOverlayPlugin {
 				if (!this.erasePieces.delete(stroke.id)) {
 					this.erased.push({ stroke, index });
 				}
+				this.damage.addRect(stroke.bbox);
 			}
-			this.scheduleRepaint();
+			this.indexDirty = true;
+			this.scheduleRepaint("partial");
 			this.repaintPath(path);
 			return;
 		}
@@ -2003,6 +2110,7 @@ class InkOverlayPlugin {
 		// stroke stays. Each stroke comes out and its survivors go back in at
 		// the same position, so z-order holds.
 		for (const { stroke, index } of inlineInk.takeLive(path, hits)) {
+			this.damage.addRect(stroke.bbox);
 			const pieces = splitStrokeByCircle(stroke, w.x, w.y, r, newStrokeId);
 			if (pieces.length === 1 && pieces[0] === stroke) {
 				// Hit by the bbox-then-segment test but the ring never crossed
@@ -2019,7 +2127,8 @@ class InkOverlayPlugin {
 			}
 		}
 		// Batched to the next frame, exactly like the canvas eraser.
-		this.scheduleRepaint();
+		this.indexDirty = true;
+		this.scheduleRepaint("partial");
 		this.repaintPath(path);
 	}
 
@@ -2081,11 +2190,19 @@ class InkOverlayPlugin {
 			const dy = w.y - this.dragFrom.y;
 			// Live drag only translates coordinates in the store; the history
 			// op is pushed once at release, with the id list frozen there.
+			const before = this.selectionBounds();
 			inlineInk.moveStrokes(path, this.selection.strokeIds, dx, dy);
 			this.dragTotal.dx += dx;
 			this.dragTotal.dy += dy;
 			this.dragFrom = w;
-			this.scheduleRepaint();
+			if (before) {
+				this.damage.addRect(before);
+				this.damage.addRect({ x: before.x + dx, y: before.y + dy, width: before.width, height: before.height });
+			} else {
+				this.damage.addAll();
+			}
+			this.indexDirty = true;
+			this.scheduleRepaint("partial");
 			this.repaintPath(path);
 			this.redrawSelectionUI();
 			return;
@@ -2303,6 +2420,8 @@ class InkOverlayPlugin {
 		this.repaintPath(op.path);
 	}
 
+
+
 	/** Repaint every OTHER pane showing this note (ink belongs to the note). */
 	private repaintPath(path: string): void {
 		for (const p of instances) {
@@ -2313,6 +2432,14 @@ class InkOverlayPlugin {
 	// ---- committed repaint --------------------------------------------------
 
 	scheduleRepaint(via = "other"): void {
+		// Meaning is unchanged for every caller except the two hot paths:
+		// "scroll" means only the camera moved (repaint blits and renders
+		// the exposed bands), "partial" means the caller already added its
+		// own damage rects. Everything else still repaints the world.
+		if (via !== "scroll" && via !== "partial") {
+			this.damage.addAll();
+			this.indexDirty = true;
+		}
 		if (this.repaintQueued || !this.container) return;
 		this.repaintQueued = true;
 		scrollProbeSchedule(via);
@@ -2336,24 +2463,33 @@ class InkOverlayPlugin {
 		this.syncCamera();
 		const path = this.filePath();
 		const strokes = path ? inlineInk.strokes(path) : [];
-		drawCommitted(
-			this.highlightCtx,
-			this.camera.snapshot,
-			strokes,
-			this.cssWidth,
-			this.cssHeight,
-			true,
-			"highlighter"
-		);
-		drawCommitted(
-			this.committedCtx,
-			this.camera.snapshot,
-			strokes,
-			this.cssWidth,
-			this.cssHeight,
-			true,
-			"pen"
-		);
+		const cam = this.camera.snapshot;
+		const last = this.lastPaintCam;
+		let work: "all" | BBox[] = this.damage.take();
+		// Any camera motion is a full repaint. A blit was tried and pulled
+		// the same night: camera deltas are fractional css px, and a
+		// fractional drawImage resamples the whole layer soft for a frame -
+		// strokes "flickered" right after the micro-scroll that follows a
+		// pen-up. The partial path is for damage while the camera is STILL,
+		// which is where the actual cost lived (erase frames, drag frames).
+		if (last === null || last.zoom !== cam.zoom || last.x !== cam.x || last.y !== cam.y) {
+			work = "all";
+		}
+		this.lastPaintCam = { x: cam.x, y: cam.y, zoom: cam.zoom };
+		if (work === "all") {
+			drawCommitted(this.highlightCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "highlighter");
+			drawCommitted(this.committedCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "pen");
+		} else if (work.length > 0) {
+			if (this.indexDirty) {
+				this.strokeIndex.rebuild(strokes);
+				this.indexDirty = false;
+			}
+			for (const rect of work) {
+				const hit = this.strokeIndex.query(rect);
+				drawRegion(this.highlightCtx, cam, hit, rect, true, "highlighter");
+				drawRegion(this.committedCtx, cam, hit, rect, true, "pen");
+			}
+		}
 		// Selection chrome lives in world coordinates: scrolling and reflow
 		// repaint it at the strokes' current position.
 		if (!this.selection.isEmpty || this.lassoActive) this.redrawSelectionUI();

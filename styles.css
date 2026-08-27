@@ -429,6 +429,31 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	touch-action: manipulation;
 }
 
+/* Stroke | Reticle chips at the top of the eraser's pop. */
+.handwriting-mode-chips {
+	display: flex;
+	gap: 4px;
+	padding: 2px 2px 0;
+}
+
+.handwriting-mode-chip {
+	font-size: 10px;
+	line-height: 1.4;
+	padding: 2px 8px;
+	border-radius: 8px;
+	border: 1px solid var(--background-modifier-border);
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.handwriting-mode-chip.is-current {
+	color: var(--text-on-accent);
+	background: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+}
+
 /* Color swatches: a row of the active tool's palette; current one ringed. */
 .handwriting-color-pop {
 	flex-direction: row;

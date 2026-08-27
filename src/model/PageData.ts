@@ -14,6 +14,20 @@ import { InkPoint, InkStroke, InkTool, computeBBox } from "../ink/Stroke";
 
 export const SCHEMA_VERSION = 1;
 
+/**
+ * Highest schema this build can READ. Writes stay at SCHEMA_VERSION until
+ * the fleet can read v2 (two-phase rollout: every device gets the reader
+ * releases before any device writes the format, or a synced v2 sidecar
+ * future-locks the note on the laggard). Flipping writes later is one
+ * constant, and serializePage already takes the version.
+ *
+ * v2 packs stroke points as integer deltas (x/y x100, pressure x1000,
+ * t in ms): same quantization v1's rounding already applied, roughly half
+ * the bytes of v1's absolute decimals - which matters exactly where the
+ * sidecar travels, the live-reload sync path.
+ */
+export const READ_SCHEMA_VERSION = 2;
+
 export interface TextBoxData {
 	id: string;
 	/** World coordinates (§5). */
@@ -133,7 +147,8 @@ const KNOWN_TOP = new Set([
 ]);
 const KNOWN_BOX = new Set(["id", "x", "y", "width", "z"]);
 const KNOWN_IMAGE = new Set(["id", "x", "y", "width", "height", "z"]);
-const KNOWN_STROKE = new Set(["id", "tool", "color", "width", "createdAt", "device", "pts", "points"]);
+const KNOWN_STROKE = new Set(["id", "tool", "color", "width", "createdAt", "device", "pts",
+	"ptsd", "points"]);
 
 /** Everything in `raw` that is not a key we claim to own. */
 function unknownKeys(raw: Record<string, unknown>, known: Set<string>): Record<string, unknown> {
@@ -165,6 +180,49 @@ function packPoints(points: InkPoint[]): number[] {
 	const out: number[] = [];
 	for (const p of points) {
 		out.push(round(p.x, 2), round(p.y, 2), round(p.pressure, 3), Math.round(p.t));
+	}
+	return out;
+}
+
+/** v2: integer deltas. First point absolute (scaled), the rest deltas. */
+export function packPointsV2(points: InkPoint[]): number[] {
+	const out: number[] = [];
+	let px = 0;
+	let py = 0;
+	let pp = 0;
+	let pt = 0;
+	for (const p of points) {
+		const x = Math.round(p.x * 100);
+		const y = Math.round(p.y * 100);
+		const pr = Math.round(p.pressure * 1000);
+		const t = Math.round(p.t);
+		out.push(x - px, y - py, pr - pp, t - pt);
+		px = x;
+		py = y;
+		pp = pr;
+		pt = t;
+	}
+	return out;
+}
+
+export function unpackPointsV2(flat: unknown): InkPoint[] {
+	if (!Array.isArray(flat)) return [];
+	const out: InkPoint[] = [];
+	let x = 0;
+	let y = 0;
+	let pr = 0;
+	let t = 0;
+	for (let i = 0; i + 3 < flat.length; i += 4) {
+		const dx = num(flat[i]);
+		const dy = num(flat[i + 1]);
+		const dp = num(flat[i + 2]);
+		const dt = num(flat[i + 3]);
+		if (dx === undefined || dy === undefined) continue;
+		x += dx;
+		y += dy;
+		pr += dp ?? 0;
+		t += dt ?? 0;
+		out.push({ x: x / 100, y: y / 100, pressure: pr / 1000, t });
 	}
 	return out;
 }
@@ -201,11 +259,11 @@ function str(v: unknown): string | undefined {
 	return typeof v === "string" ? v : undefined;
 }
 
-export function serializePage(page: PageData): string {
+export function serializePage(page: PageData, version: number = SCHEMA_VERSION): string {
 	return JSON.stringify(
 		withUnknown(
 			{
-				schemaVersion: SCHEMA_VERSION,
+				schemaVersion: version,
 				pageId: page.pageId,
 				...(page.surface ? { surface: page.surface } : {}),
 				textBoxes: page.textBoxes.map((b) =>
@@ -242,7 +300,9 @@ export function serializePage(page: PageData): string {
 							width: round(s.width, 3),
 							createdAt: s.createdAt,
 							...(s.device === "mouse" ? { device: s.device } : {}),
-							pts: packPoints(s.points),
+							...(version >= 2
+								? { ptsd: packPointsV2(s.points) }
+								: { pts: packPoints(s.points) }),
 						},
 						page.unknownByObject[s.id]
 					)
@@ -313,13 +373,16 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 			const s = item as Record<string, unknown>;
 			const id = str(s.id);
 			if (!id) continue;
-			// Accept both the packed form and a raw points array, so a
-			// hand-edited or future-written sidecar still loads.
-			const points = Array.isArray(s.pts)
-				? unpackPoints(s.pts)
-				: Array.isArray(s.points)
-					? unpackObjectPoints(s.points)
-					: [];
+			// Accept every shape ever written: v2 deltas, v1 packed, and a
+			// raw points array, so a hand-edited or future-written sidecar
+			// still loads.
+			const points = Array.isArray(s.ptsd)
+				? unpackPointsV2(s.ptsd)
+				: Array.isArray(s.pts)
+					? unpackPoints(s.pts)
+					: Array.isArray(s.points)
+						? unpackObjectPoints(s.points)
+						: [];
 			if (points.length === 0) continue;
 			const width = num(s.width) ?? 2.2;
 			const tool: InkTool = s.tool === "highlighter" ? "highlighter" : "pen";
@@ -365,7 +428,7 @@ export function parsePage(json: string, fallbackPageId: string): ParseResult {
 		const data = migratePageData(raw, fallbackPageId);
 		// A newer Handwriting wrote this. We can still render what we recognise, but
 		// the caller must not write it back.
-		if (declared !== undefined && declared > SCHEMA_VERSION) {
+		if (declared !== undefined && declared > READ_SCHEMA_VERSION) {
 			return { data, recovered: false, futureVersion: declared };
 		}
 		return { data, recovered: false };

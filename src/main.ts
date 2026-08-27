@@ -34,6 +34,8 @@ import {
 	setPersistInkSize,
 	setPenReticle,
 	setEraserWholeStrokes,
+	setShapeSnap,
+	setPersistEraserMode,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
 import { attachFontZoomHost } from "./inline/EditorFontZoom";
@@ -120,6 +122,8 @@ interface HandwritingSettings {
 	eraserMode: "stroke" | "reticle";
 	/** The reticle that follows the pen tip (1.0.5). On by default. */
 	penReticle: boolean;
+	/** Hold-at-end snaps the figure to a clean shape (1.0.14). Default on. */
+	shapeSnap: boolean;
 }
 
 const DEFAULT_SETTINGS: HandwritingSettings = {
@@ -135,6 +139,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	penTools: "auto",
 	eraserMode: "stroke",
 	penReticle: true,
+	shapeSnap: true,
 };
 
 /**
@@ -1458,12 +1463,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			// reached nobody. Reticle is chosen from here on, never inherited.
 			eraserMode: raw?.eraserMode === "reticle" ? "reticle" : "stroke",
 			penReticle: raw?.penReticle !== false,
+			shapeSnap: raw?.shapeSnap !== false,
 		};
 		setPenToolsMode(this.settings.penTools);
 		// The strip's eraser slider persists through here on release.
 		setPersistEraserRadius((px) => {
 			this.settings.eraserRadiusPx = px;
 			runDetached(this.saveData(this.settings), "save the eraser size");
+		});
+		setPersistEraserMode((on) => {
+			this.settings.eraserMode = on ? "stroke" : "reticle";
+			runDetached(this.saveData(this.settings), "save the eraser mode");
 		});
 		setPersistInkSize((tool, mult) => {
 			this.settings.inkSizes[tool] = clampInkSize(mult);
@@ -1479,6 +1489,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
 		setEraserWholeStrokes(this.settings.eraserMode === "stroke");
 		setPenReticle(this.settings.penReticle);
+		setShapeSnap(this.settings.shapeSnap);
 	}
 
 	/** Settings-tab writes: persist now, quietly. */
@@ -1611,6 +1622,16 @@ class HandwritingSettingTab extends PluginSettingTab {
 					this.plugin.settings.inkShaping = on;
 					setInkShaping(on);
 					repaintAllInkOverlays();
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Shape snap")
+			.setDesc("Hold the pen still after drawing a shape. Default on.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.shapeSnap).onChange((on) => {
+					this.plugin.settings.shapeSnap = on;
+					setShapeSnap(on);
 					this.plugin.saveSettingsNow();
 				})
 			);

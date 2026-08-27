@@ -116,6 +116,36 @@ export function drawStroke(
  * Redraw all committed strokes visible in the current viewport.
  * Strokes fully outside the viewport are skipped via their bbox.
  */
+/**
+ * Redraw one world-space rect of a committed layer in place: clip, clear,
+ * draw the given strokes (pre-queried by the caller's spatial index). The
+ * damage-repaint path (renderer debt, 2026-08-27) - the full-viewport
+ * clear-and-redraw lives on in drawCommitted for the "all" cases.
+ */
+export function drawRegion(
+	ctx: CanvasRenderingContext2D,
+	cam: CameraState,
+	strokes: readonly InkStroke[],
+	rect: { x: number; y: number; width: number; height: number },
+	smooth = false,
+	tool?: InkStroke["tool"]
+): void {
+	const cssX = (rect.x - cam.x) * cam.zoom;
+	const cssY = (rect.y - cam.y) * cam.zoom;
+	const cssW = rect.width * cam.zoom;
+	const cssH = rect.height * cam.zoom;
+	ctx.save();
+	ctx.beginPath();
+	ctx.rect(cssX, cssY, cssW, cssH);
+	ctx.clip();
+	ctx.clearRect(cssX, cssY, cssW, cssH);
+	for (const s of strokes) {
+		if (tool !== undefined && s.tool !== tool) continue;
+		drawStroke(ctx, cam, s, undefined, smooth);
+	}
+	ctx.restore();
+}
+
 export function drawCommitted(
 	ctx: CanvasRenderingContext2D,
 	cam: CameraState,

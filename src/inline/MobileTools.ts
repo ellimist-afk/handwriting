@@ -34,6 +34,9 @@ export interface MobileToolsHost {
 	activeTool(): string;
 	/** Whether eraser mode currently overrides the nib. */
 	eraserOn(): boolean;
+	/** Eraser behavior, so the pop's Stroke | Reticle chips can show and flip it. */
+	eraserWholeStroke(): boolean;
+	setEraserWholeStroke(on: boolean): void;
 	/** Whether lasso mode makes the tip lasso. */
 	lassoOn(): boolean;
 	/** The active tool's current ink color, for the tinted palette button. */
@@ -140,6 +143,8 @@ export class MobileTools {
 	private openInkSlider: "pen" | "highlighter" | null = null;
 	/** Whether the color swatch pop is open. */
 	private colorsOpen = false;
+	private strokeChip!: HTMLElement;
+	private reticleChip!: HTMLElement;
 	private colorPop!: HTMLElement;
 
 	private pill: HTMLElement;
@@ -244,6 +249,29 @@ export class MobileTools {
 		this.slider = dropSlider("Eraser size", "3", "64", "1", (v) => `${v}px`, (v, c) =>
 			this.host.setEraserRadiusPx(v, c)
 		);
+		// The eraser's pop leads with its behavior: Stroke deletes what the
+		// ring touches whole, Reticle takes only what it covers. Same
+		// setting as the tab, so the two always agree.
+		{
+			const chips = this.slider.pop.createDiv({ cls: "handwriting-mode-chips" });
+			this.slider.pop.insertBefore(chips, this.slider.pop.firstChild);
+			const chip = (label: string, whole: boolean): HTMLElement => {
+				const el = chips.createEl("button", {
+					cls: "handwriting-mode-chip",
+					text: label,
+					attr: { type: "button" },
+				});
+				el.addEventListener("pointerdown", (ev) => ev.preventDefault());
+				el.addEventListener("click", (ev) => {
+					ev.preventDefault();
+					this.host.setEraserWholeStroke(whole);
+					this.refresh();
+				});
+				return el;
+			};
+			this.strokeChip = chip("Stroke", true);
+			this.reticleChip = chip("Reticle", false);
+		}
 		this.penSlider = dropSlider("Pen size", "0.3", "3", "0.05", (v) => `${v.toFixed(2)}x`, (v, c) =>
 			this.host.setInkSizeMult("pen", v, c)
 		);
@@ -309,6 +337,9 @@ export class MobileTools {
 				slider.pop.setCssStyles({ right: `${Math.max(0, right - 4)}px` });
 			}
 		};
+		const whole = this.host.eraserWholeStroke();
+		this.strokeChip.toggleClass("is-current", whole);
+		this.reticleChip.toggleClass("is-current", !whole);
 		hangUnder(
 			this.slider,
 			"handwriting:inline-tool-eraser",
