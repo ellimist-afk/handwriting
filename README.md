@@ -7,24 +7,23 @@ Open a note and write. The note stays a plain `.md` file.
 ## right now you can
 
 * write ink, highlight, in multiple colors, size sliders
-* erase strokes, no eraser end needed, size slider
-* lasso with the side button or lasso mode; move the selection, delete it, copy/paste it across notes
-* undo/redo ink
+* erase, size slider
+* lasso with the side button; move the selection, delete it, copy/paste it across notes
+* undo/redo ink just like text
 * zoom in, out
-* draw with the mouse if you want (Mouse ink: toggle)
-* lined and grid paper
-* ink shows in embeds and reading view
-* export a note's ink as svg
-* floating pen toolbar that shows up when your pen does
+* draw with the mouse if you want
 
 ## Features
 
 * data safety
    * your ink is all stored here: `<your vault>/.handwriting/`
    * https://imgur.com/a/60GBWnn
-* palm rejection
-* handwriting shaper
 * pressure sensitivity
+* palm rejection
+* floating pen toolbar with auto-hide behavior
+* handwriting shaper
+* lined and grid paper background
+* export ink as svg
 * infinite canvas
 
 ## Works on
@@ -44,13 +43,8 @@ android
 ## ipad notes
 
 * turn off Scribble (iPad Settings > Apple Pencil > Scribble) or ios
-  draws its own black ink over your strokes and scratch-out deletes text
-* pressure calibrates from how you write. the first stroke on a fresh
-  install can come out thin; it learns within a few strokes. if ink ever
-  feels flat, run `Pen pressure: recalibrate` from the command palette
-* the floating toolbar is your tools on ipad. the pen keeps the keyboard
-  down on purpose, so the palette stays out of reach while writing
-
+  draws its own black ink over your strokes and scratch-out deletes ink
+  
 ## installing
 
 ### Method 1 
@@ -87,12 +81,10 @@ paste this in : ellimist-afk/handwriting > hit add plugin
 
 ## required
 
-Obsidian 1.12.3 or newer. a pen, or the mouse ink mode. built and tested
-on a Microsoft Surface with a Surface Slim Pen 2 and two iPads with
-apple pencils. other pens should work but nobody's tested them yet, so
-treat this as a beta and send reports.
+Obsidian 1.12.3 or newer. a pen, or not. built and tested mostly
+on a Surface Pro and my gf's iPad. please send reports.
 
-## Wishlist
+## Coming soon
 
 * audio alongside ink
 * handwriting to shapes
@@ -103,8 +95,9 @@ treat this as a beta and send reports.
 
 ## reporting problems
 
-open an issue. what you did, what happened, and for pen problems, which
-device and pen. Run `Diagnostics: toggle recording`, do the bug, then
+open an issue. report what happened. remember to include which device and pen please. 
+
+EZMODE reporting: Run `Diagnostics: toggle recording`, reproduce the bug, then
 `Diagnostics: copy pen trace` will copy it to your clipboard: paste
 it and send issue
 
@@ -114,5 +107,5 @@ Free and open source, `AGPL-3.0-only`. No CLA, no copyright assignment
 
 ## money
 
-Handwriting is free. if you want to chip in to development anyway:
+Handwriting is free! if you want to help support development anyway:
 https://ko-fi.com/ellimist-afk
