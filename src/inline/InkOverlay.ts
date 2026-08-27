@@ -33,9 +33,19 @@ import {
 /** How long after a pinch-driven scroll write repaints stay suppressed. */
 const PINCH_SCROLL_QUIET_MS = 120;
 
+/**
+ * Relative change in the measured scale worth acting on. Below this it is
+ * sub-pixel rect noise, and adopting it costs a full repaint per frame.
+ */
+const SCALE_EPSILON = 1e-3;
+
 const LASSO_CURSOR_CLASS = "handwriting-pen-hover-lasso";
 const SPACE_CURSOR_CLASS = "handwriting-pen-hover-space";
 const PAN_CURSOR_CLASS = "handwriting-pen-hover-pan";
+import {
+	DEFAULT_TOOLBAR_CORNER,
+	ToolbarCorner,
+} from "./ToolbarCorner";
 import { getPenToolsMode, markPenSeen, penSeenThisSession, penToolsVisible } from "./PenToolsMode";
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
@@ -290,6 +300,18 @@ export function setPersistEraserRadius(fn: ((px: number) => void) | null): void 
 }
 
 // Settings-tab flags (1.0.5), device-level like the modes above them.
+let toolbarCorner: ToolbarCorner = DEFAULT_TOOLBAR_CORNER;
+
+export function getToolbarCorner(): ToolbarCorner {
+	return toolbarCorner;
+}
+
+/** Settings changed the corner: every open editor's strip moves at once. */
+export function setToolbarCorner(corner: ToolbarCorner): void {
+	toolbarCorner = corner;
+	for (const p of instances) p.applyToolbarCorner();
+}
+
 let penReticleOn = true;
 let eraserWholeStrokes = true;
 let shapeSnapOn = true;
@@ -1080,6 +1102,10 @@ class InkOverlayPlugin {
 				if (commit) persistInkSize?.(tool as InkTool, getInkSizeMult(tool as InkTool));
 			},
 		});
+		// A strip born mid-session starts in the configured corner, not the
+		// default one: ensurePenTools creates it on the first pen contact,
+		// long after settings were read.
+		this.applyToolbarCorner();
 	}
 
 	unmount(): void {
@@ -1518,6 +1544,35 @@ class InkOverlayPlugin {
 		const overlay = this.container.getBoundingClientRect();
 		const contentLeft = this.view.contentDOM.getBoundingClientRect().left;
 		const documentTop = this.view.documentTop;
+		// Measure the SCALE from the same rect read as the camera, every
+		// time, instead of trusting the value handleResize last cached.
+		//
+		// The cache was the bug (alan, hardware, zoom report): after a pinch
+		// it read 2.1730 while the editor was really scaled 1.7115 - the
+		// overlay's own 2389.26 visual over 1396 layout px, which CM's scaleX
+		// and the content element both agreed with. The pen divides by this
+		// number, so every coordinate came out at 0.788 of where it belonged,
+		// compressed toward the top-left. Which code path failed to refill
+		// the cache stopped mattering once the pen measures for itself: the
+		// scale and the camera now come from one read and cannot disagree.
+		const measured = effectiveScale({
+			visualWidth: overlay.width,
+			layoutWidth: this.container.offsetWidth,
+			cmScaleX: this.view.scaleX,
+		});
+		// Adopt it only when it MEANS something. Rect widths are fractional,
+		// so this quotient wobbles in its last decimals every frame; letting
+		// that through moved the camera origin every frame, and repaint()
+		// treats any camera motion as a full re-rasterization of every
+		// stroke - turning the damage-rect fast path off entirely, and
+		// defeating handleResize's unchanged guard so five 10-megapixel
+		// canvases could be reallocated for nothing. A real zoom step is
+		// thousands of times larger than this threshold, so nothing that
+		// matters is filtered out.
+		if (Math.abs(measured - this.cssScale) > this.cssScale * SCALE_EPSILON) {
+			this.cssScale = measured;
+			this.scale = this.cssScale * this.fontZoom;
+		}
 		// Stashed for the scroll probe: read once, here, never re-read there.
 		this.lastSyncRectLeft = overlay.left;
 		this.lastSyncRectTop = overlay.top;
@@ -2836,6 +2891,11 @@ class InkOverlayPlugin {
 			changes: { from: first.from, to: line.from, insert: "" },
 			dy: -removable * lineHeight,
 		};
+	}
+
+	/** Move this editor's strip to the configured corner. */
+	applyToolbarCorner(): void {
+		this.mobileTools?.setCorner(toolbarCorner);
 	}
 
 	/** The strip's active-tool marks are stale; recompute them. */

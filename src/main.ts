@@ -12,34 +12,35 @@ import {
 	copyPresentationReport,
 	copyRegionCensus,
 	deleteAllInkOn,
-	getInlineTool,
-	getInkSizeMult,
-	setInkSizeMult,
-	inkOverlayExtension,
-	inlineInk,
-	setInlineTool,
-	getInlineEraserMode,
-	setInlineEraserMode,
 	getEraserRadiusPx,
-	setEraserRadiusPx,
-	repaintAllInkOverlays,
-	overlayForPath,
-	refreshPenToolsAll,
-	stripQuiet,
-	inlineReloadCandidates,
-	inkExternallyReloaded,
+	getInkSizeMult,
+	getInlineEraserMode,
 	getInlineLassoMode,
 	getInlinePanMode,
 	getInlineSpaceMode,
+	getInlineTool,
+	inkExternallyReloaded,
+	inkOverlayExtension,
+	inlineInk,
+	inlineReloadCandidates,
+	overlayForPath,
+	refreshPenToolsAll,
+	repaintAllInkOverlays,
+	setEraserRadiusPx,
+	setEraserWholeStrokes,
+	setInkSizeMult,
+	setInlineEraserMode,
 	setInlineLassoMode,
 	setInlinePanMode,
 	setInlineSpaceMode,
+	setInlineTool,
+	setPenReticle,
+	setPersistEraserMode,
 	setPersistEraserRadius,
 	setPersistInkSize,
-	setPenReticle,
-	setEraserWholeStrokes,
 	setShapeSnap,
-	setPersistEraserMode,
+	setToolbarCorner,
+	stripQuiet,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
 import { clearInlinePenTrace, formatInlinePenTrace } from "./inline/InlinePenRouter";
@@ -86,6 +87,12 @@ import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
 import {
+	DEFAULT_TOOLBAR_CORNER,
+	TOOLBAR_CORNER_LABELS,
+	ToolbarCorner,
+	normalizeToolbarCorner,
+} from "./inline/ToolbarCorner";
+import {
 	IOS_WEBKIT_CEILING,
 	initPressureGain,
 	resetPressureCalibration,
@@ -109,6 +116,8 @@ interface HandwritingSettings {
 	 * untouched, so flipping this restyles every stroke ever written.
 	 */
 	inkShaping: boolean;
+	/** Which corner the floating pen toolbar parks in. Default top-right. */
+	toolbarCorner: ToolbarCorner;
 	/** Selected ink color per tool (v0.13.6), hex. */
 	inkColors: { pen: string; highlighter: string };
 	/**
@@ -148,6 +157,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	eraserMode: "stroke",
 	penReticle: true,
 	shapeSnap: true,
+	toolbarCorner: DEFAULT_TOOLBAR_CORNER,
 };
 
 /**
@@ -1489,8 +1499,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			eraserMode: raw?.eraserMode === "reticle" ? "reticle" : "stroke",
 			penReticle: raw?.penReticle !== false,
 			shapeSnap: raw?.shapeSnap !== false,
+			toolbarCorner: normalizeToolbarCorner(raw?.toolbarCorner),
 		};
 		setPenToolsMode(this.settings.penTools);
+		setToolbarCorner(this.settings.toolbarCorner);
 		// The strip's eraser slider persists through here on release.
 		setPersistEraserRadius((px) => {
 			this.settings.eraserRadiusPx = px;
@@ -1609,6 +1621,18 @@ class HandwritingSettingTab extends PluginSettingTab {
 						this.plugin.saveSettingsNow();
 					})
 			);
+		new Setting(containerEl)
+			.setName("Toolbar corner")
+			.setDesc("Where the floating pen toolbar sits. Default top right.")
+			.addDropdown((d) => {
+				for (const { value, label } of TOOLBAR_CORNER_LABELS) d.addOption(value, label);
+				d.setValue(this.plugin.settings.toolbarCorner).onChange((v) => {
+					const corner = normalizeToolbarCorner(v);
+					this.plugin.settings.toolbarCorner = corner;
+					setToolbarCorner(corner);
+					this.plugin.saveSettingsNow();
+				});
+			});
 		new Setting(containerEl)
 			.setName("Paper background")
 			.setDesc("Lined or grid paper. Default none.")

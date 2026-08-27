@@ -22,7 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const EXPECT_VERSION = "1.3.3";
+const EXPECT_VERSION = "1.3.4";
 const EXPECT_MIN_APP = "1.12.3";
 const ASSETS = ["main.js", "manifest.json", "styles.css"];
 
@@ -39,6 +39,7 @@ const REQUIRED_CSS = [
 	[".embedded-backlinks", "v0.13.0 backlinks border removal on Handwriting pages"],
 	['.metadata-property[data-property-key="handwriting-page-id"]', "page-id property hidden from Properties UI"],
 	["body.handwriting-active-page .status-bar", "status bar kept off the writing surface"],
+	[".handwriting-corner-bottom-left", "toolbar corner placement (settings)"],
 ];
 
 const problems = [];

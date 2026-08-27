@@ -26,6 +26,11 @@
  */
 
 import { setIcon } from "obsidian";
+import {
+	ToolbarCorner,
+	allToolbarCornerClasses,
+	toolbarCornerClass,
+} from "./ToolbarCorner";
 
 export interface MobileToolsHost {
 	/** Execute a command by its full id (e.g. "handwriting:inline-tool-pen"). */
@@ -465,6 +470,20 @@ export class MobileTools {
 	setInking(on: boolean): void {
 		this.el.toggleClass("is-inking", on);
 		this.pill.toggleClass("is-inking", on);
+	}
+
+	/**
+	 * Park the strip and its pill in a corner. Both move together: they are
+	 * one control in two sizes, and the old classes come off first so a
+	 * change cannot leave two corners asserted at once.
+	 */
+	setCorner(corner: ToolbarCorner): void {
+		const stale = allToolbarCornerClasses();
+		const want = toolbarCornerClass(corner);
+		for (const el of [this.el, this.pill]) {
+			for (const c of stale) el.classList.remove(c);
+			el.classList.add(want);
+		}
 	}
 
 	setCollapsed(on: boolean): void {

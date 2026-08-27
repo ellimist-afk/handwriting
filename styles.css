@@ -314,6 +314,34 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	background-attachment: local, local;
 }
 
+/* Toolbar corner (settings): the strip and its collapsed pill are the same
+   control in two sizes, so one class positions both. Top-right is the default
+   and the historical position - the writing palm owns the bottom of the glass,
+   which is why a bottom corner is a choice rather than the default. */
+.handwriting-mobile-tools.handwriting-corner-top-right,
+.handwriting-pen-pill.handwriting-corner-top-right {
+	top: 8px;
+	right: 8px;
+}
+
+.handwriting-mobile-tools.handwriting-corner-top-left,
+.handwriting-pen-pill.handwriting-corner-top-left {
+	top: 8px;
+	left: 8px;
+}
+
+.handwriting-mobile-tools.handwriting-corner-bottom-right,
+.handwriting-pen-pill.handwriting-corner-bottom-right {
+	bottom: 8px;
+	right: 8px;
+}
+
+.handwriting-mobile-tools.handwriting-corner-bottom-left,
+.handwriting-pen-pill.handwriting-corner-bottom-left {
+	bottom: 8px;
+	left: 8px;
+}
+
 /* ---- mobile tool strip ---- */
 
 /*
@@ -324,8 +352,6 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
  */
 .handwriting-mobile-tools {
 	position: absolute;
-	top: 8px;
-	right: 8px;
 	z-index: 12;
 	/* Own compositor layer, isolated paints: the strip floats OVER the
 	   low-latency wet canvas, and without isolation its repaints and the
@@ -526,8 +552,6 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 
 .handwriting-pen-pill {
 	position: absolute;
-	top: 8px;
-	right: 8px;
 	z-index: 12;
 	will-change: transform;
 	contain: layout style paint;
