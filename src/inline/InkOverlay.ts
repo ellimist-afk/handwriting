@@ -231,14 +231,14 @@ export function setPersistEraserRadius(fn: ((px: number) => void) | null): void 
  */
 // Settings-tab flags (1.0.5), device-level like the modes above them.
 let penReticleOn = true;
-let eraserEndWholeStrokes = false;
+let eraserWholeStrokes = true;
 
 export function setPenReticle(on: boolean): void {
 	penReticleOn = on;
 }
 
-export function setEraserEndWholeStrokes(on: boolean): void {
-	eraserEndWholeStrokes = on;
+export function setEraserWholeStrokes(on: boolean): void {
+	eraserWholeStrokes = on;
 }
 
 let stripInvoked = false;
@@ -1134,8 +1134,22 @@ class InkOverlayPlugin {
 		// resolution. Folding it in here was the part-2 bug's sibling.
 		const backing = backingScale(this.dpr, this.cssScale);
 		const size = computeCanvasSize(layoutW, layoutH, backing);
+		// Same backing, same box: reallocating would blank five canvases
+		// for nothing (setting width clears a canvas even to the same
+		// value). The ios keyboard animation streams resize ticks, and
+		// every needless blank was a visible flicker frame.
+		const unchanged =
+			this.committedCanvas.width === size.backingW &&
+			this.committedCanvas.height === size.backingH &&
+			this.cssWidth === size.cssW &&
+			this.cssHeight === size.cssH;
 		this.cssWidth = size.cssW;
 		this.cssHeight = size.cssH;
+		if (unchanged) {
+			this.router?.refreshRect();
+			this.syncFollowLayer();
+			return;
+		}
 		for (const c of [
 			this.committedCanvas,
 			this.wetCanvas,
@@ -1155,7 +1169,17 @@ class InkOverlayPlugin {
 		this.router?.refreshRect();
 		this.syncFollowLayer();
 		this.axisChecked = false;
-		this.scheduleRepaint("resize");
+		// Reallocation just blanked the backing. Painting NOW, in the same
+		// task, means no frame is ever presented empty; the scheduled path
+		// waits for the next animation frame and shows one blank frame per
+		// resize event - a sustained flicker under the ios keyboard's
+		// animation. Mid-gesture keeps the scheduled path: the frozen
+		// frame owns the coordinate space until pen-up.
+		if (this.builder === null && this.mode === "ink") {
+			this.repaint();
+		} else {
+			this.scheduleRepaint("resize");
+		}
 	}
 
 	/**
@@ -1237,7 +1261,10 @@ class InkOverlayPlugin {
 			this.erased = [];
 			// Whole-stroke deletion is the HARDWARE eraser end's opt-in; the
 			// eraser tool keeps taking only what the ring covers.
-			this.eraseWhole = eraserEnd && eraserEndWholeStrokes;
+			// Global per Alan: stroke or reticle is a property of the ERASER,
+			// whichever way it was reached (eraser end or the mode). The
+			// radius still decides what counts as touched either way.
+			this.eraseWhole = eraserWholeStrokes;
 			metrics.begin("erase", performance.now());
 			this.showEraserCursor(sample);
 			this.eraseAt(sample);

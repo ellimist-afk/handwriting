@@ -31,7 +31,7 @@ import {
 	setPersistEraserRadius,
 	setPersistInkSize,
 	setPenReticle,
-	setEraserEndWholeStrokes,
+	setEraserWholeStrokes,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
 import { attachFontZoomHost } from "./inline/EditorFontZoom";
@@ -115,7 +115,7 @@ interface HandwritingSettings {
 	/** Pen tools strip (v0.13.16): auto (pen summons it), show, or hide. */
 	penTools: PenToolsMode;
 	/** The stylus's eraser end deletes whole strokes (1.0.5). Ring is default. */
-	eraserEndWholeStroke: boolean;
+	eraserWholeStroke: boolean;
 	/** The reticle that follows the pen tip (1.0.5). On by default. */
 	penReticle: boolean;
 }
@@ -131,7 +131,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	mouseInk: false,
 	paperStyle: "none",
 	penTools: "auto",
-	eraserEndWholeStroke: false,
+	eraserWholeStroke: true,
 	penReticle: true,
 };
 
@@ -302,7 +302,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			})
 		);
 		// Live reload: ink synced in from another device appears without a
-		// restart. One stat per open, quiet editor every 2s; the store
+		// restart. One stat per open, quiet editor every second; the store
 		// adopts a changed sidecar only when nothing local is unsaved and no
 		// gesture is active, and the write-path conflict guard keeps its
 		// last word. Dot-folders are invisible to vault events (sidecars
@@ -327,7 +327,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					}),
 					"live-reload poll"
 				);
-			}, 2000)
+			}, 1000)
 		);
 		// The nib on ordinary notes: pen or highlighter. A property of the tip,
 		// not a mode. The eraser end and the barrel keep their hardware meanings.
@@ -1435,7 +1435,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			mouseInk: raw?.mouseInk === true,
 			paperStyle: normalizePaperStyle(raw?.paperStyle),
 			penTools: normalizePenToolsMode(raw?.penTools),
-			eraserEndWholeStroke: raw?.eraserEndWholeStroke === true,
+			eraserWholeStroke: (raw?.eraserWholeStroke ?? (raw as { eraserEndWholeStroke?: boolean } | null)?.eraserEndWholeStroke) !== false,
 			penReticle: raw?.penReticle !== false,
 		};
 		setPenToolsMode(this.settings.penTools);
@@ -1456,7 +1456,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
-		setEraserEndWholeStrokes(this.settings.eraserEndWholeStroke);
+		setEraserWholeStrokes(this.settings.eraserWholeStroke);
 		setPenReticle(this.settings.penReticle);
 	}
 
@@ -1537,7 +1537,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 		containerEl.empty();
 		new Setting(containerEl)
 			.setName("Pen toolbar")
-			.setDesc("Auto summons the floating toolbar the first time a pen is seen.")
+			.setDesc("Determines when the toolbar appears. Default auto.")
 			.addDropdown((d) =>
 				d
 					.addOption("auto", "Auto")
@@ -1553,8 +1553,8 @@ class HandwritingSettingTab extends PluginSettingTab {
 					})
 			);
 		new Setting(containerEl)
-			.setName("Paper")
-			.setDesc("Ruled background on every editor. A writing aid on this device; nothing is written into notes.")
+			.setName("Paper background")
+			.setDesc("Lined or grid paper. Default none.")
 			.addDropdown((d) =>
 				d
 					.addOption("none", "None")
@@ -1570,7 +1570,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Mouse ink")
-			.setDesc("The left mouse button draws like a pen tip. Costs text selection while on.")
+			.setDesc("Left click draws. Default off.")
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.mouseInk).onChange((on) => {
 					this.plugin.settings.mouseInk = on;
@@ -1584,7 +1584,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Ink shaping")
-			.setDesc("Pressure and speed shape the line. Off draws uniform width.")
+			.setDesc("Pressure sensitivity. Default on.")
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.inkShaping).onChange((on) => {
 					this.plugin.settings.inkShaping = on;
@@ -1594,18 +1594,23 @@ class HandwritingSettingTab extends PluginSettingTab {
 				})
 			);
 		new Setting(containerEl)
-			.setName("Eraser end takes whole strokes")
-			.setDesc("The stylus's built-in eraser deletes whole strokes on contact. The eraser tool keeps taking only what the ring covers.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.eraserEndWholeStroke).onChange((on) => {
-					this.plugin.settings.eraserEndWholeStroke = on;
-					setEraserEndWholeStrokes(on);
-					this.plugin.saveSettingsNow();
-				})
+			.setName("Eraser")
+			.setDesc("What the eraser erases. Default stroke.")
+			.addDropdown((d) =>
+				d
+					.addOption("stroke", "Stroke")
+					.addOption("reticle", "Reticle")
+					.setValue(this.plugin.settings.eraserWholeStroke ? "stroke" : "reticle")
+					.onChange((v) => {
+						const on = v === "stroke";
+						this.plugin.settings.eraserWholeStroke = on;
+						setEraserWholeStrokes(on);
+						this.plugin.saveSettingsNow();
+					})
 			);
 		new Setting(containerEl)
-			.setName("Pen cursor ring")
-			.setDesc("The reticle that follows the pen tip while hovering.")
+			.setName("Pen reticle")
+			.setDesc("Default on.")
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.penReticle).onChange((on) => {
 					this.plugin.settings.penReticle = on;

@@ -85,6 +85,13 @@ describe("InlineInkStore.reloadExternal", () => {
 		expect(store.strokes("note.md").length).toBe(0);
 	});
 
+	it("identical content reports no reload (ios stat-misfire flicker)", async () => {
+		host.sidecars.set("p1", ok(pageWith("p1", "a", "b")));
+		await store.ensureLoaded("note.md");
+		expect(await store.reloadExternal("note.md")).toBe(false);
+		expect(store.strokes("note.md").length).toBe(2);
+	});
+
 	it("exposes the recorded page id for the poll", async () => {
 		host.sidecars.set("p1", ok(pageWith("p1", "a")));
 		await store.ensureLoaded("note.md");

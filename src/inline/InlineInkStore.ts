@@ -55,6 +55,11 @@ export interface InlineInkHost {
 
 const EMPTY: readonly InkStroke[] = [];
 
+/** Cheap identity of a note's ink: which strokes, where they sit. */
+function inkFingerprint(strokes: readonly InkStroke[]): string {
+	return strokes.map((s) => `${s.id}:${s.bbox.x},${s.bbox.y}`).join("|");
+}
+
 type LoadState = "no" | "loading" | "yes";
 
 interface NoteRecord {
@@ -373,14 +378,16 @@ export class InlineInkStore {
 		if (!rec || rec.load !== "yes") return false;
 		if (rec.loadInFlight || rec.claimInFlight) return false;
 		if (rec.damagedLocked || rec.legacyLocked || rec.futureLocked) return false;
+		// Repaint only when the INK differs. The adopted-strokes flag from
+		// the load reads an erase-to-empty as a non-event; a blanket true
+		// (the first fix) made every reload repaint, and a platform whose
+		// stat misfires (ios mtime quirks) then flickers every poll tick.
+		// The fingerprint covers ids and positions, so erase, add, paste
+		// and move all repaint, and identical content never does.
+		const before = inkFingerprint(rec.strokes);
 		this.byPath.delete(path);
-		// The load result's changed flag means strokes were ADOPTED, which
-		// reads an erase-to-empty as a non-event - and the caller only got
-		// here because the disk content really differs. A reload that ran
-		// is a repaint, whatever the stroke count (the empty page most of
-		// all: it is the one state the old pixels misrepresent forever).
 		await this.ensureLoaded(path);
-		return true;
+		return inkFingerprint(this.strokes(path)) !== before;
 	}
 
 	/** Diagnostics: what the session cache holds (it never evicts). */
