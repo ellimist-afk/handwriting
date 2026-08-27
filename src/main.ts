@@ -29,8 +29,10 @@ import {
 	inlineReloadCandidates,
 	inkExternallyReloaded,
 	getInlineLassoMode,
+	getInlinePanMode,
 	getInlineSpaceMode,
 	setInlineLassoMode,
+	setInlinePanMode,
 	setInlineSpaceMode,
 	setPersistEraserRadius,
 	setPersistInkSize,
@@ -40,7 +42,6 @@ import {
 	setPersistEraserMode,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
-import { attachFontZoomHost } from "./inline/EditorFontZoom";
 import { clearInlinePenTrace, formatInlinePenTrace } from "./inline/InlinePenRouter";
 import {
 	clearHitProbe,
@@ -274,22 +275,6 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			scheduleSidecarNow: (pageId, page) => this.store.saveNow(pageId, page),
 			notify: (message) => new Notice(message),
 		});
-		// Pinch-to-zoom drives Obsidian's own base font size, the same value
-		// its Ctrl+scroll quick-adjust moves. That setting is not part of the
-		// public API, so the reach for it lives here, in one place, behind a
-		// host the inline layer can only call through. If a future Obsidian
-		// drops these calls, pinch stops resizing and nothing else notices.
-		const appConfig = this.app.vault as unknown as {
-			getConfig?(key: string): unknown;
-			setConfig?(key: string, value: unknown): void;
-		};
-		attachFontZoomHost({
-			read: () => {
-				const px = appConfig.getConfig?.("baseFontSize");
-				return typeof px === "number" ? px : null;
-			},
-			write: (px) => appConfig.setConfig?.("baseFontSize", px),
-		});
 
 		this.registerEditorExtension(inkOverlayExtension());
 
@@ -370,6 +355,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				setInlineEraserMode(false);
 				setInlineLassoMode(false);
 				setInlineSpaceMode(false);
+				setInlinePanMode(false);
 				if (!stripQuiet()) new Notice("Handwriting: pen");
 			},
 		});
@@ -456,6 +442,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const on = !getInlineSpaceMode();
 				setInlineSpaceMode(on);
 				if (!stripQuiet()) new Notice(on ? "Handwriting: insert space (tip shifts ink below)" : `Handwriting: ${getInlineTool()}`);
+			},
+		});
+		// Pan as a mode: touch already pans by finger, but a pen on glass had
+		// no way to move the page without marking it.
+		this.addCommand({
+			id: "inline-tool-pan",
+			name: "Pan: toggle",
+			callback: () => {
+				const on = !getInlinePanMode();
+				setInlinePanMode(on);
+				if (!stripQuiet()) new Notice(on ? "Handwriting: pan (tip drags the page)" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		this.addCommand({
@@ -666,6 +663,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				setInlineEraserMode(false);
 				setInlineLassoMode(false);
 				setInlineSpaceMode(false);
+				setInlinePanMode(false);
 				if (!stripQuiet()) new Notice("Handwriting: highlighter");
 			},
 		});
@@ -1260,7 +1258,6 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		document.body.classList.remove("handwriting-active-page");
 		destroyProbeMarkers();
 		setHitProbeEnabled(false);
-		attachFontZoomHost(null);
 		// Obsidian's lifecycle contract is `onunload(): void`; it does not
 		// wait for asynchronous cleanup. This is best effort, not crash
 		// durability: a process killed before the I/O finishes can still

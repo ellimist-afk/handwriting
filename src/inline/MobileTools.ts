@@ -41,6 +41,8 @@ export interface MobileToolsHost {
 	lassoOn(): boolean;
 	/** Whether insert-space mode makes the tip plant a divider. */
 	spaceOn(): boolean;
+	/** Whether pan mode makes the tip drag the view. */
+	panOn(): boolean;
 	/** The active tool's current ink color, for the tinted palette button. */
 	activeColor(): string;
 	/** Eraser radius in screen px, for the slider. */
@@ -68,7 +70,8 @@ export interface MobileToolsHost {
  * actually claimed the tip, and the strip showed two active tools at once
  * (alan, 2026-08-27). Every mode that steals the tip belongs in here.
  */
-const tipInks = (h: MobileToolsHost): boolean => !h.eraserOn() && !h.lassoOn() && !h.spaceOn();
+const tipInks = (h: MobileToolsHost): boolean =>
+	!h.eraserOn() && !h.lassoOn() && !h.spaceOn() && !h.panOn();
 
 interface ButtonSpec {
 	icon: string;
@@ -80,8 +83,21 @@ interface ButtonSpec {
 	isActive?: (host: MobileToolsHost) => boolean;
 	/** Dims the button when false; omitted = always enabled. */
 	isEnabled?: (host: MobileToolsHost) => boolean;
+	/**
+	 * Draw a divider BEFORE this button. The strip carries two different
+	 * kinds of control - modes, where exactly one is always winning, and
+	 * one-shot actions - and they were laid out identically, so the most
+	 * important distinction in the whole strip was invisible.
+	 */
+	startsGroup?: boolean;
 }
 
+/**
+ * Four groups, divided by SUBJECT rather than by widget type: the nib and
+ * its colour, the other things the tip can be, what to do with a selection,
+ * and the note's history. Colour is an action sitting among modes on
+ * purpose - it changes whichever nib is active, so it belongs beside them.
+ */
 const BUTTONS: ButtonSpec[] = [
 	{
 		icon: "pen",
@@ -97,12 +113,16 @@ const BUTTONS: ButtonSpec[] = [
 		commandId: "handwriting:inline-tool-highlighter",
 		isActive: (h) => tipInks(h) && h.activeTool() === "highlighter",
 	},
+	// The colour belongs with the nibs it changes; it used to sit four
+	// unrelated buttons away, between Paste and Undo.
+	{ icon: "palette", glyph: "Cl", label: "Ink color", commandId: "handwriting:ink-color-cycle" },
 	{
 		icon: "eraser",
 		glyph: "E",
 		label: "Eraser",
 		commandId: "handwriting:inline-tool-eraser",
 		isActive: (h) => h.eraserOn(),
+		startsGroup: true,
 	},
 	{
 		icon: "lasso",
@@ -119,15 +139,23 @@ const BUTTONS: ButtonSpec[] = [
 		isActive: (h) => h.spaceOn(),
 	},
 	{
+		icon: "hand",
+		glyph: "M",
+		label: "Pan",
+		commandId: "handwriting:inline-tool-pan",
+		isActive: (h) => h.panOn(),
+	},
+	{
 		icon: "trash-2",
 		glyph: "D",
 		label: "Delete selection",
+		startsGroup: true,
 		commandId: "handwriting:delete-selected-ink",
 		isEnabled: (h) => h.hasInkSelection(),
 	},
 	{
 		icon: "copy",
-		glyph: "C",
+		glyph: "Cp",
 		label: "Copy selected ink",
 		commandId: "handwriting:copy-selected-ink",
 		isEnabled: (h) => h.hasInkSelection(),
@@ -139,8 +167,14 @@ const BUTTONS: ButtonSpec[] = [
 		commandId: "handwriting:paste-ink",
 		isEnabled: (h) => h.canPasteInk(),
 	},
-	{ icon: "palette", glyph: "Co", label: "Ink color", commandId: "handwriting:ink-color-cycle" },
-	{ icon: "undo-2", glyph: "U", label: "Undo", commandId: "editor:undo", isEnabled: (h) => h.canUndo() },
+	{
+		icon: "undo-2",
+		glyph: "U",
+		label: "Undo",
+		commandId: "editor:undo",
+		isEnabled: (h) => h.canUndo(),
+		startsGroup: true,
+	},
 	{ icon: "redo-2", glyph: "R", label: "Redo", commandId: "editor:redo", isEnabled: (h) => h.canRedo() },
 ];
 
@@ -197,6 +231,9 @@ export class MobileTools {
 			this.setCollapsed(true);
 		});
 		for (const spec of BUTTONS) {
+			if (spec.startsGroup) {
+				this.el.createDiv({ cls: "handwriting-mobile-tools-divider" });
+			}
 			const b = this.el.createEl("button", {
 				cls: "handwriting-mobile-tool",
 				attr: { "aria-label": spec.label, type: "button" },

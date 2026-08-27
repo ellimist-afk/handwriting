@@ -10,7 +10,7 @@ import { DIAG_OFF_NOTE, diagnosticsEnabled } from "../diag/DiagSwitch";
 import { VelocitySample, flingStep, releaseVelocity } from "../input/Fling";
 import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
 import { isPenCompatMouseMove } from "./PenCursor";
-import { pinchEngaged, pinchRatio, pinchSpread } from "./PinchZoom";
+import { pinchEngaged, pinchRatio, pinchSpread } from "./PinchScale";
 import { InkFeedArbiter } from "./InkFeed";
 import { stylusOnlyTouches } from "./StylusTouch";
 import { mouseInkEnabled } from "./MouseInk";
@@ -56,7 +56,13 @@ export interface InlinePenCallbacks {
 	 * spread over the spread at gesture start, so the caller scales from what
 	 * it captured on "start" and nothing accumulates.
 	 */
-	onPinch(phase: "start" | "move" | "end", ratio: number): void;
+	onPinch(
+		phase: "start" | "move" | "end",
+		ratio: number,
+		/** Midpoint between the two contacts, in client px. The zoom anchors
+		 *  here so the page does not slide out from under the fingers. */
+		centroid: { x: number; y: number }
+	): void;
 	/** Input-rate coalesced samples while a stroke is active. */
 	onPenRaw(samples: PenSample[], ev: PointerEvent): void;
 	/** rAF-rate move, for metrics only (`coalescedCount`). */
@@ -838,6 +844,13 @@ export class InlinePenRouter {
 		tr("guard", e, `pinch watched (spread ${this.pinchStartSpread.toFixed(0)}px)`);
 	}
 
+	/** Midpoint of the two live contacts, in client px. */
+	private pinchCentroid(): { x: number; y: number } {
+		const pts = [...this.touchPos.values()];
+		if (pts.length !== 2) return { x: 0, y: 0 };
+		return { x: (pts[0]!.x + pts[1]!.x) / 2, y: (pts[0]!.y + pts[1]!.y) / 2 };
+	}
+
 	/** Returns true when the pinch owned this move. */
 	private updatePinch(e: PointerEvent): boolean {
 		if (this.touchPos.size !== 2) return false;
@@ -846,10 +859,10 @@ export class InlinePenRouter {
 		if (!this.pinchLive) {
 			if (!pinchEngaged(this.pinchStartSpread, spread)) return false;
 			this.pinchLive = true;
-			this.cb.onPinch("start", 1);
+			this.cb.onPinch("start", 1, this.pinchCentroid());
 			tr("guard", e, "pinch engaged");
 		}
-		this.cb.onPinch("move", pinchRatio(this.pinchStartSpread, spread));
+		this.cb.onPinch("move", pinchRatio(this.pinchStartSpread, spread), this.pinchCentroid());
 		return true;
 	}
 
@@ -857,7 +870,7 @@ export class InlinePenRouter {
 	private endPinch(e: PointerEvent): void {
 		if (!this.pinchLive) return;
 		this.pinchLive = false;
-		this.cb.onPinch("end", 1);
+		this.cb.onPinch("end", 1, this.pinchCentroid());
 		tr("guard", e, "pinch released");
 	}
 
@@ -1116,7 +1129,7 @@ export class InlinePenRouter {
 		// writing hand now, so the note must stop resizing under it.
 		if (this.pinchLive) {
 			this.pinchLive = false;
-			this.cb.onPinch("end", 1);
+			this.cb.onPinch("end", 1, this.pinchCentroid());
 			tr("guard", e, "pinch cancelled: pen claimed the surface");
 		}
 		// A swallowed contact still down when the pen lands is the hand that

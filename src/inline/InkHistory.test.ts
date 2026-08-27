@@ -10,7 +10,7 @@ import { EditorState, StateCommand, TransactionSpec } from "@codemirror/state";
 import { history, redo, undo } from "@codemirror/commands";
 import { isolateHistory } from "@codemirror/commands";
 import { InkStroke } from "../ink/Stroke";
-import { InkOp, inkApplied, inkEffect, inkHistorySupport, invertInkOp } from "./InkHistory";
+import { inkApplied, inkEffect, inkHistorySupport, InkOp, invertInkOp, snapHistoryOps } from "./InkHistory";
 
 function stroke(id: string): InkStroke {
 	return {
@@ -281,5 +281,41 @@ describe("partial erase is one undo step", () => {
 		const undo = invertInkOp(op);
 		expect(undo.type).toBe("replace");
 		expect(undo).toMatchObject({ inserted: [piece("original")], insertedAt: [2] });
+	});
+});
+
+describe("snapHistoryOps (shape snap leaves two undo steps)", () => {
+	const freehand = stroke("freehand");
+	const snapped = stroke("snapped");
+	const ops = snapHistoryOps("n.md", freehand, [snapped], 3);
+
+	it("records the stroke landing, then the snap over it", () => {
+		expect(ops).toHaveLength(2);
+		expect(ops[0]!.type).toBe("add");
+		expect(ops[1]!.type).toBe("replace");
+	});
+
+	it("the first undo goes back to freehand, not to nothing", () => {
+		const back = invertInkOp(ops[1]!);
+		expect(back.type).toBe("replace");
+		if (back.type !== "replace") throw new Error("unreachable");
+		expect(back.inserted.map((s) => s.id)).toEqual(["freehand"]);
+		expect(back.removed.map((s) => s.id)).toEqual(["snapped"]);
+	});
+
+	it("the second undo removes the freehand the first one restored", () => {
+		// The bug this exists for: with only the replace published, there was
+		// no second step, so the un-snapped stroke could not be undone away.
+		const gone = invertInkOp(ops[0]!);
+		expect(gone.type).toBe("remove");
+		if (gone.type !== "remove") throw new Error("unreachable");
+		expect(gone.strokes.map((s) => s.id)).toEqual(["freehand"]);
+	});
+
+	it("both steps name the same slot, so redo rebuilds the z-order", () => {
+		if (ops[0]!.type !== "add" || ops[1]!.type !== "replace") throw new Error("unreachable");
+		expect(ops[0]!.indices).toEqual([3]);
+		expect(ops[1]!.removedAt).toEqual([3]);
+		expect(ops[1]!.insertedAt).toEqual([3]);
 	});
 });

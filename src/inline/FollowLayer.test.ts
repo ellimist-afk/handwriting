@@ -128,6 +128,46 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		expect(follow.baseline).toEqual({ left: 0, top: 200 });
 	});
 
+	it("a repaint that lands mid-fling keeps the baseline on the PAINTED position", () => {
+		// The rubber band (alan, hardware, 2026-08-27; only at speed). The
+		// camera is computed at the top of repaint and the ink is drawn for
+		// THAT scroll position, but the scroller keeps moving on the
+		// compositor while the frame runs. Taking the baseline from a fresh
+		// read at the end records a position the pixels never had, and every
+		// later scroll is short by the distance covered during the repaint.
+		const layer = fakeLayer();
+		const follow = new FollowLayer();
+		follow.rebase(layer, 0, 0, UNLOCKED);
+
+		// A fling: the frame is painted for scrollTop 100...
+		follow.follow(layer, 0, 100, UNLOCKED);
+		const paintedAt = 100;
+		// ...but by the time the repaint boundary runs, the scroller is at 140.
+		follow.rebase(layer, 0, paintedAt, UNLOCKED);
+		follow.follow(layer, 0, 140, UNLOCKED);
+
+		// The pixels belong to 100 and the text is at 140: shift by the
+		// difference, not by nothing.
+		expect(follow.baseline).toEqual({ left: 0, top: 100 });
+		expect(layer.style.transform).toBe("translate(0px, -40px)");
+
+		// And the NEXT scroll still measures from the painted position, so
+		// the error cannot accumulate into a spring.
+		follow.follow(layer, 0, 180, UNLOCKED);
+		expect(layer.style.transform).toBe("translate(0px, -80px)");
+	});
+
+	it("a still scroller rebases to exactly zero, as it always did", () => {
+		const layer = fakeLayer();
+		const follow = new FollowLayer();
+		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.follow(layer, 0, 200, UNLOCKED);
+		follow.rebase(layer, 0, 200, UNLOCKED);
+		follow.follow(layer, 0, 200, UNLOCKED);
+		expect(layer.style.transform).toBe(NO_SHIFT);
+		expect(follow.shifted).toBe(false);
+	});
+
 	it("a second scroll is measured from the NEW baseline, not the old one", () => {
 		const layer = fakeLayer();
 		const el = scroller(0, 0);

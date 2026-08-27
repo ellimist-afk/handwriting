@@ -58,6 +58,40 @@ export type InkOp =
 			insertedAt: number[];
 	  };
 
+/**
+ * The history a shape snap leaves behind: TWO steps, not one.
+ *
+ * The snap commits the clean shape straight to the store, so the freehand
+ * the pen actually drew never existed there. Publishing only the `replace`
+ * (the shipped behaviour through 1.2.0) therefore recorded a swap whose
+ * "before" side was never added by anything: the first undo dutifully put
+ * the freehand back, and then there was no second step to press, so the
+ * stroke sat in the note un-removable by undo (alan, 2026-08-27).
+ *
+ * Two ops fix it by making the history tell the truth about what happened:
+ * the stroke landed, then the snap replaced it. Undo peels them off in
+ * order - first back to freehand, then gone - and redo re-lays them the
+ * same way.
+ */
+export function snapHistoryOps(
+	path: string,
+	freehand: InkStroke,
+	snapped: InkStroke[],
+	at: number
+): InkOp[] {
+	return [
+		{ type: "add", path, strokes: [freehand], indices: [at] },
+		{
+			type: "replace",
+			path,
+			removed: [freehand],
+			removedAt: [at],
+			inserted: snapped,
+			insertedAt: [at],
+		},
+	];
+}
+
 export const inkEffect = StateEffect.define<InkOp>();
 
 /** Marks a dispatch whose change is already in the store (the live gesture). */

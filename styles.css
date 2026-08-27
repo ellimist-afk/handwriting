@@ -223,6 +223,26 @@
 	opacity: 0.9;
 }
 
+/* Strip grouping: modes (pick one) | selection actions | history. A hairline
+   rather than a gap, so the row does not grow on a phone where it already
+   wraps. Height comes from the button box, not a fixed number. */
+.handwriting-mobile-tools-divider {
+	align-self: stretch;
+	width: 1px;
+	margin: 4px 3px;
+	background-color: var(--background-modifier-border);
+	flex: 0 0 auto;
+}
+
+/* Pan mode at the nib: the one SOLID ring, so "grab the page" never reads
+   as one of the dashed marking tools. */
+.handwriting-pen-cursor.handwriting-pen-hover-pan {
+	border: 1.5px solid var(--text-accent);
+	background-color: transparent;
+	box-shadow: 0 0 0 1px var(--background-primary);
+	opacity: 0.9;
+}
+
 .handwriting-pen-cursor.handwriting-pen-hover-eraser {
 	border: 1.5px dashed var(--text-normal);
 	background-color: transparent;
