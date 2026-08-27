@@ -1,4 +1,4 @@
-# Handwriting
+# handwriting
 
 Pen ink on ordinary Markdown notes in Obsidian.
 
@@ -13,7 +13,7 @@ Open a note and write. The note stays a plain `.md` file.
 * undo/redo ink+text
 * draw+pan with the mouse if you want
 
-## Features
+## features
 
 * data yours forever
    * your ink is all stored here: `<your vault>/.handwriting/`
@@ -29,7 +29,7 @@ Open a note and write. The note stays a plain `.md` file.
 * ink embeds + reading view
 * handwriting to shape
 
-## Works on
+## works on
 
 windows
 
@@ -39,7 +39,7 @@ linux
 
 ios
 
-## Probably works on
+## probably works on
 
 android
 
@@ -50,9 +50,9 @@ android
   
 ## installing
 
-### Method 1 
+### method 1 
 
-it's in the community plugin directory unreviewed: 
+it's in the community plugin directory:
 
 1) Settings
 2) Community plugins
@@ -60,13 +60,13 @@ it's in the community plugin directory unreviewed:
 4) search Handwriting
 5) Install and enable
 
-### Method 2
+### method 2
 
 can also just get it here:
 
 https://community.obsidian.md/plugins/handwriting
 
-### Method 3
+### method 3
 
 if you want beta builds before they're released, use BRAT:
 
@@ -87,7 +87,7 @@ paste this in : ellimist-afk/handwriting > hit add plugin
 Obsidian 1.12.3 or newer. a pen, or not. built and tested mostly
 on a Surface Pro and my gf's iPad. please send reports.
 
-## Coming soon
+## coming soon
 
 * native pdf annotation
 * audio alongside ink

@@ -218,13 +218,17 @@ export function lineSteps(dyNote: number, lineHeightNote: number): number {
  * does - wrong by a line, where deleting a sentence would be unforgivable.
  */
 export function blankLinesAbove(
-	lines: readonly string[],
+	textAt: (lineNumber: number) => string,
 	lineNumber: number,
 	want: number
 ): number {
+	// A reader rather than an array: the caller has a document, and
+	// materializing every line of it to look at the handful directly above
+	// the divider is work proportional to the whole note for an answer
+	// bounded by `want`.
 	let n = 0;
-	let i = lineNumber - 2; // 0-based index of the line above
-	while (n < want && i >= 0 && (lines[i] ?? "").trim() === "") {
+	let i = lineNumber - 1; // 1-based number of the line above
+	while (n < want && i >= 1 && textAt(i).trim() === "") {
 		n++;
 		i--;
 	}

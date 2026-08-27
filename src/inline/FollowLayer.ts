@@ -50,6 +50,8 @@ export class FollowLayer {
 	private baseLeft = 0;
 	private baseTop = 0;
 	private shiftedFlag = false;
+	private paintedLeft = 0;
+	private paintedTop = 0;
 
 	/** True while the layer is carrying a scroll translate. */
 	get shifted(): boolean {
@@ -71,20 +73,44 @@ export class FollowLayer {
 		if (frameLocked) return;
 		const x = this.baseLeft - scrollLeft;
 		const y = this.baseTop - scrollTop;
-		if (layer) layer.setCssStyles({ transform: `translate(${x}px, ${y}px)` });
-		this.shiftedFlag = x !== 0 || y !== 0;
+		const shift = x !== 0 || y !== 0;
+		// Write only when there is something to say: a shift to apply, or a
+		// previous one to clear. A still scroller repaints often, and an
+		// unchanging transform written every frame is a CSSOM touch on the
+		// one element the compositor is animating.
+		if (layer && (shift || this.shiftedFlag)) {
+			layer.setCssStyles({ transform: `translate(${x}px, ${y}px)` });
+		}
+		this.shiftedFlag = shift;
 	}
 
 	/**
-	 * The repaint boundary. Committed ink has just been redrawn at the
-	 * current camera, so this scroll position becomes the new baseline and
-	 * the translate goes back to zero in the same frame: the style reset and
-	 * the redrawn pixels land together, and the layer never shows both.
+	 * The scroll position the camera was computed for, recorded when the
+	 * camera is synced and BEFORE the ink is drawn.
+	 *
+	 * This exists so `rebase` cannot be handed the wrong number. The baseline
+	 * has to be the position the pixels actually have; taking it from a fresh
+	 * read after drawing records a position they never had, and during a
+	 * fling the scroller moves far enough between the two that every later
+	 * scroll is short by the difference - ink lagging behind the text and
+	 * springing back when the scrolling stops.
 	 */
-	rebase(layer: FollowTarget | null, scrollLeft: number, scrollTop: number, frameLocked: boolean): void {
+	markPainted(scrollLeft: number, scrollTop: number): void {
+		this.paintedLeft = scrollLeft;
+		this.paintedTop = scrollTop;
+	}
+
+	/**
+	 * The repaint boundary. Committed ink has just been redrawn at the camera
+	 * synced by `markPainted`, so THAT position becomes the baseline - not
+	 * wherever the scroller has reached by now. The caller follows this with
+	 * a `follow` at the live position, which is zero in the common case and
+	 * carries the fling's remainder when the scroller kept moving.
+	 */
+	rebase(layer: FollowTarget | null, frameLocked: boolean): void {
 		if (frameLocked) return;
-		this.baseLeft = scrollLeft;
-		this.baseTop = scrollTop;
+		this.baseLeft = this.paintedLeft;
+		this.baseTop = this.paintedTop;
 		if (this.shiftedFlag && layer) layer.setCssStyles({ transform: NO_SHIFT });
 		this.shiftedFlag = false;
 	}

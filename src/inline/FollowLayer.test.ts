@@ -57,7 +57,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		const layer = fakeLayer();
 		const el = scroller(0, 0);
 		const follow = new FollowLayer();
-		follow.rebase(layer, el.scrollLeft, el.scrollTop, UNLOCKED); // baseline at rest
+		follow.markPainted(el.scrollLeft, el.scrollTop);
+		follow.rebase(layer, UNLOCKED); // baseline at rest
 
 		el.scrollTop = 120; // the text moved up 120 layout px
 		follow.follow(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
@@ -71,7 +72,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		const layer = fakeLayer();
 		const el = scroller(0, 0);
 		const follow = new FollowLayer();
-		follow.rebase(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
+		follow.markPainted(el.scrollLeft, el.scrollTop);
+		follow.rebase(layer, UNLOCKED);
 
 		el.scrollLeft = 64;
 		follow.follow(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
@@ -86,7 +88,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		const layer = fakeLayer();
 		const el = scroller(0, 0);
 		const follow = new FollowLayer();
-		follow.rebase(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
+		follow.markPainted(el.scrollLeft, el.scrollTop);
+		follow.rebase(layer, UNLOCKED);
 
 		el.scrollLeft = 10.5;
 		el.scrollTop = 33.25;
@@ -102,7 +105,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		// cssScale, fontZoom, devicePixelRatio or camera.zoom happen to be.
 		const layer = fakeLayer();
 		const follow = new FollowLayer();
-		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+		follow.rebase(layer, UNLOCKED);
 
 		follow.follow(layer, 0, 100, UNLOCKED);
 
@@ -113,7 +117,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		const layer = fakeLayer();
 		const el = scroller(0, 0);
 		const follow = new FollowLayer();
-		follow.rebase(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
+		follow.markPainted(el.scrollLeft, el.scrollTop);
+		follow.rebase(layer, UNLOCKED);
 
 		el.scrollTop = 200;
 		follow.follow(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
@@ -121,7 +126,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 
 		// repaint(): committed ink is redrawn at the current camera, then the
 		// boundary runs in the same frame.
-		follow.rebase(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
+		follow.markPainted(el.scrollLeft, el.scrollTop);
+		follow.rebase(layer, UNLOCKED);
 
 		expect(layer.style.transform).toBe(NO_SHIFT);
 		expect(follow.shifted).toBe(false);
@@ -137,13 +143,15 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		// later scroll is short by the distance covered during the repaint.
 		const layer = fakeLayer();
 		const follow = new FollowLayer();
-		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+		follow.rebase(layer, UNLOCKED);
 
 		// A fling: the frame is painted for scrollTop 100...
 		follow.follow(layer, 0, 100, UNLOCKED);
 		const paintedAt = 100;
 		// ...but by the time the repaint boundary runs, the scroller is at 140.
-		follow.rebase(layer, 0, paintedAt, UNLOCKED);
+		follow.markPainted(0, paintedAt);
+		follow.rebase(layer, UNLOCKED);
 		follow.follow(layer, 0, 140, UNLOCKED);
 
 		// The pixels belong to 100 and the text is at 140: shift by the
@@ -160,9 +168,11 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 	it("a still scroller rebases to exactly zero, as it always did", () => {
 		const layer = fakeLayer();
 		const follow = new FollowLayer();
-		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+		follow.rebase(layer, UNLOCKED);
 		follow.follow(layer, 0, 200, UNLOCKED);
-		follow.rebase(layer, 0, 200, UNLOCKED);
+		follow.markPainted(0, 200);
+		follow.rebase(layer, UNLOCKED);
 		follow.follow(layer, 0, 200, UNLOCKED);
 		expect(layer.style.transform).toBe(NO_SHIFT);
 		expect(follow.shifted).toBe(false);
@@ -172,11 +182,13 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		const layer = fakeLayer();
 		const el = scroller(0, 0);
 		const follow = new FollowLayer();
-		follow.rebase(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
+		follow.markPainted(el.scrollLeft, el.scrollTop);
+		follow.rebase(layer, UNLOCKED);
 
 		el.scrollTop = 200;
 		follow.follow(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
-		follow.rebase(layer, el.scrollLeft, el.scrollTop, UNLOCKED); // repaint lands
+		follow.markPainted(el.scrollLeft, el.scrollTop);
+		follow.rebase(layer, UNLOCKED); // repaint lands
 
 		el.scrollTop = 260;
 		follow.follow(layer, el.scrollLeft, el.scrollTop, UNLOCKED);
@@ -188,7 +200,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 	it("scrolling back to the baseline leaves no shift", () => {
 		const layer = fakeLayer();
 		const follow = new FollowLayer();
-		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+		follow.rebase(layer, UNLOCKED);
 
 		follow.follow(layer, 0, 40, UNLOCKED);
 		expect(follow.shifted).toBe(true);
@@ -204,7 +217,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		const layer = fakeLayer();
 		const follow = new FollowLayer();
 		const frame = new StrokeFrame();
-		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+		follow.rebase(layer, UNLOCKED);
 		layer.setCssStyles({ transform: NO_SHIFT });
 
 		frame.begin(); // pen-down
@@ -214,7 +228,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		expect(follow.shifted).toBe(false);
 		// The baseline is frozen too: the repaint boundary is skipped while
 		// locked, so a mid-stroke repaint cannot move it either.
-		follow.rebase(layer, 0, 300, frame.locked);
+		follow.markPainted(0, 300);
+		follow.rebase(layer, frame.locked);
 		expect(follow.baseline).toEqual({ left: 0, top: 0 });
 
 		frame.end(); // pen-up: the frame is live again
@@ -233,7 +248,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		const follow = new FollowLayer();
 		const frame = new StrokeFrame();
 		const order: string[] = [];
-		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+		follow.rebase(layer, UNLOCKED);
 
 		// A scroll happens; its repaint has not run yet.
 		follow.follow(layer, 0, 150, frame.locked);
@@ -245,7 +261,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		order.push("syncCamera");
 		if (follow.shifted) {
 			order.push("redrawCommitted@currentCamera");
-			follow.rebase(layer, 0, 150, frame.locked); // the reconcile
+			follow.markPainted(0, 150);
+			follow.rebase(layer, frame.locked); // the reconcile
 		}
 		order.push("refreshRect");
 		frame.begin();
@@ -291,9 +308,12 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 		};
 		const strokeBefore = JSON.stringify(stroke);
 
-		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+
+		follow.rebase(layer, UNLOCKED);
 		follow.follow(layer, 30, 120, UNLOCKED);
-		follow.rebase(layer, 30, 120, UNLOCKED);
+		follow.markPainted(30, 120);
+		follow.rebase(layer, UNLOCKED);
 		follow.follow(layer, 30, 500, UNLOCKED);
 
 		expect(camera.snapshot).toEqual(before);
@@ -305,7 +325,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 	it("forget() drops the shift when the layer goes away", () => {
 		const layer = fakeLayer();
 		const follow = new FollowLayer();
-		follow.rebase(layer, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+		follow.rebase(layer, UNLOCKED);
 		follow.follow(layer, 0, 90, UNLOCKED);
 		expect(follow.shifted).toBe(true);
 
@@ -317,7 +338,8 @@ describe("scroll-follow: the ink layer tracks the text between repaints", () => 
 	it("a null layer is inert but still tracks state", () => {
 		// unmount races a scroll event: no element to write, no throw.
 		const follow = new FollowLayer();
-		follow.rebase(null, 0, 0, UNLOCKED);
+		follow.markPainted(0, 0);
+		follow.rebase(null, UNLOCKED);
 		expect(() => follow.follow(null, 0, 50, UNLOCKED)).not.toThrow();
 		expect(follow.shifted).toBe(true);
 	});

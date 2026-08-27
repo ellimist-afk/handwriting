@@ -5,6 +5,13 @@ import { isolateHistory, redoDepth, undoDepth } from "@codemirror/commands";
 import { Notice, Platform, editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
 import {
+	releaseTipMode,
+	setTipModeListener,
+	tipMode,
+	tipModeHeld as tipModeHeldNow,
+	toggleTipMode,
+} from "./TipMode";
+import {
 	blankLinesAbove,
 	boundsOf,
 	lineSteps,
@@ -184,8 +191,10 @@ export function getInlineTool(): InkTool {
 
 export function setInlineTool(tool: InkTool): void {
 	inlineTool = tool;
-	// Picking a nib is how you put the eraser away.
-	inlineEraserMode = false;
+	// Picking a nib is how you put every other mode away - not just the
+	// eraser. While this cleared one flag of four, "Switch between pen and
+	// highlighter" left the tip panning while announcing a nib change.
+	releaseTipMode();
 }
 
 /**
@@ -199,27 +208,25 @@ export function setInlineTool(tool: InkTool): void {
  * keeps every meaning it had. The eraser end still erases whatever the mode
  * says, and choosing a nib turns the mode off.
  */
-let inlineEraserMode = false;
-let inlineLassoMode = false;
-let inlineSpaceMode = false;
-let inlinePanMode = false;
+/**
+ * The tip's mode lives in TipMode.ts (DOM-free, so it can be tested). The
+ * exported wrappers below are the names the rest of the plugin already calls.
+ */
+setTipModeListener(() => {
+	for (const p of instances) p.refreshStrip();
+});
 
 export function getInlineEraserMode(): boolean {
-	return inlineEraserMode;
+	return tipMode() === "eraser";
 }
 
 /** Eraser, lasso and space modes are exclusive: the tip can only be one thing. */
 export function setInlineEraserMode(on: boolean): void {
-	inlineEraserMode = on;
-	if (on) {
-		inlineLassoMode = false;
-		inlineSpaceMode = false;
-		inlinePanMode = false;
-	}
+	toggleTipMode("eraser", on);
 }
 
 export function getInlineLassoMode(): boolean {
-	return inlineLassoMode;
+	return tipMode() === "lasso";
 }
 
 /**
@@ -227,16 +234,11 @@ export function getInlineLassoMode(): boolean {
  * in, and iPads and mice have no barrel. While on, the tip lassos.
  */
 export function setInlineLassoMode(on: boolean): void {
-	inlineLassoMode = on;
-	if (on) {
-		inlineEraserMode = false;
-		inlineSpaceMode = false;
-		inlinePanMode = false;
-	}
+	toggleTipMode("lasso", on);
 }
 
 export function getInlineSpaceMode(): boolean {
-	return inlineSpaceMode;
+	return tipMode() === "space";
 }
 
 /**
@@ -245,29 +247,21 @@ export function getInlineSpaceMode(): boolean {
  * The barrel and the eraser end keep their hardware meanings.
  */
 export function setInlineSpaceMode(on: boolean): void {
-	inlineSpaceMode = on;
-	if (on) {
-		inlineEraserMode = false;
-		inlineLassoMode = false;
-		inlinePanMode = false;
-	}
+	toggleTipMode("space", on);
 }
 
 /** True while any mode has taken the tip away from the nib. */
 export function tipModeHeld(): boolean {
-	return inlineEraserMode || inlineLassoMode || inlineSpaceMode || inlinePanMode;
+	return tipModeHeldNow();
 }
 
 /** Hand the tip back to the active nib, whichever mode was holding it. */
 export function releaseTipModes(): void {
-	inlineEraserMode = false;
-	inlineLassoMode = false;
-	inlineSpaceMode = false;
-	inlinePanMode = false;
+	releaseTipMode();
 }
 
 export function getInlinePanMode(): boolean {
-	return inlinePanMode;
+	return tipMode() === "pan";
 }
 
 /**
@@ -277,12 +271,7 @@ export function getInlinePanMode(): boolean {
  * down - and on a Surface the fingers are usually holding the thing.
  */
 export function setInlinePanMode(on: boolean): void {
-	inlinePanMode = on;
-	if (on) {
-		inlineEraserMode = false;
-		inlineLassoMode = false;
-		inlineSpaceMode = false;
-	}
+	toggleTipMode("pan", on);
 }
 
 /** Eraser radius in screen px, shared by the hit test and both cursors. */
@@ -614,6 +603,12 @@ class InkOverlayPlugin {
 	private pinchScaleNow = 1;
 	/** The scale this gesture started from, so a pinch never accumulates. */
 	private pinchRefScale: number | null = null;
+	/** The pinch this frame owes, coalesced from however many moves arrived. */
+	private pinchPending: { next: number; centroid: { x: number; y: number } } | null = null;
+	private pinchRaf = 0;
+	/** The scale the laid-out box currently reflects, so a settle that would
+	 * change nothing does not reallocate every canvas. */
+	private pinchBoxScale = 1;
 	/** Inner canvas layer the scroll-follow translate is applied to. */
 	private layerEl: HTMLElement | null = null;
 	/**
@@ -839,7 +834,7 @@ class InkOverlayPlugin {
 					ev.pointerType,
 					ev.buttons,
 					ev.button,
-					inlineEraserMode,
+					tipMode() === "eraser",
 					mouseInkEnabled()
 				),
 			},
@@ -1102,6 +1097,25 @@ class InkOverlayPlugin {
 		this.container = null;
 		this.layerEl = null;
 		this.follow.forget();
+		// A pinch frame outliving the overlay would touch a torn-down editor.
+		if (this.pinchRaf !== 0) {
+			this.winRef.cancelAnimationFrame(this.pinchRaf);
+			this.pinchRaf = 0;
+		}
+		this.pinchPending = null;
+		// Hand the editor back the way it was found. The transform, the
+		// counter-sized box and the origin all live on view.dom, which
+		// OUTLIVES this overlay: unmounting while zoomed used to leave the
+		// editor painted at scale in a fraction-width box, with the only
+		// code that could undo it now unloaded.
+		const host = this.view.dom as HTMLElement;
+		host.style.removeProperty("transform");
+		host.style.removeProperty("transform-origin");
+		host.style.removeProperty("width");
+		host.style.removeProperty("height");
+		this.pinchScaleNow = 1;
+		this.pinchBoxScale = 1;
+		this.pinchRefScale = null;
 		this.builder = null;
 		this.penCursorEl = null;
 		this.eraserEl = null;
@@ -1453,6 +1467,9 @@ class InkOverlayPlugin {
 		// pixels by however far it travelled. See syncFollowLayer.
 		this.lastSyncScrollLeft = this.view.scrollDOM.scrollLeft;
 		this.lastSyncScrollTop = this.view.scrollDOM.scrollTop;
+		// The follow layer's baseline comes from here, not from a read taken
+		// after the ink is drawn; see FollowLayer.markPainted.
+		this.follow.markPainted(this.lastSyncScrollLeft, this.lastSyncScrollTop);
 		// Both reads are visual px; the difference becomes note space by
 		// dividing out the scale. At scale 1 this is arithmetically identical
 		// to what shipped, so persisted coordinates keep their meaning.
@@ -1506,10 +1523,10 @@ class InkOverlayPlugin {
 		// The pen decides what it is at contact (§52/§53, mode-free):
 		// eraser end erases, barrel held lassos/moves, tip inks.
 		const eraserEnd = (ev.buttons & 32) !== 0 || ev.button === 5;
-		const eraser = eraserEnd || inlineEraserMode;
+		const eraser = eraserEnd || tipMode() === "eraser";
 		// Lasso mode makes the TIP lasso: the barrel path for hardware that
 		// has no barrel (every apple pencil, every mouse).
-		const barrel = !eraser && ((ev.buttons & 2) !== 0 || inlineLassoMode);
+		const barrel = !eraser && ((ev.buttons & 2) !== 0 || tipMode() === "lasso");
 		if (barrel) {
 			this.mode = "lasso";
 			this.lassoDown(sample);
@@ -1545,7 +1562,7 @@ class InkOverlayPlugin {
 			this.eraseAt(sample);
 			return;
 		}
-		if (inlinePanMode) {
+		if (tipMode() === "pan") {
 			this.mode = "pan";
 			// A pan MOVES the surface under the ink, so the frame must stay
 			// live: the lock exists to stop reflow shearing a stroke, and
@@ -1555,7 +1572,7 @@ class InkOverlayPlugin {
 			this.panLast = { x: ev.clientX, y: ev.clientY };
 			return;
 		}
-		if (inlineSpaceMode) {
+		if (tipMode() === "space") {
 			this.mode = "space";
 			this.spaceDown(sample, ev);
 			return;
@@ -2198,12 +2215,54 @@ class InkOverlayPlugin {
 		}
 		if (phase === "end") {
 			this.pinchRefScale = null;
+			// Nothing may still be queued behind the settle: a live frame
+			// running after it would write the mid-gesture styles back.
+			if (this.pinchRaf !== 0) {
+				this.winRef.cancelAnimationFrame(this.pinchRaf);
+				this.pinchRaf = 0;
+			}
+			// Settle: the box and the ink raster catch up with the final
+			// scale, once, where the cost is invisible.
+			this.flushPinch(true);
 			return;
 		}
 		if (this.pinchRefScale === null) return;
 		const next = pinchScale(this.pinchRefScale, ratio);
 		if (next === this.pinchScaleNow) return;
-		this.applyPinchScale(next, centroid);
+		// Coalesce to one update per FRAME. Two fingers deliver pointermoves
+		// faster than the display refreshes, and the work below is not the
+		// kind you do twice for one frame.
+		this.pinchPending = { next, centroid };
+		if (this.pinchRaf === 0) {
+			this.pinchRaf = this.winRef.requestAnimationFrame(() => {
+				this.pinchRaf = 0;
+				this.flushPinch(false);
+			});
+		}
+	}
+
+	/**
+	 * Apply the pinch that this frame is owed.
+	 *
+	 * Live frames write ONLY the compositor transform and the anchored scroll.
+	 * The expensive half - resizing the counter-scaled box, which reflows the
+	 * whole editor, and `handleResize`, which reallocates the canvases and
+	 * re-rasterizes every stroke - waits for the fingers to leave.
+	 *
+	 * Doing all of it per pointermove is what made the gesture jagged and
+	 * laggy on hardware (alan, 2026-08-27): a forced layout read, a full
+	 * editor reflow and a complete ink re-raster, several times per frame.
+	 * The cost of deferring is that the ink is a scaled raster mid-gesture -
+	 * very slightly soft until release, which is what every canvas app does
+	 * and what the eye forgives; a stuttering pinch is not.
+	 */
+	private flushPinch(settle: boolean): void {
+		if (!this.container) return;
+		const pending = this.pinchPending;
+		this.pinchPending = null;
+		if (!pending && !settle) return;
+		if (pending) this.applyPinchScale(pending.next, pending.centroid, settle);
+		else if (settle) this.settlePinchBox();
 	}
 
 	/**
@@ -2216,25 +2275,35 @@ class InkOverlayPlugin {
 	 * changes. Sizing the box to 100/k percent first keeps the painted result
 	 * filling the pane instead of hanging outside it.
 	 */
-	private applyPinchScale(next: number, centroid: { x: number; y: number }): void {
+	private applyPinchScale(
+		next: number,
+		centroid: { x: number; y: number },
+		settle: boolean
+	): void {
 		const host = this.view.dom as HTMLElement;
 		const scroller = this.view.scrollDOM;
 		const from = this.pinchScaleNow;
-		const rect = host.getBoundingClientRect();
-		// Centroid relative to the scroller's own box, which is the space the
-		// scroll offsets live in.
-		const localX = centroid.x - rect.left;
-		const localY = centroid.y - rect.top;
+		// The scroller's box, not the host's: scroll offsets live in the
+		// scroller's space and it sits inset inside the host by the editor's
+		// own chrome, so measuring against the host anchored the zoom tens of
+		// px off and the page crept under the fingers.
+		const rect = scroller.getBoundingClientRect();
+		// Client px are PAINTED px; at scale k a painted offset is k layout
+		// px. Scroll offsets are layout px, so the centroid has to be divided
+		// by the scale it was measured at before the two are added.
+		const localX = (centroid.x - rect.left) / from;
+		const localY = (centroid.y - rect.top) / from;
 		const nextLeft = anchoredScroll(scroller.scrollLeft, localX, from, next);
 		const nextTop = anchoredScroll(scroller.scrollTop, localY, from, next);
 
 		this.pinchScaleNow = next;
-		if (next === 1) {
+		if (settle) this.pinchBoxScale = next;
+		if (next === 1 && settle) {
 			host.style.removeProperty("transform");
 			host.style.removeProperty("transform-origin");
 			host.style.removeProperty("width");
 			host.style.removeProperty("height");
-		} else {
+		} else if (settle) {
 			const box = `${counterSizePercent(next)}%`;
 			host.setCssStyles({
 				transform: `scale(${next})`,
@@ -2242,11 +2311,46 @@ class InkOverlayPlugin {
 				width: box,
 				height: box,
 			});
+		} else {
+			// Compositor only. Width/height are a full editor reflow and are
+			// what the settle pass exists for; mid-gesture the painted box
+			// simply overhangs, which no one can see while it is moving.
+			host.setCssStyles({ transform: `scale(${next})`, transformOrigin: "0 0" });
 		}
 		scroller.scrollLeft = nextLeft;
 		scroller.scrollTop = nextTop;
 		// The measured scale changed, so the ink geometry has to be rebuilt at
-		// the new backing resolution before the next paint.
+		// the new backing resolution - but only once the fingers are gone.
+		if (settle) this.handleResize();
+	}
+
+	/**
+	 * Pinch over: give the box its counter-size and re-raster ink crisply.
+	 *
+	 * A no-op when the box already reflects the current scale, because
+	 * `handleResize` reallocates both committed canvases and redraws every
+	 * stroke - too much to spend on a two-finger settle that crossed the
+	 * slop and changed nothing.
+	 */
+	private settlePinchBox(): void {
+		const host = this.view.dom as HTMLElement;
+		const k = this.pinchScaleNow;
+		if (k === this.pinchBoxScale) return;
+		this.pinchBoxScale = k;
+		if (k === 1) {
+			host.style.removeProperty("transform");
+			host.style.removeProperty("transform-origin");
+			host.style.removeProperty("width");
+			host.style.removeProperty("height");
+		} else {
+			const box = `${counterSizePercent(k)}%`;
+			host.setCssStyles({
+				transform: `scale(${k})`,
+				transformOrigin: "0 0",
+				width: box,
+				height: box,
+			});
+		}
 		this.handleResize();
 	}
 
@@ -2261,7 +2365,7 @@ class InkOverlayPlugin {
 		// is bounded by the eraser radius, so the reticle shows THAT. Radius
 		// is screen-space (same physical size at any zoom), like the eraser
 		// cursor that follows a live erase.
-		if (inlineEraserMode) {
+		if (tipMode() === "eraser") {
 			const r = visualToNote(inlineEraserRadiusPx, this.cssScale);
 			this.penCursorEl.classList.remove(LASSO_CURSOR_CLASS);
 			this.penCursorEl.classList.remove(SPACE_CURSOR_CLASS);
@@ -2280,7 +2384,7 @@ class InkOverlayPlugin {
 		this.penCursorEl.classList.remove(ERASER_CURSOR_CLASS);
 		// Lasso mode: the nib is about to select, and the reticle says so - a
 		// dashed ring, fixed size, visually distinct from both nib and eraser.
-		if (inlineLassoMode) {
+		if (tipMode() === "lasso") {
 			const r = visualToNote(9, this.cssScale);
 			this.penCursorEl.classList.remove(SPACE_CURSOR_CLASS);
 			this.penCursorEl.classList.remove(PAN_CURSOR_CLASS);
@@ -2299,7 +2403,7 @@ class InkOverlayPlugin {
 		// Insert-space mode: the reticle IS the divider, in miniature - a
 		// short dashed rule lying where the seam would be planted. The nib
 		// dot would say "pen" for a tip that is about to move rows instead.
-		if (inlineSpaceMode) {
+		if (tipMode() === "space") {
 			const half = visualToNote(24, this.cssScale);
 			this.penCursorEl.classList.add(SPACE_CURSOR_CLASS);
 			this.penCursorEl.setCssStyles({
@@ -2315,7 +2419,7 @@ class InkOverlayPlugin {
 		this.penCursorEl.classList.remove(SPACE_CURSOR_CLASS);
 		// Pan mode: a solid ring, the one reticle that is not dashed, so the
 		// tip reads as "grab" rather than as any of the marking tools.
-		if (inlinePanMode) {
+		if (tipMode() === "pan") {
 			const r = visualToNote(11, this.cssScale);
 			this.penCursorEl.classList.add(PAN_CURSOR_CLASS);
 			this.penCursorEl.setCssStyles({
@@ -2554,9 +2658,11 @@ class InkOverlayPlugin {
 		// into a document position exactly, with no world-to-viewport
 		// conversion of ours to drift out of step with the camera.
 		this.spaceClient = { x: ev.clientX, y: ev.clientY };
-		if (this.spaceIds.length === 0 && !stripQuiet()) {
+		if (this.spaceIds.length === 0) {
 			// A gesture that moves nothing is indistinguishable from a broken
 			// one - it cost an evening of hardware testing to learn that once.
+			// (No stripQuiet guard: this is a pen gesture, and stripInvoked is
+			// only ever true inside a strip button's own command call.)
 			new Notice("Handwriting: no ink below the line");
 		}
 		this.redrawSelectionUI();
@@ -2614,15 +2720,28 @@ class InkOverlayPlugin {
 		// its shape instead of the ink sliding off the words it belongs to.
 		// Both halves ride one transaction: undo puts the lines and the ink
 		// back together, which is the only way this can be reversible.
+		// The TEXT is authoritative. Whatever the text could not do, the ink
+		// does not do either: a drag under half a line, or an upward drag over
+		// writing that must not be deleted, settles back to zero rather than
+		// leaving the ink permanently offset from the line it belongs to -
+		// which is the one thing this gesture exists to prevent.
 		const change = this.spaceTextChange(client, applied);
-		const dy = change ? change.dy : applied;
+		const dy = change.dy;
 		const correction = dy - applied;
 		if (correction !== 0) inlineInk.moveStrokes(path, strokeIds, 0, correction);
+		if (dy === 0) {
+			// Nothing moved in the end, and the correction above already put
+			// the live drag back: no op worth recording.
+			this.scheduleRepaint();
+			this.repaintPath(path);
+			this.redrawSelectionUI();
+			return;
+		}
 		inlineInk.save(path);
 		const op: InkOp = { type: "move", path, strokeIds, dx: 0, dy };
 		try {
 			this.view.dispatch({
-				changes: change?.changes,
+				changes: change.changes ?? undefined,
 				effects: inkEffect.of(op),
 				annotations: [inkApplied.of(true), isolateHistory.of("full")],
 			});
@@ -2648,13 +2767,14 @@ class InkOverlayPlugin {
 	private spaceTextChange(
 		client: { x: number; y: number } | null,
 		applied: number
-	): { changes: { from: number; to: number; insert: string }; dy: number } | null {
-		if (!client) return null;
+	): { changes: { from: number; to: number; insert: string } | null; dy: number } {
+		const none = { changes: null, dy: 0 };
+		if (!client) return none;
 		const lineHeight = visualToNote(this.view.defaultLineHeight, this.scale);
 		const steps = lineSteps(applied, lineHeight);
-		if (steps === 0) return null;
+		if (steps === 0) return none;
 		const pos = this.view.posAtCoords(client);
-		if (pos === null) return null;
+		if (pos === null) return none;
 		const doc = this.view.state.doc;
 		const line = doc.lineAt(pos);
 		if (steps > 0) {
@@ -2664,15 +2784,18 @@ class InkOverlayPlugin {
 			};
 		}
 		// Closing up: take back only blank lines, never a word of writing.
-		const lines: string[] = [];
-		for (let i = 1; i <= doc.lines; i++) lines.push(doc.line(i).text);
-		const removable = blankLinesAbove(lines, line.number, -steps);
-		if (removable === 0) return null;
+		const removable = blankLinesAbove((n) => doc.line(n).text, line.number, -steps);
+		if (removable === 0) return none;
 		const first = doc.line(line.number - removable);
 		return {
 			changes: { from: first.from, to: line.from, insert: "" },
 			dy: -removable * lineHeight,
 		};
+	}
+
+	/** The strip's active-tool marks are stale; recompute them. */
+	refreshStrip(): void {
+		this.mobileTools?.refresh();
 	}
 
 	private redrawSelectionUI(): void {
@@ -2989,12 +3112,7 @@ class InkOverlayPlugin {
 		// short by the distance travelled during the repaint - nothing at a
 		// slow scroll, tens of px at a fling, springing back the moment the
 		// scrolling stopped and the two agreed again.
-		this.follow.rebase(
-			this.layerEl,
-			this.lastSyncScrollLeft,
-			this.lastSyncScrollTop,
-			this.frame.locked
-		);
+		this.follow.rebase(this.layerEl, this.frame.locked);
 		const scroller = this.view.scrollDOM;
 		this.follow.follow(this.layerEl, scroller.scrollLeft, scroller.scrollTop, this.frame.locked);
 	}

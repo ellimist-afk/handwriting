@@ -171,26 +171,31 @@ describe("lineSteps", () => {
 	});
 });
 
+/** The document reader the real caller passes: 1-based line numbers. */
+function reader(lines: readonly string[]): (n: number) => string {
+	return (n) => lines[n - 1] ?? "";
+}
+
 describe("blankLinesAbove", () => {
 	const doc = ["alpha", "", "", "beta"];
 
 	it("counts the blank run directly above the line", () => {
-		expect(blankLinesAbove(doc, 4, 5)).toBe(2);
+		expect(blankLinesAbove(reader(doc), 4, 5)).toBe(2);
 	});
 
 	it("never returns more than asked for", () => {
-		expect(blankLinesAbove(doc, 4, 1)).toBe(1);
+		expect(blankLinesAbove(reader(doc), 4, 1)).toBe(1);
 	});
 
 	it("stops at the first line with writing on it", () => {
-		expect(blankLinesAbove(doc, 2, 5)).toBe(0);
+		expect(blankLinesAbove(reader(doc), 2, 5)).toBe(0);
 	});
 
 	it("treats whitespace-only lines as blank", () => {
-		expect(blankLinesAbove(["alpha", "   ", "beta"], 3, 5)).toBe(1);
+		expect(blankLinesAbove(reader(["alpha", "   ", "beta"]), 3, 5)).toBe(1);
 	});
 
 	it("stops at the top of the document", () => {
-		expect(blankLinesAbove(["", "", "beta"], 3, 9)).toBe(2);
+		expect(blankLinesAbove(reader(["", "", "beta"]), 3, 9)).toBe(2);
 	});
 });
