@@ -1103,6 +1103,7 @@ class InkOverlayPlugin {
 
 	private handleResize(): void {
 		if (!this.container) return;
+		const prevScale = this.scale;
 		const rect = this.container.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) {
 			// A background tab keeps its editor - and this overlay - alive
@@ -1159,7 +1160,12 @@ class InkOverlayPlugin {
 		// for nothing (setting width clears a canvas even to the same
 		// value). The ios keyboard animation streams resize ticks, and
 		// every needless blank was a visible flicker frame.
+		// Scale is part of "unchanged": a pinch or ctrl-scroll zoom reflows
+		// the text and moves this.scale WITHOUT touching the canvas size,
+		// and skipping its repaint left ink painted at the old zoom (the
+		// 1.0.9 regression this guard shipped with).
 		const unchanged =
+			this.scale === prevScale &&
 			this.committedCanvas.width === size.backingW &&
 			this.committedCanvas.height === size.backingH &&
 			this.cssWidth === size.cssW &&
