@@ -12,7 +12,7 @@ import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
 import { isPenCompatMouseMove } from "./PenCursor";
 import { pinchEngaged, pinchRatio, pinchSpread } from "./PinchScale";
 import { InkFeedArbiter } from "./InkFeed";
-import { stylusOnlyTouches } from "./StylusTouch";
+import { palmSizedTouches, stylusOnlyTouches } from "./StylusTouch";
 import { mouseInkEnabled } from "./MouseInk";
 import { penSeenThisSession } from "./PenToolsMode";
 
@@ -626,10 +626,24 @@ export class InlinePenRouter {
 		{
 			const eatStylus = (ev: Event) => {
 				const te = ev as TouchEvent;
-				if (!te.changedTouches || !stylusOnlyTouches(te.changedTouches)) return;
-				te.preventDefault();
-				te.stopPropagation();
-				tr(te.type, null, "stylus touch eaten (webkit text layer)");
+				if (!te.changedTouches) return;
+				if (stylusOnlyTouches(te.changedTouches)) {
+					te.preventDefault();
+					te.stopPropagation();
+					tr(te.type, null, "stylus touch eaten (webkit text layer)");
+					return;
+				}
+				// A palm resting BEFORE the pen touches down. PalmGate's
+				// "palm placed before pen" rule keys off pen hover, and
+				// Pencil hover only exists on recent iPads - on the rest the
+				// palm reaches the contenteditable with no pen signal yet and
+				// the keyboard slides up before a stroke is drawn (alan,
+				// iPad). Contact size is the only signal at that instant.
+				if (palmSizedTouches(te.changedTouches)) {
+					te.preventDefault();
+					te.stopPropagation();
+					tr(te.type, null, "palm-sized touch eaten (keyboard suppression)");
+				}
 			};
 			for (const type of ["touchstart", "touchmove", "touchend"]) {
 				this.scrollEl.addEventListener(type, eatStylus, {

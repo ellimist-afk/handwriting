@@ -1216,6 +1216,9 @@ class InkOverlayPlugin {
 			this.resetGestureState();
 			this.wet.clear(this.cssWidth, this.cssHeight);
 			this.highlightWet.clear(this.cssWidth, this.cssHeight);
+			// A file switch mid-handoff would otherwise strand the wet
+			// highlighter element hidden for the next note.
+			this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
 			this.tail.clearAll(this.cssWidth, this.cssHeight);
 			this.scheduleRepaint();
 			this.loadInk(path);
@@ -1994,6 +1997,7 @@ class InkOverlayPlugin {
 		if (!stroke || !path) {
 			this.activeWet.clear(this.cssWidth, this.cssHeight);
 			this.tail.clearAll(this.cssWidth, this.cssHeight);
+			this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
 			return;
 		}
 		handoffFinishedStroke({
@@ -2004,7 +2008,20 @@ class InkOverlayPlugin {
 			// Paint underneath the still-visible wet layer. Long strokes can take
 			// long enough to flatten that clearing the desynchronized wet canvas
 			// first produces a visible blank frame, especially over Moonlight.
+			//
+			// That works because pen ink is OPAQUE: the same pixels land twice
+			// and nobody can tell. The highlighter is not - both its canvases
+			// carry opacity 0.35, so an overlap composites two translucent
+			// copies of one stroke into something much darker, and a quick
+			// series of strokes strobes (alan, 2026-08-27). Taking the wet
+			// element out of the composite in the SAME frame the committed
+			// stroke lands keeps the atomicity without the double-paint: the
+			// style write and the draw are presented together, and the
+			// desynchronized canvas cannot show what it is no longer showing.
 			drawCommitted: () => {
+				if (this.activeWet === this.highlightWet) {
+					this.highlightWetCanvas.setCssStyles({ opacity: "0" });
+				}
 				for (const finished of strokes) {
 					drawStroke(
 						this.committedCtxFor(finished.tool),
@@ -2018,6 +2035,12 @@ class InkOverlayPlugin {
 			clearTransient: () => {
 				this.activeWet.clear(this.cssWidth, this.cssHeight);
 				this.tail.clearAll(this.cssWidth, this.cssHeight);
+				// Cleared, so it is safe to be visible again for the next
+				// stroke. Restoring here rather than on the next pen-down
+				// keeps the element's resting state honest.
+				if (this.activeWet === this.highlightWet) {
+					this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
+				}
 			},
 			publishHistory: () => {
 				if (snapReplaced) {
