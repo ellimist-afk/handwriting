@@ -91,7 +91,7 @@ Obsidian 1.12.3 or newer. a pen, or not. built and tested mostly on a Surface Pr
 ## ipad notes
 
 * turn off Scribble or ios will draw its own black ink over your strokes and scratch-out deletes ink
-* iPad Settings > Apple Pencil > Scribble
+* iPad Settings > Apple Pencil > Scribble > Toggle off
 
 ## obsidian sync notes
 
@@ -117,9 +117,8 @@ it and send issue
 
 ## money
 
-Handwriting is free, no telemetry, no account, just a pen. i built it over a few months and i still fix it most nights. if it saved you some paper, there's a ko-fi:
-
-https://ko-fi.com/ellimist-afk
+Handwriting is free, no telemetry, no account, just a pen. i built it over a few months and i still fix it most nights. if it saved you some paper, buy me a coffee :)
+https://ko-fi.com/ellimistafk
 
 thank you for using my plugin.
 
