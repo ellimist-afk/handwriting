@@ -20,7 +20,7 @@ Your ink lives in the vault, so updating never touches it.
 
 ## what the pen does
 
-The tip inks. The eraser end erases. The barrel button lassos: hold it and
+The tip inks. The eraser end erases. The side button lassos: hold it and
 circle some ink, then drag the selection to move it or press Delete to
 remove it.
 

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handwriting for Obsidian</title>
+<meta name="description" content="An Obsidian plugin for writing on your notes with a pen. Pressure ink, highlighter, eraser and lasso on ordinary Markdown. Free and open source.">
+<meta property="og:title" content="Handwriting for Obsidian">
+<meta property="og:description" content="Write on your notes with a pen. The note stays a plain .md file.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://ellimist-afk.github.io/handwriting/">
+<meta property="og:image" content="https://ellimist-afk.github.io/handwriting/card.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+:root {
+	--paper: #f4f3f8;
+	--card: #fbfaff;
+	--ink: #1b1a23;
+	--ink-soft: #56526a;
+	--rule: #dcd8ea;
+	--accent: #6d3fc4;
+	--accent-soft: #ece4ff;
+	--shadow: 0 1px 2px rgba(27, 26, 35, .06), 0 8px 24px rgba(27, 26, 35, .05);
+	--display: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+	--body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+	--mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--paper: #15141c;
+		--card: #1c1a26;
+		--ink: #e9e6f4;
+		--ink-soft: #a09bb8;
+		--rule: #2c2939;
+		--accent: #b98cf0;
+		--accent-soft: #2a2140;
+		--shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
+	}
+}
+:root[data-theme="dark"] {
+	--paper: #15141c;
+	--card: #1c1a26;
+	--ink: #e9e6f4;
+	--ink-soft: #a09bb8;
+	--rule: #2c2939;
+	--accent: #b98cf0;
+	--accent-soft: #2a2140;
+	--shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+	margin: 0;
+	background: var(--paper);
+	color: var(--ink);
+	font-family: var(--body);
+	font-size: 18px;
+	line-height: 1.65;
+	font-optical-sizing: auto;
+}
+main {
+	max-width: 46rem;
+	margin: 0 auto;
+	padding: 0 1.5rem 5rem;
+}
+section {
+	padding: 3rem 0;
+	border-top: 1px solid var(--rule);
+	display: flex;
+	flex-direction: column;
+	gap: 1.1rem;
+}
+section > * { margin: 0; }
+h1, h2, h3 {
+	font-family: var(--display);
+	font-weight: 700;
+	letter-spacing: -.02em;
+	text-wrap: balance;
+	line-height: 1.15;
+	margin: 0;
+}
+h1 { font-size: clamp(2.6rem, 8vw, 3.8rem); }
+h2 { font-size: 1.7rem; }
+h3 { font-size: 1.3rem; font-weight: 600; letter-spacing: -.01em; }
+p { margin: 0; max-width: 62ch; }
+a { color: var(--accent); text-underline-offset: .18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+code, kbd { font-family: var(--mono); font-size: .85em; }
+ul { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: .35rem; }
+li::marker { color: var(--accent); }
+.soft { color: var(--ink-soft); }
+.eyebrow {
+	font-family: var(--display);
+	font-weight: 500;
+	font-size: .78rem;
+	letter-spacing: .14em;
+	text-transform: uppercase;
+	color: var(--ink-soft);
+}
+
+/* hero */
+header { padding: 4.5rem 0 2.5rem; display: flex; flex-direction: column; gap: 1.1rem; }
+.lede { font-size: 1.2rem; max-width: 40ch; }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding-top: .4rem; }
+.btn {
+	font-family: var(--display);
+	font-weight: 500;
+	font-size: .95rem;
+	text-decoration: none;
+	padding: .6rem 1.1rem;
+	border-radius: 999px;
+	border: 1px solid var(--accent);
+	background: var(--accent);
+	color: var(--paper);
+	transition: transform .12s ease;
+}
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn:hover { transform: translateY(-1px); }
+
+/* the writable surface */
+.surface {
+	position: relative;
+	background: var(--card);
+	border: 1px solid var(--rule);
+	border-radius: 10px;
+	box-shadow: var(--shadow);
+	overflow: hidden;
+}
+.paper {
+	position: relative;
+	height: min(46vh, 340px);
+	background-image: repeating-linear-gradient(
+		to bottom,
+		transparent 0,
+		transparent 27px,
+		var(--rule) 27px,
+		var(--rule) 28px
+	);
+}
+#ink-demo { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+#ink-hint {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-family: var(--display);
+	font-size: 1.5rem;
+	color: var(--ink-soft);
+	opacity: .55;
+	pointer-events: none;
+	transition: opacity .25s ease;
+}
+#ink-hint[data-written] { opacity: 0; }
+.strip {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: .5rem;
+	padding: .6rem .7rem;
+	border-top: 1px solid var(--rule);
+}
+.strip button {
+	font-family: var(--display);
+	font-size: .82rem;
+	font-weight: 500;
+	color: var(--ink);
+	background: transparent;
+	border: 1px solid var(--rule);
+	border-radius: 999px;
+	padding: .3rem .7rem;
+	cursor: pointer;
+}
+.strip button:hover { border-color: var(--accent); }
+.strip button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.swatch { width: .7rem; height: .7rem; border-radius: 50%; display: inline-block; vertical-align: -1px; margin-right: .4rem; }
+.strip .spacer { flex: 1; }
+.caption { font-size: .9rem; color: var(--ink-soft); }
+
+/* content bits */
+.tree {
+	font-family: var(--mono);
+	font-size: .82rem;
+	line-height: 1.7;
+	background: var(--card);
+	border: 1px solid var(--rule);
+	border-radius: 8px;
+	padding: 1rem 1.1rem;
+	overflow-x: auto;
+	white-space: pre;
+	color: var(--ink-soft);
+}
+.tree b { color: var(--ink); font-weight: 600; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.5rem 2rem; }
+.platforms { display: flex; flex-wrap: wrap; gap: .4rem; }
+.platforms span {
+	font-family: var(--display);
+	font-size: .85rem;
+	border: 1px solid var(--rule);
+	border-radius: 999px;
+	padding: .22rem .7rem;
+	color: var(--ink-soft);
+}
+ol { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: .3rem; }
+footer {
+	border-top: 1px solid var(--rule);
+	padding: 2.5rem 0 0;
+	display: flex;
+	flex-direction: column;
+	gap: .6rem;
+	font-size: .92rem;
+	color: var(--ink-soft);
+}
+@media (max-width: 34rem) {
+	body { font-size: 17px; }
+	header { padding-top: 3rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+	* { transition: none !important; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<header>
+	<p class="eyebrow">Obsidian plugin</p>
+	<h1>Handwriting</h1>
+	<p class="lede">Pen ink on ordinary Markdown notes. Open a note and write. The note stays a plain <code>.md</code> file.</p>
+	<div class="actions">
+		<a class="btn" href="https://community.obsidian.md/plugins/handwriting">Get it from the plugin directory</a>
+		<a class="btn ghost" href="https://github.com/ellimist-afk/handwriting">GitHub</a>
+	</div>
+</header>
+
+<section>
+	<h2>try it here first</h2>
+	<p>This is the plugin's own ink code running in this page. If your pen writes here, it writes the same in a note.</p>
+	<div class="surface">
+		<div class="paper">
+			<canvas id="ink-demo"></canvas>
+			<div id="ink-hint">Write here</div>
+		</div>
+		<div class="strip">
+			<button data-tool="violet" aria-pressed="true"><span class="swatch" style="background:#6d3fc4"></span>Pen</button>
+			<button data-tool="ink" aria-pressed="false"><span class="swatch" style="background:#1b1a23"></span>Black</button>
+			<button data-tool="red" aria-pressed="false"><span class="swatch" style="background:#c0392f"></span>Red</button>
+			<button data-tool="highlighter" aria-pressed="false"><span class="swatch" style="background:#f2c14b"></span>Highlighter</button>
+			<span class="spacer"></span>
+			<button id="ink-export">Save as SVG</button>
+			<button id="ink-undo">Undo</button>
+			<button id="ink-clear">Clear</button>
+		</div>
+	</div>
+	<p class="caption" id="ink-pointer-note">No pen? Drag with the mouse.</p>
+	<p class="caption">Save as SVG is the plugin's own export. Same file you get beside your note.</p>
+</section>
+
+<section>
+	<h2>why it exists</h2>
+	<p>The biggest hurdle to using Obsidian is the lack of handwriting integration. When I was a student I really enjoyed taking notes for biochem and comp sci in OneNote on my tablet. Truly it made me love learning.</p>
+	<p>I wish I could've used Obsidian back then to handwrite all my notes. This plugin is my attempt to solve that problem retroactively.</p>
+	<p class="soft">For students, educators, engineers, artists, or anyone who writes and types in the same place.</p>
+</section>
+
+<section>
+	<h2>what the pen does</h2>
+	<p>The tip inks. The eraser end erases. The side button lassos: hold it and circle some ink, then drag the selection to move it or press Delete to remove it.</p>
+	<p>Two tools, pen and highlighter, each with three nib sizes and its own small palette: six pen inks, five highlighter colors. All of it is in the command palette and bindable to hotkeys. Size and color apply to whichever tool is active, and persist across sessions.</p>
+	<p>Ink follows the text. It scales with Obsidian's zoom, stays glued to the text while you scroll, and plain Ctrl+Z undoes ink and text edits in the order they happened. The surface isn't bounded by the text. Draw below the last line or far off to the right and the note grows scroll room to reach it.</p>
+	<div class="cols">
+		<ul>
+			<li>Pressure sensitivity</li>
+			<li>Palm rejection</li>
+			<li>Pinch to zoom</li>
+		</ul>
+		<ul>
+			<li>Lined and grid paper</li>
+			<li>Handwriting to shape</li>
+			<li>Export ink as SVG</li>
+		</ul>
+	</div>
+</section>
+
+<section>
+	<h2>how it works</h2>
+	<p class="soft">For anyone curious about the mechanism.</p>
+
+	<h3>writing</h3>
+	<p>You write on an overlay above the editor, drawn in CodeMirror 6.</p>
+	<p>Only the pen draws. Typing, selection and the caret stay Obsidian's. Touch and mouse get enough arbitration to keep a resting palm from scrolling and an eraser pass from dragging the caret.</p>
+	<p>The only thing ever written into your Markdown is one frontmatter line, <code>handwriting-page-id</code>, added the first time you write on that note.</p>
+
+	<h3>where the ink is</h3>
+	<p>One JSON file per note, in <code>.handwriting/</code> at the vault root, named by that id.</p>
+	<div class="tree">&lt;vault&gt;/
+  <b>Some note.md</b>              your text, plus one frontmatter property
+  <b>.handwriting/</b>
+    3f2a….json               the ink for that note
+    trash/                   a copy kept from a delete</div>
+	<p>A sidecar in photography is a small file that sits beside a bigger one and holds information about it. Same idea here. The sidecar holds your strokes, the frontmatter line is the link back to the note.</p>
+	<p>Whatever happens to the ink, your text is safe. The note is never modified beyond that one line.</p>
+
+	<h3>how ink is stored</h3>
+	<p>Coordinates are note-space pixels. The origin is the top-left of the text column, and y runs down the document.</p>
+	<p>Markdown reflows wherever it wants. Your ink stays where you put it. Editing text never moves ink, except the insert space tool, by design.</p>
+	<p>Zooming rescales nothing. No stroke is rewritten.</p>
+
+	<h3>how ink is placed</h3>
+	<p>Drawing runs on raw pointer events. The line behind the nib is smoothed. The last stub to the tip is left raw, so the ink always reaches the pen.</p>
+</section>
+
+<section>
+	<h2>where it runs</h2>
+	<div class="platforms">
+		<span>Windows</span><span>macOS</span><span>Linux</span><span>iOS</span><span>Android</span><span>Boox</span>
+	</div>
+	<p class="soft">Obsidian 1.12.3 or newer. Built and tested mostly on a Surface Pro, with some testing on an iPad. Please send reports.</p>
+	<h3>Two things worth knowing</h3>
+	<ul>
+		<li><b>iPad:</b> turn off Scribble, or iOS draws its own black ink over your strokes. Settings &gt; Apple Pencil &gt; Scribble.</li>
+		<li><b>Obsidian Sync:</b> it skips hidden folders, so ink won't sync until you turn on Handwriting settings &gt; Compatibility with Obsidian sync.</li>
+	</ul>
+</section>
+
+<section>
+	<h2>installing</h2>
+	<ol>
+		<li>Settings &gt; Community plugins &gt; Browse</li>
+		<li>Search <b>Handwriting</b></li>
+		<li>Install, then enable</li>
+	</ol>
+	<p class="soft">Or from the directory: <a href="https://community.obsidian.md/plugins/handwriting">community.obsidian.md/plugins/handwriting</a>. For beta builds before they're released, add <code>ellimist-afk/handwriting</code> to BRAT.</p>
+	<p class="soft">Longer reading: the <a href="https://github.com/ellimist-afk/handwriting/blob/master/docs/manual.md">manual</a>, and <a href="https://github.com/ellimist-afk/handwriting/blob/master/docs/storage.md">how ink is stored</a>.</p>
+</section>
+
+<section>
+	<h2>coming</h2>
+	<ul>
+		<li>Native PDF annotation</li>
+		<li>OCR, handwriting to text</li>
+		<li>Searchable handwriting</li>
+		<li>Handwriting to math and LaTeX</li>
+		<li>Audio alongside ink</li>
+		<li>Ruler and compass on screen</li>
+	</ul>
+</section>
+
+<section>
+	<h2>found a bug</h2>
+	<p>Open an issue on <a href="https://github.com/ellimist-afk/handwriting/issues">GitHub</a> and say what happened, which device, and which pen.</p>
+	<p class="soft">Easy mode: run <code>Diagnostics: toggle recording</code>, reproduce it, then <code>Diagnostics: copy pen trace</code> and paste that into the issue.</p>
+</section>
+
+<footer>
+	<p>Handwriting is free and open source, AGPL-3.0-only. No CLA, no copyright assignment.</p>
+	<p>I'm still working on it almost every night. If you want to buy me a coffee: <a href="https://ko-fi.com/ellimistafk">ko-fi.com/ellimistafk</a></p>
+	<p>Thank you for using my plugin.</p>
+</footer>
+
+</main>
+<script src="demo.js"></script>
+</body>
+</html>
