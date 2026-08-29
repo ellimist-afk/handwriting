@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import { InkStroke, computeBBox } from "./Stroke";
-import { inkToSvg, strokeToSvg } from "./SvgExport";
+import { inkSvgBody, inkSvgLayers, inkToSvg, strokeToSvg } from "./SvgExport";
 
 function stroke(tool: "pen" | "highlighter", xs: number[], y: number): InkStroke {
 	const points = xs.map((x, i) => ({ x, y: y + i, pressure: 0.5, t: i * 8 }));
@@ -59,5 +59,48 @@ describe("inkToSvg", () => {
 
 	it("no ink, no document", () => {
 		expect(inkToSvg([])).toBe("");
+	});
+});
+
+describe("inkSvgLayers (what the reading view builds elements from)", () => {
+	it("splits the layers and keeps one run per colour", () => {
+		const layers = inkSvgLayers([
+			stroke("highlighter", [0, 10], 0),
+			stroke("pen", [0, 10], 20),
+			stroke("pen", [0, 10], 40),
+		]);
+		expect(layers.highlighter).toHaveLength(1);
+		// both pen strokes share a colour, so they merge into one path
+		expect(layers.pen).toHaveLength(1);
+		expect(layers.pen[0]!.d.length).toBeGreaterThan(0);
+	});
+
+	it("a colour change breaks the run, so z-order survives", () => {
+		const a = stroke("pen", [0, 10], 0);
+		const b = { ...stroke("pen", [0, 10], 20), color: "#e74c3c" };
+		const c = stroke("pen", [0, 10], 40);
+		const layers = inkSvgLayers([a, b, c]);
+		// three runs, in the order drawn - collapsing by colour would lift
+		// the first stroke above the red one drawn over it
+		expect(layers.pen).toHaveLength(3);
+		expect(layers.pen[1]!.color).toBe("#e74c3c");
+	});
+
+	it("empty in, empty out", () => {
+		const layers = inkSvgLayers([]);
+		expect(layers.highlighter).toEqual([]);
+		expect(layers.pen).toEqual([]);
+	});
+
+	it("the runs and the file export still describe the same paths", () => {
+		// the .svg download keeps the string builder; this pins the two
+		// forms together so the refactor cannot drift them apart
+		const strokes = [stroke("highlighter", [0, 10], 0), stroke("pen", [0, 10], 20)];
+		const body = inkSvgBody(strokes);
+		const layers = inkSvgLayers(strokes);
+		for (const run of [...layers.highlighter, ...layers.pen]) {
+			expect(body).toContain(`d="${run.d}"`);
+			expect(body).toContain(`fill="${run.color}"`);
+		}
 	});
 });

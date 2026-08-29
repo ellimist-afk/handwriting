@@ -103,9 +103,40 @@ export function strokeToSvg(stroke: InkStroke): string {
  * origin puts the ink exactly where the note put it.
  */
 export function inkSvgBody(strokes: readonly InkStroke[]): string {
-	const hi = mergedRuns(strokes.filter((s) => s.tool === "highlighter"));
-	const pen = mergedRuns(strokes.filter((s) => s.tool !== "highlighter"));
+	const hi = runMarkup(inkSvgRuns(strokes.filter((s) => s.tool === "highlighter")));
+	const pen = runMarkup(inkSvgRuns(strokes.filter((s) => s.tool !== "highlighter")));
 	return (hi ? `<g opacity="${HIGHLIGHTER_ALPHA}">${hi}</g>` : "") + pen;
+}
+
+/** One merged path: the fill colour and the path data, without markup. */
+export interface InkSvgRun {
+	color: string;
+	d: string;
+}
+
+/**
+ * The same runs inkSvgBody would render, handed over as data.
+ *
+ * A caller painting into a LIVE document builds elements from these
+ * (createElementNS + setAttribute). Writing the markup string into
+ * Writing the markup into a live element would do the same thing, and the
+ * community review flags that on sight, safe content or not - so the string form
+ * stays for the .svg file export, where it is a file write.
+ */
+export function inkSvgLayers(strokes: readonly InkStroke[]): {
+	highlighter: InkSvgRun[];
+	pen: InkSvgRun[];
+} {
+	return {
+		highlighter: inkSvgRuns(strokes.filter((s) => s.tool === "highlighter")),
+		pen: inkSvgRuns(strokes.filter((s) => s.tool !== "highlighter")),
+	};
+}
+
+function runMarkup(runs: readonly InkSvgRun[]): string {
+	let out = "";
+	for (const r of runs) out += `<path fill="${r.color}" fill-rule="nonzero" d="${r.d}"/>`;
+	return out;
 }
 
 /**
@@ -126,8 +157,8 @@ export function inkSvgBody(strokes: readonly InkStroke[]): string {
  * run merge instead of cancelling. That is also what the highlighter layer
  * wants: one flat wash rather than a dark seam at every crossing.
  */
-function mergedRuns(strokes: readonly InkStroke[]): string {
-	let out = "";
+function inkSvgRuns(strokes: readonly InkStroke[]): InkSvgRun[] {
+	const out: InkSvgRun[] = [];
 	let i = 0;
 	while (i < strokes.length) {
 		const color = normalizeInkColor(strokes[i]!.tool, strokes[i]!.color);
@@ -136,7 +167,7 @@ function mergedRuns(strokes: readonly InkStroke[]): string {
 			d += strokePathData(strokes[i]!);
 			i++;
 		}
-		if (d !== "") out += `<path fill="${color}" fill-rule="nonzero" d="${d}"/>`;
+		if (d !== "") out.push({ color, d });
 	}
 	return out;
 }

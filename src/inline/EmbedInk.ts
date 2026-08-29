@@ -32,7 +32,8 @@
 import { CameraState } from "../camera/coordinates";
 import { drawStroke } from "../ink/StrokeRenderer";
 import { InkStroke } from "../ink/Stroke";
-import { inkSvgBody } from "../ink/SvgExport";
+import { InkSvgRun, inkSvgLayers } from "../ink/SvgExport";
+import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
 
 /**
  * Total device pixels one rendered layer may hold.
@@ -260,12 +261,31 @@ function usePrintVector(on: boolean): void {
 		svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
 		svg.setAttribute("width", `${w}`);
 		svg.setAttribute("height", `${h}`);
-		// Colours pass through normalizeInkColor and everything else is a
-		// formatted number, so there is nothing here a sidecar could author.
-		svg.innerHTML = inkSvgBody(strokes);
+		// Built as elements rather than markup. The content is safe either
+		// way - colours pass through normalizeInkColor and the rest is
+		// formatted numbers - but assigning markup is flagged on sight by
+		// the community review, and building nodes costs nothing here.
+		while (svg.firstChild) svg.removeChild(svg.firstChild);
+		const layers = inkSvgLayers(strokes);
+		if (layers.highlighter.length > 0) {
+			const g = root.ownerDocument.createElementNS(SVG_NS, "g");
+			g.setAttribute("opacity", String(HIGHLIGHTER_ALPHA));
+			for (const run of layers.highlighter) g.appendChild(inkPathEl(root, run));
+			svg.appendChild(g);
+		}
+		for (const run of layers.pen) svg.appendChild(inkPathEl(root, run));
 		if (!existing) root.appendChild(svg);
 		canvas?.setCssStyles({ display: "none" });
 	}
+}
+
+/** One merged run as an SVG <path>, in the root's own document. */
+function inkPathEl(root: HTMLElement, run: InkSvgRun): SVGPathElement {
+	const el = root.ownerDocument.createElementNS(SVG_NS, "path");
+	el.setAttribute("fill", run.color);
+	el.setAttribute("fill-rule", "nonzero");
+	el.setAttribute("d", run.d);
+	return el;
 }
 
 function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): void {

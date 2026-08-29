@@ -23,7 +23,7 @@ Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 ## features
 
 * data yours forever
-   * your ink is all stored here: `<your vault>/.handwriting/`
+   * your ink is all stored here: your vault's `.handwriting/` folder
    * https://imgur.com/a/60GBWnn
 * pressure sensitivity
 * palm rejection
