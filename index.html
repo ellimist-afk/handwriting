@@ -197,15 +197,18 @@ header { padding: 4.5rem 0 2.5rem; display: flex; flex-direction: column; gap: 1
 }
 .tree b { color: var(--ink); font-weight: 600; }
 .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.5rem 2rem; }
-.platforms { display: flex; flex-wrap: wrap; gap: .4rem; }
-.platforms span {
-	font-family: var(--display);
-	font-size: .85rem;
+.platforms { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: .8rem; }
+.platforms div {
 	border: 1px solid var(--rule);
-	border-radius: 999px;
-	padding: .22rem .7rem;
-	color: var(--ink-soft);
+	border-radius: 8px;
+	padding: .8rem .9rem;
+	display: flex;
+	flex-direction: column;
+	gap: .25rem;
+	background: var(--card);
 }
+.platforms b { font-family: var(--display); font-weight: 600; }
+.platforms span { color: var(--ink-soft); font-size: .95rem; }
 ol { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: .3rem; }
 footer {
 	border-top: 1px solid var(--rule);
@@ -318,12 +321,18 @@ footer {
 <section>
 	<h2>where it runs</h2>
 	<div class="platforms">
-		<span>Windows</span><span>macOS</span><span>Linux</span><span>iOS</span><span>Android</span><span>Boox</span>
+		<div><b>Windows</b><span>Built and tested here every day, on a Surface Pro with a Slim Pen 2.</span></div>
+		<div><b>macOS</b><span>Runs on Obsidian desktop. Pen through a drawing tablet.</span></div>
+		<div><b>Linux</b><span>Runs on Obsidian desktop, the same as the other two.</span></div>
+		<div><b>iOS</b><span>Tested on an iPad with an Apple Pencil.</span></div>
+		<div><b>Android</b><span>Reported working with an S-Pen.</span></div>
+		<div><b>Boox</b><span>Reported working on a 5c.</span></div>
 	</div>
-	<p class="soft">Obsidian 1.12.3 or newer. Built and tested mostly on a Surface Pro, with some testing on an iPad. Please send reports.</p>
-	<h3>Two things worth knowing</h3>
+	<p class="soft">Obsidian 1.12.3 or newer. Where it says reported, that is a user's word and not mine, and I would like more of them.</p>
+	<h3>Three things worth knowing</h3>
 	<ul>
 		<li><b>iPad:</b> turn off Scribble, or iOS draws its own black ink over your strokes. Settings &gt; Apple Pencil &gt; Scribble.</li>
+		<li><b>E-ink:</b> turn off ink prediction if the tip flickers on your screen. Handwriting settings.</li>
 		<li><b>Obsidian Sync:</b> it skips hidden folders, so ink won't sync until you turn on Handwriting settings &gt; Compatibility with Obsidian sync.</li>
 	</ul>
 </section>
