@@ -1,4 +1,5 @@
 import { normalizePath } from "obsidian";
+import { DEFAULT_INK_FOLDER, ensureFolder } from "./InkFolder";
 import { PageData, ParseResult, emptyPage, parsePage, serializePage } from "../model/PageData";
 import { runDetached } from "../util/Detached";
 
@@ -15,6 +16,8 @@ export interface PageAdapterLike {
 	remove(path: string): Promise<void>;
 	mkdir(path: string): Promise<void>;
 	stat(path: string): Promise<{ mtime: number } | null>;
+	/** Obsidian provides this; the test doubles do not all need to. */
+	list?(path: string): Promise<{ files: string[]; folders: string[] }>;
 }
 
 export interface PageStoreHost {
@@ -132,6 +135,42 @@ export class PageStore {
 		return normalizePath(`${this.folder}/${pageId}.json`);
 	}
 
+	/** Where sidecars are being kept right now. */
+	inkFolder(): string {
+		return this.folder;
+	}
+
+	/**
+	 * Point the store at a different folder. Writes go here from now on.
+	 *
+	 * Reads keep a fallback (see `readPath`), which is what makes a folder
+	 * change safe to interrupt: a move that half-finished, or a settings save
+	 * that never landed, leaves pages readable from wherever they actually
+	 * are instead of invisible.
+	 */
+	useInkFolder(folder: string): void {
+		this.folder = folder;
+	}
+
+	/**
+	 * Where to READ a page from: the configured folder, or the default one if
+	 * the file is not there.
+	 *
+	 * Every vault's ink starts life in `.handwriting`, so that is the one
+	 * place a page can be when the configured folder does not have it - a
+	 * migration that was interrupted, or a setting that failed to persist
+	 * after the files moved. Falling back costs one `exists` on a miss and
+	 * turns "all my ink disappeared" into "it still opens".
+	 */
+	private async readPath(pageId: string): Promise<string> {
+		const primary = this.path(pageId);
+		if (this.folder === DEFAULT_INK_FOLDER) return primary;
+		const adapter = this.app.vault.adapter;
+		if (await adapter.exists(primary)) return primary;
+		const fallback = normalizePath(`${DEFAULT_INK_FOLDER}/${pageId}.json`);
+		return (await adapter.exists(fallback)) ? fallback : primary;
+	}
+
 	private tmpPath(pageId: string): string {
 		return `${this.path(pageId)}.tmp`;
 	}
@@ -194,7 +233,9 @@ export class PageStore {
 
 	async load(pageId: string): Promise<ParseResult | null> {
 		const adapter = this.app.vault.adapter;
-		const final = this.path(pageId);
+		// Not `path()`: a page can still be sitting in the default folder if a
+		// folder change was interrupted. See readPath.
+		const final = await this.readPath(pageId);
 		try {
 			if (await adapter.exists(final)) {
 				// Stat BEFORE read, deliberately: if an external writer lands
@@ -454,7 +495,7 @@ export class PageStore {
 			const final = this.path(pageId);
 			if (!(await adapter.exists(final))) return;
 			const trashDir = this.trashDir();
-			if (!(await adapter.exists(trashDir))) await adapter.mkdir(trashDir);
+			await ensureFolder(adapter, trashDir);
 			const text = await adapter.read(final);
 			const to = await this.freeTrashPath(pageId);
 			await adapter.write(to, text);
@@ -483,9 +524,7 @@ export class PageStore {
 	private async writeNow(pageId: string, data: PageData): Promise<void> {
 		const adapter = this.app.vault.adapter;
 		try {
-			if (!(await adapter.exists(this.folder))) {
-				await adapter.mkdir(this.folder);
-			}
+			await ensureFolder(adapter, this.folder);
 			const final = this.path(pageId);
 			const tmp = this.tmpPath(pageId);
 			// External-revision guard: if the file on disk is not the one this
@@ -616,7 +655,7 @@ export class PageStore {
 				return;
 			}
 			const out = serializePage({ ...parsed.data, pageId: toId });
-			if (!(await adapter.exists(this.folder))) await adapter.mkdir(this.folder);
+			await ensureFolder(adapter, this.folder);
 			const tmp = this.tmpPath(toId);
 			await adapter.write(tmp, out);
 			await adapter.rename(tmp, dest);
@@ -683,7 +722,7 @@ export class PageStore {
 						await adapter.remove(final);
 					} else {
 						const trashDir = this.trashDir();
-						if (!(await adapter.exists(trashDir))) await adapter.mkdir(trashDir);
+						await ensureFolder(adapter, trashDir);
 						// Never a name that already exists: no `remove(dest)`
 						// here any more, which is exactly what used to destroy
 						// the previous generation.

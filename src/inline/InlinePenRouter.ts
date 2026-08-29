@@ -12,7 +12,11 @@ import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
 import { isPenCompatMouseMove } from "./PenCursor";
 import { pinchEngaged, pinchRatio, pinchSpread } from "./PinchScale";
 import { InkFeedArbiter } from "./InkFeed";
-import { palmSizedTouches, stylusOnlyTouches } from "./StylusTouch";
+import {
+	palmSizedTouches,
+	stylusOnlyTouches,
+	touchesPredateStroke,
+} from "./StylusTouch";
 import { mouseInkEnabled } from "./MouseInk";
 import { penSeenThisSession } from "./PenToolsMode";
 
@@ -476,6 +480,14 @@ export class InlinePenRouter {
 	 */
 	private touchPos = new Map<number, { x: number; y: number }>();
 	private pinchStartSpread = 0;
+	/**
+	 * Touch identifiers currently down, from the TOUCH stream's own numbering
+	 * - `touchPos` keys are pointer ids, which are a different sequence and
+	 * cannot be compared against `Touch.identifier`.
+	 */
+	private liveTouchIds = new Set<number>();
+	/** Snapshot of the above taken when the current pen stroke began. */
+	private touchesAtStrokeStart = new Set<number>();
 	private pinchLive = false;
 	/** The one transition gesture the assist pan is carrying. */
 	private assistPointerId: number | null = null;
@@ -627,10 +639,65 @@ export class InlinePenRouter {
 			const eatStylus = (ev: Event) => {
 				const te = ev as TouchEvent;
 				if (!te.changedTouches) return;
+				// Registered on the WINDOW (see below), so the first question
+				// is whether this touch is even ours. Everything past this
+				// line behaves exactly as it did when the listener sat on the
+				// scroller - including the bookkeeping, which must only ever
+				// count contacts on our own surface.
+				//
+				// `contains` and not instanceof: a popout window's elements
+				// belong to another realm, and the scroller is asked about its
+				// own descendants either way.
+				const target = te.target as Node | null;
+				if (!target || !this.scrollEl.contains(target)) return;
+				// Bookkeeping first, and for every event including the ones
+				// eaten below: the set has to reflect what the browser thinks
+				// is down, not what we let through.
+				if (te.type === "touchstart") {
+					for (let i = 0; i < te.changedTouches.length; i++) {
+						const id = te.changedTouches[i]?.identifier;
+						if (typeof id === "number") this.liveTouchIds.add(id);
+					}
+				} else if (te.type === "touchend") {
+					for (let i = 0; i < te.changedTouches.length; i++) {
+						const id = te.changedTouches[i]?.identifier;
+						if (typeof id === "number") this.liveTouchIds.delete(id);
+					}
+				}
 				if (stylusOnlyTouches(te.changedTouches)) {
 					te.preventDefault();
 					te.stopPropagation();
 					tr(te.type, null, "stylus touch eaten (webkit text layer)");
+					return;
+				}
+				// The pen's parallel TOUCH stream on engines with no stylus
+				// marking. WebKit tags Pencil touches and the branch above
+				// eats them; Chromium tags nothing, so on Android tablets
+				// (Onyx Boox, reported 2026-08-27) the stylus arrives twice -
+				// once as the pointer events we claim, once as touches we
+				// never saw. Those touches reach the app: they focus the
+				// contenteditable and raise the keyboard, and a stroke that
+				// travels sideways reads as Obsidian's open-the-sidebar
+				// swipe, mid-word.
+				//
+				// PalmGate already states the rule - "while a pen stroke is
+				// active, all NEW touch contacts are ignored" - it just never
+				// governed the touch stream. It does now, and it is the pen's
+				// OWN state rather than a platform sniff, so nothing here
+				// needs to know what device it is running on.
+				if (this.gate.isPenStrokeActive) {
+					// ...except the tail of a gesture that was already running
+					// when the pen landed. Killing a scroll mid-fling because
+					// someone rested the pen to write is its own bug, and an
+					// eaten touchend leaves the browser tracking a touch that
+					// never ended.
+					if (!touchesPredateStroke(te.changedTouches, this.touchesAtStrokeStart)) {
+						te.preventDefault();
+						te.stopPropagation();
+						tr(te.type, null, "touch eaten: a pen stroke owns the surface");
+						return;
+					}
+					tr(te.type, null, "touch allowed: it was down before the stroke");
 					return;
 				}
 				// A palm resting BEFORE the pen touches down. PalmGate's
@@ -639,19 +706,52 @@ export class InlinePenRouter {
 				// palm reaches the contenteditable with no pen signal yet and
 				// the keyboard slides up before a stroke is drawn (alan,
 				// iPad). Contact size is the only signal at that instant.
+				// The radius threshold is the one constant here chosen without
+				// hardware to check it against. Trace what the device actually
+				// reports on every touchstart, so a single pen trace from an
+				// Android tablet settles whether 40px is right rather than
+				// another round of guessing.
+				if (te.type === "touchstart" && diagnosticsEnabled()) {
+					const sizes: string[] = [];
+					for (let i = 0; i < te.changedTouches.length; i++) {
+						const touch = te.changedTouches[i];
+						sizes.push(
+							`${touch?.radiusX ?? "?"}x${touch?.radiusY ?? "?"}` +
+								(typeof (touch as { touchType?: string })?.touchType === "string"
+									? `/${(touch as { touchType?: string }).touchType}`
+									: "")
+						);
+					}
+					tr(te.type, null, `touch radii: ${sizes.join(", ")}`);
+				}
 				if (palmSizedTouches(te.changedTouches)) {
 					te.preventDefault();
 					te.stopPropagation();
 					tr(te.type, null, "palm-sized touch eaten (keyboard suppression)");
 				}
 			};
+			// On the WINDOW, not the scroller. Capture descends from the
+			// outside in, so a listener on the scroller is the LAST thing to
+			// see a touch - after every app-level handler above it. Obsidian's
+			// open-the-sidebar swipe is one of those, which is why a sideways
+			// stroke still opened a side panel on an Onyx Boox even with the
+			// rule below saying it must not (reported 2026-08-27, and the rule
+			// was right; it was just being applied somewhere it could be
+			// pre-empted). armOwnership already states the principle for
+			// mouse-like fallout - "window precedes document in capture order,
+			// so these pre-empt Obsidian's app-level handlers" - and the touch
+			// stream simply never got the same treatment.
+			//
+			// Nothing widens except reach: the target check above confines
+			// every decision to our own scroller, so touches anywhere else in
+			// the app never meet this code at all.
 			for (const type of ["touchstart", "touchmove", "touchend"]) {
-				this.scrollEl.addEventListener(type, eatStylus, {
+				this.winRef.addEventListener(type, eatStylus, {
 					capture: true,
 					passive: false,
 				});
 				this.disposers.push(() =>
-					this.scrollEl.removeEventListener(type, eatStylus, { capture: true })
+					this.winRef.removeEventListener(type, eatStylus, { capture: true })
 				);
 			}
 		}
@@ -993,6 +1093,26 @@ export class InlinePenRouter {
 		return this.activePenId !== null;
 	}
 
+	/**
+	 * The platform's own guess at where this pointer is heading, mapped into
+	 * the same sample space as the real ones.
+	 *
+	 * Mapping lives here because the rect does: the overlay has no business
+	 * knowing how a client coordinate becomes a sample, and a predicted point
+	 * that went through a different conversion than its real neighbours would
+	 * be a tail that starts with a jump. Empty on engines without the API, and
+	 * on a throw - a prediction is a nicety and must never cost a stroke.
+	 */
+	predictedSamples(e: PointerEvent): PenSample[] {
+		const pe = e as PointerEvent & { getPredictedEvents?: () => PointerEvent[] };
+		if (typeof pe.getPredictedEvents !== "function") return [];
+		try {
+			return pe.getPredictedEvents().map((p) => this.sampleFrom(p));
+		} catch {
+			return [];
+		}
+	}
+
 	refreshRect(): void {
 		this.rect = this.rectEl.getBoundingClientRect();
 	}
@@ -1175,6 +1295,9 @@ export class InlinePenRouter {
 		telemetry.bump("inline.penDown");
 		this.armEndBackstop();
 		this.gate.penStrokeStarted();
+		// Whatever fingers were already down get to finish their gesture; see
+		// touchesPredateStroke.
+		this.touchesAtStrokeStart = new Set(this.liveTouchIds);
 		try {
 			this.scrollEl.setPointerCapture(e.pointerId);
 		} catch {
@@ -1500,6 +1623,7 @@ export class InlinePenRouter {
 		this.disarmEndBackstop();
 		this.inkFeed.strokeEnd();
 		this.gate.penStrokeEnded(performance.now());
+		this.touchesAtStrokeStart.clear();
 		// Standing guard: no release. Armed IS the resting state.
 		hideProbeMarkers();
 		// Trailing click/auxclick/contextmenu from this contact land AFTER

@@ -39,7 +39,10 @@ describe("counterSizePercent", () => {
 		// Scaled 2x, the box must claim half the width to paint at 100%.
 		expect(counterSizePercent(2)).toBe(50);
 		expect(counterSizePercent(1)).toBe(100);
-		expect(counterSizePercent(0.5)).toBe(200);
+		// Below 1 no longer exists to ask about: the scale it would counter
+		// is clamped away, because a shrunk editor leaves dead space that
+		// only a reflow could fill. See MIN_PINCH_SCALE.
+		expect(counterSizePercent(0.5)).toBe(100);
 	});
 });
 

@@ -88,3 +88,33 @@ export function palmSizedTouches(touches: ArrayLike<SizedTouch>): boolean {
 	}
 	return true;
 }
+
+interface IdentifiedTouch {
+	identifier?: number;
+}
+
+/**
+ * True when every changed touch was already down before the pen landed.
+ *
+ * `PalmGate`'s rule is about NEW contacts: "while a pen stroke is active, all
+ * NEW touch contacts are ignored". A gesture already underway is different -
+ * someone scrolling with a finger who then rests the pen to write should not
+ * have the scroll die under them, and eating the `touchend` of a touch the
+ * browser is still tracking ends its gesture bookkeeping differently than it
+ * began. So the continuation of a pre-existing touch passes; anything that
+ * arrives after the pen does not.
+ *
+ * Mixed batches pass, consistent with the other two rules here: letting one
+ * extra event through is cheaper than eating a real finger.
+ */
+export function touchesPredateStroke(
+	touches: ArrayLike<IdentifiedTouch>,
+	downBeforeStroke: ReadonlySet<number>
+): boolean {
+	if (touches.length === 0) return false;
+	for (let i = 0; i < touches.length; i++) {
+		const id = touches[i]?.identifier;
+		if (typeof id !== "number" || !downBeforeStroke.has(id)) return false;
+	}
+	return true;
+}

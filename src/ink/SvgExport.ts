@@ -18,39 +18,65 @@
  * Pure string building over pure geometry: no DOM, loads under vitest.
  */
 
-import { flattenStroke } from "./Ribbon";
 import { ribbonSides, jointIndices, RibbonPt } from "./Ribbon";
-import { flattenStrokeShaped, inkShapingEnabled } from "./InkShape";
-import { HIGHLIGHTER_ALPHA, PenStyle } from "./PenStyle";
+import { HIGHLIGHTER_ALPHA } from "./PenStyle";
 import { InkStroke } from "./Stroke";
+import { normalizeInkColor } from "./InkColor";
+import { ribbonOf } from "./StrokeOutline";
 
-/** Density for curve flattening: world px are CSS px, 2 samples per px. */
-const EXPORT_PX_PER_WORLD = 2;
 const MARGIN_WORLD = 12;
 
 const num = (v: number) => (Math.round(v * 100) / 100).toString();
 
+/** A cap or joint disc as PATH DATA: two arcs, so it needs no element. */
+function discData(p: RibbonPt): string {
+	const r = Math.max(0.125, p.hw);
+	return (
+		`M ${num(p.x - r)} ${num(p.y)}` +
+		` a ${num(r)} ${num(r)} 0 1 0 ${num(r * 2)} 0` +
+		` a ${num(r)} ${num(r)} 0 1 0 ${num(-r * 2)} 0 Z`
+	);
+}
+
+/**
+ * One stroke's whole geometry as path data - outline and discs together, no
+ * elements of its own.
+ *
+ * This is what lets many strokes share a single `<path>`. Emitting a group,
+ * a path and a circle per cap and joint costs thousands of DOM nodes on a
+ * heavy note, which is fine in a file and not fine in a live document.
+ */
+export function strokePathData(stroke: InkStroke): string {
+	const ribbon = ribbonOf(stroke);
+	if (ribbon.length === 0) return "";
+	if (ribbon.length === 1) return discData(ribbon[0]!);
+	const { left, right } = ribbonSides(ribbon);
+	let d = `M ${num(left[0]!.x)} ${num(left[0]!.y)}`;
+	for (let i = 1; i < left.length; i++) d += ` L ${num(left[i]!.x)} ${num(left[i]!.y)}`;
+	for (let i = right.length - 1; i >= 0; i--) d += ` L ${num(right[i]!.x)} ${num(right[i]!.y)}`;
+	d += " Z";
+	return (
+		d +
+		discData(ribbon[0]!) +
+		discData(ribbon[ribbon.length - 1]!) +
+		jointIndices(ribbon).map((i) => discData(ribbon[i]!)).join("")
+	);
+}
+
 /** One stroke's ribbon outline plus its cap/joint discs, as SVG elements. */
 export function strokeToSvg(stroke: InkStroke): string {
-	const pts = stroke.points;
-	if (pts.length === 0) return "";
-	const flat = stroke.tool === "highlighter";
-	// drawStroke's exact style derivation, so the widths match the note.
-	const style: PenStyle = {
-		color: stroke.color,
-		baseWidth: stroke.width,
-		minWidthFactor: flat ? 0.9 : 0.35,
-		gamma: flat ? 1 : 0.75,
-	};
-	const ribbon =
-		!flat && stroke.device !== "mouse" && inkShapingEnabled()
-			? flattenStrokeShaped(pts, style, EXPORT_PX_PER_WORLD)
-			: flattenStroke(pts, style, EXPORT_PX_PER_WORLD);
+	// Sanitized, not trusted. A stroke's colour is whatever the sidecar JSON
+	// said, and this string is interpolated into markup - written to a file
+	// that a browser will open, and (since the rendered layer became vector)
+	// inserted into the live DOM. `normalizeInkColor` answers with a hex from
+	// the palette or a hex that matched the pattern, and nothing else.
+	const color = normalizeInkColor(stroke.tool, stroke.color);
+	const ribbon = ribbonOf(stroke);
 	if (ribbon.length === 0) return "";
 	const circle = (p: RibbonPt) =>
 		`<circle cx="${num(p.x)}" cy="${num(p.y)}" r="${num(Math.max(0.125, p.hw))}"/>`;
 	if (ribbon.length === 1) {
-		return `<g fill="${stroke.color}">${circle(ribbon[0]!)}</g>`;
+		return `<g fill="${color}">${circle(ribbon[0]!)}</g>`;
 	}
 	const { left, right } = ribbonSides(ribbon);
 	let d = `M ${num(left[0]!.x)} ${num(left[0]!.y)}`;
@@ -65,7 +91,54 @@ export function strokeToSvg(stroke: InkStroke): string {
 	// fill-rule nonzero unions the outline with its discs; the outline may
 	// self-intersect inside tight turns, and the discs fill those pinches the
 	// same way fillRibbon's do.
-	return `<g fill="${stroke.color}" fill-rule="nonzero"><path d="${d}"/>${discs}</g>`;
+	return `<g fill="${color}" fill-rule="nonzero"><path d="${d}"/>${discs}</g>`;
+}
+
+/**
+ * Every stroke as SVG elements, in layer order: highlighter first and inside
+ * one group carrying the layer opacity (painting each stroke translucent
+ * would double-blend every overlap into a dark seam), then pen above it.
+ *
+ * Coordinates are note space, untranslated, so a viewBox anchored at the
+ * origin puts the ink exactly where the note put it.
+ */
+export function inkSvgBody(strokes: readonly InkStroke[]): string {
+	const hi = mergedRuns(strokes.filter((s) => s.tool === "highlighter"));
+	const pen = mergedRuns(strokes.filter((s) => s.tool !== "highlighter"));
+	return (hi ? `<g opacity="${HIGHLIGHTER_ALPHA}">${hi}</g>` : "") + pen;
+}
+
+/**
+ * Consecutive strokes of one colour, collapsed into a single `<path>`.
+ *
+ * A heavy note is a few hundred strokes, and a group-plus-path-plus-discs per
+ * stroke is thousands of DOM nodes for a document to lay out. Folded this way
+ * a page written in one colour is ONE element, and the cost stops scaling
+ * with how much you wrote.
+ *
+ * CONSECUTIVE, not grouped by colour: strokes paint in the order they were
+ * drawn, and gathering every red in the note into one path would lift the
+ * early reds above a blue that was drawn over them. A run breaks whenever the
+ * colour changes, so z-order is preserved exactly and the worst case - every
+ * stroke a different colour - is simply what we had before.
+ *
+ * `fill-rule: nonzero` unions the sub-paths, so strokes that overlap inside a
+ * run merge instead of cancelling. That is also what the highlighter layer
+ * wants: one flat wash rather than a dark seam at every crossing.
+ */
+function mergedRuns(strokes: readonly InkStroke[]): string {
+	let out = "";
+	let i = 0;
+	while (i < strokes.length) {
+		const color = normalizeInkColor(strokes[i]!.tool, strokes[i]!.color);
+		let d = "";
+		while (i < strokes.length && normalizeInkColor(strokes[i]!.tool, strokes[i]!.color) === color) {
+			d += strokePathData(strokes[i]!);
+			i++;
+		}
+		if (d !== "") out += `<path fill="${color}" fill-rule="nonzero" d="${d}"/>`;
+	}
+	return out;
 }
 
 /**
@@ -90,9 +163,7 @@ export function inkToSvg(strokes: readonly InkStroke[]): string {
 	y0 -= MARGIN_WORLD;
 	x1 += MARGIN_WORLD;
 	y1 += MARGIN_WORLD;
-	const hi = inked.filter((s) => s.tool === "highlighter").map(strokeToSvg).join("");
-	const pen = inked.filter((s) => s.tool !== "highlighter").map(strokeToSvg).join("");
-	const body = (hi ? `<g opacity="${HIGHLIGHTER_ALPHA}">${hi}</g>` : "") + pen;
+	const body = inkSvgBody(inked);
 	const w = num(x1 - x0);
 	const h = num(y1 - y0);
 	return (

@@ -17,7 +17,26 @@
  * Everything here is pure.
  */
 
-export const MIN_PINCH_SCALE = 0.5;
+/**
+ * No zooming out. One, not a half.
+ *
+ * The transform has `transform-origin: 0 0` and the layout box is deliberately
+ * never resized, so a scale below 1 paints the editor into the top-left
+ * FRACTION of its own box and leaves the remainder empty - not just blank but
+ * dead: nothing to click, nothing to draw on. At the old floor of 0.5 that was
+ * three quarters of the pane (alan, hardware).
+ *
+ * There is no fix for that short of counter-sizing the box, which is retired
+ * below and for good reason: a resized box re-wraps the text and slides words
+ * out from under ink anchored to note coordinates. Zooming IN has a coherent
+ * story without it - the note overhangs the pane and the scroller reaches it,
+ * the same as any pdf viewer - and zooming out simply never had one.
+ *
+ * Nothing is really lost. Shrinking a note to see more of it is what the
+ * editor's own font zoom is for, and that reflows honestly instead of
+ * pretending to.
+ */
+export const MIN_PINCH_SCALE = 1;
 export const MAX_PINCH_SCALE = 4;
 
 /** Keep a live or restored scale inside something usable. */

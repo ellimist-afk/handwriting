@@ -4,6 +4,7 @@ import type { Extension } from "@codemirror/state";
 import { isolateHistory, redoDepth, undoDepth } from "@codemirror/commands";
 import { Notice, Platform, editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
+import { CameraState } from "../camera/coordinates";
 import {
 	releaseTipMode,
 	setTipModeListener,
@@ -34,6 +35,19 @@ import {
 const PINCH_SCROLL_QUIET_MS = 120;
 
 /**
+ * Canvas backing-store reallocations since load, across every editor.
+ *
+ * A pinch that reallocates per frame and one that reallocates once look
+ * identical from the outside and feel different only sometimes. This makes
+ * the difference countable: pinch, read the zoom report, pinch again.
+ */
+let canvasReallocs = 0;
+
+export function inkCanvasReallocs(): number {
+	return canvasReallocs;
+}
+
+/**
  * Relative change in the measured scale worth acting on. Below this it is
  * sub-pixel rect noise, and adopting it costs a full repaint per frame.
  */
@@ -50,7 +64,7 @@ import { getPenToolsMode, markPenSeen, penSeenThisSession, penToolsVisible } fro
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
-import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
+import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle, widthForPressure } from "../ink/PenStyle";
 import { clampInkSize } from "../ink/InkSize";
 import { colorsFor, getInkColorHex } from "../ink/InkColor";
 import { Point2 } from "../ink/Smoothing";
@@ -71,7 +85,9 @@ import {
 	removeSelectedInlineStrokes,
 } from "./InlineSelectionDelete";
 import { StrokeFrame } from "./StrokeFrame";
-import { FollowLayer } from "./FollowLayer";
+import { Band, BandViewport, bandFor, bandNeedsMove } from "./ScrollBand";
+import { buildTail, correctionError } from "../ink/Prediction";
+import { predictionEnabled } from "./StrokePrediction";
 import {
 	clearMetadataVisibility,
 	frontmatterPropertyKeys,
@@ -83,7 +99,7 @@ import { focusClaimedPenEditor } from "./InlineFocus";
 import { PEN_HOVER_CLASS, penCursorLayout } from "./PenCursor";
 import { normalizeInlinePenPressure } from "./PenPressure";
 import { observeStrokeMax, strokeGain } from "../ink/PressureGain";
-import { embedInkLayerCount } from "./EmbedInk";
+import { embedInkLayerCount, embedInkPrintSwaps } from "./EmbedInk";
 import { notifyInkChanged } from "./InkEvents";
 import { DamageLedger } from "../ink/DamageLedger";
 import { StrokeIndex } from "../ink/StrokeIndex";
@@ -170,6 +186,10 @@ let inlineTool: InkTool = "pen";
  * A/B was retired in the v0.13.0 cleanup.
  */
 const INLINE_DESYNCHRONIZED = true;
+/** No hover sample for this long means the pen is gone; see armHoverWatchdog. */
+const HOVER_GHOST_MS = 1000;
+/** Real samples kept for extrapolation; the turn guard reads the last three. */
+const PRED_HISTORY = 8;
 
 
 // ---- ink size (v0.13.6) -----------------------------------------------------
@@ -432,8 +452,13 @@ export function copyInlineInkMetrics(): string {
 	const lines = [
 		`Handwriting ink metrics: ${metrics.summaries.length} stroke(s)`,
 		`down/up/backstop/silent: ${downs}/${ups}/${backstops}/${silentLifts}  palms blocked: ${palms}`,
-		`session: up ${((Date.now() - sessionStartMs) / 60000).toFixed(0)} min  overlays ${instances.size}  embed layers ${embedInkLayerCount()}`,
+		`session: up ${((Date.now() - sessionStartMs) / 60000).toFixed(0)} min  overlays ${instances.size}  embed layers ${embedInkLayerCount()}  print swaps ${embedInkPrintSwaps()}`,
 		`ink cache: ${cache.notes} note(s), ${cache.strokes} strokes, ${cache.points} points`,
+		// `desynchronized` is a hint, not a contract - a browser may refuse it
+		// without saying so. Report what was GRANTED, so "the tip is on the
+		// low-latency path" is something this panel can settle rather than
+		// something the code merely asked for.
+		[...instances][0]?.latencyReport() ?? "canvas latency: (no overlay mounted)",
 		"",
 		...metrics.summaries.map((s) => StrokeMetrics.summaryText(s)),
 	];
@@ -603,8 +628,8 @@ class InkOverlayPlugin {
 	private scrollFn: (() => void) | null = null;
 	private wheelFn: ((e: WheelEvent) => void) | null = null;
 	private hostPositionPatched = false;
-	/** True when chromeHost() had to make the editor's container positioned. */
-	private chromeHostPatched = false;
+	/** The element chromeHost() made positioned, so teardown can undo it. */
+	private chromeHostPatched: HTMLElement | null = null;
 
 	// ---- surface extent (reconstructed from the 2026-08-20 hardware build) --
 	/** 1×1 invisible child of the scroller that extends its scroll range. */
@@ -625,6 +650,12 @@ class InkOverlayPlugin {
 	private pinchPending: { next: number } | null = null;
 	/** When the pinch last wrote the scroll itself; see the scroll handler. */
 	private pinchScrollAt = 0;
+	/** Hides a reticle left behind by a pen that never sent pointerleave. */
+	private hoverWatchdog: ReturnType<Window["setTimeout"]> | null = null;
+	/** Recent REAL samples, newest last: what prediction extrapolates from. */
+	private predReal: PenSample[] = [];
+	/** The tail drawn last event, kept only to score it against what arrived. */
+	private predLastTail: readonly PenSample[] = [];
 	/** Gesture-start state the whole pinch is computed from; see anchoredScroll. */
 	private pinchAnchor: {
 		scrollLeft: number;
@@ -637,14 +668,14 @@ class InkOverlayPlugin {
 	 * change nothing does not reallocate every canvas. */
 	private pinchRasterScale = 1;
 	/** Inner canvas layer the scroll-follow translate is applied to. */
-	private layerEl: HTMLElement | null = null;
 	/**
 	 * Scroll-follow state: the baseline the current translate is measured
 	 * from, and whether one is applied. Lives in its own object so the whole
 	 * cycle (scroll, scroll, repaint, scroll) is unit-testable; this file
 	 * cannot be instantiated without a live CodeMirror view.
 	 */
-	private follow = new FollowLayer();
+	/** The ink band's box in scroller-content coordinates; see ScrollBand. */
+	private band: Band | null = null;
 	// Font-zoom tracking (quick font size / touchpad pinch; see ZoomScale).
 	/** Live computed style of the content element; .fontSize is a cheap read. */
 	private contentStyle: CSSStyleDeclaration | null = null;
@@ -758,30 +789,59 @@ class InkOverlayPlugin {
 		// The lost 2026-08-20 build carried this class (reconstruction gap,
 		// found via the census counter reading 0). No stylesheet references
 		// it. Restoring it is render-inert and gives diagnostics a selector.
-		const container = host.createDiv({ cls: "handwriting-ink-overlay" });
+		//
+		// The overlay lives INSIDE the scroller, positioned in content
+		// coordinates, so the compositor scrolls ink and text together and no
+		// main-thread lateness can separate them. See ScrollBand for why the
+		// viewport-anchored version could not be made to keep up.
+		const scroller = this.view.scrollDOM;
+		if (this.winRef.getComputedStyle(scroller).position === "static") {
+			scroller.setCssStyles({ position: "relative" });
+			this.scrollPositionPatched = true;
+		}
+		const container = scroller.createDiv({ cls: "handwriting-ink-overlay" });
 		this.container = container;
+		// Zero until syncBand writes the first box: an absolutely positioned
+		// child extends scrollable overflow, and a full-height band placed
+		// before the clamp is applied would inflate the scrollHeight that the
+		// clamp then reads.
 		container.setCssStyles({
 			position: "absolute",
-			inset: "0",
+			left: "0",
+			top: "0",
+			width: "0",
+			height: "0",
 			overflow: "hidden",
 			pointerEvents: "none",
+			// As a child of `.cm-editor` this sat above the whole editor by
+			// DOM order alone. Inside the scroller it is a sibling of the
+			// content, and CodeMirror gives `.cm-gutters` z-index 200 - so
+			// without this, ink drawn left of the text column would vanish
+			// behind the fold gutter. Ink paints above the Markdown; that
+			// rule is older than where this element happens to live.
+			zIndex: "250",
 		});
 
-		// Transform-follow layer (v0.13.5): the canvases sit in an inner layer
-		// that scroll events TRANSLATE by the delta since the last real
-		// repaint (a compositor-cheap style write), so ink stays glued to
-		// the text through fast flings instead of floating at main-thread
-		// repaint rate and snapping at rest. Every real repaint redraws at
-		// the current camera and zeroes the translate in the same frame.
-		// Camera and pointer mapping keep reading the OUTER container, which
-		// never moves.
+		// The canvases sit in an inner layer that fills the band. Between
+		// v0.13.5 and the ScrollBand change the layer was the thing scroll
+		// events translated, chasing the text from the main thread. It does
+		// not move any anymore - the band it lives in is scrolled by the
+		// compositor along with the text - so `will-change: transform` was
+		// left behind pointing at a transform that no longer exists.
+		//
+		// Dropped, on the theory that folding five canvases into one promoted
+		// layer is what keeps the wet canvas off the low-latency path it was
+		// granted: ink is on the canvas ~1.5ms after the pen moves and ~30ms
+		// before it is on screen, and that whole gap is compositing.
+		//
+		// If it costs scrolling smoothness, put it back - that is the trade
+		// being tested, and the two are measured by different numbers
+		// (age@present in the ink metrics against how the scroll feels).
 		const layer = container.createDiv({ cls: "handwriting-ink-layer" });
-		this.layerEl = layer;
 		layer.setCssStyles({
 			position: "absolute",
 			inset: "0",
 			pointerEvents: "none",
-			willChange: "transform",
 		});
 
 		const canvas = (): HTMLCanvasElement => {
@@ -822,6 +882,16 @@ class InkOverlayPlugin {
 		this.highlightWet = new WetInkRenderer(this.highlightWetCanvas, INLINE_DESYNCHRONIZED);
 		this.highlightWet.smooth = true;
 		this.activeWet = this.wet;
+		// NOT desynchronized, and that is a hardware finding rather than an
+		// oversight. The reasoning for giving the tip layer the low-latency
+		// path is sound - it carries the stub that reaches the nib, while the
+		// wet layer below it is by construction already behind the pen - and
+		// it was tried on 2026-08-28. It produced SECONDS of lag: a second
+		// desynchronized canvas in this stack does not present faster, it
+		// queues, and at pen sample rates the queue never drains.
+		//
+		// The wet layer keeps the flag because it demonstrably works there.
+		// One low-latency surface in the stack is apparently the budget.
 		this.tail = new TailRenderer(this.tailCanvas);
 
 		this.penCursorEl = container.createDiv({ cls: "handwriting-pen-cursor" });
@@ -897,20 +967,28 @@ class InkOverlayPlugin {
 		this.scrollFn = () => {
 			const during = this.router?.isStroking ?? false;
 			if (during) this.scrollsDuringStroke++;
-			// Scroll-follow: move the ink layer with the text NOW, by a
-			// compositor transform, instead of leaving the canvases at their
-			// old screen position until the next main-thread repaint. That
-			// gap is the visible snap. The delta is layout px straight from
-			// the scroller and is deliberately unscaled; see FollowLayer.
-			//
-			// One read of each offset, used by both the translate and the
-			// probe. RC4 kept these reads behind the diagnostics switch
-			// because the probe discarded them; they are load-bearing now,
-			// so the switch only gates the probe call itself.
+			// Nothing here moves the ink any more. The layer is a child of
+			// the scroller in content coordinates, so this scroll has already
+			// moved it, on the compositor, together with the text. All that
+			// is left is to notice when the viewport has eaten far enough
+			// into the band's margin to need a wider one drawn - which
+			// repaint() decides, through syncBand.
 			const scroller = this.view.scrollDOM;
 			const scrollLeft = scroller.scrollLeft;
 			const scrollTop = scroller.scrollTop;
-			this.follow.follow(this.layerEl, scrollLeft, scrollTop, this.frame.locked);
+			// The overlay is inside the scroller now, so its client rect moves
+			// with every scroll - and the router caches that rect to map
+			// pointer coordinates. It used to be safe to cache across scrolls
+			// because the overlay did not move; it is not any more. Stale by a
+			// scroll delta shows up as the hover reticle sitting away from the
+			// pen tip, and as lasso and insert-space landing where the ink was
+			// a moment ago.
+			//
+			// A stroke in flight keeps the rect it froze at pen-down. That is
+			// the same coordinate frame the camera froze with, and refreshing
+			// one without the other is exactly the forward/inverse mismatch
+			// the frozen pipeline exists to prevent.
+			if (!during) this.router?.refreshRect();
 			if (diagnosticsEnabled()) {
 				scrollProbeScroll(scrollLeft, scrollTop, during);
 			}
@@ -1140,10 +1218,10 @@ class InkOverlayPlugin {
 			this.view.scrollDOM.setCssStyles({ position: "" });
 			this.scrollPositionPatched = false;
 		}
+		this.clearHoverWatchdog();
 		this.container?.remove();
 		this.container = null;
-		this.layerEl = null;
-		this.follow.forget();
+		this.band = null;
 		// A pinch frame outliving the overlay would touch a torn-down editor.
 		if (this.pinchRaf !== 0) {
 			this.winRef.cancelAnimationFrame(this.pinchRaf);
@@ -1155,7 +1233,7 @@ class InkOverlayPlugin {
 		// OUTLIVES this overlay: unmounting while zoomed used to leave the
 		// editor painted at scale in a fraction-width box, with the only
 		// code that could undo it now unloaded.
-		const host = this.view.dom as HTMLElement;
+		const host = this.view.dom;
 		host.style.removeProperty("transform");
 		host.style.removeProperty("transform-origin");
 		host.style.removeProperty("width");
@@ -1176,8 +1254,8 @@ class InkOverlayPlugin {
 			this.hostPositionPatched = false;
 		}
 		if (this.chromeHostPatched) {
-			this.view.dom.parentElement?.setCssStyles({ position: "" });
-			this.chromeHostPatched = false;
+			this.chromeHostPatched.setCssStyles({ position: "" });
+			this.chromeHostPatched = null;
 		}
 	}
 
@@ -1345,6 +1423,8 @@ class InkOverlayPlugin {
 				`  css: ${this.cssWidth.toFixed(2)} x ${this.cssHeight.toFixed(2)}`,
 			`camera origin (note space): ${this.camera.x.toFixed(2)}, ${this.camera.y.toFixed(2)}`,
 			`strokes on this note: ${this.filePath() ? inlineInk.strokes(this.filePath()!).length : 0}`,
+			`canvas reallocations since load: ${canvasReallocs}` +
+				"  (5 per resize; a pinch should add ~5 in total, not ~5 per frame)",
 		].join("\n");
 	}
 
@@ -1386,6 +1466,11 @@ class InkOverlayPlugin {
 
 	private handleResize(): void {
 		if (!this.container) return;
+		// The container no longer inherits the editor's box, so its size is
+		// whatever syncBand last wrote. Resize it FIRST or every measurement
+		// below - including the zero-size check that releases the backings in
+		// a background tab - reads the previous viewport's band.
+		this.syncBand();
 		const prevScale = this.scale;
 		const rect = this.container.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) {
@@ -1457,7 +1542,6 @@ class InkOverlayPlugin {
 		this.cssHeight = size.cssH;
 		if (unchanged) {
 			this.router?.refreshRect();
-			this.syncFollowLayer();
 			return;
 		}
 		for (const c of [
@@ -1467,6 +1551,11 @@ class InkOverlayPlugin {
 			this.highlightCanvas,
 			this.highlightWetCanvas,
 		]) {
+			// Counted, because "the canvases are being reallocated every frame"
+			// is a claim that should be a number rather than an argument. Each
+			// assignment here throws away and re-allocates a backing store the
+			// size of the viewport times the backing scale, five times over.
+			canvasReallocs++;
 			c.width = size.backingW;
 			c.height = size.backingH;
 			c.setCssStyles({ width: `${size.cssW}px`, height: `${size.cssH}px` });
@@ -1477,7 +1566,6 @@ class InkOverlayPlugin {
 		this.highlightWet.applyDpr(backing);
 		this.tail.applyDpr(backing);
 		this.router?.refreshRect();
-		this.syncFollowLayer();
 		this.axisChecked = false;
 		// Reallocation blanked the canvases: the ledger and the camera latch
 		// must both know, or the sync repaint below would paint nothing.
@@ -1529,9 +1617,18 @@ class InkOverlayPlugin {
 		if (!parent) return this.view.dom;
 		if (this.winRef.getComputedStyle(parent).position === "static") {
 			parent.setCssStyles({ position: "relative" });
-			this.chromeHostPatched = true;
+			// Remember the ELEMENT, not the fact. Teardown used to re-derive
+			// it from `view.dom.parentElement`, and by then Obsidian may have
+			// already detached the editor - leaving a container we do not own
+			// with a position it did not have, and no record that we set it.
+			this.chromeHostPatched = parent;
 		}
 		return parent;
+	}
+
+	/** What the two latency-critical canvases actually got, not what was asked. */
+	latencyReport(): string {
+		return `canvas latency: wet [${this.wet.describe()}]  ${this.tail.describeLatency()}`;
 	}
 
 	private backingNow(layoutW?: number, layoutH?: number): number {
@@ -1581,17 +1678,11 @@ class InkOverlayPlugin {
 		this.lastSyncRectTop = overlay.top;
 		this.lastSyncContentLeft = contentLeft;
 		this.lastSyncDocumentTop = documentTop;
-		// The scroll position this camera was computed FOR, read in the same
-		// synchronous block as the rects above. The follow layer's baseline has
-		// to be THIS, not a fresh read taken after the ink is drawn: during a
-		// fast scroll the scroller keeps moving on the compositor while the
-		// repaint runs, and a later read makes the baseline disagree with the
-		// pixels by however far it travelled. See syncFollowLayer.
+		// Stashed for the scroll probe, in the same synchronous block as the
+		// rects above so a diagnostic can never blame a mismatch on having
+		// read the two at different moments.
 		this.lastSyncScrollLeft = this.view.scrollDOM.scrollLeft;
 		this.lastSyncScrollTop = this.view.scrollDOM.scrollTop;
-		// The follow layer's baseline comes from here, not from a read taken
-		// after the ink is drawn; see FollowLayer.markPainted.
-		this.follow.markPainted(this.lastSyncScrollLeft, this.lastSyncScrollTop);
 		// Both reads are visual px; the difference becomes note space by
 		// dividing out the scale. At scale 1 this is arithmetically identical
 		// to what shipped, so persisted coordinates keep their meaning.
@@ -1625,10 +1716,16 @@ class InkOverlayPlugin {
 		// The only layout reads on the whole stroke happen here, once. From
 		// here the frame is frozen until pen-up.
 		this.frame.end();
+		// The band is deliberately NOT moved here. The sample this was handed
+		// was already mapped by the router against the box as it stands, and
+		// moving it now would leave that ONE point in a different coordinate
+		// frame from every sample that follows - which draws as a straight
+		// line from nowhere into the stroke (alan, hardware: writing near the
+		// bottom of a page, where the end-of-document clamp makes the move a
+		// large one). Nothing is lost by leaving it: the band is guaranteed to
+		// cover the viewport at every scroll position that has been checked,
+		// and pen-down does not move the viewport.
 		this.syncCamera();
-		// Before anything freezes: if a scroll translate is still applied,
-		// settle it against the camera we just synced.
-		this.reconcileFollowLayer();
 		this.router?.refreshRect();
 		this.frame.begin();
 		if (isPenProbeEnabled()) this.captureProbeGeometry();
@@ -1728,6 +1825,11 @@ class InkOverlayPlugin {
 		this.rawLastMoveT = sample.timestamp;
 		this.rawLastMoveX = sample.x;
 		this.rawLastMoveY = sample.y;
+		// Prediction never carries across strokes: extrapolating a new stroke
+		// from the tail of the last one would guess a direction from a pen
+		// that has been lifted and put down somewhere else.
+		this.predReal = [];
+		this.predLastTail = [];
 		this.builder = new StrokeBuilder(
 			tool,
 			this.activeStyle.color,
@@ -1818,6 +1920,16 @@ class InkOverlayPlugin {
 		this.tail.clear();
 		const head = this.activeWet.head();
 		if (head) this.tail.drawHead(cam, this.activeStyle, head.from, head.to, head.pressure);
+		// The predicted tail goes on the same canvas, after the head, so the
+		// one `clear()` above erases both: its dirty rect covers whatever was
+		// drawn last event, whether that was real or a guess.
+		if (predictionEnabled()) {
+			this.predReal.push(...samples);
+			if (this.predReal.length > PRED_HISTORY) {
+				this.predReal.splice(0, this.predReal.length - PRED_HISTORY);
+			}
+			this.drawPredictedTail(ev, cam);
+		}
 		// Probe AFTER the head is drawn: `head()` is then exactly the geometry
 		// on screen, so the recorded endpoint is the rendered endpoint.
 		if (isPenProbeEnabled()) {
@@ -1832,6 +1944,50 @@ class InkOverlayPlugin {
 			);
 		}
 		this.schedulePresentProbe(newestTs);
+	}
+
+	/**
+	 * Draw a short disposable tail ahead of the newest real sample.
+	 *
+	 * Never added to the stroke: `builder.add` has already seen every real
+	 * sample by the time this runs, and these points touch nothing but the
+	 * transient canvas. A stroke saved mid-prediction is exactly the stroke
+	 * that would have been saved without it.
+	 *
+	 * The scoring happens FIRST, against the tail drawn last event: the sample
+	 * that just arrived is the ground truth for the guess made before it, and
+	 * once `predLastTail` is overwritten that comparison is gone. It is what
+	 * turns "does prediction overshoot on my handwriting" into a number in the
+	 * ink metrics rather than an argument.
+	 */
+	private drawPredictedTail(ev: PointerEvent, cam: CameraState): void {
+		const real = this.predReal;
+		const newest = real[real.length - 1];
+		if (!newest) return;
+		if (this.predLastTail.length > 0) {
+			const err = correctionError(this.predLastTail, newest);
+			if (err !== undefined) metrics.recordCorrection(err);
+		}
+		const predicted = this.router?.predictedSamples(ev) ?? [];
+		const mode = predicted.length > 0 ? "chromium" : "extrap";
+		const result = buildTail(real, predicted, mode);
+		metrics.setPrediction("on", result.source);
+		this.predLastTail = result.points;
+		if (result.suppressed || result.points.length === 0) {
+			metrics.recordTailSuppressed();
+			return;
+		}
+		metrics.recordTail(result.points.length, result.horizonMs, result.tipDistPx);
+		// Sample space IS canvas css px: a sample is the client offset from the
+		// container divided by the css scale, and drawHead's own screen
+		// arithmetic - (world - cam) * zoom - lands on the same number.
+		this.tail.draw(
+			newest.x,
+			newest.y,
+			result.points,
+			this.activeStyle.color,
+			widthForPressure(this.activeStyle, newest.pressure) * cam.zoom
+		);
 	}
 
 	private schedulePresentProbe(newestTs: number): void {
@@ -2432,7 +2588,7 @@ class InkOverlayPlugin {
 	private applyPinchScale(next: number, settle: boolean): void {
 		const anchor = this.pinchAnchor;
 		if (!anchor) return;
-		const host = this.view.dom as HTMLElement;
+		const host = this.view.dom;
 		const scroller = this.view.scrollDOM;
 		// Both scales come from the GESTURE, not from the previous frame: the
 		// reference the gesture started at, and where it is being asked to go.
@@ -2483,6 +2639,8 @@ class InkOverlayPlugin {
 		// Reticle off: the native cursor stays, so no hover class either.
 		if (!penReticleOn) return;
 		if (!this.penCursorEl) return;
+		// Every branch below returns, so the watchdog is armed here, once.
+		this.armHoverWatchdog();
 		this.view.scrollDOM.classList.add(PEN_HOVER_CLASS);
 		// In eraser mode the nib width is a lie: what the tip is about to do
 		// is bounded by the eraser radius, so the reticle shows THAT. Radius
@@ -2578,8 +2736,39 @@ class InkOverlayPlugin {
 	}
 
 	private hidePenCursor(): void {
+		this.clearHoverWatchdog();
 		this.view.scrollDOM.classList.remove(PEN_HOVER_CLASS);
 		if (this.penCursorEl) this.penCursorEl.setCssStyles({ display: "none" });
+	}
+
+	/**
+	 * The reticle is shown from hover samples and hidden from `pointerleave`.
+	 * A pen that leaves HOVER RANGE without leaving the element may never send
+	 * one - digitizers differ - and the reticle is then simply left on screen.
+	 *
+	 * It became visible when the overlay moved inside the scroller: a stale
+	 * reticle used to sit at a fixed screen position, and now it is glued to
+	 * the document and scrolls along with the text, which reads as a mark ON
+	 * the page (alan, hardware). The staleness was always there; the band just
+	 * stopped hiding it.
+	 *
+	 * So the reticle stops depending on an event that may never arrive. A
+	 * second is far longer than the gap between samples from a hand-held pen -
+	 * a hand is never still - so this only ever fires once the pen is really
+	 * gone, and the next hover sample brings it straight back.
+	 */
+	private armHoverWatchdog(): void {
+		this.clearHoverWatchdog();
+		this.hoverWatchdog = this.winRef.setTimeout(() => {
+			this.hoverWatchdog = null;
+			this.hidePenCursor();
+		}, HOVER_GHOST_MS);
+	}
+
+	private clearHoverWatchdog(): void {
+		if (this.hoverWatchdog === null) return;
+		this.winRef.clearTimeout(this.hoverWatchdog);
+		this.hoverWatchdog = null;
 	}
 
 	private eraseAt(sample: PenSample): void {
@@ -3155,6 +3344,16 @@ class InkOverlayPlugin {
 			this.handleResize();
 			return;
 		}
+		// Position, then measure, then draw - all inside this one frame. That
+		// ordering is what makes the ink's position independent of timing: a
+		// late repaint costs coverage at a band edge, never a displacement.
+		// A resize reallocates the backings and repaints synchronously, so
+		// this frame's work is done there; carrying on would paint twice at
+		// the same camera. Same shape as the dpr check above.
+		if (this.syncBand() === "resized") {
+			this.handleResize();
+			return;
+		}
 		this.syncCamera();
 		const path = this.filePath();
 		const strokes = path ? inlineInk.strokes(path) : [];
@@ -3218,71 +3417,68 @@ class InkOverlayPlugin {
 				driftY,
 			});
 		}
-		this.syncFollowLayer();
 		this.updateExtent();
 	}
 
 	/**
-	 * Repaint just redrew committed ink at the CURRENT camera: make that the
-	 * follow baseline and zero any scroll-follow translate in the same frame,
-	 * so the style reset and the redrawn pixels land together. Skipped while
-	 * a stroke owns the frame (its camera is frozen; scrollFn does not
-	 * translate then either).
+	 * Put the ink band where this viewport needs it, and say whether it moved.
+	 *
+	 * The band is the box the canvases cover, in the scroller's own content
+	 * coordinates. It is deliberately LAZY: the whole point of living inside
+	 * the scroller is that ordinary scrolling needs no work at all, so this
+	 * writes nothing until the viewport has eaten into the margin. Moving it
+	 * is what costs a full re-rasterization, and doing that per scroll event
+	 * is what the viewport-anchored layer used to do.
+	 *
+	 * Skipped while a stroke owns the frame. The pen froze its camera at
+	 * pen-down and every sample maps through that frozen frame; moving the
+	 * box under it would shear the stroke being drawn. Nothing is lost by
+	 * waiting - the band scrolls with the text on its own.
 	 */
-	private syncFollowLayer(): void {
-		// Two steps, and the order is the whole fix. The baseline becomes the
-		// position the ink was actually DRAWN for; then any distance the
-		// scroller covered while this repaint ran is carried immediately as a
-		// translate, instead of being silently folded into the baseline.
-		//
-		// Folding it in was the rubber band: the layer's baseline claimed a
-		// position its pixels did not have, so every following scroll was
-		// short by the distance travelled during the repaint - nothing at a
-		// slow scroll, tens of px at a fling, springing back the moment the
-		// scrolling stopped and the two agreed again.
-		this.follow.rebase(this.layerEl, this.frame.locked);
+	private syncBand(): "none" | "moved" | "resized" {
+		if (!this.container || this.frame.locked) return "none";
 		const scroller = this.view.scrollDOM;
-		this.follow.follow(this.layerEl, scroller.scrollLeft, scroller.scrollTop, this.frame.locked);
+		const viewport: BandViewport = {
+			scrollLeft: scroller.scrollLeft,
+			scrollTop: scroller.scrollTop,
+			clientWidth: scroller.clientWidth,
+			clientHeight: scroller.clientHeight,
+			scrollWidth: scroller.scrollWidth,
+			scrollHeight: scroller.scrollHeight,
+		};
+		if (!bandNeedsMove(this.band, viewport)) return "none";
+		const band = bandFor(viewport);
+		// A SIZE change has to reach handleResize, and the ResizeObserver will
+		// not carry it: that observer watches the editor, so it fires when the
+		// viewport changes and never when we resize our own container.
+		//
+		// Vertically that gap is invisible, because the band's height only
+		// changes when the viewport's does - which the observer sees. The
+		// width is the one that bites: it changes when the surface becomes
+		// horizontally scrollable, which INK causes, not a resize. The
+		// container widened to hold the margin while the canvases stayed at
+		// their old width, so every stroke past the old right edge was drawn
+		// outside the canvas and simply never appeared (alan, hardware:
+		// "drawing breaks on the right extended canvas ... no ink comes out").
+		const resized = this.band === null || this.band.width !== band.width || this.band.height !== band.height;
+		this.band = band;
+		this.container.setCssStyles({
+			left: `${band.left}px`,
+			top: `${band.top}px`,
+			width: `${band.width}px`,
+			height: `${band.height}px`,
+		});
+		// The box just moved under the router's cached rect. The scroll
+		// handler refreshes it for the scrolling itself, but that runs BEFORE
+		// this frame repositions the band, so without this the rect stays
+		// stale by exactly the reposition - the hover reticle drifting off the
+		// pen tip after every band move. Safe unconditionally: this method
+		// returns early while a stroke owns the frame, so a refresh here can
+		// never disturb a frozen one.
+		this.router?.refreshRect();
+		return resized ? "resized" : "moved";
 	}
 
-	/**
-	 * Pen-down inside a follow interval: the layer is still carrying a
-	 * scroll translate, and syncCamera has just moved the camera to the live
-	 * geometry. Drawing the new stroke now would put fresh ink at the NEW
-	 * camera inside a layer still shifted by the OLD delta, which is the
-	 * same forward/inverse mismatch the snap comes from, wearing a different
-	 * hat. So redraw the committed layers at the current camera and zero the
-	 * translate, synchronously, before the frame freezes.
-	 *
-	 * Only reachable on pen-down after a shifted scroll frame. The repaint
-	 * that scroll already queued still runs and is harmless: it repaints at
-	 * the same camera against a zeroed transform. No polling, no extra
-	 * layout reads on any other path.
-	 */
-	private reconcileFollowLayer(): void {
-		if (!this.follow.shifted || !this.container) return;
-		const path = this.filePath();
-		const strokes = path ? inlineInk.strokes(path) : [];
-		drawCommitted(
-			this.highlightCtx,
-			this.camera.snapshot,
-			strokes,
-			this.cssWidth,
-			this.cssHeight,
-			true,
-			"highlighter"
-		);
-		drawCommitted(
-			this.committedCtx,
-			this.camera.snapshot,
-			strokes,
-			this.cssWidth,
-			this.cssHeight,
-			true,
-			"pen"
-		);
-		this.syncFollowLayer();
-	}
 
 	// ---- surface extent -----------------------------------------------------
 	//

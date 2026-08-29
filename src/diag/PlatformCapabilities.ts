@@ -21,7 +21,7 @@
  * actually arrived. What the header needs to report is whether samples reached
  * the handler, which is what that count says.
  *
- * Split the way GuardStyle and FollowLayer are, and for the same reason: no
+ * Split the way GuardStyle and ScrollBand are, and for the same reason: no
  * `obsidian` import anywhere in this file, so the whole thing loads under
  * vitest. `Platform` and `apiVersion` arrive as arguments from the view, which
  * already imports them. `readCapabilities` is the only function here that

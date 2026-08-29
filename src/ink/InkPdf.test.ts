@@ -1,0 +1,182 @@
+/**
+ * The PDF writer, judged by the two things that make a file open or not: a
+ * cross-reference table whose byte offsets actually land on their objects, and
+ * a content stream whose numbers are legal PDF literals.
+ *
+ * Geometry is not re-tested here. It comes from StrokeOutline, which the SVG
+ * export shares, and is already covered by the ribbon suites.
+ */
+
+import { describe, expect, it } from "vitest";
+import { InkStroke, computeBBox } from "./Stroke";
+import {
+	PX_TO_PT,
+	discOps,
+	inkPageBox,
+	inkPdfContent,
+	inkToPdf,
+	pdfColor,
+	pdfDocument,
+	strokePdfOps,
+} from "./InkPdf";
+
+function stroke(
+	tool: "pen" | "highlighter",
+	xs: number[],
+	y: number,
+	color?: string
+): InkStroke {
+	const points = xs.map((x, i) => ({ x, y: y + i, pressure: 0.5, t: i * 8 }));
+	return {
+		id: `s-${tool}-${y}-${color ?? "d"}`,
+		tool,
+		color: color ?? (tool === "pen" ? "#4b7bec" : "#ffd60a"),
+		width: 4,
+		points,
+		bbox: computeBBox(points, 4),
+		createdAt: 0,
+	};
+}
+
+describe("the cross-reference table", () => {
+	// The offsets are the whole reason this file is assembled rather than
+	// templated. Re-deriving them from the finished bytes is a check that can
+	// FAIL: it reads the table, jumps to each offset, and asks whether the
+	// object it claims is really there. A builder that miscounts by one byte
+	// produces a file some readers open and others reject, which is the worst
+	// possible failure to discover from a user.
+	function xrefOffsets(pdf: string): number[] {
+		const at = pdf.indexOf("xref\n");
+		// "xref", the subsection header, then the mandatory free entry for
+		// object 0, which is not an offset and is not in the list below.
+		const lines = pdf.slice(at).split("\n").slice(3);
+		const out: number[] = [];
+		for (const line of lines) {
+			const m = /^(\d{10}) 00000 n $/.exec(line);
+			if (!m) break;
+			out.push(Number.parseInt(m[1]!, 10));
+		}
+		return out;
+	}
+
+	it("every offset lands exactly on the object it names", () => {
+		const pdf = inkToPdf([stroke("pen", [10, 20, 30], 40)]);
+		const offsets = xrefOffsets(pdf);
+		expect(offsets.length).toBe(5);
+		offsets.forEach((off, i) => {
+			expect(pdf.slice(off, off + `${i + 1} 0 obj`.length)).toBe(`${i + 1} 0 obj`);
+		});
+	});
+
+	it("startxref lands on the table itself", () => {
+		const pdf = inkToPdf([stroke("pen", [10, 20], 40)]);
+		const m = /startxref\n(\d+)\n%%EOF/.exec(pdf);
+		expect(m).not.toBeNull();
+		expect(pdf.slice(Number.parseInt(m![1]!, 10), Number.parseInt(m![1]!, 10) + 4)).toBe("xref");
+	});
+
+	it("declares a stream length matching the bytes it wrote", () => {
+		// A short /Length truncates the drawing; a long one runs past the
+		// stream and the page renders blank. Neither says anything on open.
+		const pdf = inkToPdf([stroke("pen", [10, 20, 30], 40)]);
+		const declared = Number.parseInt(/\/Length (\d+)/.exec(pdf)![1]!, 10);
+		const body = pdf.slice(pdf.indexOf("stream\n") + 7, pdf.indexOf("\nendstream"));
+		expect(body.length).toBe(declared);
+	});
+
+	it("opens and closes like a pdf", () => {
+		const pdf = inkToPdf([stroke("pen", [10, 20], 40)]);
+		expect(pdf.startsWith("%PDF-1.7\n")).toBe(true);
+		expect(pdf.endsWith("%%EOF\n")).toBe(true);
+	});
+});
+
+describe("numbers", () => {
+	it("never writes exponent notation", () => {
+		// `1e-7` is a syntax error in a content stream, not a small number,
+		// and the whole page silently fails to draw.
+		const ops = discOps({ x: 0.0000001, y: 1e21, r: 0.0000004 });
+		expect(ops).not.toMatch(/e[+-]?\d/i);
+		const content = inkPdfContent([stroke("pen", [0.000001, 0.000002], 0)], 100);
+		expect(content).not.toMatch(/e[+-]?\d/i);
+	});
+
+	it("writes colours as three components in 0..1", () => {
+		expect(pdfColor("pen", "#000000")).toBe("0 0 0");
+		expect(pdfColor("pen", "#ffffff")).toBe("1 1 1");
+	});
+
+	it("refuses a colour the sidecar could have invented", () => {
+		// Same guard the svg export uses: nothing user-authored reaches the
+		// document, so there is no string to escape and nothing to inject.
+		expect(pdfColor("pen", '#f00" /X (')).toBe(pdfColor("pen", undefined));
+	});
+});
+
+describe("the content stream", () => {
+	it("flips the origin once, at the top", () => {
+		// PDF counts y upward from the bottom; ink counts it downward from the
+		// top. One transform, or every stroke is upside down.
+		const content = inkPdfContent([stroke("pen", [10, 20], 40)], 500);
+		expect(content.startsWith("q 1 0 0 -1 0 500 cm ")).toBe(true);
+		expect(content.endsWith("Q")).toBe(true);
+	});
+
+	it("merges consecutive strokes of one colour into a single fill", () => {
+		const content = inkPdfContent(
+			[stroke("pen", [10, 20], 40, "#111111"), stroke("pen", [30, 40], 60, "#111111")],
+			500
+		);
+		expect(content.match(/ f /g)?.length ?? 0).toBe(1);
+	});
+
+	it("breaks the run when the colour changes, preserving paint order", () => {
+		// Grouping every red together would lift early reds above a blue that
+		// was drawn over them.
+		const content = inkPdfContent(
+			[
+				stroke("pen", [10, 20], 40, "#111111"),
+				stroke("pen", [30, 40], 60, "#222222"),
+				stroke("pen", [50, 60], 80, "#111111"),
+			],
+			500
+		);
+		expect(content.match(/ f /g)?.length ?? 0).toBe(3);
+	});
+
+	it("puts highlighter under the pen, inside the alpha state", () => {
+		const content = inkPdfContent(
+			[stroke("pen", [10, 20], 40), stroke("highlighter", [10, 20], 40)],
+			500
+		);
+		const alpha = content.indexOf("/GSa gs");
+		expect(alpha).toBeGreaterThan(-1);
+		// The highlighter group closes before any pen fill is emitted.
+		expect(content.indexOf("Q ", alpha)).toBeLessThan(content.lastIndexOf(" rg"));
+	});
+
+	it("says nothing about a stroke with no points", () => {
+		expect(strokePdfOps(stroke("pen", [], 0))).toBe("");
+		expect(inkToPdf([stroke("pen", [], 0)])).toBe("");
+		expect(inkToPdf([])).toBe("");
+	});
+});
+
+describe("the page", () => {
+	it("is measured in points, from a box measured in pixels", () => {
+		const pdf = pdfDocument(800, 1000, "");
+		expect(pdf).toContain(`/MediaBox [0 0 ${800 * PX_TO_PT} ${1000 * PX_TO_PT}]`);
+	});
+
+	it("is sized to the ink, with room around it", () => {
+		const box = inkPageBox([stroke("pen", [100, 200], 300)]);
+		expect(box.w).toBeGreaterThan(200);
+		expect(box.h).toBeGreaterThan(300);
+	});
+
+	it("ignores strokes that hold nothing when sizing", () => {
+		const withEmpty = inkPageBox([stroke("pen", [100], 100), stroke("pen", [], 9999)]);
+		const without = inkPageBox([stroke("pen", [100], 100)]);
+		expect(withEmpty).toEqual(without);
+	});
+});

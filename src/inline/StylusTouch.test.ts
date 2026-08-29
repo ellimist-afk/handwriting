@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { PALM_RADIUS_PX, palmSizedTouches, stylusOnlyTouches } from "./StylusTouch";
+import { PALM_RADIUS_PX, palmSizedTouches, stylusOnlyTouches, touchesPredateStroke } from "./StylusTouch";
 
 describe("stylusOnlyTouches", () => {
 	it("matches a lone stylus touch", () => {
@@ -66,5 +66,33 @@ describe("palmSizedTouches (palm lands before the pen, iPad)", () => {
 
 	it("an empty batch is not a palm", () => {
 		expect(palmSizedTouches([])).toBe(false);
+	});
+});
+
+describe("touchesPredateStroke (a scroll already running when the pen lands)", () => {
+	const before = new Set([1, 2]);
+
+	it("lets a touch that was already down finish its gesture", () => {
+		// Killing a scroll mid-fling because someone rested the pen to write
+		// is its own bug, and eating its touchend leaves the browser tracking
+		// a touch that never ended.
+		expect(touchesPredateStroke([{ identifier: 1 }], before)).toBe(true);
+	});
+
+	it("eats a touch that arrived after the stroke began", () => {
+		expect(touchesPredateStroke([{ identifier: 9 }], before)).toBe(false);
+	});
+
+	it("eats a mixed batch rather than letting the new one through", () => {
+		expect(touchesPredateStroke([{ identifier: 1 }, { identifier: 9 }], before)).toBe(false);
+	});
+
+	it("eats everything when nothing was down first", () => {
+		expect(touchesPredateStroke([{ identifier: 1 }], new Set())).toBe(false);
+	});
+
+	it("is false for an empty batch and for unidentified touches", () => {
+		expect(touchesPredateStroke([], before)).toBe(false);
+		expect(touchesPredateStroke([{}], before)).toBe(false);
 	});
 });

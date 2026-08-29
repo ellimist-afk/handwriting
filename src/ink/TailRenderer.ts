@@ -21,11 +21,50 @@ import { fillRibbon } from "./RibbonRenderer";
 export class TailRenderer {
 	private ctx: CanvasRenderingContext2D;
 	private dirty: { x0: number; y0: number; x1: number; y1: number } | null = null;
+	private readonly requested: boolean;
 
-	constructor(canvas: HTMLCanvasElement) {
-		const ctx = canvas.getContext("2d");
+	/**
+	 * `desynchronized` asks the browser to present this canvas without waiting
+	 * for the normal compositing sync - the low-latency path.
+	 *
+	 * It belongs here more than anywhere else in the plugin. This canvas holds
+	 * the stub that reaches the nib; the wet canvas below it holds geometry
+	 * that is already, by construction, behind the pen. The inline overlay
+	 * asked for it on the wet layer from the start and never asked for it
+	 * here, which had the tip presenting on the slower path than the ink
+	 * trailing it.
+	 *
+	 * It is only a HINT. Browsers refuse it silently, so `actualDesynchronized`
+	 * reports what was really granted rather than what was asked for - the same
+	 * shape WetInkRenderer uses, and the reason a latency claim about this can
+	 * be checked instead of assumed.
+	 */
+	constructor(canvas: HTMLCanvasElement, desynchronized = false) {
+		this.requested = desynchronized;
+		// Exactly the call this made before the flag existed when nothing is
+		// asked for. Passing `{ desynchronized: false }` ought to be identical
+		// to passing nothing, and after what asking for `true` did on hardware
+		// here, "ought to be" is not a good enough reason to change the call
+		// the working path makes.
+		const ctx = desynchronized
+			? canvas.getContext("2d", { desynchronized: true })
+			: canvas.getContext("2d");
 		if (!ctx) throw new Error("Handwriting: could not acquire tail 2d context");
 		this.ctx = ctx;
+	}
+
+	/** What the browser actually granted; undefined where unreportable. */
+	get actualDesynchronized(): boolean | undefined {
+		return (
+			this.ctx as CanvasRenderingContext2D & {
+				getContextAttributes?: () => { desynchronized?: boolean };
+			}
+		).getContextAttributes?.().desynchronized;
+	}
+
+	/** Compact one-line report, for the metrics panel. */
+	describeLatency(): string {
+		return `tail: req ${this.requested} | granted ${String(this.actualDesynchronized ?? "n/a")}`;
 	}
 
 	applyDpr(dpr: number): void {

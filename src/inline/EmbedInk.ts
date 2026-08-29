@@ -32,15 +32,43 @@
 import { CameraState } from "../camera/coordinates";
 import { drawStroke } from "../ink/StrokeRenderer";
 import { InkStroke } from "../ink/Stroke";
+import { inkSvgBody } from "../ink/SvgExport";
 
 /**
- * Rendered ink never exceeds this extent, whatever the page holds. 2048 on
- * a side caps one layer at 16MB of RGBA; hover previews and multi-embed
- * notes each pay for their own canvas, so this is a battery bound as much
- * as a memory one.
+ * Total device pixels one rendered layer may hold.
+ *
+ * This replaced a 2048px cap on each SIDE, which was the wrong shape for the
+ * thing it was protecting against. A per-side cap does not bound cost - two
+ * capped sides still buy 4.2M pixels - and it CLIPS: a note with ink below
+ * 2048px lost it, in reading view and in anything printed from it. Ink
+ * silently missing from a page is a worse failure than a heavy canvas.
+ *
+ * An area budget bounds the real cost (this is 16MB of RGBA) while letting a
+ * tall narrow page be tall. When ink genuinely exceeds it, the layer degrades
+ * in RESOLUTION rather than dropping strokes - every stroke still renders,
+ * slightly softer. Hover previews and multi-embed notes each pay for their
+ * own canvas, so this is a battery bound as much as a memory one.
  */
-const MAX_EXTENT_PX = 2048;
+const MAX_LAYER_PX = 4_000_000;
 const MARKER_ATTR = "data-handwriting-embed-ink";
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** Windows whose print swap is already wired; popouts each get their own. */
+const printArmed = new WeakSet<Window>();
+/**
+ * How many times a print actually asked for the vector layer.
+ *
+ * `beforeprint` is not guaranteed: an export that renders through its own
+ * pipeline rather than the browser's print flow may never fire it, and the
+ * symptom of that is indistinguishable by eye from a swap that fired and
+ * didn't help. A count settles it in one export instead of another round of
+ * inference from how the ink looks.
+ */
+let printSwaps = 0;
+
+export function embedInkPrintSwaps(): number {
+	return printSwaps;
+}
 
 const CAM: CameraState = { x: 0, y: 0, zoom: 1 };
 
@@ -50,15 +78,25 @@ const layers = new Map<HTMLElement, string>();
 const revisions = new Map<string, number>();
 let strokesFor: ((path: string) => readonly InkStroke[]) | null = null;
 
-/** The rendered document's root for a section element, if recognizable. */
+/**
+ * The rendered document's root for a section element, if recognizable.
+ *
+ * Tried in order of how well each one pins the note's coordinate origin. The
+ * last two are a fallback for render contexts that have no sizer at all -
+ * an export or a print renders the markdown into a container of its own, and
+ * "no sizer" there meant no root, which meant no ink on the page. A sizer,
+ * where one exists, still wins: `closest` reaches it first walking up.
+ */
 export function embedInkRoot(sectionEl: HTMLElement): HTMLElement | null {
 	return (
 		(sectionEl.closest(".markdown-embed-content") as HTMLElement | null) ??
-		(sectionEl.closest(".markdown-preview-sizer") as HTMLElement | null)
+		(sectionEl.closest(".markdown-preview-sizer") as HTMLElement | null) ??
+		(sectionEl.closest(".markdown-preview-view") as HTMLElement | null) ??
+		(sectionEl.closest(".markdown-rendered") as HTMLElement | null)
 	);
 }
 
-/** Pure: the canvas extent that covers every stroke, capped. */
+/** Pure: the css extent that covers every stroke. Never clipped. */
 export function embedInkExtent(strokes: readonly InkStroke[]): { w: number; h: number } {
 	let maxX = 0;
 	let maxY = 0;
@@ -66,15 +104,48 @@ export function embedInkExtent(strokes: readonly InkStroke[]): { w: number; h: n
 		maxX = Math.max(maxX, s.bbox.x + s.bbox.width);
 		maxY = Math.max(maxY, s.bbox.y + s.bbox.height);
 	}
-	return {
-		w: Math.min(Math.ceil(maxX), MAX_EXTENT_PX),
-		h: Math.min(Math.ceil(maxY), MAX_EXTENT_PX),
-	};
+	return { w: Math.ceil(maxX), h: Math.ceil(maxY) };
+}
+
+/**
+ * Pure: device pixels per css pixel for a layer of this size.
+ *
+ * The display's own ratio, unless that would exceed the budget, in which case
+ * as much resolution as the budget affords. Rendered ink used to be drawn at
+ * exactly 1x - one device pixel per css pixel - which is soft on every modern
+ * screen and softer still in an exported PDF, where it sits beside text that
+ * was rasterized at the printer's resolution.
+ */
+export function embedInkScale(w: number, h: number, dpr: number): number {
+	if (w <= 0 || h <= 0) return 1;
+	const want = Math.max(1, dpr);
+	const area = w * h * want * want;
+	if (area <= MAX_LAYER_PX) return want;
+	return Math.max(0.25, Math.sqrt(MAX_LAYER_PX / (w * h)));
 }
 
 /** Pure: what the marker attribute holds for a (path, revision) pair. */
 export function embedInkMarker(path: string, rev: number): string {
 	return `${path}@${rev}`;
+}
+
+/**
+ * Pure: does this root need painting?
+ *
+ * The marker alone is not proof the picture is still there. Reading view
+ * re-renders its sections as you scroll while KEEPING the sizer element, so
+ * Obsidian can drop our canvas and leave the attribute behind - and a
+ * marker-only check then decides everything is up to date and paints nothing.
+ * That is why a note's own reading view came up blank while an embed of the
+ * same note was fine: an embed is rebuilt whole, marker and all (reported
+ * twice, iPad and Onyx Boox, 2026-08-27).
+ */
+export function embedInkNeedsPaint(
+	currentMarker: string | null,
+	wantedMarker: string,
+	hasCanvas: boolean
+): boolean {
+	return currentMarker !== wantedMarker || !hasCanvas;
 }
 
 /** Diagnostics: how many rendered roots the registry currently holds. */
@@ -126,36 +197,110 @@ export function attachEmbedInk(
 ): void {
 	sweepDisconnected();
 	layers.set(root, path);
+	armPrintSwap(root.ownerDocument.defaultView ?? window);
 	paint(root, path, strokes);
+}
+
+/**
+ * Canvas on screen, vector on paper.
+ *
+ * The two representations are good at opposite things and the choice is not a
+ * compromise, it is a switch. A canvas costs what the PAGE costs - ten strokes
+ * and ten thousand render identically - so no amount of drawing can slow a
+ * note down, which is the only acceptable behaviour for a surface people are
+ * meant to draw freely on. But a canvas is a fixed grid of pixels, and a
+ * printer wants a resolution nobody knew at render time, so ink came out of a
+ * PDF visibly soft beside the text.
+ *
+ * Vector has exactly the inverse profile: nothing to choose a resolution for,
+ * and a cost that grows with how much was drawn. So it exists only while a
+ * print is actually happening - built on `beforeprint`, dropped on
+ * `afterprint`, never present during ordinary use.
+ *
+ * If a print path never fires these events, nothing swaps and the canvas is
+ * printed, which is exactly the behaviour before any of this. The failure mode
+ * is the old output, not a broken one.
+ */
+function armPrintSwap(win: Window): void {
+	if (printArmed.has(win)) return;
+	printArmed.add(win);
+	win.addEventListener("beforeprint", () => usePrintVector(true));
+	win.addEventListener("afterprint", () => usePrintVector(false));
+	// Second trigger, because the first is unreliable. A print stylesheet
+	// becoming active is a media-query change, and some print paths flip that
+	// without ever dispatching beforeprint. Both are idempotent: whichever
+	// arrives first builds the layer and the other finds it already there.
+	const mq = win.matchMedia?.("print");
+	mq?.addEventListener?.("change", (e) => usePrintVector(e.matches));
+}
+
+function usePrintVector(on: boolean): void {
+	if (on) printSwaps++;
+	sweepDisconnected();
+	for (const [root, path] of layers) {
+		const canvas = root.querySelector(
+			":scope > canvas.handwriting-embed-ink"
+		) as HTMLCanvasElement | null;
+		const existing = root.querySelector(
+			":scope > svg.handwriting-embed-ink"
+		) as SVGSVGElement | null;
+		if (!on) {
+			existing?.remove();
+			canvas?.style.removeProperty("display");
+			continue;
+		}
+		const strokes = strokesFor ? strokesFor(path) : [];
+		const { w, h } = embedInkExtent(strokes);
+		if (strokes.length === 0 || w <= 0 || h <= 0) continue;
+		// createElementNS, not createEl: an <svg> built as an HTML element is
+		// an unknown tag that renders nothing.
+		const svg = existing ?? root.ownerDocument.createElementNS(SVG_NS, "svg");
+		svg.setAttribute("class", "handwriting-embed-ink");
+		svg.setAttribute("aria-hidden", "true");
+		svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+		svg.setAttribute("width", `${w}`);
+		svg.setAttribute("height", `${h}`);
+		// Colours pass through normalizeInkColor and everything else is a
+		// formatted number, so there is nothing here a sidecar could author.
+		svg.innerHTML = inkSvgBody(strokes);
+		if (!existing) root.appendChild(svg);
+		canvas?.setCssStyles({ display: "none" });
+	}
 }
 
 function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): void {
 	const marker = embedInkMarker(path, revisions.get(path) ?? 0);
-	if (root.getAttribute(MARKER_ATTR) === marker) return;
-	root.setAttribute(MARKER_ATTR, marker);
 	let canvas = root.querySelector(
 		":scope > canvas.handwriting-embed-ink"
 	) as HTMLCanvasElement | null;
+	if (!embedInkNeedsPaint(root.getAttribute(MARKER_ATTR), marker, canvas !== null)) return;
+	root.setAttribute(MARKER_ATTR, marker);
+	const view = root.ownerDocument.defaultView ?? window;
 	const { w, h } = embedInkExtent(strokes);
 	if (strokes.length === 0 || w <= 0 || h <= 0) {
 		// The last stroke was erased: the picture goes too.
 		canvas?.remove();
 		return;
 	}
-	const view = root.ownerDocument.defaultView ?? window;
 	if (view.getComputedStyle(root).position === "static") {
 		root.setCssStyles({ position: "relative" });
 	}
 	if (!canvas) {
 		canvas = root.createEl("canvas", { cls: "handwriting-embed-ink" });
 	}
-	if (canvas.width !== w || canvas.height !== h) {
-		canvas.width = w;
-		canvas.height = h;
+	// The canvas is sized in DEVICE pixels and laid out in css pixels, so the
+	// strokes below can go on drawing in note units and come out sharp.
+	const scale = embedInkScale(w, h, view.devicePixelRatio || 1);
+	const backingW = Math.max(1, Math.round(w * scale));
+	const backingH = Math.max(1, Math.round(h * scale));
+	if (canvas.width !== backingW || canvas.height !== backingH) {
+		canvas.width = backingW;
+		canvas.height = backingH;
 		canvas.setCssStyles({ width: `${w}px`, height: `${h}px` });
 	}
 	const ctx = canvas.getContext("2d");
 	if (!ctx) return;
+	ctx.setTransform(scale, 0, 0, scale, 0, 0);
 	ctx.clearRect(0, 0, w, h);
 	// Highlighter first and translucent as a layer would be; then pen.
 	ctx.globalAlpha = 0.35;

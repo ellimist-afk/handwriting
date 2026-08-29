@@ -67,6 +67,7 @@ import {
 } from "./ink/InkColor";
 import { diagnosticsEnabled, setDiagnosticsEnabled } from "./diag/DiagSwitch";
 import { mouseInkEnabled, setMouseInk } from "./inline/MouseInk";
+import { setPrediction } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
 import { inkToSvg } from "./ink/SvgExport";
 import { clipboardSize } from "./inline/InkClipboard";
@@ -86,6 +87,14 @@ import { PageIdIndex } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
+import {
+	changeFolder,
+	DEFAULT_INK_FOLDER,
+	inkFolderSyncs,
+	migrateInkFolder,
+	normalizeInkFolder,
+	SYNCED_INK_FOLDER,
+} from "./persistence/InkFolder";
 import {
 	DEFAULT_TOOLBAR_CORNER,
 	TOOLBAR_CORNER_LABELS,
@@ -116,6 +125,8 @@ interface HandwritingSettings {
 	 * untouched, so flipping this restyles every stroke ever written.
 	 */
 	inkShaping: boolean;
+	/** Vault folder holding the ink sidecars. Default `.handwriting`. */
+	inkFolder: string;
 	/** Which corner the floating pen toolbar parks in. Default top-right. */
 	toolbarCorner: ToolbarCorner;
 	/** Selected ink color per tool (v0.13.6), hex. */
@@ -131,6 +142,7 @@ interface HandwritingSettings {
 	eraserRadiusPx: number;
 	/** Mouse-ink mode (v0.13.16): left mouse button draws like a pen tip. */
 	mouseInk: boolean;
+	strokePrediction: boolean;
 	/** Ruled paper background (v0.13.16): none, lines or grid. Per device. */
 	paperStyle: PaperStyle;
 	/** Pen tools strip (v0.13.16): auto (pen summons it), show, or hide. */
@@ -152,12 +164,16 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	pageOwners: {},
 	eraserRadiusPx: DEFAULT_ERASER_RADIUS_PX,
 	mouseInk: false,
+	// Off by default; see StrokePrediction.ts for why that is a judgement
+	// about e-ink users rather than caution.
+	strokePrediction: false,
 	paperStyle: "none",
 	penTools: "auto",
 	eraserMode: "stroke",
 	penReticle: true,
 	shapeSnap: true,
 	toolbarCorner: DEFAULT_TOOLBAR_CORNER,
+	inkFolder: DEFAULT_INK_FOLDER,
 };
 
 /**
@@ -177,6 +193,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	private settingsTimer: number | null = null;
 	/** Files we are mid-swap on, so layout events don't fight each other. */
 	private swapping = new Set<string>();
+
 	/** Notes the user explicitly opened as Markdown this session (§ no bounce-back). */
 	private preferMarkdown = new Set<string>();
 	/** Page-id ownership ledger (duplicate detection, v0.13.6). */
@@ -297,10 +314,21 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			if (!path || !path.endsWith(".md")) return;
 			const child = new MarkdownRenderChild(el);
 			child.onload = () => {
+				// Synchronously when the ink is already in the session, which
+				// it is whenever the note is open. An export renders the note
+				// and then SERIALIZES it, so ink that arrives on a later tick
+				// arrives after the picture was taken - and awaiting a promise
+				// that had nothing to do would lose the page its ink for the
+				// sake of a microtask.
+				if (inlineInk.isLoaded(path)) {
+					const root = embedInkRoot(el);
+					// Registered even with zero strokes: a note drawn on
+					// AFTER its embed rendered still gains ink live.
+					if (root) attachEmbedInk(root, path, inlineInk.strokes(path));
+					return;
+				}
 				runDetached(
 					inlineInk.ensureLoaded(path).then(() => {
-						// Registered even with zero strokes: a note drawn on
-						// AFTER its embed rendered still gains ink live.
 						const root = embedInkRoot(el);
 						if (root) attachEmbedInk(root, path, inlineInk.strokes(path));
 					}),
@@ -547,7 +575,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// search and sync treat it as an ordinary attachment.
 		this.addCommand({
 			id: "export-ink-svg",
-			name: "Export this note's ink as SVG",
+			// Named for what it is. "Export this note's ink as SVG" reads as a
+			// page export to anyone not thinking about the distinction, and what
+			// comes out is the drawing alone, cropped to itself, on no background.
+			name: "Export ink as SVG (drawing only)",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md" || !inlineInk.hasInk(file.path)) {
@@ -1472,6 +1503,51 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		if (cls) doc.body.classList.add(cls);
 	}
 
+	/**
+	 * Point the ink at a different folder, moving what is already there.
+	 *
+	 * Order matters: settle pending writes, MOVE the files, then repoint the
+	 * store, then persist. Repointing first would send reads to a folder the
+	 * files have not reached; moving without settling could race a debounced
+	 * write into the folder being emptied.
+	 *
+	 * None of that ordering is load-bearing for the user's data, and it must
+	 * not be: `PageStore.readPath` falls back to the default folder, so a move
+	 * interrupted anywhere - including a settings save that never lands -
+	 * leaves every page readable from wherever it actually is.
+	 */
+	async changeInkFolder(raw: string): Promise<void> {
+		const next = normalizeInkFolder(raw);
+		const outcome = await changeFolder(
+			{
+				settle: () => inlineInk.settle(),
+				migrate: (from, to) => migrateInkFolder(this.app.vault.adapter, from, to),
+				repoint: (to) => this.store.useInkFolder(to),
+				persist: async (to) => {
+					this.settings.inkFolder = to;
+					await this.saveSettingsNow();
+				},
+			},
+			this.store.inkFolder(),
+			next
+		);
+		if (outcome.kind === "unchanged") return;
+		if (outcome.kind === "busy") {
+			new Notice("Handwriting: ink is still saving, so the folder was not changed. Try again.");
+			return;
+		}
+		if (outcome.kind === "unsupported") {
+			new Notice("Handwriting: this vault cannot list files, so the ink was not moved.");
+			return;
+		}
+		const { moved, skipped } = outcome.result;
+		const left = skipped > 0 ? `, ${skipped} left behind (name already taken)` : "";
+		new Notice(
+			`Handwriting: ink folder is now "${next}". Moved ${moved} file(s)${left}.` +
+				(inkFolderSyncs(next) ? "" : " This folder is hidden and will not sync.")
+		);
+	}
+
 	private async loadSettings(): Promise<void> {
 		const raw = (await this.loadData()) as Partial<HandwritingSettings> | null;
 		this.settings = {
@@ -1490,6 +1566,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				raw?.pageOwners && typeof raw.pageOwners === "object" ? raw.pageOwners : {},
 			eraserRadiusPx: clampEraserRadius(raw?.eraserRadiusPx ?? DEFAULT_ERASER_RADIUS_PX),
 			mouseInk: raw?.mouseInk === true,
+			strokePrediction: raw?.strokePrediction === true,
 			paperStyle: normalizePaperStyle(raw?.paperStyle),
 			penTools: normalizePenToolsMode(raw?.penTools),
 			// A fresh key on purpose: the old boolean keys carried the OLD
@@ -1500,9 +1577,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			penReticle: raw?.penReticle !== false,
 			shapeSnap: raw?.shapeSnap !== false,
 			toolbarCorner: normalizeToolbarCorner(raw?.toolbarCorner),
+			inkFolder: normalizeInkFolder(raw?.inkFolder),
 		};
 		setPenToolsMode(this.settings.penTools);
 		setToolbarCorner(this.settings.toolbarCorner);
+		// The store is constructed before settings are read, so it starts on
+		// the default folder and is pointed at the real one here - before any
+		// note is opened, so nothing ever reads from the wrong place.
+		this.store.useInkFolder(this.settings.inkFolder);
 		// The strip's eraser slider persists through here on release.
 		setPersistEraserRadius((px) => {
 			this.settings.eraserRadiusPx = px;
@@ -1517,6 +1599,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			runDetached(this.saveData(this.settings), "save the ink size");
 		});
 		setMouseInk(this.settings.mouseInk);
+		setPrediction(this.settings.strokePrediction);
 		this.applyPaper(this.settings.paperStyle);
 		setInkSizeMult("pen", this.settings.inkSizes.pen);
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
@@ -1621,6 +1704,42 @@ class HandwritingSettingTab extends PluginSettingTab {
 						this.plugin.saveSettingsNow();
 					})
 			);
+		// One button, not a path field. "Where should the ink live" is not a
+		// question anyone wants asked - the only reason to move it is that
+		// Obsidian Sync skips hidden folders, so the control offers exactly
+		// that and nothing else. No free text also means no path to validate,
+		// no nested folder to create, and no way to typo your ink somewhere
+		// strange.
+		const current = this.plugin.settings.inkFolder;
+		const hidden = !inkFolderSyncs(current);
+		new Setting(containerEl)
+			.setName("Compatibility with Obsidian Sync")
+			// No description. The name is the description - Alan's rule, and
+			// three attempts at wording proved it: a status line, a paragraph
+			// of mechanics, and a one-line effect were all worse than the
+			// name plus a button that says Turn on. The explanation lives in
+			// the README, where someone goes when they want the reason.
+			.addButton((btn) =>
+				btn
+					.setButtonText(hidden ? "Turn on" : "Turn off")
+					.setCta()
+					.onClick(() => {
+						btn.setDisabled(true);
+						const target = hidden ? SYNCED_INK_FOLDER : DEFAULT_INK_FOLDER;
+						runDetached(
+							this.plugin.changeInkFolder(target).then(() => {
+								// Re-render so the button and the description
+								// describe where the ink actually is now.
+								this.display();
+							}),
+							"move the ink folder",
+							() => {
+								btn.setDisabled(false);
+								new Notice("Handwriting: the ink folder could not be changed.");
+							}
+						);
+					})
+			);
 		new Setting(containerEl)
 			.setName("Toolbar corner")
 			.setDesc("Where the floating pen toolbar sits. Default top right.")
@@ -1660,6 +1779,19 @@ class HandwritingSettingTab extends PluginSettingTab {
 						markPenSeen();
 						refreshPenToolsAll();
 					}
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Ink prediction")
+			.setDesc(
+				"Improves ink latency. Turn it off if the line flicks past sharp corners, " +
+					"or if the tip flickers on an e-ink screen."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.strokePrediction).onChange((on) => {
+					this.plugin.settings.strokePrediction = on;
+					setPrediction(on);
 					this.plugin.saveSettingsNow();
 				})
 			);
@@ -1709,5 +1841,15 @@ class HandwritingSettingTab extends PluginSettingTab {
 					this.plugin.saveSettingsNow();
 				})
 			);
+
+		// One line at the bottom, after every setting, because that is where
+		// someone who has been using the thing ends up - not where someone
+		// deciding whether to install it starts.
+		const support = containerEl.createEl("p", { cls: "handwriting-support" });
+		support.appendText("Handwriting is free. i'm still working on it almost every night. ");
+		support.createEl("a", {
+			text: "Buy me a coffee :)",
+			href: "https://ko-fi.com/ellimistafk",
+		});
 	}
 }

@@ -117,7 +117,7 @@ it and send issue
 
 ## money
 
-Handwriting is free, no telemetry, no account, just a pen. i built it over a few months and i still fix it most nights. if it saved you some paper, buy me a coffee :)
+Handwriting is free. i'm still working on it almost every night. if you want to buy me a coffee:
 https://ko-fi.com/ellimistafk
 
 thank you for using my plugin.

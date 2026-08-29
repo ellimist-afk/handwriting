@@ -143,6 +143,25 @@ export class InlineInkStore {
 	// ---- loading --------------------------------------------------------------
 
 	/**
+	 * Is this note's ink already in the session?
+	 *
+	 * `ensureLoaded` is async even when it has nothing to do, and a promise
+	 * that resolves on a microtask is still too late for a caller that is
+	 * about to serialize the DOM - which is what an export does. This lets
+	 * such a caller paint synchronously in the common case (the note is open,
+	 * so its ink was loaded long ago) and fall back to awaiting only when
+	 * there is a real file read to wait for.
+	 *
+	 * False while a load is in flight and false for a damaged sidecar awaiting
+	 * retry: in both cases `strokes()` would answer with an incomplete set,
+	 * and a partial picture is worse than a late one.
+	 */
+	isLoaded(path: string): boolean {
+		const rec = this.byPath.get(path);
+		return rec !== undefined && rec.load === "yes" && !rec.damagedLocked;
+	}
+
+	/**
 	 * Bring a note's persisted ink into the session, once. Resolves true when
 	 * the visible strokes changed (the caller repaints).
 	 *
@@ -545,7 +564,13 @@ export class InlineInkStore {
 	 * crash durability: a process killed before the I/O finishes can still
 	 * lose pending ink.
 	 */
-	async settle(maxWaitMs = 2000): Promise<void> {
+	/**
+	 * Wait for pending writes. Returns TRUE when everything drained and FALSE
+	 * when the deadline won - callers that are about to move files need to
+	 * know the difference, because proceeding after a timeout can race a
+	 * write into a directory being emptied.
+	 */
+	async settle(maxWaitMs = 2000): Promise<boolean> {
 		let expire: (v: boolean) => void = () => {};
 		const deadline = new Promise<boolean>((r) => {
 			expire = r;
@@ -558,13 +583,15 @@ export class InlineInkStore {
 					if (rec.claimInFlight) inFlight.push(rec.claimInFlight);
 					if (rec.loadInFlight) inFlight.push(rec.loadInFlight);
 				}
-				if (inFlight.length === 0) return;
+				if (inFlight.length === 0) return true;
 				const timedOut = await Promise.race([
 					Promise.all(inFlight).then(() => false),
 					deadline,
 				]);
-				if (timedOut) return;
+				if (timedOut) return false;
 			}
+			// Four passes and still work arriving: treat it as unsettled.
+			return false;
 		} finally {
 			window.clearTimeout(timer);
 		}

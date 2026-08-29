@@ -20,11 +20,19 @@ import { markPenSeen, resetPenToolsForTest } from "./PenToolsMode";
 
 // ---- window stub -----------------------------------------------------------
 
+/**
+ * Window-level capture registrations land here. The touch guards live on the
+ * window rather than the scroller precisely so nothing above them can act
+ * first, so a test that fired them on the element would be testing the wrong
+ * thing.
+ */
+const winHandlers = new Map<string, Handler>();
+
 const hadWindow = "window" in globalThis;
 beforeAll(() => {
 	if (!hadWindow) {
 		(globalThis as Record<string, unknown>).window = {
-			addEventListener: () => {},
+			addEventListener: (type: string, h: Handler) => void winHandlers.set(type, h),
 			removeEventListener: () => {},
 			setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
 			clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
@@ -42,8 +50,10 @@ type Handler = (ev: Event) => void;
 function fakeEl() {
 	const handlers = new Map<string, Handler>();
 	const classes = new Set<string>();
-	return {
+	const el = {
 		handlers,
+		/** Replaced below with an identity check; the guards ask this. */
+		contains: (_node: unknown) => false,
 		style: { touchAction: "" },
 		scrollLeft: 0,
 		scrollTop: 0,
@@ -78,6 +88,8 @@ function fakeEl() {
 		setPointerCapture() {},
 		releasePointerCapture() {},
 	};
+	el.contains = (node: unknown) => node === el;
+	return el;
 }
 
 // ---- event factory ---------------------------------------------------------
@@ -161,7 +173,12 @@ function harness() {
 		if (!h) throw new Error(`router registered no handler for ${ev.type}`);
 		h(ev);
 	};
-	return { router, rec, fire };
+	const fireWin = (ev: PointerEvent) => {
+		const h = winHandlers.get(ev.type);
+		if (!h) throw new Error(`router registered no window handler for ${ev.type}`);
+		h(ev);
+	};
+	return { router, rec, fire, fireWin, el };
 }
 
 /** Flatten every fed sample's timestamp, across calls, in delivery order. */
@@ -260,21 +277,40 @@ describe("raw-fed ink through the real router (Chromium stream)", () => {
 		// The webkit second stream: same pen, wearing its touch costume.
 		let prevented = 0;
 		let stopped = 0;
-		const touch = (touchType?: string) =>
+		const touch = (touchType?: string, target: unknown = h.el) =>
 			({
 				type: "touchstart",
+				target,
 				changedTouches: touchType === undefined ? [{}] : [{ touchType }],
 				preventDefault: () => void prevented++,
 				stopPropagation: () => void stopped++,
 			}) as unknown as PointerEvent;
-		h.fire(touch("stylus"));
+		h.fireWin(touch("stylus"));
 		expect(prevented).toBe(1);
 		expect(stopped).toBe(1);
 		// A finger and a chromium-shaped touch both pass untouched.
-		h.fire(touch("direct"));
-		h.fire(touch(undefined));
+		h.fireWin(touch("direct"));
+		h.fireWin(touch(undefined));
 		expect(prevented).toBe(1);
 		expect(stopped).toBe(1);
+	});
+
+	it("leaves touches outside its own scroller entirely alone", () => {
+		// The guards moved to the window to get ahead of Obsidian's app-level
+		// handlers, which means they now SEE every touch in the app. A stylus
+		// touch on a sidebar, a modal, another editor - none of it is ours,
+		// and eating it would break the rest of the app in exactly the way
+		// window-level listeners are notorious for.
+		let prevented = 0;
+		const elsewhere = fakeEl();
+		h.fireWin({
+			type: "touchstart",
+			target: elsewhere,
+			changedTouches: [{ touchType: "stylus" }],
+			preventDefault: () => void prevented++,
+			stopPropagation: () => {},
+		} as unknown as PointerEvent);
+		expect(prevented).toBe(0);
 	});
 
 	it("a raw during a later stroke keeps the move handler out for the session", () => {
