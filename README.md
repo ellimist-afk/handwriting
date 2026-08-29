@@ -4,6 +4,13 @@ Pen ink on ordinary Markdown notes in Obsidian.
 
 Open a note and write. The note stays a plain `.md` file.
 
+The biggest hurdle to using Obsidian is the lack of handwriting integration. when I was a student i really enjoyed taking notes for biochem and comp sci in Onenote on my tablet. truly it made me love learning. 
+I wish I could've used Obsidian back then to handwrite all my notes. this plugin is my attempt to solve that problem retroactively
+
+Handwriting is designed for students, educators, engineers, artists, or anyone who needs to write and type in Obsidian
+
+Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
+
 ## right now you can
 
 * write ink, highlight, color palette, size sliders
@@ -20,13 +27,13 @@ Open a note and write. The note stays a plain `.md` file.
    * https://imgur.com/a/60GBWnn
 * pressure sensitivity
 * palm rejection
-* floating pen toolbar with auto-hide behavior
+* pen toolbar with auto-hide
 * pinch to zoom
-* ink smoothing
+* ink prediction + smoothing
 * lined and grid paper background
 * export ink as svg
 * infinite canvas
-* ink embeds + reading view
+* ink embeds
 * handwriting to shape
 
 ## works on
@@ -39,15 +46,10 @@ linux
 
 ios
 
-## probably works on
+boox
 
 android
 
-## ipad notes
-
-* turn off Scribble (iPad Settings > Apple Pencil > Scribble) or ios
-  draws its own black ink over your strokes and scratch-out deletes ink
-  
 ## installing
 
 ### method 1 
@@ -84,8 +86,17 @@ paste this in : ellimist-afk/handwriting > hit add plugin
 
 ## required
 
-Obsidian 1.12.3 or newer. a pen, or not. built and tested mostly
-on a Surface Pro and my gf's iPad. please send reports.
+Obsidian 1.12.3 or newer. a pen, or not. built and tested mostly on a Surface Pro with a bit of testing on  an iPad. please send reports.
+
+## ipad notes
+
+* turn off Scribble or ios will draw its own black ink over your strokes and scratch-out deletes ink
+* iPad Settings > Apple Pencil > Scribble
+
+## obsidian sync notes
+
+* if you use obsidian sync, by default your ink will not sync properly across devices. this is because obsidian sync skips hidden folders
+* to fix this, go to: Obsidian Settings > Handwriting settings > Compatibility with Obsidian sync > Turn on
 
 ## coming soon
 
@@ -104,11 +115,14 @@ EZMODE reporting: Run `Diagnostics: toggle recording`, reproduce the bug, then
 `Diagnostics: copy pen trace` will copy it to your clipboard: paste
 it and send issue
 
+## money
+
+Handwriting is free, no telemetry, no account, just a pen. i built it over a few months and i still fix it most nights. if it saved you some paper, there's a ko-fi:
+
+https://ko-fi.com/ellimist-afk
+
+thank you for using my plugin.
+
 ## license
 
 Free and open source, `AGPL-3.0-only`. No CLA, no copyright assignment
-
-## money
-
-Handwriting is free! if you want to help support development anyway:
-https://ko-fi.com/ellimist-afk
