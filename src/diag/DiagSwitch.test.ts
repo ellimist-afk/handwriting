@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { DIAG_OFF_NOTE, diagnosticsEnabled, setDiagnosticsEnabled } from "./DiagSwitch";
+import {
+	DIAG_OFF_NOTE,
+	diagnosticsEnabled,
+	endRecordingForReport,
+	setDiagnosticsEnabled,
+} from "./DiagSwitch";
 import {
 	clearScrollProbe,
 	formatScrollProbe,
@@ -37,5 +42,27 @@ describe("diagnostics master switch (v0.13.0 cleanup)", () => {
 		const out = formatScrollProbe();
 		expect(out).toContain("wheel events            : 1");
 		expect(out).not.toContain(DIAG_OFF_NOTE);
+	});
+});
+
+describe("endRecordingForReport (showing a report ends the capture)", () => {
+	afterEach(() => setDiagnosticsEnabled(false));
+
+	it("ends a running capture and reports that it did", () => {
+		setDiagnosticsEnabled(true);
+		expect(endRecordingForReport()).toBe(true);
+		expect(diagnosticsEnabled()).toBe(false);
+	});
+
+	it("is a no-op when nothing was recording", () => {
+		setDiagnosticsEnabled(false);
+		expect(endRecordingForReport()).toBe(false);
+		expect(diagnosticsEnabled()).toBe(false);
+	});
+
+	it("showing the same report twice only announces the stop once", () => {
+		setDiagnosticsEnabled(true);
+		endRecordingForReport();
+		expect(endRecordingForReport()).toBe(false);
 	});
 });

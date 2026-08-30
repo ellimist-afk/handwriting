@@ -160,6 +160,19 @@ export function pointInBBox(x: number, y: number, b: BBox): boolean {
 	return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
 }
 
+/**
+ * A box grown by `pad` on every side, for a hit test that needs tolerance.
+ *
+ * The grab test that starts a selection drag is the caller. A stroke's box is
+ * its points plus twice its width, so a horizontal line is only a few units
+ * thick, and an unpadded test asks the user to land the nib on that exact
+ * row. The pad is in the box's own units; each surface converts its screen-px
+ * tolerance before calling.
+ */
+export function padBBox(b: BBox, pad: number): BBox {
+	return { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
+}
+
 /** Move a stroke in place, keeping its bbox consistent. */
 export function translateStroke(stroke: InkStroke, dx: number, dy: number): void {
 	for (const p of stroke.points) {

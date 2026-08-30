@@ -111,9 +111,10 @@ Obsidian 1.12.3 or newer. a pen, or not. built and tested mostly on a Surface Pr
 
 open an issue. report what happened. remember to include which device and pen please. 
 
-EZMODE reporting: Run `Diagnostics: toggle recording`, reproduce the bug, then
-`Diagnostics: copy pen trace` will copy it to your clipboard: paste
-it and send issue
+EZMODE reporting: Run `Diagnostics: begin recording`, reproduce the bug, then
+`Diagnostics: show pen trace` will copy it to your clipboard: paste
+it and send issue. showing the trace stops the recording, so there is
+nothing to turn off after
 
 ## money
 

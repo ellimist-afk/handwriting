@@ -7,6 +7,18 @@ function round2(n: number): number {
 	return Math.round(n * 100) / 100;
 }
 
+/**
+ * A stat with no samples did not measure zero - nothing measured it.
+ *
+ * `frame 0/0ms` printed for every inline stroke while a flicker was being
+ * hunted with exactly that number (alan, hardware, 2026-08-30). It reads as
+ * "frames were perfect", which is the failure mode where a dead instrument is
+ * indistinguishable from a clean result. Say which one it is.
+ */
+function statText(s: StatSummary, unit = "ms"): string {
+	return s.n === 0 ? "(not recorded)" : `${s.avg}/${s.max}${unit}`;
+}
+
 export interface StatSummary {
 	avg: number;
 	max: number;
@@ -56,7 +68,6 @@ export interface StrokeSummary {
 	ageAtDrawMs: StatSummary;
 	ageAtPresentMs: StatSummary;
 	frameIntervalMs: StatSummary;
-	queueDepthMax: number;
 	// ---- prediction experiment (v0.1.3) ----
 	predMode: string;
 	predApi: string;
@@ -85,7 +96,6 @@ export class StrokeMetrics {
 	private drawAge = new Stat();
 	private presentAge = new Stat();
 	private frameInterval = new Stat();
-	private queueMax = 0;
 	private lastFrameTs = 0;
 
 	private predMode = "off";
@@ -121,7 +131,6 @@ export class StrokeMetrics {
 		this.drawAge.reset();
 		this.presentAge.reset();
 		this.frameInterval.reset();
-		this.queueMax = 0;
 		this.lastFrameTs = 0;
 		this.active = true;
 	}
@@ -168,10 +177,6 @@ export class StrokeMetrics {
 		this.lastFrameTs = ts;
 	}
 
-	recordQueue(depth: number): void {
-		if (this.active && depth > this.queueMax) this.queueMax = depth;
-	}
-
 	setPrediction(mode: string, api: string): void {
 		this.predMode = mode;
 		this.predApi = api;
@@ -213,7 +218,6 @@ export class StrokeMetrics {
 			ageAtDrawMs: this.drawAge.summary(),
 			ageAtPresentMs: this.presentAge.summary(),
 			frameIntervalMs: this.frameInterval.summary(),
-			queueDepthMax: this.queueMax,
 			predMode: this.predMode,
 			predApi: this.predApi,
 			predTails: this.predTails,
@@ -235,7 +239,7 @@ export class StrokeMetrics {
 			`move ${this.moveEvents} raw ${this.rawEvents} samples ${this.samples} (acc ${this.accepted})`,
 			`delivery ${round2(this.deliveryAge.avg)}ms  handler ${round2(this.handler.avg)}ms  draw ${round2(this.draw.avg)}ms`,
 			`age@draw ${round2(this.drawAge.avg)}ms  age@present ${round2(this.presentAge.avg)}ms`,
-			`frame ${round2(this.frameInterval.avg)}ms (max ${round2(this.frameInterval.max)})  queueMax ${this.queueMax}`,
+			`frame ${statText(this.frameInterval.summary())}`,
 		].join("\n");
 	}
 
@@ -245,7 +249,7 @@ export class StrokeMetrics {
 			`samples ${s.samples} (acc ${s.accepted} / dedup ${s.deduped})  coalesced avg ${s.coalescedPerEvent.avg} max ${s.coalescedPerEvent.max}`,
 			`delivery ${s.deliveryAgeMs.avg}/${s.deliveryAgeMs.max}ms  handler ${s.handlerMs.avg}/${s.handlerMs.max}ms  draw ${s.drawMs.avg}/${s.drawMs.max}ms`,
 			`age@draw ${s.ageAtDrawMs.avg}/${s.ageAtDrawMs.max}ms  age@present ${s.ageAtPresentMs.avg}/${s.ageAtPresentMs.max}ms`,
-			`frame ${s.frameIntervalMs.avg}/${s.frameIntervalMs.max}ms  queueMax ${s.queueDepthMax}`,
+			`frame ${statText(s.frameIntervalMs)}`,
 		];
 		if (s.predMode !== "off") {
 			lines.push(

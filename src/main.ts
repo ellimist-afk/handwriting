@@ -55,7 +55,7 @@ import { surfaceExtents } from "./inline/SurfaceExtent";
 import { claimMarkdown, reassignMarkdown } from "./inline/InlineClaim";
 import { INK_SIZE_STEPS, clampInkSize, nextInkSize } from "./ink/InkSize";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius, nextEraserSize } from "./ink/EraserSize";
-import { inkShapingEnabled, setInkShaping } from "./ink/InkShape";
+import { setPressureSensitivity, pressureSensitivityEnabled } from "./ink/PenStyle";
 import {
 	HIGHLIGHTER_COLORS,
 	PEN_COLORS,
@@ -71,12 +71,19 @@ import { setPrediction } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
 import { inkToSvg } from "./ink/SvgExport";
 import { clipboardSize } from "./inline/InkClipboard";
-import { attachEmbedInk, embedInkChanged, embedInkRoot, initEmbedInkRefresh } from "./inline/EmbedInk";
+import {
+	attachEmbedInk,
+	disarmPrintSwaps,
+	embedInkChanged,
+	embedInkRoot,
+	initEmbedInkRefresh,
+} from "./inline/EmbedInk";
 import { notifyInkChanged, onInkChanged } from "./inline/InkEvents";
 import {
 	PenToolsMode,
 	getPenToolsMode,
 	markPenSeen,
+	penSeenThisSession,
 	nextPenToolsMode,
 	normalizePenToolsMode,
 	setPenToolsMode,
@@ -121,10 +128,12 @@ interface HandwritingSettings {
 	inkSizes: { pen: number; highlighter: number };
 	/**
 	 * Shaped ink rendering (v0.13.10): velocity thinning, filtered pressure
-	 * and endpoint taper, applied to pen strokes at render time. Stored ink is
-	 * untouched, so flipping this restyles every stroke ever written.
+	 * Off pins pressure to its no-pressure value, so width stops following how
+	 * hard you press. Speed thinning and the endpoint taper stay in both
+	 * states. Applied at render time, so flipping this restyles every stroke
+	 * ever written.
 	 */
-	inkShaping: boolean;
+	pressureSensitivity: boolean;
 	/** Vault folder holding the ink sidecars. Default `.handwriting`. */
 	inkFolder: string;
 	/** Which corner the floating pen toolbar parks in. Default top-right. */
@@ -159,7 +168,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	cameras: {},
 	smoothInk: true,
 	inkSizes: { pen: 1, highlighter: 1 },
-	inkShaping: true,
+	pressureSensitivity: true,
 	inkColors: { pen: PEN_COLORS[0]!.hex, highlighter: HIGHLIGHTER_COLORS[0]!.hex },
 	pageOwners: {},
 	eraserRadiusPx: DEFAULT_ERASER_RADIUS_PX,
@@ -186,6 +195,18 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
  * it can always be opened as plain Markdown again. Either way the note stays
  * readable, linkable and indexable.
  */
+/**
+ * How many one-second ticks to skip between sidecar checks.
+ *
+ * One second while ink is arriving, stretching to five when it is not. What
+ * is being spread out is a filesystem stat per open note, which is this
+ * plugin's largest standing cost when nothing at all is happening - it runs
+ * whether or not a second device exists.
+ */
+function reloadStride(quietTicks: number): number {
+	return Math.min(5, 1 + Math.floor(quietTicks / 5));
+}
+
 export default class HandwritingPlugin extends Plugin implements HandwritingHost {
 	store!: PageStore;
 	settings: HandwritingSettings = { ...DEFAULT_SETTINGS };
@@ -355,12 +376,32 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// last word. Dot-folders are invisible to vault events (sidecars
 		// are not vault-indexed files), which is why this polls.
 		let reloadTickBusy = false;
+		// Idle backoff. This exists to notice another device's write, and every
+		// tick that finds nothing still costs a stat per open note - forever, on
+		// battery, whether or not a second device exists. Quiet ticks get rarer;
+		// anything found puts it straight back to one second.
+		let quietTicks = 0;
+		let ticks = 0;
+		let wasHidden = false;
 		this.registerInterval(
 			window.setInterval(() => {
 				if (reloadTickBusy) return;
+				// Nobody is watching ink arrive in a hidden window, and the
+				// first visible tick catches up on everything missed.
+				if (document.hidden) {
+					wasHidden = true;
+					return;
+				}
+				if (wasHidden) {
+					wasHidden = false;
+					quietTicks = 0;
+				}
+				ticks++;
+				if (ticks % reloadStride(quietTicks) !== 0) return;
 				reloadTickBusy = true;
 				runDetached(
 					(async () => {
+						let changed = false;
 						for (const path of inlineReloadCandidates()) {
 							const id = inlineInk.pageIdOf(path);
 							if (!id || !(await this.store.externallyChanged(id))) continue;
@@ -372,8 +413,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 							if (await inlineInk.reloadExternal(path)) {
 								inkExternallyReloaded(path);
 								notifyInkChanged(path);
+								changed = true;
 							}
 						}
+						quietTicks = changed ? 0 : quietTicks + 1;
 					})().finally(() => {
 						reloadTickBusy = false;
 					}),
@@ -382,7 +425,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			}, 1000)
 		);
 		// The nib on ordinary notes: pen or highlighter. A property of the tip,
-		// not a mode. The eraser end and the barrel keep their hardware meanings.
+		// not a mode. The eraser end and the side button keep their hardware meanings.
 		this.addCommand({
 			id: "inline-tool-pen",
 			name: "Pen",
@@ -457,10 +500,18 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const on = !getInlineEraserMode();
 				setInlineEraserMode(on);
-				if (!stripQuiet()) new Notice(on ? "Handwriting: eraser" : `Handwriting: ${getInlineTool()}`);
+				// A tool is only reachable once the tip exists; see armTipModeInput.
+				const armed = on && this.armTipModeInput();
+				if (!stripQuiet()) {
+					new Notice(
+						on
+							? `Handwriting: eraser${armed ? " (mouse ink on)" : ""}`
+							: `Handwriting: ${getInlineTool()}`
+					);
+				}
 			},
 		});
-		// Lasso as a mode: the barrel button was the only way in, and every
+		// Lasso as a mode: the side button was the only way in, and every
 		// apple pencil and every mouse lacks one. Exclusive with the eraser.
 		this.addCommand({
 			id: "inline-tool-lasso",
@@ -468,7 +519,15 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const on = !getInlineLassoMode();
 				setInlineLassoMode(on);
-				if (!stripQuiet()) new Notice(on ? "Handwriting: lasso (tip selects)" : `Handwriting: ${getInlineTool()}`);
+				// A tool is only reachable once the tip exists; see armTipModeInput.
+				const armed = on && this.armTipModeInput();
+				if (!stripQuiet()) {
+					new Notice(
+						on
+							? `Handwriting: lasso (tip selects)${armed ? " (mouse ink on)" : ""}`
+							: `Handwriting: ${getInlineTool()}`
+					);
+				}
 			},
 		});
 		// Insert space as a mode, same shape as lasso: plant a divider with
@@ -479,7 +538,15 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const on = !getInlineSpaceMode();
 				setInlineSpaceMode(on);
-				if (!stripQuiet()) new Notice(on ? "Handwriting: insert space (tip shifts ink below)" : `Handwriting: ${getInlineTool()}`);
+				// A tool is only reachable once the tip exists; see armTipModeInput.
+				const armed = on && this.armTipModeInput();
+				if (!stripQuiet()) {
+					new Notice(
+						on
+							? `Handwriting: insert space (tip shifts ink below)${armed ? " (mouse ink on)" : ""}`
+							: `Handwriting: ${getInlineTool()}`
+					);
+				}
 			},
 		});
 		// Pan as a mode: touch already pans by finger, but a pen on glass had
@@ -490,7 +557,15 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const on = !getInlinePanMode();
 				setInlinePanMode(on);
-				if (!stripQuiet()) new Notice(on ? "Handwriting: pan (tip drags the page)" : `Handwriting: ${getInlineTool()}`);
+				// A tool is only reachable once the tip exists; see armTipModeInput.
+				const armed = on && this.armTipModeInput();
+				if (!stripQuiet()) {
+					new Notice(
+						on
+							? `Handwriting: pan (tip drags the page)${armed ? " (mouse ink on)" : ""}`
+							: `Handwriting: ${getInlineTool()}`
+					);
+				}
 			},
 		});
 		this.addCommand({
@@ -507,10 +582,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "ink-shaping-toggle",
 			name: "Pressure sensitivity: toggle",
 			callback: () => {
-				const on = !inkShapingEnabled();
-				runDetached(this.applyInkShaping(on), "save the ink shaping setting", () =>
+				const on = !pressureSensitivityEnabled();
+				runDetached(this.applyPressureSensitivity(on), "save the pressure setting", () =>
 					new Notice(
-						"Handwriting: ink shaping changed for this session, but the setting could not be saved."
+						"Handwriting: pressure sensitivity changed for this session, but the setting could not be saved."
 					)
 				);
 			},
@@ -810,7 +885,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// default and costs one boolean check per event while off.
 		this.addCommand({
 			id: "toggle-diagnostics",
-			name: "Diagnostics: toggle recording",
+			name: "Diagnostics: begin recording",
 			callback: () => {
 				const on = !diagnosticsEnabled();
 				setDiagnosticsEnabled(on);
@@ -1201,13 +1276,15 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		);
 	}
 
-	private async applyInkShaping(on: boolean): Promise<void> {
-		setInkShaping(on);
-		this.settings.inkShaping = on;
+	private async applyPressureSensitivity(on: boolean): Promise<void> {
+		setPressureSensitivity(on);
+		this.settings.pressureSensitivity = on;
 		// Render-time law: a repaint restyles every committed stroke.
 		repaintAllInkOverlays();
 		await this.saveData(this.settings);
-		new Notice(on ? "Handwriting: ink shaping on" : "Handwriting: ink shaping off");
+		new Notice(
+			on ? "Handwriting: pressure sensitivity on" : "Handwriting: pressure sensitivity off"
+		);
 	}
 
 	private async setInkColor(hex: string, name: string): Promise<void> {
@@ -1294,10 +1371,41 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		return `an unnamed page (${pageId.slice(0, 8)}…)`;
 	}
 
+
+	/**
+	 * A tip mode means nothing until the tip exists.
+	 *
+	 * Eraser, lasso, insert space and pan all say what the TIP does, and on a
+	 * machine with no pen the mouse is not a tip until mouse ink is on. So a
+	 * hotkey for any of them set a mode that nothing read, and the command
+	 * looked simply broken: ctrl+shift+E did nothing at all until ctrl+shift+D
+	 * had been pressed first (user report with video, 2026-08-30).
+	 *
+	 * Asking for a tool is asking to draw with it, so the tool turns the mouse
+	 * on for someone who has not used a pen this session. A pen user's mouse is
+	 * left alone - they did not ask for it, and claiming the mouse costs them
+	 * text selection.
+	 *
+	 * Returns whether it turned mouse ink on, so the notice can say so rather
+	 * than leaving a mode change to be inferred.
+	 */
+	private armTipModeInput(): boolean {
+		if (mouseInkEnabled() || penSeenThisSession()) return false;
+		setMouseInk(true);
+		this.settings.mouseInk = true;
+		runDetached(this.saveData(this.settings), "save the mouse ink setting");
+		markPenSeen();
+		refreshPenToolsAll();
+		return true;
+	}
 	onunload(): void {
 		this.applyPaper("none");
 		document.body.classList.remove("handwriting-active-page");
 		destroyProbeMarkers();
+		// The print swap arms itself once per window and the guard is a WeakSet
+		// in module scope, which a reload replaces - leaving the previous pair
+		// on the window, calling into the old module on every print.
+		disarmPrintSwaps();
 		setHitProbeEnabled(false);
 		// Obsidian's lifecycle contract is `onunload(): void`; it does not
 		// wait for asynchronous cleanup. This is best effort, not crash
@@ -1525,7 +1633,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				repoint: (to) => this.store.useInkFolder(to),
 				persist: async (to) => {
 					this.settings.inkFolder = to;
-					await this.saveSettingsNow();
+					// saveSettingsNow is synchronous; awaiting it awaited undefined.
+					this.saveSettingsNow();
 				},
 			},
 			this.store.inkFolder(),
@@ -1561,7 +1670,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				pen: normalizeInkColor("pen", raw?.inkColors?.pen),
 				highlighter: normalizeInkColor("highlighter", raw?.inkColors?.highlighter),
 			},
-			inkShaping: raw?.inkShaping !== false,
+			// Vaults written before the rename carry `inkShaping`, which drove the
+			// same toggle. Honour it once so nobody's choice is silently reset.
+			pressureSensitivity:
+				raw?.pressureSensitivity ??
+				(raw as { inkShaping?: boolean } | undefined)?.inkShaping !== false,
 			pageOwners:
 				raw?.pageOwners && typeof raw.pageOwners === "object" ? raw.pageOwners : {},
 			eraserRadiusPx: clampEraserRadius(raw?.eraserRadiusPx ?? DEFAULT_ERASER_RADIUS_PX),
@@ -1603,7 +1716,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.applyPaper(this.settings.paperStyle);
 		setInkSizeMult("pen", this.settings.inkSizes.pen);
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
-		setInkShaping(this.settings.inkShaping);
+		setPressureSensitivity(this.settings.pressureSensitivity);
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
@@ -1797,11 +1910,11 @@ class HandwritingSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Pressure sensitivity")
-			.setDesc("Default on.")
+			.setDesc("Off gives an even line. Default on.")
 			.addToggle((t) =>
-				t.setValue(this.plugin.settings.inkShaping).onChange((on) => {
-					this.plugin.settings.inkShaping = on;
-					setInkShaping(on);
+				t.setValue(this.plugin.settings.pressureSensitivity).onChange((on) => {
+					this.plugin.settings.pressureSensitivity = on;
+					setPressureSensitivity(on);
 					repaintAllInkOverlays();
 					this.plugin.saveSettingsNow();
 				})

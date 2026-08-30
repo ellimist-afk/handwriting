@@ -118,7 +118,7 @@ export function recordProbe(entry: ProbeEntry): void {
 // ---- on-screen markers ------------------------------------------------------
 
 function makeMarker(color: string, size: number): HTMLElement {
-	const el = document.body.createEl("div");
+	const el = document.body.createDiv();
 	el.setCssStyles({
 		position: "fixed",
 		left: "0px",

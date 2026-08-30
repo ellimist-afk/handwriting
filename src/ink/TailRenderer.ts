@@ -5,6 +5,17 @@ import { Point2 } from "./Smoothing";
 import { fillRibbon } from "./RibbonRenderer";
 
 /**
+ * How much width the predicted tail gives up by its tip.
+ *
+ * The far end of a guess is the least certain part of it, so it is drawn as
+ * the faintest part. At full weight a wrong guess announces itself - the tip
+ * jumps a nib-width sideways and the eye follows it - which is what made
+ * prediction read as distortion while writing even though the committed
+ * stroke was correct.
+ */
+const TAIL_TIP_TAPER = 0.5;
+
+/**
  * The transient overlay: a canvas above the wet ink layer holding only
  * geometry that will be replaced on the next input event. Two things live
  * here:
@@ -221,23 +232,34 @@ export class TailRenderer {
 		if (points.length === 0) return;
 		const ctx = this.ctx;
 		ctx.strokeStyle = color;
-		ctx.lineWidth = Math.max(0.5, lineWidthPx);
 		ctx.lineCap = "round";
 		ctx.lineJoin = "round";
-		ctx.beginPath();
-		ctx.moveTo(fromX, fromY);
+		const base = Math.max(0.5, lineWidthPx);
+		let px = fromX;
+		let py = fromY;
 		let x0 = fromX;
 		let y0 = fromY;
 		let x1 = fromX;
 		let y1 = fromY;
-		for (const p of points) {
+		// Segment at a time, narrowing toward the tip. One stroked polyline is
+		// cheaper, but it draws the least certain end at full weight: when the
+		// guess is wrong the eye is pulled to a full-width tip snapping
+		// sideways. Tapered, a correction is a thin line moving slightly.
+		for (let i = 0; i < points.length; i++) {
+			const p = points[i]!;
+			const t = (i + 1) / points.length;
+			ctx.lineWidth = Math.max(0.5, base * (1 - TAIL_TIP_TAPER * t));
+			ctx.beginPath();
+			ctx.moveTo(px, py);
 			ctx.lineTo(p.x, p.y);
+			ctx.stroke();
+			px = p.x;
+			py = p.y;
 			if (p.x < x0) x0 = p.x;
 			if (p.y < y0) y0 = p.y;
 			if (p.x > x1) x1 = p.x;
 			if (p.y > y1) y1 = p.y;
 		}
-		ctx.stroke();
-		this.growDirty(x0, y0, x1, y1, ctx.lineWidth / 2 + 2);
+		this.growDirty(x0, y0, x1, y1, base / 2 + 2);
 	}
 }

@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
 import { silentLift } from "./PointerRouter";
 
 const TIP = 1;
-const BARREL = 2;
+const SIDE_BUTTON = 2;
 const ERASER = 32;
 
 describe("silentLift — hover sample while a stroke is still claimed", () => {
@@ -23,15 +23,15 @@ describe("silentLift — hover sample while a stroke is still claimed", () => {
 		expect(silentLift({ pressure: 0, buttons: 0 })).toBe(true);
 	});
 
-	it("fires even with the barrel held through the lift", () => {
-		// Hover with barrel pressed reports buttons=2; the pen is still off
-		// the glass. The barrel bit must not keep a dead stroke alive.
-		expect(silentLift({ pressure: 0, buttons: BARREL })).toBe(true);
+	it("fires even with the side button held through the lift", () => {
+		// Hover with side-button pressed reports buttons=2; the pen is still off
+		// the glass. The side-button bit must not keep a dead stroke alive.
+		expect(silentLift({ pressure: 0, buttons: SIDE_BUTTON })).toBe(true);
 	});
 
 	it("never fires while the tip is in contact", () => {
 		expect(silentLift({ pressure: 0.4, buttons: TIP })).toBe(false);
-		expect(silentLift({ pressure: 0.4, buttons: TIP | BARREL })).toBe(false);
+		expect(silentLift({ pressure: 0.4, buttons: TIP | SIDE_BUTTON })).toBe(false);
 	});
 
 	it("never fires while the eraser is in contact", () => {

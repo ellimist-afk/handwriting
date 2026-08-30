@@ -7,7 +7,7 @@
  * explicitly invoked: OFF by default, every recording call returns
  * immediately (one boolean read), and the pixel readbacks and layout reads
  * that feed the richer trace rows are skipped entirely. Flip it with
- * `Diagnostics: toggle recording`, reproduce, copy the trace.
+ * `Diagnostics: begin recording`, reproduce, copy the trace.
  *
  * THE CALL-SITE RULE (RC4). A gate inside the recording function is not
  * enough, because the CALLER evaluates the arguments: `probe(el.scrollTop)`
@@ -34,6 +34,22 @@ export function setDiagnosticsEnabled(on: boolean): void {
 	enabled = on;
 }
 
+/**
+ * Showing a report ends the capture.
+ *
+ * The reporting flow is begin, reproduce, show, paste - and there is no
+ * fourth step where anyone remembers to turn recording back off. Ending it
+ * here means the command called "begin recording" only ever has to begin,
+ * and nobody leaves a trace running for days because they filed their bug
+ * and moved on. Returns whether it actually stopped anything, so the caller
+ * can say so.
+ */
+export function endRecordingForReport(): boolean {
+	if (!enabled) return false;
+	enabled = false;
+	return true;
+}
+
 /** One-line banner for trace outputs produced while the switch is off. */
 export const DIAG_OFF_NOTE =
-	"Handwriting diagnostics are off. Run 'Diagnostics: toggle recording', reproduce, then copy again.";
+	"Handwriting diagnostics are off. Run 'Diagnostics: begin recording', reproduce, then copy again.";

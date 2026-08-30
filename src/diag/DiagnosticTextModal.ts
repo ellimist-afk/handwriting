@@ -1,4 +1,5 @@
 import { App, Modal, Notice, Platform } from "obsidian";
+import { endRecordingForReport } from "./DiagSwitch";
 
 /**
  * A selectable diagnostics report, with two ways off the device.
@@ -128,5 +129,10 @@ function stamp(): string {
 }
 
 export function showDiagnosticText(app: App, heading: string, text: string): void {
+	// Every diagnostics report comes through here, so this is the one place
+	// that has to end the capture. The text was already gathered above, so
+	// what the reader sees is unaffected.
+	const stopped = endRecordingForReport();
 	new DiagnosticTextModal(app, heading, text).open();
+	if (stopped) new Notice("Handwriting: recording stopped");
 }

@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question or suggest a feature
+    url: https://github.com/ellimist-afk/handwriting/discussions
+    about: Questions, ideas and "does it work on my device" go here.
+  - name: iPad ink looks wrong, or a black stroke appears
+    url: https://github.com/ellimist-afk/handwriting#ipad-notes
+    about: That is usually iPadOS Scribble. Settings > Apple Pencil > Scribble.
+  - name: Ink is not syncing between devices
+    url: https://github.com/ellimist-afk/handwriting#obsidian-sync-notes
+    about: Obsidian Sync skips hidden folders. There is a setting for it.

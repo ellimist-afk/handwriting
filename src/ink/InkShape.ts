@@ -56,7 +56,14 @@ export const PEN_SHAPE: ShapeParams = {
 	thinningK: 0.18,
 	minVelocityFactor: 0.65,
 	taperWidths: 2.4,
-	taperMaxShare: 0.3,
+	// How much of a stroke the taper may claim. The taper is a multiple of the
+	// nib WIDTH, so a fat nib tapers over a longer distance and a short stroke
+	// hits this cap: measured 2026-08-29, a 2.5x nib gave up 27% of a short
+	// stroke and 24% of a long one, which reads as the end being clipped off.
+	// At 0.18 it holds near 14% whatever the nib. The tip floor is deliberately
+	// NOT raised with it - ends are tips, not blunt caps, and there is a test
+	// that says so.
+	taperMaxShare: 0.18,
 	tipFloor: 0.12,
 };
 

@@ -13,7 +13,7 @@ export interface PenStyle {
 }
 
 export const DEFAULT_PEN: PenStyle = {
-	color: "#4b7bec",
+	color: "#2f6de0",
 	baseWidth: 2.2,
 	minWidthFactor: 0.35,
 	gamma: 0.75,
@@ -39,12 +39,35 @@ export const HIGHLIGHTER_PEN: PenStyle = {
 /** Layer opacity for highlighter ink. */
 export const HIGHLIGHTER_ALPHA = 0.35;
 
+/** What a device that reports no pressure sends, normalized upstream. */
+export const NO_PRESSURE = 0.5;
+
+/**
+ * Pressure sensitivity, off for anyone who wants an even line.
+ *
+ * It pins pressure rather than switching the width law off. Speed thinning
+ * and the endpoint taper are what make a stroke read as handwriting and they
+ * stay in both states; only "how hard you press" stops moving the width.
+ * Every stroke is styled at render time, so flipping this restyles ink that
+ * was written years ago.
+ */
+let pressureSensitive = true;
+
+export function setPressureSensitivity(on: boolean): void {
+	pressureSensitive = on;
+}
+
+export function pressureSensitivityEnabled(): boolean {
+	return pressureSensitive;
+}
+
 /**
  * Width in world units for a given pressure sample.
  * Devices that report no pressure send 0.5 (normalized upstream).
  */
 export function widthForPressure(style: PenStyle, pressure: number): number {
-	const p = Math.min(1, Math.max(0, pressure));
+	const raw = pressureSensitive ? pressure : NO_PRESSURE;
+	const p = Math.min(1, Math.max(0, raw));
 	const effective = Math.pow(p, style.gamma);
 	const factor = style.minWidthFactor + (1 - style.minWidthFactor) * effective;
 	return style.baseWidth * factor;

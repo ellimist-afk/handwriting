@@ -519,8 +519,18 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 }
 
 /* Color swatches: a row of the active tool's palette; current one ringed. */
+/*
+ * Eight swatches in a deterministic 4 x 2, not a row told to fold inside a
+ * pixel budget. The budget was guessed against a 22px swatch on a desktop and
+ * came out two-wide in a three-wide box on an ipad: any platform that pads or
+ * sizes differently gets a different answer, and none of them are checkable
+ * from here. A column count cannot drift.
+ */
 .handwriting-color-pop {
-	flex-direction: row;
+	display: grid;
+	grid-template-columns: repeat(4, auto);
+	justify-items: center;
+	align-items: center;
 	gap: 6px;
 	padding: 8px;
 }

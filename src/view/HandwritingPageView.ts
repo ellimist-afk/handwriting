@@ -12,7 +12,7 @@ import { TailRenderer } from "../ink/TailRenderer";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
 import { DEFAULT_CAPS, buildTail, correctionError } from "../ink/Prediction";
 import { strokesHitByCircle } from "../ink/Eraser";
-import { pointInBBox } from "../objects/Selection";
+import { padBBox, pointInBBox } from "../objects/Selection";
 import { SelectionModel } from "../objects/SelectionModel";
 import { Point2 } from "../ink/Smoothing";
 import { BBox } from "../ink/Stroke";
@@ -762,13 +762,13 @@ export class HandwritingPageView extends TextFileView {
 		const eraserButton = (ev.buttons & 32) !== 0 || ev.button === 5;
 		if (eraserButton) telemetry.bump("pen.eraserButton");
 
-		// Barrel button held = lasso, whatever tool is selected (§52). This is
+		// Side button held = lasso, whatever tool is selected (§52). This is
 		// the temporary-override model from §53: reach for the button, drag a
 		// loop, let go. No toolbar trip and no mode left behind. Diagnostics
-		// established that this pen reports the barrel as bit 2 of `buttons`.
-		const barrelHeld = (ev.buttons & 2) !== 0;
-		if (barrelHeld) telemetry.bump("pen.barrelLasso");
-		if ((this.tool === "lasso" || barrelHeld) && !eraserButton) {
+		// established that this pen reports the side button as bit 2 of `buttons`.
+		const sideHeld = (ev.buttons & 2) !== 0;
+		if (sideHeld) telemetry.bump("pen.barrelLasso");
+		if ((this.tool === "lasso" || sideHeld) && !eraserButton) {
 			this.lassoDown(sample);
 			return;
 		}
@@ -1588,10 +1588,6 @@ export class HandwritingPageView extends TextFileView {
 function normalizePressure(p: number): number {
 	if (!Number.isFinite(p) || p <= 0) return 0.5;
 	return Math.min(1, p);
-}
-
-function padBBox(b: BBox, pad: number): BBox {
-	return { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
 }
 
 /** Natural pixel size of an image, for the initial placement. */

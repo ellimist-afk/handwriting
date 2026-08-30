@@ -68,7 +68,7 @@ const STATS_INTERVAL_MS = 100;
  * - what buttons/eraser the Slim Pen actually reports in this Electron build
  * - whether getCoalescedEvents works and how many samples it delivers
  * - real pressure/tilt/twist ranges
- * - what happens on hover, barrel button, eraser end, palm contact
+ * - what happens on hover, side button, eraser end, palm contact
  *
  * Scoped entirely to this view's capture area. Every export leads with the
  * platform capability header, because the question a remote session is sent to
@@ -173,7 +173,7 @@ export class PenDiagnosticsView extends ItemView {
 		});
 
 		this.captureEl = content.createDiv({ cls: "handwriting-diag-capture" });
-		this.captureEl.setText("write / touch / hover here");
+		this.captureEl.setText("Write / touch / hover here");
 
 		this.statsEl = content.createDiv({ cls: "handwriting-diag-stats" });
 		this.logEl = content.createDiv({ cls: "handwriting-diag-log" });

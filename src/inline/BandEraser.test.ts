@@ -18,7 +18,7 @@ describe("bandEraserIntent (linked-mentions band claims)", () => {
 		expect(bandEraserIntent("pen", 1, 0, false, false)).toBe(false);
 	});
 
-	it("pen barrel stays native", () => {
+	it("pen side button stays native", () => {
 		expect(bandEraserIntent("pen", 2, 0, false, false)).toBe(false);
 	});
 

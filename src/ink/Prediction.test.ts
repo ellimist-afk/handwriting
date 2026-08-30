@@ -6,6 +6,7 @@ import {
 	correctionError,
 	extrapolate,
 	recentSpeed,
+	recentTurnDegrees,
 	turnDegrees,
 } from "./Prediction";
 
@@ -136,5 +137,46 @@ describe("correctionError", () => {
 	it("is undefined when the tail does not span the sample", () => {
 		expect(correctionError([s(10, 0, 100)], s(10, 0, 400))).toBeUndefined();
 		expect(correctionError([], s(0, 0, 0))).toBeUndefined();
+	});
+});
+
+describe("recentTurnDegrees (the turn guard's input)", () => {
+	/**
+	 * A straight stroke at pen rates: samples half a pixel apart, with a third
+	 * of a pixel of digitizer noise across the line. The hand is going
+	 * straight; consecutive samples are not.
+	 */
+	function jitteryStraight(): PenSample[] {
+		const wobble = [0, 0.3, -0.3, 0.2, -0.25, 0.3, -0.2, 0.25, -0.3, 0.2, -0.25, 0.3];
+		return wobble.map((dy, i) => s(i * 0.5, dy, i * 4));
+	}
+
+	it("reads a jittery straight line as straight", () => {
+		const real = jitteryStraight();
+		// The old measurement - the last three samples - is dominated by the
+		// noise, which is what made the guard flap and the tail strobe.
+		const naive = turnDegrees(real.at(-3)!, real.at(-2)!, real.at(-1)!);
+		expect(naive).toBeGreaterThan(DEFAULT_CAPS.maxTurnDeg);
+		expect(recentTurnDegrees(real)).toBeLessThan(DEFAULT_CAPS.maxTurnDeg);
+	});
+
+	it("still sees a real corner", () => {
+		// right, then down - the corner sits inside the window
+		const real = [
+			s(0, 0, 0),
+			s(2, 0, 4),
+			s(4, 0, 8),
+			s(6, 0, 12),
+			s(6, 2, 16),
+			s(6, 4, 20),
+			s(6, 6, 24),
+			s(6, 8, 28),
+			s(6, 10, 32),
+		];
+		expect(recentTurnDegrees(real)).toBeGreaterThan(DEFAULT_CAPS.maxTurnDeg);
+	});
+
+	it("is 0 with too little history to measure", () => {
+		expect(recentTurnDegrees([s(0, 0, 0), s(1, 0, 4)])).toBe(0);
 	});
 });

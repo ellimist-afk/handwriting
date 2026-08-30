@@ -40,7 +40,7 @@ describe("contextMenuSuppressed", () => {
 		expect(contextMenuSuppressed({ ...base, activeStroke: true })).toBe(true);
 	});
 
-	it("suppresses in the tail — the barrel menu fires AFTER pointerup", () => {
+	it("suppresses in the tail — the side-button menu fires AFTER pointerup", () => {
 		// This is the exact stacking bug: activePenId was already null when the
 		// contextmenu event arrived, so the old during-stroke check let it by.
 		expect(contextMenuSuppressed({ ...base, ownershipTailUntil: 1300 })).toBe(true);
@@ -50,7 +50,7 @@ describe("contextMenuSuppressed", () => {
 		expect(contextMenuSuppressed({ ...base, pointerType: "pen" })).toBe(true);
 	});
 
-	it("suppresses while the pen hovers — barrel press without contact", () => {
+	it("suppresses while the pen hovers — side-button press without contact", () => {
 		expect(contextMenuSuppressed({ ...base, penNear: true })).toBe(true);
 	});
 

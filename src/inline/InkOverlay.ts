@@ -64,7 +64,7 @@ import { getPenToolsMode, markPenSeen, penSeenThisSession, penToolsVisible } fro
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
-import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle, widthForPressure } from "../ink/PenStyle";
+import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
 import { clampInkSize } from "../ink/InkSize";
 import { colorsFor, getInkColorHex } from "../ink/InkColor";
 import { Point2 } from "../ink/Smoothing";
@@ -76,7 +76,7 @@ import { drawCommitted,
 import { TailRenderer } from "../ink/TailRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { PenSample } from "../input/PointerRouter";
-import { pointInBBox } from "../objects/Selection";
+import { padBBox, pointInBBox } from "../objects/Selection";
 import { SelectionModel } from "../objects/SelectionModel";
 import { runDetached } from "../util/Detached";
 import { InkOp, inkApplied, inkEffect, inkHistorySupport, snapHistoryOps } from "./InkHistory";
@@ -175,7 +175,7 @@ type PenMode = "ink" | "erase" | "lasso" | "space" | "pan";
 let enabled = true;
 /**
  * What the pen TIP draws: pen or highlighter. This is a property of the nib
- * (like its color), not an interaction mode. The eraser end and the barrel
+ * (like its color), not an interaction mode. The eraser end and the side button
  * keep their hardware meanings regardless. Session-scoped; switched by command.
  */
 let inlineTool: InkTool = "pen";
@@ -188,8 +188,8 @@ let inlineTool: InkTool = "pen";
 const INLINE_DESYNCHRONIZED = true;
 /** No hover sample for this long means the pen is gone; see armHoverWatchdog. */
 const HOVER_GHOST_MS = 1000;
-/** Real samples kept for extrapolation; the turn guard reads the last three. */
-const PRED_HISTORY = 8;
+/** Real samples kept for extrapolation; the turn guard averages a window. */
+const PRED_HISTORY = 12;
 
 
 // ---- ink size (v0.13.6) -----------------------------------------------------
@@ -225,7 +225,7 @@ export function setInlineTool(tool: InkTool): void {
  * Eraser mode (v0.13.13).
  *
  * The pen normally decides what it is at contact and needs no mode at all:
- * eraser end erases, barrel lassos, tip inks. That only works on a pen that
+ * eraser end erases, side button lassos, tip inks. That only works on a pen that
  * HAS an eraser end. Plenty do not, and on those the eraser was unreachable.
  *
  * So: an explicit mode, off by default, that makes the tip erase. Hardware
@@ -254,8 +254,8 @@ export function getInlineLassoMode(): boolean {
 }
 
 /**
- * Lasso as a MODE (roadmap: pen GUI): the barrel button was the only way
- * in, and iPads and mice have no barrel. While on, the tip lassos.
+ * Lasso as a MODE (roadmap: pen GUI): the side button was the only way
+ * in, and iPads and mice have no side button. While on, the tip lassos.
  */
 export function setInlineLassoMode(on: boolean): void {
 	toggleTipMode("lasso", on);
@@ -268,7 +268,7 @@ export function getInlineSpaceMode(): boolean {
 /**
  * Insert space as a MODE, same grammar as eraser and lasso: while on, the
  * tip plants a divider and everything below it follows the pen vertically.
- * The barrel and the eraser end keep their hardware meanings.
+ * The side button and the eraser end keep their hardware meanings.
  */
 export function setInlineSpaceMode(on: boolean): void {
 	toggleTipMode("space", on);
@@ -652,6 +652,8 @@ class InkOverlayPlugin {
 	private pinchScrollAt = 0;
 	/** Hides a reticle left behind by a pen that never sent pointerleave. */
 	private hoverWatchdog: ReturnType<Window["setTimeout"]> | null = null;
+	/** Whether the metrics frame ticker is running; see startFrameTicker. */
+	private frameTicking = false;
 	/** Recent REAL samples, newest last: what prediction extrapolates from. */
 	private predReal: PenSample[] = [];
 	/** The tail drawn last event, kept only to score it against what arrived. */
@@ -1219,6 +1221,9 @@ class InkOverlayPlugin {
 			this.scrollPositionPatched = false;
 		}
 		this.clearHoverWatchdog();
+		// A stroke interrupted by teardown never reaches pen-up, so the
+		// ticker rAF would keep rescheduling itself against a dead overlay.
+		this.stopFrameTicker();
 		this.container?.remove();
 		this.container = null;
 		this.band = null;
@@ -1705,7 +1710,7 @@ class InkOverlayPlugin {
 		// caret. That also cancels native focus. Give keyboard ownership back to
 		// this editor before freezing geometry, or Delete and undo go wherever
 		// focus happened to be before the pen landed.
-		focusClaimedPenEditor(this.view);
+		focusClaimedPenEditor(this.view, Platform.isMobileApp);
 		// Hide the DOT only. The hover class stays on: it is what holds
 		// `cursor: none` over the scroller, and dropping it here handed every
 		// stroke to CodeMirror's I-beam - the reticle "flickered" because each
@@ -1740,20 +1745,20 @@ class InkOverlayPlugin {
 		this.mobileTools?.closeInkSliders();
 
 		// The pen decides what it is at contact (§52/§53, mode-free):
-		// eraser end erases, barrel held lassos/moves, tip inks.
+		// eraser end erases, side button held lassos/moves, tip inks.
 		const eraserEnd = (ev.buttons & 32) !== 0 || ev.button === 5;
 		const eraser = eraserEnd || tipMode() === "eraser";
-		// Lasso mode makes the TIP lasso: the barrel path for hardware that
-		// has no barrel (every apple pencil, every mouse).
-		const barrel = !eraser && ((ev.buttons & 2) !== 0 || tipMode() === "lasso");
-		if (barrel) {
+		// Lasso mode makes the TIP lasso: the side-button path for hardware that
+		// has no side button (every apple pencil, every mouse).
+		const side = !eraser && ((ev.buttons & 2) !== 0 || tipMode() === "lasso");
+		if (side) {
 			this.mode = "lasso";
 			this.lassoDown(sample);
 			return;
 		}
 		// A bare tip landing INSIDE an active selection drags it - OneNote's
 		// grammar (alan, 2026-08-27): the side button selects, then either
-		// the tip or the held barrel moves. Outside, the tip dissolves the
+		// the tip or the held side button moves. Outside, the tip dissolves the
 		// selection and inks, same as always. Esc backs out without a move.
 		if (!this.selection.isEmpty) {
 			const w = this.camera.screenToWorld(sample.x, sample.y);
@@ -1777,6 +1782,7 @@ class InkOverlayPlugin {
 			// decides what counts as touched either way.
 			this.eraseWhole = eraserWholeStrokes;
 			metrics.begin("erase", performance.now());
+			this.startFrameTicker();
 			this.showEraserCursor(sample);
 			this.eraseAt(sample);
 			return;
@@ -1798,6 +1804,7 @@ class InkOverlayPlugin {
 		}
 		this.mode = "ink";
 		metrics.begin("ink", performance.now());
+		this.startFrameTicker();
 		// Bind the nib once: the raw loop never asks which tool is active.
 		const tool = inlineTool;
 		this.activeStyle = tool === "highlighter" ? this.highlighterStyle : this.penStyle;
@@ -1986,7 +1993,10 @@ class InkOverlayPlugin {
 			newest.y,
 			result.points,
 			this.activeStyle.color,
-			widthForPressure(this.activeStyle, newest.pressure) * cam.zoom
+			// The width the ribbon is actually laying down, not one derived
+			// from raw pressure: with shaping on those differ by a lot at
+			// speed, and the tail was drawing the fatter of the two.
+			this.activeWet.liveWidthPx(cam, this.activeStyle, newest.pressure)
 		);
 	}
 
@@ -2081,6 +2091,7 @@ class InkOverlayPlugin {
 		if (this.mode === "erase") {
 			this.mode = "ink";
 			metrics.end(performance.now());
+			this.stopFrameTicker();
 			this.hideEraserCursor();
 			const erased = this.erased;
 			this.erased = [];
@@ -2110,6 +2121,7 @@ class InkOverlayPlugin {
 			return;
 		}
 		metrics.end(performance.now());
+		this.stopFrameTicker();
 		const builder = this.builder;
 		this.builder = null;
 		// Finish before clearing the wet layer. Release filtering may produce
@@ -2771,6 +2783,32 @@ class InkOverlayPlugin {
 		this.hoverWatchdog = null;
 	}
 
+	/**
+	 * Feed StrokeMetrics.recordFrame while a stroke is live.
+	 *
+	 * That recorder had exactly ONE caller - the canvas page view's ticker -
+	 * so every stroke drawn in a note reported `frame 0/0ms`. Not "the frames
+	 * were perfect": nothing ever measured them. It cost a flicker hunt the
+	 * one number that would have located it (alan, hardware, 2026-08-30).
+	 *
+	 * Runs only between pen-down and pen-up, and does nothing per frame but
+	 * read a timestamp, so the latency path pays a rAF callback and no work.
+	 */
+	private startFrameTicker(): void {
+		if (this.frameTicking) return;
+		this.frameTicking = true;
+		const tick = (ts: number): void => {
+			if (!this.frameTicking) return;
+			metrics.recordFrame(ts);
+			this.winRef.requestAnimationFrame(tick);
+		};
+		this.winRef.requestAnimationFrame(tick);
+	}
+
+	private stopFrameTicker(): void {
+		this.frameTicking = false;
+	}
+
 	private eraseAt(sample: PenSample): void {
 		const path = this.filePath();
 		if (!path) return;
@@ -2835,7 +2873,7 @@ class InkOverlayPlugin {
 		if (this.eraserEl) this.eraserEl.setCssStyles({ display: "none" });
 	}
 
-	// ---- lasso / move (barrel held; §52/§53, ink-only on the inline surface) --
+	// ---- lasso / move (side button held; §52/§53, ink-only on the inline surface) --
 
 	private strokesHere(): readonly InkStroke[] {
 		const path = this.filePath();
@@ -3127,6 +3165,12 @@ class InkOverlayPlugin {
 		}
 		const bounds = this.selectionBounds();
 		if (bounds) this.tail.drawSelectionBox(cam, bounds, SELECTION_COLOR);
+		// A repaint can land mid-stroke - a scroll, an external reload, damage
+		// from an erase elsewhere. clearAll above takes the live head with it,
+		// and the head is the lag-free tip: erasing it until the next pointer
+		// event is a blink at exactly the place the eye is resting.
+		const head = this.builder ? this.activeWet.head() : undefined;
+		if (head) this.tail.drawHead(cam, this.activeStyle, head.from, head.to, head.pressure);
 	}
 
 	private resetGestureState(): void {
@@ -3618,10 +3662,6 @@ class InkOverlayPlugin {
 				: "last reconcile: (none yet)",
 		].join("\n");
 	}
-}
-
-function padBBox(b: BBox, pad: number): BBox {
-	return { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
 }
 
 const inkOverlayPlugin = ViewPlugin.fromClass(InkOverlayPlugin);

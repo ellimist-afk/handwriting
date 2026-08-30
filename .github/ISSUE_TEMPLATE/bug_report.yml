@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in Handwriting is broken or behaving oddly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The device and pen matter more than anything
+        else here - most bugs so far have turned out to be specific to one
+        piece of hardware.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what the plugin did instead of what you expected.
+      placeholder: |
+        I lassoed some ink and pressed ctrl+c. The notice said it copied, but
+        ctrl+v pasted nothing.
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Make and model, and the operating system.
+      placeholder: Surface Pro 9, Windows 11 / iPad Pro 12.9 4th gen, iPadOS 26.6 / Boox Note Air 5c
+    validations:
+      required: true
+
+  - type: input
+    id: pen
+    attributes:
+      label: Pen
+      description: Which stylus, or say mouse or finger.
+      placeholder: Surface Slim Pen 2 / Apple Pencil 2 / Samsung S Pen / mouse
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Handwriting and Obsidian versions
+      description: Both are in Settings, under Community plugins and under About.
+      placeholder: Handwriting 1.3.7, Obsidian 1.13.7
+    validations:
+      required: true
+
+  - type: textarea
+    id: pen-trace
+    attributes:
+      label: Pen trace
+      description: |
+        This is the fastest way to get a pen or ink bug fixed, and it usually
+        makes the difference between a guess and a fix.
+
+        Run `Diagnostics: begin recording` from the command palette, reproduce
+        the problem, then run `Diagnostics: show pen trace` and paste what it
+        gives you here. Showing the trace stops the recording for you. Skip
+        this whole field if the bug has nothing to do with the pen.
+      render: text
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: |
+        Screenshots or a short clip if the problem is visual. Also worth
+        mentioning: other plugins that touch the editor, a custom theme, or
+        whether it happens in a brand new vault too.

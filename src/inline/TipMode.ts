@@ -2,8 +2,8 @@
  * What the pen TIP currently is, as one value.
  *
  * The pen decides what it is at contact and needs no mode at all: eraser end
- * erases, barrel lassos, tip inks. That only works on hardware that HAS an
- * eraser end and a barrel; plenty has neither, so each of those meanings also
+ * erases, side button lassos, tip inks. That only works on hardware that HAS an
+ * eraser end and a side button; plenty has neither, so each of those meanings also
  * has an explicit mode that gives it to the tip. Only one can win.
  *
  * This was four independent booleans kept mutually exclusive by hand, and

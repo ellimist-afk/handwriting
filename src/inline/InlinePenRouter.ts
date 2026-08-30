@@ -34,7 +34,7 @@ import { penSeenThisSession } from "./PenToolsMode";
  *   Pen tip      -> ink. Claimed in the CAPTURE phase on the editor's
  *                   scroller, before CodeMirror's own handlers (which live on
  *                   the child content element) can see it.
- *   Pen barrel   -> claimed: held at contact it lassos and moves ink.
+ *   Pen side    -> claimed: held at contact it lassos and moves ink.
  *   Pen eraser   -> claimed and swallowed (no ink, and no accidental
  *                   right-click storm from the eraser end).
  *   Touch        -> passed through untouched, UNLESS the palm gate says a pen
@@ -84,7 +84,7 @@ export interface InlinePenCallbacks {
  * Pure: should a contact landing on the linked-mentions band claim as an
  * eraser? Eraser end and eraser mode say yes for the pen; the mouse only
  * when it is a pen (mouse ink) in eraser mode with the left button down.
- * Tip and barrel stay native: tapping a backlink row with the pen must
+ * Tip and side button stay native: tapping a backlink row with the pen must
  * keep clicking.
  */
 export function bandEraserIntent(
@@ -330,10 +330,10 @@ const ASSIST_SLOP_PX = 8;
 
 // ---- native-event ownership -------------------------------------------------
 //
-// Once Handwriting has positively classified a pen contact (tip / barrel / eraser),
+// Once Handwriting has positively classified a pen contact (tip / side / eraser),
 // it owns that interaction. Cancelling pointerdown on the scroller is not
 // enough: Windows synthesises `contextmenu` AFTER pointerup (so the
-// during-stroke check missed it, and every barrel gesture stacked an Obsidian
+// during-stroke check missed it, and every side-button gesture stacked an Obsidian
 // menu), and Obsidian/CodeMirror register handlers at DOCUMENT level, above
 // the scroller, so mouse-compat / drag / selection machinery could still react
 // to a claimed contact (the eraser visibly dragged the editor caret).
@@ -396,7 +396,7 @@ export function suppressNativeFallout(opts: {
  *
  * Yes when a claimed gesture owns the moment, when the event itself is
  * pen-sourced (Chromium ≥115 delivers contextmenu as a PointerEvent), or when
- * a pen is writing or hovering, because a barrel press while hovering raises
+ * a pen is writing or hovering, because a side-button press while hovering raises
  * the menu with no contact to claim. A plain mouse right-click away from the pen is
  * never suppressed.
  */
@@ -599,7 +599,7 @@ export class InlinePenRouter {
 		// 2026-08-26). One capture listener on the view root claims
 		// eraser-intent contacts whose target sits inside the band; after the
 		// claim, setPointerCapture retargets the rest of the gesture to the
-		// scroller and every existing listener takes over. Tip and barrel
+		// scroller and every existing listener takes over. Tip and side button
 		// contacts on the band stay native so backlink rows keep clicking.
 		const bandRoot =
 			typeof scrollEl.closest === "function"
@@ -757,8 +757,8 @@ export class InlinePenRouter {
 		}
 
 		// Pen-sourced context menus on the note are never wanted: mid-stroke
-		// long-press, barrel press at contact (fires AFTER pointerup, so the old
-		// during-stroke check missed it and menus stacked), and barrel press
+		// long-press, side-button press at contact (fires AFTER pointerup, so the old
+		// during-stroke check missed it and menus stacked), and side-button press
 		// while merely hovering. Mouse right-click away from the pen passes.
 		{
 			const h = (ev: Event) => {
@@ -1228,7 +1228,7 @@ export class InlinePenRouter {
 		}
 
 		// EVERY pen contact is a Handwriting gesture now: tip = ink, eraser end =
-		// erase, barrel held = lasso/manipulate (§52/§53, the interaction the
+		// erase, side button held = lasso/manipulate (§52/§53, the interaction the
 		// canvas settled). The overlay reads ev.buttons at pen-down to decide
 		// which; the router's job is only to claim the contact before the
 		// editor can turn it into selection or a context menu.
@@ -1236,7 +1236,7 @@ export class InlinePenRouter {
 			(e.buttons & 32) !== 0 || e.button === 5
 				? "eraser"
 				: (e.buttons & 2) !== 0
-					? "barrel"
+					? "side"
 					: "tip";
 		// COLD = the gesture guard was not pre-armed by hover; if cold contacts
 		// start late, the first-raw trace line below tells us exactly how the

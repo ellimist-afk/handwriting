@@ -112,7 +112,7 @@ function isTextEditingContext(target: EventTarget | null): boolean {
 
 /**
  * A pen sample that claims a live stroke but is already hovering: zero
- * pressure and neither contact bit set (tip = 1, eraser = 32). The barrel
+ * pressure and neither contact bit set (tip = 1, eraser = 32). The side button
  * bit (2) is ignored because it can be held through a lift.
  *
  * The Surface Slim Pen can lift without a discrete pointerup ever reaching

@@ -59,7 +59,7 @@ export class PalmGate {
 
 	/**
 	 * Is a pen writing or hovering right now? Read-only view of the same state
-	 * the touch rule uses. A barrel press while merely HOVERING produces a
+	 * the touch rule uses. A side-button press while merely HOVERING produces a
 	 * native context menu with no contact for the router to claim, and this is
 	 * how that menu gets attributed to the pen.
 	 */

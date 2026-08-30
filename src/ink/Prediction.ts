@@ -69,8 +69,14 @@ function clamp(v: number, lo: number, hi: number): number {
 	return v < lo ? lo : v > hi ? hi : v;
 }
 
+/** Anything with a position: the turn only ever needs x and y. */
+interface Xy {
+	x: number;
+	y: number;
+}
+
 /** Direction change at b, in degrees, across a→b→c. 0 when degenerate. */
-export function turnDegrees(a: PenSample, b: PenSample, c: PenSample): number {
+export function turnDegrees(a: Xy, b: Xy, c: Xy): number {
 	const ux = b.x - a.x;
 	const uy = b.y - a.y;
 	const vx = c.x - b.x;
@@ -80,6 +86,45 @@ export function turnDegrees(a: PenSample, b: PenSample, c: PenSample): number {
 	if (lu < 1e-6 || lv < 1e-6) return 0;
 	const cos = clamp((ux * vx + uy * vy) / (lu * lv), -1, 1);
 	return (Math.acos(cos) * 180) / Math.PI;
+}
+
+/**
+ * Direction change at the pen, measured between AVERAGED positions rather
+ * than between three raw samples.
+ *
+ * At 200+ Hz three consecutive samples can span a fraction of a pixel, and
+ * the angle between two sub-pixel vectors is mostly digitizer noise. Feeding
+ * that to the turn guard made it flap between "straight" and "fully
+ * suppressed" several times per letter, and the tail strobed at the tip
+ * (hardware, 2026-08-29 - flicker while writing).
+ *
+ * The window is split into three, and each third contributes its centroid.
+ * Averaging cuts the noise without lengthening the baseline, which matters:
+ * a longer baseline would dilute a real corner and let the tail hook past it.
+ * Early in a stroke, when only three samples exist, this is exactly the old
+ * measurement - there is nothing better to be had yet.
+ */
+export function recentTurnDegrees(real: readonly PenSample[], window = 9): number {
+	const n = real.length;
+	if (n < 3) return 0;
+	const w = Math.min(window, n);
+	const k = Math.floor(w / 3);
+	if (k < 1) return 0;
+	const start = n - k * 3;
+	const centroid = (from: number, count: number): Xy => {
+		let x = 0;
+		let y = 0;
+		for (let i = from; i < from + count; i++) {
+			x += real[i]!.x;
+			y += real[i]!.y;
+		}
+		return { x: x / count, y: y / count };
+	};
+	return turnDegrees(
+		centroid(start, k),
+		centroid(start + k, k),
+		centroid(start + 2 * k, k)
+	);
 }
 
 /** Recent speed in px/ms from the tail of the real-sample history. */
@@ -177,10 +222,10 @@ export function buildTail(
 
 	// Turn guard: scale the horizon down as the recent path bends, to zero at
 	// maxTurnDeg. This is what keeps corners from growing hooks.
-	let turnDeg = 0;
-	if (n >= 3) {
-		turnDeg = turnDegrees(real[n - 3]!, real[n - 2]!, last);
-	}
+	// Measured over a baseline, not over the last three samples: at pen rates
+	// the last three can be sub-pixel apart, and the guard was flapping on
+	// noise rather than on the shape of the letter.
+	const turnDeg = recentTurnDegrees(real);
 	const guard = clamp(1 - turnDeg / caps.maxTurnDeg, 0, 1);
 	if (guard <= 0) {
 		return { ...EMPTY, turnDeg, guard: 0, suppressed: true };

@@ -10,25 +10,32 @@ from source. The sidecar format and every recovery path live in
 Replace all three files from the same release, then reload Obsidian or
 disable and re-enable Handwriting under Community plugins.
 
-The three files are one unit. `main.js` is the code, `styles.css` carries
-rules the code relies on, and `manifest.json` declares the version and the
-minimum Obsidian the other two expect. Copy only `main.js` and the old
-stylesheet stays behind, and what breaks looks like an input bug, usually
-pen strokes dying over embedded blocks like the backlinks pane.
+The three files are one unit: the code, the stylesheet it depends on, and the
+manifest that says which versions belong together. Copy only `main.js` and
+the old stylesheet stays behind, which looks like an input bug rather than a
+missed file.
 
 Your ink lives in the vault, so updating never touches it.
 
+## turn off backlinks in document
+
+Settings > Backlinks > **Backlinks in document**, off.
+
+On a tablet that panel sits where your hand rests, and its rows are links. Your
+pen cannot trigger them; a stray finger can. Backlinks still work in the
+sidebar.
+
 ## what the pen does
 
-The tip inks. The eraser end erases. The barrel button lassos: hold it and
+The tip inks. The eraser end erases. The side button lassos: hold it and
 circle some ink, then drag the selection to move it or press Delete to
 remove it.
 
-Two tools, pen and highlighter, each with three nib sizes (fine, medium,
-bold) and its own small palette: six pen inks, five highlighter colors. All
-of it's in the command palette and bindable to hotkeys. Worth binding:
-`Pen`, `Highlighter`, `Ink size: next`, `Ink color: next`. Size and color
-apply to whichever tool is active, and persist across sessions.
+Two tools, pen and highlighter, each with a nib size slider and its own small
+palette: six pen inks, five highlighter colors. All of it is in the command
+palette and bindable to hotkeys. Worth binding: `Pen`, `Highlighter`,
+`Ink size: next`, `Ink color: next`. Size and color apply to whichever tool is
+active, and persist across sessions.
 
 Ink follows the text. It scales with Obsidian's zoom (Ctrl +/-, Ctrl-scroll
 quick font size, pinch), stays glued to the text while you scroll, and plain
@@ -40,39 +47,22 @@ To wipe a note, run `Delete all ink on this note`. It asks first, copies the
 ink to the trash described in [storage.md](storage.md), and one undo brings
 everything back.
 
-Only the pen draws. But keeping the pen reliable takes some arbitration of
-touch, and a brief suppression of mouse events, so here's what happens to
-the other two.
+Only the pen draws. Touch and mouse keep working the way they do everywhere
+else, apart from what Handwriting does to keep the pen reliable.
 
-The mouse is never a drawing input, and Handwriting adds no mouse behaviour.
-It does suppress the mouse-compatibility events Windows synthesizes from a
-pen contact, during a claimed stroke and for 350 ms after it, so an eraser
-pass can't drag the text caret. Outside that window the mouse is untouched.
+A resting hand is ignored. While the pen is writing, or has just been near
+the glass, a new finger contact neither scrolls nor moves the caret. Move
+that finger far enough and it is released as a scroll, so you can still flick
+the page while holding the pen.
 
-Touch stays the editor's, with one piece of arbitration Handwriting owns. A
-pen contact must never be mistaken for a scroll, so the editor's scroller
-sits at `touch-action: none` whenever a pen could appear. Under that setting
-the browser won't pan for a finger either, so Handwriting carries the first
-finger gesture itself: it scrolls the note 1:1 with the finger, and on
-release it glides, decaying exponentially with a 325 ms time constant.
-The curve is Handwriting's own, so the first swipe after the pen has been
-near may not feel identical to a native one. Once that gesture ends with a
-real pan, native finger scrolling comes back for the next second, and any
-pen signal takes it away again. A finger tap places the caret as usual.
+Because a pen contact must never be read as a scroll, Handwriting carries the
+first finger scroll itself while the pen is around. That glide is its own
+curve, so the first swipe after the pen has been near may not feel identical
+to a native one. Native scrolling comes back a second later.
 
-Palm rejection: a new finger contact is swallowed, so a resting hand neither
-scrolls nor moves the caret, whenever any one of three things is true. A pen
-stroke is in progress; the last pen contact ended under 250 ms ago; or the
-pen was last seen hovering under 300 ms ago. The two tails run from
-different events and overlap, and the hover one usually decides it: a pen
-lifting away passes back through hover range, and each hover sample restarts
-that 300 ms afresh, so touch stays blocked until the pen is clear of the
-glass. The 250 ms tail only covers the pen leaving hover range outright.
-
-A swallowed contact that travels far enough within its first 400 ms is
-released and becomes a scroll, so you can still flick with a finger while
-holding the pen. A contact the pen overlapped at any point stays a palm for
-as long as it's down.
+On Windows a pen contact also raises synthetic mouse events. Those are
+suppressed during a stroke and briefly after it, so an eraser pass cannot
+drag the text caret.
 
 ## where the ink is
 
@@ -94,23 +84,19 @@ includes hidden folders by default. Check that yours carries `.handwriting/`.
 If it doesn't, the ink won't make it into your backups or onto your other
 machines.
 
-A save runs 700 ms after the most recent change, with a five-second ceiling
-so continuous writing can't defer it forever. Writes go to a temporary file
-and get renamed into place, so an interrupted save is recoverable.
+Saves are written to a temporary file and renamed into place, so an
+interrupted save is recoverable.
 
-Deleting a note moves its ink into `.handwriting/trash/` instead of deleting
-it, when Obsidian reports the deletion while Handwriting is loaded. Every
-copy into the trash gets its own timestamped file, nothing there is ever
-overwritten, and Handwriting never empties that folder.
+Deleting a note moves its ink to `.handwriting/trash/` rather than deleting
+it. Nothing there is ever overwritten, and Handwriting never empties it.
 
 A sidecar changed by another program or device is never overwritten: the
-other version is preserved beside it and you're told. A sidecar that can't
-be parsed is left alone and the note opens read-only for ink, so a backup
-can still repair it.
+other version is kept beside it and you are told. One that cannot be parsed
+is left alone and the note opens read-only for ink, so a backup can repair
+it.
 
 Back up the vault the way you already do, and confirm `.handwriting/` is in
-the backup. The atomic-write scheme handles an interrupted save. A dying
-disk needs a real backup.
+the backup.
 
 ## the canvas
 

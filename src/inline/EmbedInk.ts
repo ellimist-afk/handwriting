@@ -57,6 +57,13 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 /** Windows whose print swap is already wired; popouts each get their own. */
 const printArmed = new WeakSet<Window>();
 /**
+ * Teardowns for the print listeners, because the WeakSet above cannot survive
+ * a plugin reload. Disable and re-enable and the module is evaluated afresh:
+ * the set is empty, the listeners are added again, and the previous pair is
+ * still on the window calling into the old module. Printing then fires both.
+ */
+const printDisarms: Array<() => void> = [];
+/**
  * How many times a print actually asked for the vector layer.
  *
  * `beforeprint` is not guaranteed: an export that renders through its own
@@ -225,14 +232,27 @@ export function attachEmbedInk(
 function armPrintSwap(win: Window): void {
 	if (printArmed.has(win)) return;
 	printArmed.add(win);
-	win.addEventListener("beforeprint", () => usePrintVector(true));
-	win.addEventListener("afterprint", () => usePrintVector(false));
+	const on = () => usePrintVector(true);
+	const off = () => usePrintVector(false);
+	win.addEventListener("beforeprint", on);
+	win.addEventListener("afterprint", off);
+	printDisarms.push(() => {
+		win.removeEventListener("beforeprint", on);
+		win.removeEventListener("afterprint", off);
+	});
 	// Second trigger, because the first is unreliable. A print stylesheet
 	// becoming active is a media-query change, and some print paths flip that
 	// without ever dispatching beforeprint. Both are idempotent: whichever
 	// arrives first builds the layer and the other finds it already there.
 	const mq = win.matchMedia?.("print");
-	mq?.addEventListener?.("change", (e) => usePrintVector(e.matches));
+	const onMq = (e: MediaQueryListEvent) => usePrintVector(e.matches);
+	mq?.addEventListener?.("change", onMq);
+	if (mq) printDisarms.push(() => mq.removeEventListener?.("change", onMq));
+}
+
+/** Drop the print listeners at unload, so a reload cannot leave a pair behind. */
+export function disarmPrintSwaps(): void {
+	for (const d of printDisarms.splice(0)) d();
 }
 
 function usePrintVector(on: boolean): void {

@@ -1,6 +1,6 @@
 import { CameraState } from "../camera/coordinates";
 import { countPaintedPixels } from "../diag/Raster";
-import { PenStyle } from "./PenStyle";
+import { PenStyle, widthForPressure } from "./PenStyle";
 import { InkPoint } from "./Stroke";
 import { IncrementalSmoother, Point2 } from "./Smoothing";
 import { RibbonPt, flattenSegment, flattenSegmentHw } from "./Ribbon";
@@ -160,6 +160,24 @@ export class WetInkRenderer {
 	/** The raw stub from the settled curve to the nib; undefined in raw mode. */
 	head(): { from: Point2; to: Point2; pressure: number } | undefined {
 		return this.smooth ? this.smoother.head() : undefined;
+	}
+
+	/**
+	 * The width the ribbon is laying down right now, in css px.
+	 *
+	 * The predicted tail asks for this rather than computing one from raw
+	 * pressure. With shaping on the ribbon is velocity-thinned, so a tail
+	 * sized from pressure alone is much fatter than the ink it extends - a
+	 * bulge that runs ahead of the nib and deflates as the real samples
+	 * land. Reported from hardware 2026-08-29: distorting while writing,
+	 * while the finished stroke looked perfect. The finished stroke WAS
+	 * perfect; only the guess was drawn wrong.
+	 */
+	liveWidthPx(cam: CameraState, style: PenStyle, pressure: number): number {
+		const world = this.shapingThisStroke
+			? this.shaper.last() * 2
+			: widthForPressure(style, pressure);
+		return world * cam.zoom;
 	}
 
 	/**
