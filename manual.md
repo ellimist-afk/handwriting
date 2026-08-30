@@ -31,8 +31,11 @@ The tip inks. The eraser end erases. The side button lassos: hold it and
 circle some ink, then drag the selection to move it or press Delete to
 remove it.
 
-Two tools, pen and highlighter. Each has a nib size slider and its own
-palette: six pen inks, five highlighter colors.
+Two tools, pen and highlighter, each with a nib size slider and its own small
+palette: six pen inks, five highlighter colors. All of it is in the command
+palette and bindable to hotkeys. Worth binding: `Pen`, `Highlighter`,
+`Ink size: next`, `Ink color: next`. Size and color apply to whichever tool is
+active, and persist across sessions.
 
 Ink follows the text. It scales with Obsidian's zoom (Ctrl +/-, Ctrl-scroll
 quick font size, pinch), stays glued to the text while you scroll, and plain
