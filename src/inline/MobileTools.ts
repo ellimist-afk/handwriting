@@ -462,10 +462,14 @@ export class MobileTools {
 	}
 
 	/**
-	 * The chrome steps aside while the pen is down: anything overlapping a
-	 * desynchronized canvas can demote it off the low-latency path, so
-	 * during a stroke nothing overlaps it at all. Pure class toggles - no
-	 * reads, nothing forced, safe inside the pen-down handler.
+	 * The chrome steps aside while the pen is down. The original reason was
+	 * that anything overlapping a desynchronized canvas can demote it off the
+	 * low-latency path; that flag is off now (see INLINE_DESYNCHRONIZED), so
+	 * the behaviour rests on the plainer reason instead - a toolbar over the
+	 * page is a toolbar in the way of the nib.
+	 *
+	 * Pure class toggles - no reads, nothing forced, safe inside the pen-down
+	 * handler.
 	 */
 	setInking(on: boolean): void {
 		this.el.toggleClass("is-inking", on);

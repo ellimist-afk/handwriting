@@ -56,6 +56,7 @@ import { claimMarkdown, reassignMarkdown } from "./inline/InlineClaim";
 import { INK_SIZE_STEPS, clampInkSize, nextInkSize } from "./ink/InkSize";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius, nextEraserSize } from "./ink/EraserSize";
 import { setPressureSensitivity, pressureSensitivityEnabled } from "./ink/PenStyle";
+import { setInkShaping } from "./ink/InkShape";
 import {
 	HIGHLIGHTER_COLORS,
 	PEN_COLORS,
@@ -134,6 +135,8 @@ interface HandwritingSettings {
 	 * ever written.
 	 */
 	pressureSensitivity: boolean;
+	/** Shaped ribbon: velocity thinning and the start/end taper. */
+	inkSmoothing: boolean;
 	/** Vault folder holding the ink sidecars. Default `.handwriting`. */
 	inkFolder: string;
 	/** Which corner the floating pen toolbar parks in. Default top-right. */
@@ -169,6 +172,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	smoothInk: true,
 	inkSizes: { pen: 1, highlighter: 1 },
 	pressureSensitivity: true,
+	inkSmoothing: true,
 	inkColors: { pen: PEN_COLORS[0]!.hex, highlighter: HIGHLIGHTER_COLORS[0]!.hex },
 	pageOwners: {},
 	eraserRadiusPx: DEFAULT_ERASER_RADIUS_PX,
@@ -403,17 +407,31 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					(async () => {
 						let changed = false;
 						for (const path of inlineReloadCandidates()) {
-							const id = inlineInk.pageIdOf(path);
-							if (!id || !(await this.store.externallyChanged(id))) continue;
-							// The quiet check above is a tick old and the stat
-							// awaited: a pen can have landed meanwhile. This
-							// recheck runs in the same microtask as the
-							// record drop, so no gesture can interleave.
-							if (!inlineReloadCandidates().includes(path)) continue;
-							if (await inlineInk.reloadExternal(path)) {
-								inkExternallyReloaded(path);
-								notifyInkChanged(path);
-								changed = true;
+							// Per note, because this list is walked in the same
+							// order every tick: one note that reliably throws -
+							// an unreadable sidecar, a stat that keeps failing -
+							// would abort the pass at the same place forever and
+							// STARVE every note behind it. Live reload would stop
+							// for those notes silently, which reads as ink from
+							// another device simply never arriving.
+							try {
+								const id = inlineInk.pageIdOf(path);
+								if (!id || !(await this.store.externallyChanged(id))) continue;
+								// The quiet check above is a tick old and the stat
+								// awaited: a pen can have landed meanwhile. This
+								// recheck runs in the same microtask as the
+								// record drop, so no gesture can interleave.
+								if (!inlineReloadCandidates().includes(path)) continue;
+								if (await inlineInk.reloadExternal(path)) {
+									inkExternallyReloaded(path);
+									notifyInkChanged(path);
+									// The release line owns this line, not the cherry-pick:
+									// the quiet-tick backoff below reads it, and dropping it
+									// would hold the poll at full stride forever.
+									changed = true;
+								}
+							} catch (err) {
+								console.error(`[handwriting] live-reload poll failed for ${path}`, err);
 							}
 						}
 						quietTicks = changed ? 0 : quietTicks + 1;
@@ -1008,6 +1026,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				if (file instanceof TFile && file.extension === "md") {
 					inlineInk.handleRename(oldPath, file.path);
 					surfaceExtents.handleRename(oldPath, file.path);
+					// Canvas intent is keyed by path for the same reason and
+					// carries the same hazard: left behind, a NEW note later
+					// created at the old path inherits "the user opened this
+					// on the canvas" from a note that no longer exists.
+					if (this.canvasIntent.delete(oldPath)) this.canvasIntent.add(file.path);
 				}
 			})
 		);
@@ -1016,6 +1039,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				if (file instanceof TFile && file.extension === "md") {
 					inlineInk.handleDelete(file.path);
 					surfaceExtents.handleDelete(file.path);
+					this.canvasIntent.delete(file.path);
 				}
 			})
 		);
@@ -1675,6 +1699,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			pressureSensitivity:
 				raw?.pressureSensitivity ??
 				(raw as { inkShaping?: boolean } | undefined)?.inkShaping !== false,
+			// Its own key, deliberately not the legacy `inkShaping` one above:
+			// that key is already spoken for by the pressure toggle it was
+			// renamed into, and reading it here would make one old choice
+			// silently set two different things.
+			inkSmoothing: raw?.inkSmoothing !== false,
 			pageOwners:
 				raw?.pageOwners && typeof raw.pageOwners === "object" ? raw.pageOwners : {},
 			eraserRadiusPx: clampEraserRadius(raw?.eraserRadiusPx ?? DEFAULT_ERASER_RADIUS_PX),
@@ -1717,6 +1746,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		setInkSizeMult("pen", this.settings.inkSizes.pen);
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
 		setPressureSensitivity(this.settings.pressureSensitivity);
+		setInkShaping(this.settings.inkSmoothing);
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
@@ -1908,9 +1938,35 @@ class HandwritingSettingTab extends PluginSettingTab {
 					this.plugin.saveSettingsNow();
 				})
 			);
+		// The smoothing users can actually feel. setInkShaping has been
+		// honoured by the renderers all along but nothing ever called it: the
+		// toggle that drove it was renamed into "pressure sensitivity" and the
+		// shaping half lost its wiring, so the line has been permanently
+		// shaped with no way to say otherwise. Two people asked for exactly
+		// this on the same day (boox thread, 2026-08-30) and were told to turn
+		// prediction off, which is a different feature and did nothing.
+		new Setting(containerEl)
+			.setName("Ink smoothing")
+			.setDesc(
+				"Shapes the line: thinner when you move fast, tapered at each end. " +
+					"Off draws a plainer stroke that follows the pen more literally. Default on."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.inkSmoothing).onChange((on) => {
+					this.plugin.settings.inkSmoothing = on;
+					setInkShaping(on);
+					repaintAllInkOverlays();
+					this.plugin.saveSettingsNow();
+				})
+			);
 		new Setting(containerEl)
 			.setName("Pressure sensitivity")
-			.setDesc("Off gives an even line. Default on.")
+			// "Off gives an even line" was not true, and a user found the gap:
+			// pressure off stops width tracking how hard you press, but speed
+			// thinning and the end taper are SHAPE, not pressure, and both
+			// stay. The old wording sent people hunting for a setting that
+			// would flatten the line completely (boox thread, 2026-08-30).
+			.setDesc("Off stops the line thickening when you press harder. Default on.")
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.pressureSensitivity).onChange((on) => {
 					this.plugin.settings.pressureSensitivity = on;

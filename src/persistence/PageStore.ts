@@ -93,6 +93,8 @@ export class PageStore {
 	private knownHash = new Map<string, string>();
 	private failures = new Map<string, number>();
 	private errorNotified = new Set<string>();
+	/** Pages whose change-check has already reported a read failure once. */
+	private changeCheckLogged = new Set<string>();
 	/**
 	 * An external revision this session moved aside but has NOT yet replaced
 	 * with a successful write (RC4). The aside-rename necessarily happens
@@ -215,20 +217,44 @@ export class PageStore {
 		const known = this.knownMtime.get(pageId);
 		if (known === undefined) return false;
 		const adapter = this.app.vault.adapter;
+		let changed: boolean;
 		try {
 			const st = await adapter.stat(this.path(pageId)).catch(() => null);
-			if (!st || st.mtime === known) return false;
-			const stamp = contentStamp(await adapter.read(this.path(pageId)));
-			if (stamp === this.knownHash.get(pageId)) {
-				// mtime churn without content change (a sync tool touching
-				// the file): remember it so the next poll stays one stat.
-				this.knownMtime.set(pageId, st.mtime);
-				return false;
+			if (!st || st.mtime === known) {
+				changed = false;
+			} else {
+				const stamp = contentStamp(await adapter.read(this.path(pageId)));
+				if (stamp === this.knownHash.get(pageId)) {
+					// mtime churn without content change (a sync tool touching
+					// the file): remember it so the next poll stays one stat.
+					this.knownMtime.set(pageId, st.mtime);
+					changed = false;
+				} else {
+					changed = true;
+				}
 			}
-			return true;
-		} catch {
+		} catch (err) {
+			// False means "nothing changed", which is the SAFE direction: it
+			// declines to reload and so never discards local state. But this
+			// runs on a one-second poll, so a page whose read keeps failing
+			// would silently stop receiving another device's ink forever, and
+			// say nothing. Once per page, not once per second.
+			if (!this.changeCheckLogged.has(pageId)) {
+				this.changeCheckLogged.add(pageId);
+				console.error(
+					`[handwriting] change check failed for ${pageId}; live reload is paused for this page`,
+					err
+				);
+			}
 			return false;
 		}
+		// Cleared on ANY completed check, not just one that found a change.
+		// Clearing only on `true` left a page that failed, recovered, and then
+		// simply never changed again holding the latch forever - so a genuinely
+		// new failure later would say nothing, which is the exact silence this
+		// latch exists to break.
+		this.changeCheckLogged.delete(pageId);
+		return changed;
 	}
 
 	async load(pageId: string): Promise<ParseResult | null> {

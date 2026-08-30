@@ -727,6 +727,106 @@ describe("externallyChanged — the live-reload poll primitive", () => {
 		await store.load("p1");
 		expect(await store.externallyChanged("p1")).toBe(false);
 	});
+
+	// A read that keeps failing pauses live reload for that page. False is
+	// the safe answer - it declines to reload, so local ink is never
+	// discarded - but on a one-second poll, silence means another device's
+	// ink stops arriving forever with nothing said. Once per page, not once
+	// per second.
+	it("a failing read answers false and says so exactly once", async () => {
+		store.schedule("p1", pageWith("p1", "S"));
+		await store.flush();
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "REMOTE")));
+		fake.mtimes.set(".handwriting/p1.json", 999999);
+
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const realRead = fake.read.bind(fake);
+		fake.read = async () => {
+			throw new Error("EIO");
+		};
+		try {
+			expect(await store.externallyChanged("p1")).toBe(false);
+			expect(await store.externallyChanged("p1")).toBe(false);
+			expect(await store.externallyChanged("p1")).toBe(false);
+			expect(errors).toHaveBeenCalledTimes(1);
+			expect(String(errors.mock.calls[0]?.[0])).toContain("live reload is paused");
+		} finally {
+			fake.read = realRead;
+			errors.mockRestore();
+		}
+	});
+
+	// The latch has to clear on ANY completed check, not only one that found a
+	// change. Clearing only on "changed" left a page that failed, recovered,
+	// and then simply never changed again holding the latch forever - so a
+	// genuinely new failure would say nothing, which is the silence the latch
+	// exists to break.
+	it("a quiet recovery still clears the latch", async () => {
+		store.schedule("p1", pageWith("p1", "S"));
+		await store.flush();
+
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const realRead = fake.read.bind(fake);
+		try {
+			// Fail once, with a change on disk so the read is reached.
+			fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "REMOTE")));
+			fake.mtimes.set(".handwriting/p1.json", 999999);
+			fake.read = async () => {
+				throw new Error("EIO");
+			};
+			expect(await store.externallyChanged("p1")).toBe(false);
+			expect(errors).toHaveBeenCalledTimes(1);
+
+			// Recovers, but the page is QUIET: mtime back to what we know, so
+			// the check completes and reports "no change" without a read.
+			fake.read = realRead;
+			fake.mtimes.set(".handwriting/p1.json", store["knownMtime"].get("p1") as number);
+			expect(await store.externallyChanged("p1")).toBe(false);
+
+			// A new failure after that quiet success is news again.
+			fake.mtimes.set(".handwriting/p1.json", 1000001);
+			fake.read = async () => {
+				throw new Error("EIO");
+			};
+			expect(await store.externallyChanged("p1")).toBe(false);
+			expect(errors).toHaveBeenCalledTimes(2);
+		} finally {
+			fake.read = realRead;
+			errors.mockRestore();
+		}
+	});
+
+	it("reports again after the page recovers and then fails anew", async () => {
+		store.schedule("p1", pageWith("p1", "S"));
+		await store.flush();
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "REMOTE")));
+		fake.mtimes.set(".handwriting/p1.json", 999999);
+
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const realRead = fake.read.bind(fake);
+		try {
+			fake.read = async () => {
+				throw new Error("EIO");
+			};
+			expect(await store.externallyChanged("p1")).toBe(false);
+			expect(errors).toHaveBeenCalledTimes(1);
+
+			// Recovering clears the latch: a real change is seen again.
+			fake.read = realRead;
+			expect(await store.externallyChanged("p1")).toBe(true);
+
+			// Failing later is news again, so it reports again.
+			fake.read = async () => {
+				throw new Error("EIO");
+			};
+			fake.mtimes.set(".handwriting/p1.json", 1000000);
+			expect(await store.externallyChanged("p1")).toBe(false);
+			expect(errors).toHaveBeenCalledTimes(2);
+		} finally {
+			fake.read = realRead;
+			errors.mockRestore();
+		}
+	});
 });
 
 describe("round trips and deletion", () => {

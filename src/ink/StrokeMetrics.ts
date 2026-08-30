@@ -112,6 +112,14 @@ export class StrokeMetrics {
 	totalEnded = 0;
 
 	begin(mode: string, now: number): void {
+		// Per stroke, like every other prediction field. Left standing, the
+		// FIRST stroke that ever predicted made every later report say
+		// "pred on" - including strokes drawn with the setting off, which
+		// then read as prediction running and producing nothing. It sent a
+		// flicker hunt after a feature that was not even switched on
+		// (alan, hardware, 2026-08-30).
+		this.predMode = "off";
+		this.predApi = "unknown";
 		this.predTails = 0;
 		this.predSuppressed = 0;
 		this.predPoints.reset();

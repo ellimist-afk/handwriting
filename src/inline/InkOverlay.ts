@@ -180,12 +180,38 @@ let enabled = true;
  */
 let inlineTool: InkTool = "pen";
 /**
- * Low-latency canvas request for the wet layers. Chosen by the v0.1.x A/B
- * re-run on the test Surface for the inline overlay: `true` noticeably improves pen
- * feel. Fixed at getContext() time; the diagnostic toggle that re-ran the
- * A/B was retired in the v0.13.0 cleanup.
+ * Low-latency canvas request for the wet layers. OFF, and the name is a lie
+ * on this stack: asking for it made everything worse.
+ *
+ * It was `true` from a v0.1.x A/B judged on feel alone - necessarily, because
+ * the frame instrument on this surface never recorded anything until
+ * 2026-08-30, so nobody could see what the flag did to frame cadence. With it
+ * working, one A/B on the same class of machine (surface pro, intel, mains
+ * power, 120Hz):
+ *
+ *              desynchronized: true      false
+ *   frame            13-28ms          8.33ms locked
+ *   age@present      25-37ms          7ms
+ *   move events      25-40Hz          111-117Hz
+ *   raw samples      65-100Hz         237-262Hz
+ *   coalescing       2.7:1            1:1
+ *
+ * It was not merely costing frames, it was throttling INPUT: the pen reported
+ * 80Hz because the queue was swallowing samples, and the digitizer is
+ * actually 260Hz. That also explains the coalescing that looked like a busy
+ * main thread - the thread was idle, the events were held.
+ *
+ * And it was the flicker. The stroke handoff notes that clearing a
+ * desynchronized wet canvas "can reach the compositor while the main thread
+ * is still drawing a long committed stroke"; the ordering there mitigates
+ * that, and under sustained input the queue outran the mitigation. Turning
+ * this off ended the flicker alan had been chasing since the night before.
+ *
+ * Long strokes were where it showed: at `true`, any stroke past ~200ms
+ * degraded while flicks stayed clean. At `false`, a 2988ms stroke carrying
+ * 786 samples holds 8.33ms frames.
  */
-const INLINE_DESYNCHRONIZED = true;
+const INLINE_DESYNCHRONIZED = false;
 /** No hover sample for this long means the pen is gone; see armHoverWatchdog. */
 const HOVER_GHOST_MS = 1000;
 /** Real samples kept for extrapolation; the turn guard averages a window. */
@@ -2173,9 +2199,12 @@ class InkOverlayPlugin {
 				inlineInk.commitGesture(path, strokes);
 				this.updateHandwritingPageClass();
 			},
-			// Paint underneath the still-visible wet layer. Long strokes can take
-			// long enough to flatten that clearing the desynchronized wet canvas
-			// first produces a visible blank frame, especially over Moonlight.
+			// Paint underneath the still-visible wet layer. Long strokes can
+			// take long enough to flatten that clearing the wet canvas first
+			// produces a visible blank frame, especially over Moonlight. That
+			// was sharpest while the wet layer was desynchronized, which it no
+			// longer is (see INLINE_DESYNCHRONIZED); the ordering is kept
+			// because painting before clearing is right either way.
 			//
 			// That works because pen ink is OPAQUE: the same pixels land twice
 			// and nobody can tell. The highlighter is not - both its canvases

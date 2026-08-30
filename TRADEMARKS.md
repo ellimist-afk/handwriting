@@ -1,6 +1,6 @@
 # Name and branding
 
-`AGPL-3.0-only` covers the code. This document is about the name, and it
+The `LICENSE` file covers the code. This document is about the name, and it
 takes nothing away from that licence.
 
 No registered trademark is claimed. "Handwriting" is an ordinary descriptive
@@ -16,5 +16,5 @@ Factual references stay fine: "Forked from Handwriting", "compatible with
 Handwriting sidecars", and similar accurate statements.
 
 This document has not been legally reviewed. Nothing in it restricts any
-right granted by the AGPL. Where the two appear to disagree, the licence
+right granted by the licence. Where the two appear to disagree, the licence
 governs.

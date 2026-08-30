@@ -4,8 +4,8 @@ Pen ink on ordinary Markdown notes in Obsidian.
 
 Open a note and write. The note stays a plain `.md` file.
 
-Obsidian never really fulfilled its role of main notebook for me because of its lack of handwriting integration. Back in uni, taking notes for biochem and comp sci in onenote with pen and keyboard seamlessly on my tablet truly made me love learning.
-I wish I could've used Obsidian back then to take all my notes. I built this plugin to solve that problem retroactively
+The biggest hurdle to using Obsidian is the lack of handwriting integration. when I was a student i really enjoyed taking notes for biochem and comp sci in Onenote on my tablet. truly it made me love learning. 
+I wish I could've used Obsidian back then to handwrite all my notes. this plugin is my attempt to solve that problem retroactively
 
 Handwriting is designed for students, educators, engineers, artists, or anyone who needs to write and type in Obsidian
 
@@ -125,4 +125,10 @@ thank you for using my plugin.
 
 ## license
 
-Free and open source, `AGPL-3.0-only`. No CLA, no copyright assignment
+PolyForm Strict 1.0.0, plus a grant covering personal use and internal
+business use. Use it for anything you write, including work you get paid for.
+
+You may not redistribute it, publish a modified version, or ship it inside
+something you sell. For those, ask.
+
+Handwriting was `AGPL-3.0-only` through 1.3.8, and those releases stay that way.
