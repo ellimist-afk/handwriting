@@ -356,7 +356,13 @@ footer {
 <section>
 	<h2>found a bug</h2>
 	<p>Open an issue on <a href="https://github.com/ellimist-afk/handwriting/issues">GitHub</a> and say what happened, which device, and which pen.</p>
-	<p class="soft">Easy mode: run <code>Diagnostics: toggle recording</code>, reproduce it, then <code>Diagnostics: copy pen trace</code> and paste that into the issue.</p>
+	<p>A pen trace helps. Everything below is a command palette entry, so hit Ctrl+P (Cmd+P on Mac) and type the name.</p>
+	<ol>
+		<li><code>Diagnostics: begin recording</code></li>
+		<li>Reproduce the bug.</li>
+		<li><code>Diagnostics: show pen trace</code></li>
+		<li>Press Copy in the window that opens, and paste it into the issue.</li>
+	</ol>
 </section>
 
 <footer>
