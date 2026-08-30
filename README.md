@@ -4,8 +4,8 @@ Pen ink on ordinary Markdown notes in Obsidian.
 
 Open a note and write. The note stays a plain `.md` file.
 
-The biggest hurdle to using Obsidian is the lack of handwriting integration. when I was a student i really enjoyed taking notes for biochem and comp sci in Onenote on my tablet. truly it made me love learning. 
-I wish I could've used Obsidian back then to handwrite all my notes. this plugin is my attempt to solve that problem retroactively
+Obsidian never really fulfilled its role of main notebook for me because of its lack of handwriting integration. Back in uni, taking notes for biochem and comp sci in onenote with pen and keyboard seamlessly on my tablet truly made me love learning.
+I wish I could've used Obsidian back then to take all my notes. I built this plugin to solve that problem retroactively
 
 Handwriting is designed for students, educators, engineers, artists, or anyone who needs to write and type in Obsidian
 
