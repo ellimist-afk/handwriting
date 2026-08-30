@@ -6,7 +6,7 @@
 <title>Handwriting for Obsidian</title>
 <meta name="description" content="An Obsidian plugin for writing on your notes with a pen. Pressure ink, highlighter, eraser and lasso on ordinary Markdown. Free and open source.">
 <meta property="og:title" content="Handwriting for Obsidian">
-<meta property="og:description" content="Write on your notes with a pen. The note stays a plain .md file.">
+<meta property="og:description" content="Write on your notes with a pen. The note stays a .md file.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://ellimist-afk.github.io/handwriting/">
 <meta property="og:image" content="https://ellimist-afk.github.io/handwriting/card.png">
@@ -181,6 +181,17 @@ header { padding: 4.5rem 0 2.5rem; display: flex; flex-direction: column; gap: 1
 .swatch { width: .7rem; height: .7rem; border-radius: 50%; display: inline-block; vertical-align: -1px; margin-right: .4rem; }
 .strip .spacer { flex: 1; }
 .caption { font-size: .9rem; color: var(--ink-soft); }
+.video {
+	position: relative;
+	width: 100%;
+	aspect-ratio: 16 / 9;
+	border-radius: 10px;
+	overflow: hidden;
+	border: 1px solid var(--rule);
+	box-shadow: var(--shadow);
+	background: var(--card);
+}
+.video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
 
 /* content bits */
 .tree {
@@ -233,12 +244,19 @@ footer {
 <header>
 	<p class="eyebrow">Obsidian plugin</p>
 	<h1>Handwriting</h1>
-	<p class="lede">pen ink on ordinary Markdown notes. open a note and write. the note stays a plain <code>.md</code> file.</p>
+	<p class="lede">pen ink on ordinary Markdown notes. open a note and write. the note stays a <code>.md</code> file.</p>
 	<div class="actions">
 		<a class="btn" href="https://community.obsidian.md/plugins/handwriting">Get it from the plugin directory</a>
 		<a class="btn ghost" href="https://github.com/ellimist-afk/handwriting">GitHub</a>
 	</div>
 </header>
+
+<section>
+	<h2>see it work</h2>
+	<div class="video">
+		<iframe src="https://www.youtube-nocookie.com/embed/TUeniA9BZcc" title="Handwriting inside of Obsidian" loading="lazy" referrerpolicy="no-referrer" allow="fullscreen; picture-in-picture" allowfullscreen></iframe>
+	</div>
+</section>
 
 <section>
 	<h2>try it here first</h2>
@@ -274,7 +292,7 @@ footer {
 	<h2>what the pen does</h2>
 	<p>the tip inks. the eraser end erases. the side button lassos: hold it and circle some ink, then drag the selection to move it or press Delete to remove it.</p>
 	<p>two tools, pen and highlighter. each has a nib size slider and its own palette: eight pen inks, five highlighter colors.</p>
-	<p>ink stays glued to the text. it scales with Obsidian's zoom, moves with the text while you scroll, and plain Ctrl+Z undoes ink and text edits in the order they happened. draw past the last line or far off to the right and the note grows scroll room to reach it.</p>
+	<p>ink stays glued to the text. it scales with Obsidian's zoom, moves with the text while you scroll, and Ctrl+Z undoes ink and text edits in the order they happened. draw past the last line or far off to the right and the note grows scroll room to reach it.</p>
 	<div class="cols">
 		<ul>
 			<li>pressure sensitivity</li>

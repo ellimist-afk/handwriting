@@ -37,7 +37,7 @@ command palette and bindable to hotkeys. Worth binding: `Pen`, `Highlighter`,
 active, and persist across sessions.
 
 Ink stays glued to the text while you scroll and scales with Obsidian's zoom
-(Ctrl +/-, Ctrl-scroll quick font size, pinch). Plain Ctrl+Z undoes ink and
+(Ctrl +/-, Ctrl-scroll quick font size, pinch). Ctrl+Z undoes ink and
 text edits in the order they happened. Draw below the last line or far off to
 the right and the note grows scroll room to reach it.
 
@@ -103,7 +103,7 @@ A note with `handwriting: page` in its frontmatter opens in a dedicated
 canvas view instead of the editor, with its own toolbar, free-placed text
 boxes, images as vault attachments and a pannable camera. The ribbon's **New canvas
 page** button creates one, and `Open canvas page as Markdown` opens it in
-the plain editor for the rest of the session; it goes back to the canvas
+the editor for the rest of the session; it goes back to the canvas
 next time unless you remove the `handwriting: page` line.
 
 The canvas shares the ink engine and the sidecar format with the inline
