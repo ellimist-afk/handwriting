@@ -18,17 +18,35 @@ pen strokes dying over embedded blocks like the backlinks pane.
 
 Your ink lives in the vault, so updating never touches it.
 
+## turn off backlinks in document
+
+Settings > Backlinks > **Backlinks in document**, off.
+
+Obsidian can render a backlinks panel at the foot of every note. Handwriting
+keeps pen strokes alive across it already: the standing guard puts
+`touch-action: none` on every descendant of the scroller, which is what stopped
+strokes dying in the band across "Linked mentions" and "Unlinked mentions".
+
+That does not change what those entries are. They are links, and touch belongs
+to the editor by design, so a finger landing on one opens that note. On a
+tablet the panel is a large tap target sitting where a hand rests while
+writing.
+
+The pen itself is safe. A claimed stroke owns `click`, `auxclick`, `dblclick`
+and `contextmenu` for its whole length and for 350 ms after it, so a stroke
+crossing a backlink cannot follow it.
+
+Turning the panel off removes the target. Backlinks still work everywhere
+else: the sidebar pane, the command palette, the graph.
+
 ## what the pen does
 
 The tip inks. The eraser end erases. The side button lassos: hold it and
 circle some ink, then drag the selection to move it or press Delete to
 remove it.
 
-Two tools, pen and highlighter, each with three nib sizes (fine, medium,
-bold) and its own small palette: six pen inks, five highlighter colors. All
-of it's in the command palette and bindable to hotkeys. Worth binding:
-`Pen`, `Highlighter`, `Ink size: next`, `Ink color: next`. Size and color
-apply to whichever tool is active, and persist across sessions.
+Two tools, pen and highlighter. Each has a nib size slider and its own
+palette: six pen inks, five highlighter colors.
 
 Ink follows the text. It scales with Obsidian's zoom (Ctrl +/-, Ctrl-scroll
 quick font size, pinch), stays glued to the text while you scroll, and plain
