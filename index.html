@@ -233,7 +233,7 @@ footer {
 <header>
 	<p class="eyebrow">Obsidian plugin</p>
 	<h1>Handwriting</h1>
-	<p class="lede">Pen ink on ordinary Markdown notes. Open a note and write. The note stays a plain <code>.md</code> file.</p>
+	<p class="lede">pen ink on ordinary Markdown notes. open a note and write. the note stays a plain <code>.md</code> file.</p>
 	<div class="actions">
 		<a class="btn" href="https://community.obsidian.md/plugins/handwriting">Get it from the plugin directory</a>
 		<a class="btn ghost" href="https://github.com/ellimist-afk/handwriting">GitHub</a>
@@ -242,7 +242,7 @@ footer {
 
 <section>
 	<h2>try it here first</h2>
-	<p>This is the plugin's own ink code running in this page. If your pen writes here, it writes the same in a note.</p>
+	<p>this is the plugin's own ink code running in this page. if your pen writes here, it writes the same in a note.</p>
 	<div class="surface">
 		<div class="paper">
 			<canvas id="ink-demo"></canvas>
@@ -259,67 +259,65 @@ footer {
 			<button id="ink-clear">Clear</button>
 		</div>
 	</div>
-	<p class="caption" id="ink-pointer-note">No pen? Drag with the mouse.</p>
-	<p class="caption">Save as SVG is the plugin's own export. Same file you get beside your note.</p>
+	<p class="caption" id="ink-pointer-note">no pen? drag with the mouse.</p>
+	<p class="caption">save as SVG is the plugin's own export. same file you get beside your note.</p>
 </section>
 
 <section>
 	<h2>why it exists</h2>
-	<p>Obsidian never really fulfilled its role of main notebook for me because of its lack of handwriting integration. Back in uni, taking notes for biochem and comp sci in onenote with pen and keyboard seamlessly on my tablet truly made me love learning.</p>
+	<p>Obsidian never really fulfilled its role of main notebook for me because of its lack of handwriting integration. back in uni, taking notes for biochem and comp sci in onenote with pen and keyboard seamlessly on my tablet truly made me love learning.</p>
 	<p>I wish I could've used Obsidian back then to take all my notes. I built this plugin to solve that problem retroactively</p>
-	<p class="soft">For students, educators, engineers, artists, or anyone who writes and types in the same place.</p>
+	<p class="soft">for students, educators, engineers, artists, or anyone who writes and types in the same place.</p>
 </section>
 
 <section>
 	<h2>what the pen does</h2>
-	<p>The tip inks. The eraser end erases. The side button lassos: hold it and circle some ink, then drag the selection to move it or press Delete to remove it.</p>
-	<p>Two tools, pen and highlighter. Each has a nib size slider and its own palette: eight pen inks, five highlighter colors.</p>
-	<p>Ink stays glued to the text. It scales with Obsidian's zoom, moves with the text while you scroll, and plain Ctrl+Z undoes ink and text edits in the order they happened. Draw past the last line or far off to the right and the note grows scroll room to reach it.</p>
+	<p>the tip inks. the eraser end erases. the side button lassos: hold it and circle some ink, then drag the selection to move it or press Delete to remove it.</p>
+	<p>two tools, pen and highlighter. each has a nib size slider and its own palette: eight pen inks, five highlighter colors.</p>
+	<p>ink stays glued to the text. it scales with Obsidian's zoom, moves with the text while you scroll, and plain Ctrl+Z undoes ink and text edits in the order they happened. draw past the last line or far off to the right and the note grows scroll room to reach it.</p>
 	<div class="cols">
 		<ul>
-			<li>Pressure sensitivity</li>
-			<li>Palm rejection</li>
-			<li>Ink prediction and smoothing</li>
-			<li>Pinch to zoom</li>
-			<li>Infinite canvas</li>
-			<li>Pen toolbar with auto-hide</li>
+			<li>pressure sensitivity</li>
+			<li>palm rejection</li>
+			<li>ink prediction and smoothing</li>
+			<li>pinch to zoom</li>
+			<li>infinite canvas</li>
+			<li>pen toolbar with auto-hide</li>
 		</ul>
 		<ul>
-			<li>Lined and grid paper</li>
-			<li>Handwriting to shape</li>
-			<li>Insert space</li>
-			<li>Ink embeds</li>
-			<li>Export ink as SVG</li>
+			<li>lined and grid paper</li>
+			<li>handwriting to shape</li>
+			<li>insert space</li>
+			<li>ink embeds</li>
+			<li>export ink as SVG</li>
 		</ul>
 	</div>
 </section>
 
 <section>
 	<h2>how it works</h2>
-	<p class="soft">For anyone curious about the mechanism.</p>
 
 	<h3>writing</h3>
-	<p>You write on an overlay above the editor, drawn in CodeMirror 6.</p>
-	<p>Only the pen draws. Typing, selection and the caret stay Obsidian's. A resting palm won't scroll the page, and an eraser pass won't drag the caret.</p>
-	<p>The only thing ever written into your Markdown is one frontmatter line, <code>handwriting-page-id</code>, added the first time you write on that note.</p>
+	<p>when you put pen to screen, you are writing on an overlay drawn over the Obsidian text editor - this overlay is drawn in codemirror 6</p>
+	<p>the overlay claims pen input only. touch, mouse, typing, selection and caret placement all fall through to Obsidian untouched</p>
+	<p>the only thing ever written into your markdown is a single <code>handwriting-page-id</code> line in frontmatter which is placed when you start writing</p>
 
-	<h3>where the ink is</h3>
-	<p>One JSON file per note, in <code>.handwriting/</code> at the vault root, named by that id.</p>
+	<h3>where is ink stored</h3>
+	<p>your ink is one json file per note in <code>/.handwriting/</code></p>
 	<div class="tree">&lt;vault&gt;/
   <b>Some note.md</b>              your text, plus one frontmatter property
   <b>.handwriting/</b>
     3f2a….json               the ink for that note
     trash/                   a copy kept from a delete</div>
-	<p>A sidecar in photography is a small file that sits beside a bigger one and holds information about it. Same idea here. The sidecar holds your strokes, the frontmatter line is the link back to the note.</p>
-	<p>Whatever happens to the ink, your text is safe. The note is never modified beyond that one line.</p>
+	<p>sidecar is a digital photography term that refers to a small file beside a main file, that holds information about the main file. this is a useful analogy</p>
+	<p>in this case, the sidecar stores your ink as coordinates - your note is linked to your ink by a single properties line in the properties field of your note. this link + the coordinates tells Obsidian where all the ink is</p>
+	<p>what this means practically is that no matter what happens to the ink, the text in your note will be safe, as the note itself is not modified (besides its frontmatter).</p>
 
-	<h3>how ink is stored</h3>
-	<p>Coordinates are note-space pixels. The origin is the top-left of the text column, and y runs down the document.</p>
-	<p>Markdown reflows wherever it wants. Your ink stays where you put it. Editing text never moves ink, except the insert space tool, by design.</p>
-	<p>Zooming doesn't rewrite a single stroke.</p>
+	<h3>how the ink is stored</h3>
+	<p>ink is stored in note-surface coordinates. origin at the top-left of the text column, y absolute down the document. markdown reflows wherever it wants. your ink stays where you put it. editing text will never move ink except in the case of the insert space tool, by design</p>
 
-	<h3>how ink is placed</h3>
-	<p>Drawing runs on raw pointer events. The line behind the nib is smoothed. The last stub to the tip is left raw, so the ink always reaches the pen.</p>
+	<h3>how the ink is placed</h3>
+	<p>drawing happens on raw pointer events. the line behind the nib is smoothed with math; the last stub to the pen tip is raw so the ink will always reach the tip of the pen</p>
 </section>
 
 <section>
@@ -327,53 +325,53 @@ footer {
 	<div class="platforms">
 		<span>Windows</span><span>macOS</span><span>Linux</span><span>iOS</span><span>Android</span><span>Boox</span>
 	</div>
-	<p class="soft">Obsidian 1.12.3 or newer. Built and tested mostly on a Surface Pro, with some testing on an iPad. Please send reports.</p>
-	<h3>Two things worth knowing</h3>
+	<p class="soft">Obsidian 1.12.3 or newer. built and tested mostly on a Surface Pro, with some testing on an iPad. please send reports.</p>
+	<h3>two things worth knowing</h3>
 	<ul>
 		<li><b>iPad:</b> turn off Scribble, or iOS draws its own black ink over your strokes. Settings &gt; Apple Pencil &gt; Scribble.</li>
-		<li><b>Obsidian Sync:</b> it skips hidden folders, so ink won't sync until you turn on Handwriting settings &gt; Compatibility with Obsidian sync.</li>
+		<li><b>Obsidian Sync:</b> it skips hidden folders, so ink won't sync until you turn on Handwriting settings &gt; compatibility with Obsidian sync.</li>
 	</ul>
 </section>
 
 <section>
 	<h2>installing</h2>
 	<ol>
-		<li>Settings &gt; Community plugins &gt; Browse</li>
-		<li>Search <b>Handwriting</b></li>
-		<li>Install, then enable</li>
+		<li>Settings &gt; Community plugins &gt; browse</li>
+		<li>search <b>Handwriting</b></li>
+		<li>install, then enable</li>
 	</ol>
-	<p class="soft">Or from the directory: <a href="https://community.obsidian.md/plugins/handwriting">community.obsidian.md/plugins/handwriting</a>. For beta builds before they're released, add <code>ellimist-afk/handwriting</code> to BRAT.</p>
-	<p class="soft">Longer reading: the <a href="https://github.com/ellimist-afk/handwriting/blob/master/docs/manual.md">manual</a>, and <a href="https://github.com/ellimist-afk/handwriting/blob/master/docs/storage.md">how ink is stored</a>.</p>
+	<p class="soft">or from the directory: <a href="https://community.obsidian.md/plugins/handwriting">community.obsidian.md/plugins/handwriting</a>. for beta builds before they're released, add <code>ellimist-afk/handwriting</code> to BRAT.</p>
+	<p class="soft">longer reading: the <a href="https://github.com/ellimist-afk/handwriting/blob/master/docs/manual.md">manual</a>, and <a href="https://github.com/ellimist-afk/handwriting/blob/master/docs/storage.md">how ink is stored</a>.</p>
 </section>
 
 <section>
 	<h2>coming</h2>
 	<ul>
-		<li>Native PDF annotation</li>
+		<li>native PDF annotation</li>
 		<li>OCR, handwriting to text</li>
-		<li>Searchable handwriting</li>
-		<li>Handwriting to math and LaTeX</li>
-		<li>Audio alongside ink</li>
-		<li>Ruler and compass on screen</li>
+		<li>searchable handwriting</li>
+		<li>handwriting to math and LaTeX</li>
+		<li>audio alongside ink</li>
+		<li>ruler and compass on screen</li>
 	</ul>
 </section>
 
 <section>
 	<h2>found a bug</h2>
-	<p>Open an issue on <a href="https://github.com/ellimist-afk/handwriting/issues">GitHub</a> and say what happened, which device, and which pen.</p>
-	<p>A pen trace helps. Everything below is a command palette entry, so hit Ctrl+P (Cmd+P on Mac) and type the name.</p>
+	<p>open an issue on <a href="https://github.com/ellimist-afk/handwriting/issues">GitHub</a> and say what happened, which device, and which pen.</p>
+	<p>a pen trace helps. everything below is a command palette entry, so hit Ctrl+P (Cmd+P on Mac) and type the name.</p>
 	<ol>
 		<li><code>Diagnostics: begin recording</code></li>
-		<li>Reproduce the bug.</li>
+		<li>reproduce the bug.</li>
 		<li><code>Diagnostics: show pen trace</code></li>
-		<li>Press Copy in the window that opens, and paste it into the issue.</li>
+		<li>press Copy in the window that opens, and paste it into the issue.</li>
 	</ol>
 </section>
 
 <footer>
-	<p>Handwriting is free and open source, AGPL-3.0-only. No CLA, no copyright assignment.</p>
-	<p>I'm still working on it almost every night. If you want to buy me a coffee: <a href="https://ko-fi.com/ellimistafk">ko-fi.com/ellimistafk</a></p>
-	<p>Thank you for using my plugin.</p>
+	<p>Handwriting is free and open source.</p>
+	<p>I'm still working on it almost every night. if you want to buy me a coffee: <a href="https://ko-fi.com/ellimistafk">ko-fi.com/ellimistafk</a></p>
+	<p>thank you for using my plugin.</p>
 </footer>
 
 </main>
