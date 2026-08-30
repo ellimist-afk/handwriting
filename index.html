@@ -265,9 +265,9 @@ footer {
 
 <section>
 	<h2>why it exists</h2>
-	<p>The biggest hurdle to using Obsidian is the lack of handwriting integration. When I was a student I really enjoyed taking notes for biochem and comp sci in OneNote on my tablet. Truly it made me love learning.</p>
+	<p>Obsidian has no handwriting. When I was a student I really enjoyed taking notes for biochem and comp sci in OneNote on my tablet. Truly it made me love learning.</p>
 	<p>I wish I could've used Obsidian back then to handwrite all my notes. This plugin is my attempt to solve that problem retroactively.</p>
-	<p class="soft">For students, educators, engineers, artists, or anyone who writes and types in the same place.</p>
+	<p class="soft">For anyone who writes and types in the same place.</p>
 </section>
 
 <section>
@@ -285,6 +285,7 @@ footer {
 			<li>Lined and grid paper</li>
 			<li>Handwriting to shape</li>
 			<li>Export ink as SVG</li>
+			<li>Write on PDFs</li>
 		</ul>
 	</div>
 </section>
@@ -295,7 +296,7 @@ footer {
 
 	<h3>writing</h3>
 	<p>You write on an overlay above the editor, drawn in CodeMirror 6.</p>
-	<p>Only the pen draws. Typing, selection and the caret stay Obsidian's. Touch and mouse get enough arbitration to keep a resting palm from scrolling and an eraser pass from dragging the caret.</p>
+	<p>Only the pen draws. Typing, selection and the caret stay Obsidian's. A resting palm won't scroll the page, and an eraser pass won't drag the caret.</p>
 	<p>The only thing ever written into your Markdown is one frontmatter line, <code>handwriting-page-id</code>, added the first time you write on that note.</p>
 
 	<h3>where the ink is</h3>
@@ -311,7 +312,7 @@ footer {
 	<h3>how ink is stored</h3>
 	<p>Coordinates are note-space pixels. The origin is the top-left of the text column, and y runs down the document.</p>
 	<p>Markdown reflows wherever it wants. Your ink stays where you put it. Editing text never moves ink, except the insert space tool, by design.</p>
-	<p>Zooming rescales nothing. No stroke is rewritten.</p>
+	<p>Zooming doesn't rewrite a single stroke.</p>
 
 	<h3>how ink is placed</h3>
 	<p>Drawing runs on raw pointer events. The line behind the nib is smoothed. The last stub to the tip is left raw, so the ink always reaches the pen.</p>
@@ -344,7 +345,6 @@ footer {
 <section>
 	<h2>coming</h2>
 	<ul>
-		<li>Native PDF annotation</li>
 		<li>OCR, handwriting to text</li>
 		<li>Searchable handwriting</li>
 		<li>Handwriting to math and LaTeX</li>
