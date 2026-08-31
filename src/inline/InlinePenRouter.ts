@@ -1,6 +1,8 @@
+import { Platform } from "obsidian";
 import { telemetry } from "../diag/Telemetry";
 import { GuardDecision, ManipulationGuard } from "../input/ManipulationGuard";
 import { PalmGate, paroleEarned } from "../input/PalmGate";
+import { PalmShield, palmRadiusTrustworthy } from "../input/PalmShield";
 import { PenSample, silentLift } from "../input/PointerRouter";
 import { visualToNote } from "./ZoomScale";
 import { hideProbeMarkers, markRawPointer } from "./PenProbe";
@@ -18,6 +20,7 @@ import {
 	touchesPredateStroke,
 } from "./StylusTouch";
 import { mouseInkEnabled } from "./MouseInk";
+import { MouseTrail } from "../input/MouseTrail";
 import { penSeenThisSession } from "./PenToolsMode";
 
 /**
@@ -52,7 +55,13 @@ import { penSeenThisSession } from "./PenToolsMode";
 export interface InlinePenCallbacks {
 	onPenDown(sample: PenSample, ev: PointerEvent): void;
 	/** Display-rate pen hover, outside an active contact. */
-	onPenHover(sample: PenSample): void;
+	/**
+	 * `pointerType` because a reticle serves two audiences: under a pen it is
+	 * a preview the nib will cover, under a mouse it is the POINTER, and the
+	 * two want different chrome. Optional so implementors that do not care
+	 * keep their one-argument shape.
+	 */
+	onPenHover(sample: PenSample, pointerType?: string): void;
 	/** The hovering pen left the editor. */
 	onPenLeave(): void;
 	/**
@@ -446,6 +455,13 @@ export class InlinePenRouter {
 	/** The element pen coordinates are made relative to: the overlay. */
 	private rectEl: HTMLElement;
 	private rect: DOMRect;
+	/**
+	 * Set while the live stroke is a mouse wearing the pen's hat, so its
+	 * samples run through the grid filter. A pen's samples never do - see
+	 * MouseTrail for the rule this deliberately bends and for whom.
+	 */
+	private mouseStrokeTrail: MouseTrail | null = null;
+	private readonly mouseTrail = new MouseTrail();
 	private cb: InlinePenCallbacks;
 	private scaleProvider: () => number;
 	private gate = new PalmGate();
@@ -569,6 +585,20 @@ export class InlinePenRouter {
 				this.scrollEl.removeEventListener(type, h, { capture: true })
 			);
 		};
+
+		// Palm-shaped touches are refused by SHAPE at capture, complementing
+		// the pen-proximity gate: a hand nudging the glass with no pen near
+		// lands as two contacts and our own pinch would zoom the note. Off on
+		// platforms whose fingers look like palms (see PalmShield).
+		// Desktop only: the 16px threshold is calibrated on Windows touch
+		// hardware. Android reports honest contact ellipses like iOS does, so
+		// on a Boox a fingertip would read as a palm and the shield would eat
+		// scrolling - the iPad failure again, on the main user base.
+		const shield = new PalmShield();
+		if (!Platform.isMobileApp && palmRadiusTrustworthy(this.scrollEl.win?.navigator ?? navigator)) {
+			shield.attach(this.scrollEl);
+			this.disposers.push(() => shield.dispose());
+		}
 
 		on("pointerdown", (e) => this.pointerDown(e));
 		on("pointermove", (e) => this.pointerMove(e));
@@ -1304,6 +1334,14 @@ export class InlinePenRouter {
 			/* best-effort; the backstop covers a failed capture */
 		}
 		if (isHitProbeEnabled()) hitProbeDown(e, true, this.scrollEl);
+		if (this.mouseActsAsPen(e)) {
+			this.mouseTrail.reset();
+			this.mouseStrokeTrail = this.mouseTrail;
+		} else {
+			this.mouseStrokeTrail = null;
+		}
+		// The down sample is the anchor and goes through raw: the reader of
+		// an export should find the stroke starting where the click was.
 		this.cb.onPenDown(this.sampleFrom(e), e);
 	}
 
@@ -1438,7 +1476,7 @@ export class InlinePenRouter {
 			this.applyGuard(this.manip.penSignal(), "pen-hover");
 			this.traceHover(e);
 			if (isHitProbeEnabled()) hitProbeHover(e);
-			this.cb.onPenHover(this.sampleFrom(e));
+			this.cb.onPenHover(this.sampleFrom(e), e.pointerType);
 			return;
 		}
 		if (e.pointerId !== this.activePenId) return;
@@ -1486,7 +1524,7 @@ export class InlinePenRouter {
 							: "fed nothing (all samples at or below the stroke's high-water mark)")
 				);
 			}
-			if (samples.length > 0) this.cb.onPenRaw(samples, e);
+			if (samples.length > 0) this.cb.onPenRaw(this.smoothed(samples), e);
 			this.cb.onPenMove(e, events.length);
 			return;
 		}
@@ -1564,7 +1602,13 @@ export class InlinePenRouter {
 			const ce = events[i];
 			if (ce !== undefined) samples.push(this.sampleFrom(ce));
 		}
-		if (samples.length > 0) this.cb.onPenRaw(samples, e);
+		if (samples.length > 0) this.cb.onPenRaw(this.smoothed(samples), e);
+	}
+
+	/** Mouse samples through the grid filter; a pen's untouched. */
+	private smoothed(samples: PenSample[]): PenSample[] {
+		const trail = this.mouseStrokeTrail;
+		return trail === null ? samples : samples.map((sample) => trail.push(sample));
 	}
 
 	// ---- stroke end ---------------------------------------------------------

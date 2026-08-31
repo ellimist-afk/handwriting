@@ -96,6 +96,7 @@ import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
 import { decideWhatsNew, whatsNewFragment, WHATS_NEW_MS } from "./update/WhatsNew";
+import { PdfPalmWatch } from "./input/PdfPalmWatch";
 import {
 	changeFolder,
 	DEFAULT_INK_FOLDER,
@@ -288,6 +289,24 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// After layout, not during onload: a modal that opens while the
 		// workspace is still assembling fights the app for the screen.
 		this.app.workspace.onLayoutReady(() => this.showWhatsNewIfDue());
+		// On iOS and Android the webview is frozen or killed on background
+		// with no further JS, so anything mid-debounce - ink sidecars,
+		// settings - was silently lost: write on a Boox, swipe away, come
+		// back to a note missing its last strokes. Both events, because iOS
+		// does not reliably fire either one alone; both handlers DISPATCH
+		// writes synchronously and never await, because nothing after a
+		// freeze runs to hear a promise resolve. onunload still covers the
+		// ordinary teardown path via finishPersistence().
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "hidden") this.flushOnHide();
+		});
+		this.registerDomEvent(window, "pagehide", () => this.flushOnHide());
+		// Palm-shaped touches must not zoom a pdf someone is reading. Ink on
+		// pdfs is the 1.4 line; this is only the shield.
+		const pdfPalms = new PdfPalmWatch(this.app);
+		this.register(() => pdfPalms.dispose());
+		this.registerEvent(this.app.workspace.on("layout-change", () => pdfPalms.sync()));
+		this.app.workspace.onLayoutReady(() => pdfPalms.sync());
 
 		this.registerView(HANDWRITING_PAGE_VIEW_TYPE, (leaf) => new HandwritingPageView(leaf, this));
 		this.registerView(HANDWRITING_PEN_LAB_VIEW_TYPE, (leaf) => new PenLabView(leaf));
@@ -1449,6 +1468,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// durability: a process killed before the I/O finishes can still
 		// lose pending ink (README, Limitations).
 		runDetached(this.finishPersistence(), "finish persistence during unload");
+	}
+
+	/** The background/freeze path: start every pending write, wait for none. */
+	private flushOnHide(): void {
+		this.store.flushDispatch();
+		// flushSettings clears its timer and reaches saveData synchronously;
+		// detached because its completion cannot be awaited under a freeze.
+		runDetached(this.flushSettings(), "flush settings on hide");
 	}
 
 	/** Best-effort shutdown: settle in-flight claims and loads, then flush. */

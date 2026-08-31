@@ -35,6 +35,8 @@ class FakeAdapter {
 	clock = 1000;
 	failWriteTimes = 0;
 	writeDelay: Promise<void> | null = null;
+	/** Writes that ENTERED the adapter, counted before any stall. */
+	writesStarted = 0;
 	log: string[] = [];
 
 	async exists(path: string): Promise<boolean> {
@@ -46,6 +48,7 @@ class FakeAdapter {
 		return f;
 	}
 	async write(path: string, data: string): Promise<void> {
+		this.writesStarted++;
 		if (this.writeDelay) await this.writeDelay;
 		if (this.failWriteTimes > 0) {
 			this.failWriteTimes--;
@@ -901,5 +904,29 @@ describe("round trips and deletion", () => {
 		await store.remove("p1"); // the note deletion
 		expect(fake.files.has(".handwriting/p1.json")).toBe(false);
 		expect(trashContents("p1")).toEqual([expect.stringContaining("precious")]);
+	});
+});
+
+// ---- background flush (mobile freeze) --------------------------------------
+
+describe("flushDispatch: the background/freeze path", () => {
+	it("starts every pending write synchronously, without awaiting between them", async () => {
+		// On iOS and Android the webview freezes on background with no
+		// further JS. flush() awaits each write in turn, so under a freeze
+		// only the first write ever starts. The hidden-path dispatcher must
+		// START them all before yielding.
+		store.schedule("p1", pageWith("p1", "s1"));
+		store.schedule("p2", pageWith("p2", "s2"));
+		expect(fake.files.size).toBe(0); // both debounced, nothing on disk
+
+		// A stalled first write is the freeze in miniature: flush()'s
+		// sequential awaits would never reach p2.
+		fake.writeDelay = new Promise<void>(() => {});
+		store.flushDispatch();
+		// One drained tick (fake timers rule this file). p1's write is
+		// stalled forever, so a sequential flush would sit at 1 here for
+		// good; the dispatcher must show both.
+		await vi.advanceTimersByTimeAsync(0);
+		expect(fake.writesStarted).toBe(2);
 	});
 });

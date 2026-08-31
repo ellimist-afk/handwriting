@@ -85,7 +85,17 @@ export async function ensureFolder(adapter: MigrationAdapter, folder: string): P
 	let sofar = "";
 	for (const part of parts) {
 		sofar = sofar === "" ? part : `${sofar}/${part}`;
-		if (!(await adapter.exists(sofar))) await adapter.mkdir(sofar);
+		if (!(await adapter.exists(sofar))) {
+			try {
+				await adapter.mkdir(sofar);
+			} catch (err) {
+				// Per-page write chains run different pages' first writes
+				// concurrently, so two of these can both see "missing" and
+				// both mkdir. Losing the race to CREATE the folder is
+				// winning: it exists. Anything else is a real failure.
+				if (!(await adapter.exists(sofar))) throw err;
+			}
+		}
 	}
 }
 

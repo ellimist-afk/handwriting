@@ -62,6 +62,9 @@ export interface MobileToolsHost {
 	canRedo(): boolean;
 	/** Whether the ink clipboard holds anything, so paste can dim. */
 	canPasteInk(): boolean;
+	/** Mouse ink: on for people writing with a mouse instead of a pen. */
+	mouseInkOn(): boolean;
+	setMouseInk(on: boolean): void;
 	/** Whether a lasso selection exists, so copy and trash can dim. */
 	hasInkSelection(): boolean;
 	/** The active tool's palette, for the swatch pop. */
@@ -198,6 +201,13 @@ export class MobileTools {
 	private hlSlider!: { pop: HTMLElement; input: HTMLInputElement; val: HTMLElement };
 	/** Which nib's size slider is open; tap the active tool again to toggle. */
 	private openInkSlider: "pen" | "highlighter" | null = null;
+	private sliderHoverTimer: number | null = null;
+	private mouseReArm = false;
+	/** The last pointer type seen anywhere in the document, so the nib
+	 * buttons can light for the input actually in hand: a purple pen
+	 * button beside a text-mode mouse claims a tool the mouse does not
+	 * have. Unknown reads as pen, which is the pre-existing look. */
+	private lastPointer = "pen";
 	/** Whether the color swatch pop is open. */
 	private colorsOpen = false;
 	private strokeChip!: HTMLElement;
@@ -205,6 +215,22 @@ export class MobileTools {
 	private colorPop!: HTMLElement;
 
 	private pill: HTMLElement;
+
+	/** Closes open pops when a tap lands anywhere that is not the strip. */
+	private readonly outsideTap = (ev: PointerEvent): void => {
+		if (ev.pointerType && ev.pointerType !== this.lastPointer) {
+			this.lastPointer = ev.pointerType;
+			this.refresh();
+		}
+		const t = ev.target;
+		if (!(t instanceof Node)) return;
+		if (this.el.contains(t) || this.pill.contains(t)) return;
+		// On glass there is no pen-down-over-the-page moment to hide behind:
+		// a slider opened with a finger just STAYED, over whatever the next
+		// tap was about, until another tool was pressed (ipad, 2026-08-30).
+		// Desktop never felt it because writing closes the pops.
+		this.closeInkSliders();
+	};
 
 	constructor(parent: HTMLElement, private host: MobileToolsHost) {
 		// The collapsed form: one small pen button that brings the strip back.
@@ -216,13 +242,26 @@ export class MobileTools {
 		if (!this.pill.querySelector("svg")) this.pill.setText("P");
 		// Buttons must not take focus from the editor: undo/redo route to the
 		// active editor, and a focus-stealing toolbar makes that a coin flip.
-		const noFocus = (el: HTMLElement) =>
-			el.addEventListener("pointerdown", (ev) => ev.preventDefault());
+		// preventDefault here kills the compat mouse events that drive CSS
+		// :active, so a pressed button showed NOTHING on touch until the click
+		// landed at finger-lift (emulation, 2026-08-30). The pressed state is
+		// a class managed on the same events instead.
+		const noFocus = (el: HTMLElement) => {
+			el.addEventListener("pointerdown", (ev) => {
+				ev.preventDefault();
+				el.classList.add("is-pressed");
+			});
+			const release = () => el.classList.remove("is-pressed");
+			el.addEventListener("pointerup", release);
+			el.addEventListener("pointerleave", release);
+			el.addEventListener("pointercancel", release);
+		};
 		noFocus(this.pill);
 		this.pill.addEventListener("click", (ev) => {
 			ev.preventDefault();
 			this.setCollapsed(false);
 		});
+		parent.ownerDocument.addEventListener("pointerdown", this.outsideTap, { capture: true });
 		this.el = parent.createDiv({ cls: "handwriting-mobile-tools" });
 		const collapse = this.el.createEl("button", {
 			cls: "handwriting-mobile-tool handwriting-tools-collapse",
@@ -247,6 +286,27 @@ export class MobileTools {
 			// If the icon set yields no svg, the button says its initial.
 			if (!b.querySelector("svg")) b.setText(spec.glyph);
 			noFocus(b);
+			b.addEventListener("pointerenter", (ev) => {
+				if (ev.pointerType === "touch") return;
+				const hoverNib =
+					spec.commandId === "handwriting:inline-tool-pen"
+						? "pen"
+						: spec.commandId === "handwriting:inline-tool-highlighter"
+							? "highlighter"
+							: null;
+				if (!hoverNib || !spec.isActive?.(this.host)) return;
+				if (ev.pointerType === "mouse" && !this.host.mouseInkOn()) return;
+				this.cancelSliderClose();
+				if (this.openInkSlider !== hoverNib) {
+					this.openInkSlider = hoverNib as "pen" | "highlighter";
+					this.colorsOpen = false;
+					this.refresh();
+				}
+			});
+			b.addEventListener("pointerleave", (ev) => {
+				if (ev.pointerType === "touch") return;
+				this.scheduleSliderClose();
+			});
 			b.addEventListener("click", (ev) => {
 				ev.preventDefault();
 				// The GoodNotes pattern: tapping the tool you are already
@@ -257,8 +317,33 @@ export class MobileTools {
 						: spec.commandId === "handwriting:inline-tool-highlighter"
 							? "highlighter"
 							: null;
-				if (nib && spec.isActive?.(this.host)) {
+				// A mouse only draws because its owner has no pen, so for
+				// them the nib button IS the mode: clicking the active tool
+				// hands the mouse back to text. Pen and touch keep the tap
+				// (hover already opened the slider for anything that hovers).
+				const ptr = (ev as PointerEvent).pointerType;
+				if (nib && spec.isActive?.(this.host) && ptr === "mouse" && this.host.mouseInkOn()) {
+					// Clicking the tool you are drawing with hands the mouse
+					// back to text. Click it again and it draws again.
+					this.host.setMouseInk(false);
+					this.mouseReArm = true;
+					this.openInkSlider = null;
+					this.colorsOpen = false;
+				} else if (nib && spec.isActive?.(this.host) && ptr === "mouse" && this.mouseReArm) {
+					this.host.setMouseInk(true);
+					this.mouseReArm = false;
+				} else if (nib && spec.isActive?.(this.host) && ptr === "touch") {
+					// Touch has no hover, so the tap is the toggle.
 					this.openInkSlider = this.openInkSlider === nib ? null : nib;
+					// One pop at a time: a size slider sliding out from under
+					// the open palette read as the strip coming apart.
+					this.colorsOpen = false;
+				} else if (nib && spec.isActive?.(this.host)) {
+					// A pen hovers BEFORE it taps, so hover has already opened
+					// the slider; a toggle here would flash it shut under the
+					// nib. The tap just makes sure it is open.
+					this.openInkSlider = nib;
+					this.colorsOpen = false;
 				} else if (spec.commandId === "handwriting:ink-color-cycle") {
 					// The palette button opens SWATCHES: picking a color you
 					// can see beats cycling one you cannot.
@@ -346,6 +431,14 @@ export class MobileTools {
 			(v, c) => this.host.setInkSizeMult("highlighter", v, c)
 		);
 		this.colorPop = this.el.createDiv({ cls: "handwriting-slider-pop handwriting-color-pop" });
+		for (const pop of [this.penSlider.pop, this.hlSlider.pop]) {
+			pop.addEventListener("pointerenter", (ev: PointerEvent) => {
+				if (ev.pointerType !== "touch") this.cancelSliderClose();
+			});
+			pop.addEventListener("pointerleave", (ev: PointerEvent) => {
+				if (ev.pointerType !== "touch") this.scheduleSliderClose();
+			});
+		}
 		this.refreshNow();
 		this.setCollapsed(collapsedSession);
 	}
@@ -371,7 +464,10 @@ export class MobileTools {
 	/** The synchronous body; the constructor uses it before first paint. */
 	refreshNow(): void {
 		for (const { el, spec } of this.buttons) {
-			el.classList.toggle("is-active", spec.isActive?.(this.host) ?? false);
+			// Every tool and mode light follows the input in hand: a
+			// text-mode mouse holds no nib, no eraser, no lasso.
+			const inputDraws = this.lastPointer !== "mouse" || this.host.mouseInkOn();
+			el.classList.toggle("is-active", (spec.isActive?.(this.host) ?? false) && inputDraws);
 			el.classList.toggle("is-disabled", !(spec.isEnabled?.(this.host) ?? true));
 			// The palette button answers "which color" by BEING it.
 			if (spec.commandId === "handwriting:ink-color-cycle") {
@@ -403,11 +499,15 @@ export class MobileTools {
 		hangUnder(
 			this.slider,
 			"handwriting:inline-tool-eraser",
-			this.host.eraserOn(),
+			// The eraser slider rides the MODE, not a toggle, so it was still
+			// hanging there when the palette opened next to it. While the
+			// palette is up it steps aside; closing the palette brings it
+			// straight back, because the mode never changed.
+			this.host.eraserOn() && !this.colorsOpen,
 			this.host.eraserRadiusPx(),
 			(v) => `${v}px`
 		);
-		const nib = this.host.eraserOn() ? null : this.openInkSlider;
+		const nib = this.host.eraserOn() || this.colorsOpen ? null : this.openInkSlider;
 		hangUnder(
 			this.penSlider,
 			"handwriting:inline-tool-pen",
@@ -496,7 +596,29 @@ export class MobileTools {
 		this.pill.toggleClass("is-showing", on);
 	}
 
+	/** Leaving the button or its pop closes the slider, after a beat so
+	 * the pointer can travel the gap between them. */
+	private scheduleSliderClose(): void {
+		this.cancelSliderClose();
+		this.sliderHoverTimer = window.setTimeout(() => {
+			this.sliderHoverTimer = null;
+			if (this.openInkSlider !== null) {
+				this.openInkSlider = null;
+				this.refresh();
+			}
+		}, 300);
+	}
+
+	private cancelSliderClose(): void {
+		if (this.sliderHoverTimer !== null) {
+			window.clearTimeout(this.sliderHoverTimer);
+			this.sliderHoverTimer = null;
+		}
+	}
+
 	destroy(): void {
+		this.cancelSliderClose();
+		this.el.ownerDocument.removeEventListener("pointerdown", this.outsideTap, { capture: true });
 		this.el.remove();
 		this.pill.remove();
 		this.buttons = [];

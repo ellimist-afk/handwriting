@@ -7,6 +7,15 @@
  */
 export const RELEASE_NOTES: Record<string, string[]> = {
 	"1.3.10": ["undo works", "ink prediction v2", "toolbar ui fixes", "bug fixes"],
+	"1.3.11": [
+		"data safety fix",
+		"palm rejection fix",
+		"pdf handling fix",
+		"mouse ink fixes",
+		"ui polish",
+		"ui fixes",
+		"bug fixes",
+	],
 };
 
 /** Show the notes, or don't - and either way, the version to remember. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
+import { ensureFolder,
 	DEFAULT_INK_FOLDER,
 	FolderChangeSteps,
 	MigrationAdapter,
@@ -266,5 +266,44 @@ describe("changeFolder (the ordering IS the safety story)", () => {
 		});
 		await expect(changeFolder(steps, ".handwriting", "handwriting")).rejects.toThrow("disk full");
 		expect(order).toEqual(["settle", "migrate", "repoint", "persist"]);
+	});
+});
+
+describe("ensureFolder raced by a concurrent creator", () => {
+	it("treats a lost mkdir race as success when the folder exists after all", async () => {
+		// Per-page write chains run different pages' FIRST writes
+		// concurrently, so two ensureFolders can both see "missing" and both
+		// mkdir; real adapters throw for the loser. Losing the race to
+		// CREATE the folder is winning: it exists.
+		const dirs = new Set<string>();
+		const adapter = {
+			exists: async (p: string) => dirs.has(p),
+			mkdir: async (p: string) => {
+				if (dirs.has(p)) throw new Error("EEXIST: folder exists");
+				dirs.add(p);
+			},
+			read: async () => "",
+			write: async () => {},
+			rename: async () => {},
+			remove: async () => {},
+			stat: async () => null,
+		};
+		// Both start with the folder absent; interleave so both pass the
+		// exists check before either mkdirs.
+		let releaseExists!: () => void;
+		const hold = new Promise<void>((r) => (releaseExists = r));
+		const gated = {
+			...adapter,
+			exists: async (p: string) => {
+				const had = dirs.has(p);
+				await hold;
+				return had;
+			},
+		};
+		const a = ensureFolder(gated, ".handwriting");
+		const b = ensureFolder(gated, ".handwriting");
+		releaseExists();
+		await expect(Promise.all([a, b])).resolves.toBeDefined();
+		expect(dirs.has(".handwriting")).toBe(true);
 	});
 });

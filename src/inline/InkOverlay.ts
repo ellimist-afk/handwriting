@@ -1215,6 +1215,12 @@ class InkOverlayPlugin {
 			canRedo: () => redoDepth(this.view.state) > 0,
 			canPasteInk: () => clipboardSize() > 0,
 			hasInkSelection: () => !this.selection.isEmpty,
+			mouseInkOn: () => mouseInkEnabled(),
+			setMouseInk: (on) => {
+				// Through the command, so the setting persists and the Notice
+				// says what just happened to the mouse.
+				if (mouseInkEnabled() !== on) commands.executeCommandById("handwriting:mouse-ink-toggle");
+			},
 			palette: () => colorsFor(getInlineTool()),
 			inkSizeMult: (tool) => getInkSizeMult(tool as InkTool),
 			setInkSizeMult: (tool, mult, commit) => {
@@ -2107,9 +2113,15 @@ class InkOverlayPlugin {
 		this.frame.end();
 		// The stroke is over: the strip returns (a beat later, so an eraser
 		// scrub's rapid lift-and-reland does not strobe it) and its buttons
-		// catch up with what undo can do now.
+		// catch up with what undo can do now. The catch-up is a microtask,
+		// NOT immediate: every branch below this line dispatches its ops
+		// later in this same method, so a synchronous refresh here reads the
+		// history depth from BEFORE the gesture - after the first stroke on
+		// a fresh note, a working undo button kept wearing the disabled look
+		// that issue #1 was filed about. The microtask runs once penUp and
+		// all its dispatches have returned, whichever branch they took.
 		this.mobileTools?.setInking(false);
-		this.mobileTools?.refresh();
+		queueMicrotask(() => this.mobileTools?.refresh());
 		if (this.mode === "pan") {
 			this.mode = "ink";
 			this.panLast = null;

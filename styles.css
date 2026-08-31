@@ -400,6 +400,27 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	opacity: 0.92;
 }
 
+/* Hover only where hover exists: on glass these states stick to whatever was
+   tapped last and read as a second active tool. */
+@media (hover: hover) {
+	.handwriting-mobile-tool:hover:not(.is-active):not(.is-disabled) {
+		background: var(--background-modifier-hover);
+		color: var(--text-normal);
+	}
+	.handwriting-color-swatch:hover {
+		box-shadow: 0 0 0 2px var(--background-secondary), 0 0 0 3.5px var(--background-modifier-border-hover, var(--background-modifier-border));
+	}
+}
+
+/* Pressed feedback, both input worlds: the strip's buttons run through
+   preventDefault on pointerdown, so the browser's own active styling never
+   shows and a tap on glass looked like nothing until the command landed. */
+.handwriting-mobile-tool:active:not(.is-disabled),
+.handwriting-mobile-tool.is-pressed:not(.is-disabled) {
+	background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+	transform: scale(0.94);
+}
+
 /* Desktop trims the chrome; mobile keeps 40px touch targets. */
 .handwriting-mobile-tool {
 	width: 32px;

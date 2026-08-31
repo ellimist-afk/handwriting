@@ -81,7 +81,40 @@ export class PageStore {
 	private timers = new Map<string, number>();
 	/** One-shot maximum-dirty-interval timer per page; see MAX_DIRTY_MS. */
 	private maxTimers = new Map<string, number>();
-	private inFlight: Promise<void> = Promise.resolve();
+	/**
+	 * One tail PER PAGE, not one for the store. The tmp/rename dance must
+	 * never interleave for the SAME page - that was always the invariant -
+	 * but a store-wide chain also made every page wait behind every other,
+	 * which is exactly what the background/freeze flush cannot afford: with
+	 * one stalled write, nothing else ever reached the adapter. Different
+	 * pages are different files; they owe each other no ordering.
+	 */
+	private tails = new Map<string, Promise<void>>();
+
+	/**
+	 * Recovery's seat in the queue is behind EVERY page's writes, not just
+	 * its own - the gate tests stage exactly this: the decision must be
+	 * re-proven after waiting, whatever the queue held. Everything else
+	 * chains per page.
+	 */
+	private chainBehindAll<T>(pageId: string, run: () => Promise<T>): Promise<T> {
+		// The page's own tail is already among the joined ones, so seeding
+		// the slot with the join loses nothing and orders run after it all.
+		const all = Promise.all([...this.tails.values()]).then(() => undefined);
+		this.tails.set(pageId, all);
+		return this.chain(pageId, run);
+	}
+
+	/** Serialize run behind the page's own tail; the map stays bounded. */
+	private chain<T>(pageId: string, run: () => Promise<T>): Promise<T> {
+		const tail = this.tails.get(pageId) ?? Promise.resolve();
+		const chained = tail.then(run);
+		const kept = chained.then(() => undefined, () => undefined).then(() => {
+			if (this.tails.get(pageId) === kept) this.tails.delete(pageId);
+		});
+		this.tails.set(pageId, kept);
+		return chained;
+	}
 	/**
 	 * The sidecar mtime this session last saw (at load, or after its own
 	 * write). If the file's mtime differs at write time, something else
@@ -386,11 +419,7 @@ export class PageStore {
 			return { kind: "promoted", keptAs, text: tmpText };
 		};
 
-		const chained = this.inFlight.then(run);
-		this.inFlight = chained.then(
-			() => undefined,
-			() => undefined
-		);
+		const chained = this.chainBehindAll(pageId, run);
 		let outcome: Outcome;
 		try {
 			outcome = await chained;
@@ -479,6 +508,24 @@ export class PageStore {
 		}
 	}
 
+	/**
+	 * START every pending write, synchronously, without awaiting between
+	 * them. The background path on iOS and Android: the webview freezes on
+	 * backgrounding with no further JS, so flush()'s one-at-a-time awaits
+	 * only ever dispatch the FIRST write before the freeze lands. This
+	 * hands every dirty sidecar to the adapter in one synchronous sweep -
+	 * the I/O is the platform's to finish - and completion is deliberately
+	 * not awaited, because nothing after a freeze runs to hear about it.
+	 */
+	flushDispatch(): void {
+		for (const pageId of new Set([...this.timers.keys(), ...this.maxTimers.keys()])) {
+			this.clearTimers(pageId);
+		}
+		for (const id of [...this.pending.keys()]) {
+			runDetached(this.writePending(id), `background flush of ${id}`);
+		}
+	}
+
 	/** Write everything queued right now: page switch, view close, plugin unload. */
 	async flush(): Promise<void> {
 		for (const pageId of new Set([...this.timers.keys(), ...this.maxTimers.keys()])) {
@@ -486,7 +533,7 @@ export class PageStore {
 		}
 		const ids = [...this.pending.keys()];
 		for (const id of ids) await this.writePending(id);
-		await this.inFlight;
+		await Promise.all([...this.tails.values()]);
 	}
 
 	/**
@@ -530,8 +577,7 @@ export class PageStore {
 		// Ride the write chain so the copy can't interleave with a save, but
 		// keep the chain alive if the copy fails. The failure is the CALLER's
 		// signal (abort the wipe), not a reason to wedge future saves.
-		const chained = this.inFlight.then(run);
-		this.inFlight = chained.catch(() => undefined);
+		const chained = this.chain(pageId, run);
 		await chained;
 		return dest;
 	}
@@ -543,8 +589,7 @@ export class PageStore {
 		this.clearTimers(pageId); // the batch is consumed, both timers with it
 		// Serialize writes so two saves for the same page can't interleave
 		// their tmp/rename dance.
-		this.inFlight = this.inFlight.then(() => this.writeNow(pageId, data));
-		await this.inFlight;
+		await this.chain(pageId, () => this.writeNow(pageId, data));
 	}
 
 	private async writeNow(pageId: string, data: PageData): Promise<void> {
@@ -690,8 +735,13 @@ export class PageStore {
 			this.knownHash.set(toId, contentStamp(out));
 			result = "cloned";
 		};
-		const chained = this.inFlight.then(run);
-		this.inFlight = chained.catch(() => undefined);
+		// The copy reads one page and writes another: it must not
+		// interleave with either page's own writes, so it rides the source
+		// tail and the target tail records it too.
+		const chained = this.chain(fromId, async () => {
+			await run();
+		});
+		this.tails.set(toId, chained.catch(() => undefined));
 		await chained;
 		return result;
 	}
@@ -766,8 +816,6 @@ export class PageStore {
 				}
 			}
 		};
-		const chained = this.inFlight.then(run);
-		this.inFlight = chained.catch(() => undefined);
-		await chained;
+		await this.chain(pageId, run);
 	}
 }

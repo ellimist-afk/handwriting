@@ -117,8 +117,8 @@ the work goes.
 
 ## limitations
 
-Ink draws in the Markdown editor, in Live Preview and source mode. Reading
-View and exports show the text without ink.
+Ink draws in the Markdown editor, in Live Preview and source mode, and
+shows in Reading View, embeds, and print.
 
 Undo history for ink is per pane and clears when the note is closed.
 
