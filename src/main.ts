@@ -95,6 +95,7 @@ import { PageIdIndex } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
+import { decideWhatsNew, whatsNewFragment, WHATS_NEW_MS } from "./update/WhatsNew";
 import {
 	changeFolder,
 	DEFAULT_INK_FOLDER,
@@ -165,6 +166,12 @@ interface HandwritingSettings {
 	penReticle: boolean;
 	/** Hold-at-end snaps the figure to a clean shape (1.0.14). Default on. */
 	shapeSnap: boolean;
+	/**
+	 * The version whose what's-new notes have been shown (1.3.10). Null in
+	 * every vault written before that build, which is why the popup asks
+	 * whether a settings file existed at all rather than trusting this.
+	 */
+	lastSeenVersion: string | null;
 }
 
 const DEFAULT_SETTINGS: HandwritingSettings = {
@@ -185,6 +192,7 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	eraserMode: "stroke",
 	penReticle: true,
 	shapeSnap: true,
+	lastSeenVersion: null,
 	toolbarCorner: DEFAULT_TOOLBAR_CORNER,
 	inkFolder: DEFAULT_INK_FOLDER,
 };
@@ -214,6 +222,8 @@ function reloadStride(quietTicks: number): number {
 export default class HandwritingPlugin extends Plugin implements HandwritingHost {
 	store!: PageStore;
 	settings: HandwritingSettings = { ...DEFAULT_SETTINGS };
+	/** Set at load: this vault had no settings file before now. */
+	private freshInstall = false;
 	private settingsDirty = false;
 	private settingsTimer: number | null = null;
 	/** Files we are mid-swap on, so layout events don't fight each other. */
@@ -275,6 +285,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			);
 		};
 		await this.loadSettings();
+		// After layout, not during onload: a modal that opens while the
+		// workspace is still assembling fights the app for the screen.
+		this.app.workspace.onLayoutReady(() => this.showWhatsNewIfDue());
 
 		this.registerView(HANDWRITING_PAGE_VIEW_TYPE, (leaf) => new HandwritingPageView(leaf, this));
 		this.registerView(HANDWRITING_PEN_LAB_VIEW_TYPE, (leaf) => new PenLabView(leaf));
@@ -1681,8 +1694,37 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		);
 	}
 
+	/** The first launch after an update says what changed, once. */
+	private showWhatsNewIfDue(): void {
+		const d = decideWhatsNew(
+			this.manifest.version,
+			this.settings.lastSeenVersion,
+			this.freshInstall
+		);
+		if (d.show) {
+			try {
+				new Notice(whatsNewFragment(d.version, d.notes), WHATS_NEW_MS);
+			} catch (err) {
+				// Recording first would spend the one chance this user gets.
+				// The notes appear on exactly ONE launch, so a popup that threw
+				// is a popup nobody will ever read: leave the version
+				// unrecorded and let the next launch try again.
+				console.error("[handwriting] the what's new notice failed to open", err);
+				return;
+			}
+		}
+		if (d.record !== this.settings.lastSeenVersion) {
+			this.settings.lastSeenVersion = d.record;
+			runDetached(this.saveData(this.settings), "remember the version whose notes were shown");
+		}
+	}
+
 	private async loadSettings(): Promise<void> {
 		const raw = (await this.loadData()) as Partial<HandwritingSettings> | null;
+		// No settings file at all means nobody has ever run this plugin here.
+		// An update always leaves one behind, so this - not a missing
+		// lastSeenVersion - is what tells a new user from an updating one.
+		this.freshInstall = raw === null;
 		this.settings = {
 			cameras: raw?.cameras && typeof raw.cameras === "object" ? raw.cameras : {},
 			smoothInk: raw?.smoothInk !== false,
@@ -1718,9 +1760,19 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			eraserMode: raw?.eraserMode === "reticle" ? "reticle" : "stroke",
 			penReticle: raw?.penReticle !== false,
 			shapeSnap: raw?.shapeSnap !== false,
+			lastSeenVersion:
+				typeof raw?.lastSeenVersion === "string" ? raw.lastSeenVersion : null,
 			toolbarCorner: normalizeToolbarCorner(raw?.toolbarCorner),
 			inkFolder: normalizeInkFolder(raw?.inkFolder),
 		};
+		// Android pulls its notification shade from the very top of the glass,
+		// and that gesture wins over anything underneath it: a top-corner
+		// toolbar sitting 8px down had its taps eaten outright (boox go 6,
+		// 2026-08-30, reported by a user who could not press a single tool).
+		// Marked here rather than handled in CSS alone, because the clearance
+		// must NOT apply on ios, where the same 8px is correct and a shifted
+		// toolbar would be a regression for everyone already using it.
+		if (Platform.isAndroidApp) document.body.classList.add("handwriting-android");
 		setPenToolsMode(this.settings.penTools);
 		setToolbarCorner(this.settings.toolbarCorner);
 		// The store is constructed before settings are read, so it starts on
@@ -1830,6 +1882,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		new Setting(containerEl).setName("Toolbar").setHeading();
 		new Setting(containerEl)
 			.setName("Pen toolbar")
 			.setDesc("Determines when the toolbar appears. Default auto.")
@@ -1855,6 +1908,141 @@ class HandwritingSettingTab extends PluginSettingTab {
 		// strange.
 		const current = this.plugin.settings.inkFolder;
 		const hidden = !inkFolderSyncs(current);
+		new Setting(containerEl)
+			.setName("Toolbar corner")
+			.setDesc("Where the floating pen toolbar sits. Default top right.")
+			.addDropdown((d) => {
+				for (const { value, label } of TOOLBAR_CORNER_LABELS) d.addOption(value, label);
+				d.setValue(this.plugin.settings.toolbarCorner).onChange((v) => {
+					const corner = normalizeToolbarCorner(v);
+					this.plugin.settings.toolbarCorner = corner;
+					setToolbarCorner(corner);
+					this.plugin.saveSettingsNow();
+				});
+			});
+
+		new Setting(containerEl).setName("The pen").setHeading();
+		new Setting(containerEl)
+			.setName("Mouse ink")
+			.setDesc("Left click draws. Default off.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.mouseInk).onChange((on) => {
+					this.plugin.settings.mouseInk = on;
+					setMouseInk(on);
+					if (on) {
+						markPenSeen();
+						refreshPenToolsAll();
+					}
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Pressure sensitivity")
+			// "Off gives an even line" was not true, and a user found the gap:
+			// pressure off stops width tracking how hard you press, but speed
+			// thinning and the end taper are SHAPE, not pressure, and both
+			// stay. The old wording sent people hunting for a setting that
+			// would flatten the line completely (boox thread, 2026-08-30).
+			.setDesc("Off stops the line thickening when you press harder. Default on.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.pressureSensitivity).onChange((on) => {
+					this.plugin.settings.pressureSensitivity = on;
+					setPressureSensitivity(on);
+					repaintAllInkOverlays();
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Ink smoothing")
+			.setDesc(
+				"Shapes the line: thinner when you move fast, tapered at each end. " +
+					"Off draws a plainer stroke that follows the pen more literally. Default on."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.inkSmoothing).onChange((on) => {
+					this.plugin.settings.inkSmoothing = on;
+					setInkShaping(on);
+					repaintAllInkOverlays();
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Ink prediction")
+			// The e-ink flicker advice came out with 1.3.9: that flicker was the
+			// wet canvas asking for the low-latency path, not prediction, so
+			// sending people here to fix it cost a boox user a pointless toggle
+			// and told us nothing. Flicking past sharp corners is a real
+			// prediction artefact and stays.
+			.setDesc("Draws a little ahead of the pen to hide latency. Off by default: turn it on if ink feels behind your hand, and back off if the line runs ahead of the nib or flicks past sharp corners.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.strokePrediction).onChange((on) => {
+					this.plugin.settings.strokePrediction = on;
+					setPrediction(on);
+					this.plugin.saveSettingsNow();
+				})
+			);
+		// The smoothing users can actually feel. setInkShaping has been
+		// honoured by the renderers all along but nothing ever called it: the
+		// toggle that drove it was renamed into "pressure sensitivity" and the
+		// shaping half lost its wiring, so the line has been permanently
+		// shaped with no way to say otherwise. Two people asked for exactly
+		// this on the same day (boox thread, 2026-08-30) and were told to turn
+		// prediction off, which is a different feature and did nothing.
+		new Setting(containerEl)
+			.setName("Pen reticle")
+			.setDesc("A ring under the hovering nib, showing where the pen will land. Default on.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.penReticle).onChange((on) => {
+					this.plugin.settings.penReticle = on;
+					setPenReticle(on);
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Shape snap")
+			.setDesc("Hold the pen still at the end of a shape and it redraws as a clean one. Default on.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.shapeSnap).onChange((on) => {
+					this.plugin.settings.shapeSnap = on;
+					setShapeSnap(on);
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Eraser")
+			.setDesc("Whether touching a stroke removes all of it, or only the part under the nib. Default whole stroke.")
+			.addDropdown((d) =>
+				d
+					.addOption("stroke", "Whole stroke")
+					.addOption("reticle", "Only what the nib touches")
+					.setValue(this.plugin.settings.eraserMode)
+					.onChange((v) => {
+						const mode = v === "reticle" ? "reticle" : "stroke";
+						this.plugin.settings.eraserMode = mode;
+						setEraserWholeStrokes(mode === "stroke");
+						this.plugin.saveSettingsNow();
+					})
+			);
+
+		new Setting(containerEl).setName("The page").setHeading();
+		new Setting(containerEl)
+			.setName("Paper background")
+			.setDesc("Lined or grid paper. Default none.")
+			.addDropdown((d) =>
+				d
+					.addOption("none", "None")
+					.addOption("lines", "Lines")
+					.addOption("grid", "Grid")
+					.setValue(this.plugin.settings.paperStyle)
+					.onChange((v) => {
+						const style = normalizePaperStyle(v);
+						this.plugin.settings.paperStyle = style;
+						this.plugin.applyPaper(style);
+						this.plugin.saveSettingsNow();
+					})
+			);
+
+		new Setting(containerEl).setName("Syncing").setHeading();
 		new Setting(containerEl)
 			.setName("Compatibility with Obsidian Sync")
 			// No description. The name is the description - Alan's rule, and
@@ -1882,133 +2070,6 @@ class HandwritingSettingTab extends PluginSettingTab {
 							}
 						);
 					})
-			);
-		new Setting(containerEl)
-			.setName("Toolbar corner")
-			.setDesc("Where the floating pen toolbar sits. Default top right.")
-			.addDropdown((d) => {
-				for (const { value, label } of TOOLBAR_CORNER_LABELS) d.addOption(value, label);
-				d.setValue(this.plugin.settings.toolbarCorner).onChange((v) => {
-					const corner = normalizeToolbarCorner(v);
-					this.plugin.settings.toolbarCorner = corner;
-					setToolbarCorner(corner);
-					this.plugin.saveSettingsNow();
-				});
-			});
-		new Setting(containerEl)
-			.setName("Paper background")
-			.setDesc("Lined or grid paper. Default none.")
-			.addDropdown((d) =>
-				d
-					.addOption("none", "None")
-					.addOption("lines", "Lines")
-					.addOption("grid", "Grid")
-					.setValue(this.plugin.settings.paperStyle)
-					.onChange((v) => {
-						const style = normalizePaperStyle(v);
-						this.plugin.settings.paperStyle = style;
-						this.plugin.applyPaper(style);
-						this.plugin.saveSettingsNow();
-					})
-			);
-		new Setting(containerEl)
-			.setName("Mouse ink")
-			.setDesc("Left click draws. Default off.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.mouseInk).onChange((on) => {
-					this.plugin.settings.mouseInk = on;
-					setMouseInk(on);
-					if (on) {
-						markPenSeen();
-						refreshPenToolsAll();
-					}
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Ink prediction")
-			.setDesc(
-				"Improves ink latency. Turn it off if the line flicks past sharp corners, " +
-					"or if the tip flickers on an e-ink screen."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.strokePrediction).onChange((on) => {
-					this.plugin.settings.strokePrediction = on;
-					setPrediction(on);
-					this.plugin.saveSettingsNow();
-				})
-			);
-		// The smoothing users can actually feel. setInkShaping has been
-		// honoured by the renderers all along but nothing ever called it: the
-		// toggle that drove it was renamed into "pressure sensitivity" and the
-		// shaping half lost its wiring, so the line has been permanently
-		// shaped with no way to say otherwise. Two people asked for exactly
-		// this on the same day (boox thread, 2026-08-30) and were told to turn
-		// prediction off, which is a different feature and did nothing.
-		new Setting(containerEl)
-			.setName("Ink smoothing")
-			.setDesc(
-				"Shapes the line: thinner when you move fast, tapered at each end. " +
-					"Off draws a plainer stroke that follows the pen more literally. Default on."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.inkSmoothing).onChange((on) => {
-					this.plugin.settings.inkSmoothing = on;
-					setInkShaping(on);
-					repaintAllInkOverlays();
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Pressure sensitivity")
-			// "Off gives an even line" was not true, and a user found the gap:
-			// pressure off stops width tracking how hard you press, but speed
-			// thinning and the end taper are SHAPE, not pressure, and both
-			// stay. The old wording sent people hunting for a setting that
-			// would flatten the line completely (boox thread, 2026-08-30).
-			.setDesc("Off stops the line thickening when you press harder. Default on.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.pressureSensitivity).onChange((on) => {
-					this.plugin.settings.pressureSensitivity = on;
-					setPressureSensitivity(on);
-					repaintAllInkOverlays();
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Shape snap")
-			.setDesc("Hold the pen still after drawing a shape. Default on.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.shapeSnap).onChange((on) => {
-					this.plugin.settings.shapeSnap = on;
-					setShapeSnap(on);
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Eraser")
-			.setDesc("What the eraser erases. Default stroke.")
-			.addDropdown((d) =>
-				d
-					.addOption("stroke", "Stroke")
-					.addOption("reticle", "Reticle")
-					.setValue(this.plugin.settings.eraserMode)
-					.onChange((v) => {
-						const mode = v === "reticle" ? "reticle" : "stroke";
-						this.plugin.settings.eraserMode = mode;
-						setEraserWholeStrokes(mode === "stroke");
-						this.plugin.saveSettingsNow();
-					})
-			);
-		new Setting(containerEl)
-			.setName("Pen reticle")
-			.setDesc("Default on.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.penReticle).onChange((on) => {
-					this.plugin.settings.penReticle = on;
-					setPenReticle(on);
-					this.plugin.saveSettingsNow();
-				})
 			);
 
 		// One line at the bottom, after every setting, because that is where

@@ -155,20 +155,21 @@ anything unless the worktree is clean, the versions agree across
 rule the code depends on is present. It writes a receipt with the commit and
 the SHA-256 of each asset.
 
-Contributions are welcome under `PolyForm-Strict-1.0.0`. [CONTRIBUTING.md](../CONTRIBUTING.md)
+Contributions are welcome under `CC-BY-NC-ND-4.0`. [CONTRIBUTING.md](../CONTRIBUTING.md)
 lists the checks to run before opening a pull request. For a security
 defect, don't open a normal issue; [SECURITY.md](../SECURITY.md) has the
 private reporting path.
 
 ## license details
 
-Handwriting is under PolyForm Strict 1.0.0 plus a grant covering personal
-use and internal business use, including work you get paid for. You may not
-redistribute it, publish a modified version, or ship it inside something you
-sell. For those, ask. The full text is in [LICENSE](../LICENSE).
+Handwriting is free and open source, under CC BY-NC-ND 4.0. Use it and share
+it, with attribution, for anything noncommercial, including your own work you
+get paid for. You may not sell it, use it commercially, or distribute a
+modified version. For any of those, ask. The full text is in
+[LICENSE](../LICENSE).
 
-Releases up to and including 1.3.8 went out under `AGPL-3.0-only` and stay
-that way.
+Releases up to and including 1.3.8 went out under `AGPL-3.0-only`, and 1.3.9
+under `PolyForm-Strict-1.0.0`. Those stay that way.
 
 Nothing from `node_modules` is bundled into `main.js`. The build marks
 `obsidian`, `electron` and the CodeMirror and Lezer packages as external,

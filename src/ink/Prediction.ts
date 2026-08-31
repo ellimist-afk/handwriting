@@ -33,9 +33,24 @@ export interface PredictionCaps {
 	minSpeedPxPerMs: number;
 }
 
+/**
+ * Tuned against the latency that actually exists.
+ *
+ * 24ms and 20px were chosen while age@present measured 25-37ms: guessing a
+ * frame and a half ahead is right when the ink is a frame and a half behind.
+ * Turning INLINE_DESYNCHRONIZED off took the software path to ~7ms (the
+ * measurements live on that constant), and this horizon then overshot by the
+ * difference - the tip leading the nib instead of sitting under it (alan,
+ * hardware, 2026-08-30: "writing slightly offset").
+ *
+ * Halved rather than matched to 7ms on purpose: age@present measures OUR
+ * path only, and the digitizer and the panel add latency it cannot see.
+ * Predicting a little beyond the software delay is the whole point;
+ * predicting three times it is what put the ink in the wrong place.
+ */
 export const DEFAULT_CAPS: PredictionCaps = {
-	maxHorizonMs: 24,
-	maxDistPx: 20,
+	maxHorizonMs: 12,
+	maxDistPx: 10,
 	maxTurnDeg: 30,
 	minSpeedPxPerMs: 0.02,
 };

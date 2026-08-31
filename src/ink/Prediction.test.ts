@@ -110,10 +110,15 @@ describe("buildTail caps", () => {
 	it("truncates chromium predictions beyond the horizon", () => {
 		const real = straight();
 		const last = real.at(-1)!;
+		// Relative to the cap, not to whatever the cap happened to be when this
+		// was written. The horizon is retuned whenever the latency it
+		// compensates for changes, and a fixture in absolute milliseconds turns
+		// that into a failing test instead of a passing one.
+		const h = DEFAULT_CAPS.maxHorizonMs;
 		const predicted = [
-			s(last.x + 1, 0, last.timestamp + 8),
-			s(last.x + 2, 0, last.timestamp + 16),
-			s(last.x + 3, 0, last.timestamp + 200), // way out — must be dropped
+			s(last.x + 1, 0, last.timestamp + h / 3),
+			s(last.x + 2, 0, last.timestamp + (h * 2) / 3),
+			s(last.x + 3, 0, last.timestamp + h * 10), // way out - must be dropped
 		];
 		const r = buildTail(real, predicted, "chromium");
 		expect(r.points.length).toBe(2);

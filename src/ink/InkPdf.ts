@@ -60,7 +60,28 @@ export function pdfColor(tool: InkStroke["tool"], hex: unknown): string {
 	return `${num(((n >> 16) & 0xff) / 255)} ${num(((n >> 8) & 0xff) / 255)} ${num((n & 0xff) / 255)}`;
 }
 
-/** One disc as a closed sub-path of four beziers. */
+/**
+ * One disc as a closed sub-path of four beziers.
+ *
+ * KNOWN BUG, and deliberately not fixed here. This traces every disc the same
+ * way regardless of which way its stroke's outline turns. Nonzero winding ADDS
+ * the turns of every sub-path in a fill, so a disc going the other way
+ * subtracts itself from the body it sits on and leaves a hole - one per cap
+ * and joint, a nicked edge on a pen line and a row of bubbles on a
+ * highlighter, whose discs are wide.
+ *
+ * It has never been visible because nothing on this line calls it: there is no
+ * PDF export command here, only `export-ink-svg`, and this file is unreachable
+ * and tree-shaken out of the bundle. It was found on the pdf branch, where
+ * ink is genuinely written into documents, by rendering 61 real PDFs.
+ *
+ * The fix is dc01602 on rc4: measure the outline's turn per stroke - a stroke
+ * drawn right to left closes the other way, so it cannot be assumed - and
+ * mirror the disc's y offsets to match. Take it from there rather than
+ * rewriting it, and take its tests with it. If you are here because you are
+ * wiring PDF export on this line, this is the thing that would have shipped
+ * holes.
+ */
 export function discOps(d: Disc): string {
 	const { x, y, r } = d;
 	const k = K * r;

@@ -125,10 +125,10 @@ thank you for using my plugin.
 
 ## license
 
-PolyForm Strict 1.0.0, plus a grant covering personal use and internal
-business use. Use it for anything you write, including work you get paid for.
+CC BY-NC-ND 4.0. Use it and share it, with attribution, for anything
+noncommercial. Use it for your own work, including work you get paid for.
 
-You may not redistribute it, publish a modified version, or ship it inside
-something you sell. For those, ask.
+You may not sell it, use it commercially, or distribute a modified version.
+For any of those, ask.
 
 Handwriting was `AGPL-3.0-only` through 1.3.8, and those releases stay that way.

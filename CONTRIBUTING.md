@@ -47,7 +47,7 @@ exists; do not delete those.
 
 ## licensing
 
-Contributions are submitted under `PolyForm-Strict-1.0.0`, the same license
+Contributions are submitted under `CC-BY-NC-ND-4.0`, the same license
 as the rest of the project. By opening a pull request you are offering your
 change under those terms.
 

@@ -1,7 +1,7 @@
 import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { Prec } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
-import { isolateHistory, redoDepth, undoDepth } from "@codemirror/commands";
+import { isolateHistory, redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { Notice, Platform, editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
 import { CameraState } from "../camera/coordinates";
@@ -1176,7 +1176,21 @@ class InkOverlayPlugin {
 			exec: (id) => {
 				stripInvoked = true;
 				try {
-					commands.executeCommandById(id);
+					// Undo and redo are NOT Obsidian commands - they are native
+					// keybindings, so executeCommandById("editor:undo") returns
+					// false and does nothing, silently. The strip's undo button
+					// has therefore never worked on any shipped build; nobody
+					// noticed because everyone reaches for Ctrl+Z, until issue
+					// #1 (2026-08-30, Surface Pro 11 - reproduced on alan's own
+					// surface in a fresh vault). Run CodeMirror's own history on
+					// OUR view instead, which is what Ctrl+Z was doing all along.
+					if (id === "editor:undo") {
+						undo(this.view);
+					} else if (id === "editor:redo") {
+						redo(this.view);
+					} else {
+						commands.executeCommandById(id);
+					}
 				} finally {
 					stripInvoked = false;
 				}

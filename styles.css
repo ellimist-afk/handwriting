@@ -350,6 +350,20 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	left: 8px;
 }
 
+/* Android pulls the notification shade from the very top edge, and that
+   gesture beats anything drawn under it - a top-corner toolbar at 8px was
+   simply untappable (boox go 6, 2026-08-30). Clear the gesture strip, but
+   ONLY on android: the same 8px is right on ios and moving it there would
+   be a regression for people the toolbar already works for.
+
+   env() covers devices that report an inset; the constant covers android,
+   where the shade is pullable whether or not an inset is reported. */
+.handwriting-android .handwriting-mobile-tools.handwriting-corner-top-right,
+.handwriting-android .handwriting-pen-pill.handwriting-corner-top-right,
+.handwriting-android .handwriting-mobile-tools.handwriting-corner-top-left,
+.handwriting-android .handwriting-pen-pill.handwriting-corner-top-left {
+	top: calc(env(safe-area-inset-top, 0px) + 48px);
+}
 /* ---- mobile tool strip ---- */
 
 /*
@@ -904,4 +918,15 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
  */
 body.handwriting-active-page .status-bar {
 	display: none;
+}
+
+/* What's new: the first launch after an update says what changed, once,
+   in the corner where Obsidian says everything else. */
+.handwriting-whats-new-title {
+	font-weight: var(--font-semibold);
+}
+.handwriting-whats-new-list {
+	margin: 4px 0 0;
+	padding-left: 18px;
+	line-height: 1.6;
 }
