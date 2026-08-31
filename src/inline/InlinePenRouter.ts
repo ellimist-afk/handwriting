@@ -595,7 +595,13 @@ export class InlinePenRouter {
 		// on a Boox a fingertip would read as a palm and the shield would eat
 		// scrolling - the iPad failure again, on the main user base.
 		const shield = new PalmShield();
-		if (!Platform.isMobileApp && palmRadiusTrustworthy(this.scrollEl.win?.navigator ?? navigator)) {
+		// typeof, not optional chaining: Node 20 (the CI runner) has no
+		// global navigator BINDING at all, and ?. only guards values -
+		// an undeclared identifier still throws. Shipped 1.3.11's red X.
+		const nav =
+			this.scrollEl.win?.navigator ??
+			(typeof navigator === "undefined" ? undefined : navigator);
+		if (!Platform.isMobileApp && nav !== undefined && palmRadiusTrustworthy(nav)) {
 			shield.attach(this.scrollEl);
 			this.disposers.push(() => shield.dispose());
 		}

@@ -181,7 +181,9 @@ export function readCapabilities(
 		// sniffing, and the host flags (Platform, passed in by the view)
 		// answer the same question honestly.
 		devicePixelRatio: window.devicePixelRatio || 1,
-		maxTouchPoints: navigator?.maxTouchPoints ?? 0,
+		// Same trap as the router's shield gate: ?. does not guard an
+		// UNDECLARED binding, and Node 20 has no navigator at all.
+		maxTouchPoints: typeof navigator === "undefined" ? 0 : (navigator.maxTouchPoints ?? 0),
 		viewportWidth: window.innerWidth,
 		viewportHeight: window.innerHeight,
 		apis: {
