@@ -16,7 +16,7 @@ import { DIAG_OFF_NOTE, diagnosticsEnabled } from "../diag/DiagSwitch";
  * outside it" names the stage where the two scroll types diverge.
  *
  * Everything here is observation: passive listeners, no preventDefault, no
- * behavior. The ring is always on and cheap (small plain objects); the report
+ * behavior. The ring is always on and cheap (small bare objects); the report
  * is built only when copied.
  *
  * What one capture holds, in one merged timeline:

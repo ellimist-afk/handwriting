@@ -1,9 +1,9 @@
 {
 	"id": "handwriting",
 	"name": "Handwriting",
-	"version": "1.3.11",
+	"version": "1.4.2",
 	"minAppVersion": "1.12.3",
-	"description": "Write on your notes with a pen. Pressure ink, highlighter, eraser, and lasso directly on Markdown, saved beside your files.",
+	"description": "Handwrite, highlight, erase and lasso on your notes and PDFs. Your notes stay Markdown.",
 	"author": "Alan",
 	"fundingUrl": {
 		"Ko-fi": "https://ko-fi.com/ellimistafk"

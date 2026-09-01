@@ -19,7 +19,7 @@ import { flattenStroke } from "./Ribbon";
 import { DEFAULT_PEN, widthForPressure } from "./PenStyle";
 import { InkPoint } from "./Stroke";
 
-/** Shaping disabled through its own parameters: must equal the plain law. */
+/** Shaping disabled through its own parameters: must equal the unshaped law. */
 const NEUTRAL: ShapeParams = {
 	pressureAlpha: 1,
 	velocityAlpha: 1,
@@ -115,13 +115,13 @@ describe("applyEndTaper — tips, not blunt caps", () => {
 describe("flattenStrokeShaped — the committed geometry", () => {
 	it("neutral parameters reproduce flattenStroke's geometry", () => {
 		const pts = line(20, 3, 5, 0.5);
-		const plain = flattenStroke(pts, DEFAULT_PEN, 1);
+		const unshaped = flattenStroke(pts, DEFAULT_PEN, 1);
 		const shaped = flattenStrokeShaped(pts, DEFAULT_PEN, 1, NEUTRAL);
-		expect(shaped.length).toBe(plain.length);
-		for (let i = 0; i < plain.length; i++) {
-			expect(shaped[i]!.x).toBeCloseTo(plain[i]!.x, 10);
-			expect(shaped[i]!.y).toBeCloseTo(plain[i]!.y, 10);
-			expect(shaped[i]!.hw).toBeCloseTo(plain[i]!.hw, 10);
+		expect(shaped.length).toBe(unshaped.length);
+		for (let i = 0; i < unshaped.length; i++) {
+			expect(shaped[i]!.x).toBeCloseTo(unshaped[i]!.x, 10);
+			expect(shaped[i]!.y).toBeCloseTo(unshaped[i]!.y, 10);
+			expect(shaped[i]!.hw).toBeCloseTo(unshaped[i]!.hw, 10);
 		}
 	});
 

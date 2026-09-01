@@ -46,7 +46,7 @@ const K = 0.5522847498307936;
  * inside a content stream rather than a small number, and a stream that fails
  * to parse renders as a blank page with no other complaint.
  */
-function num(v: number): string {
+export function pdfNum(v: number): string {
 	const r = Math.round(v * 100) / 100;
 	if (!Number.isFinite(r) || r === 0) return "0";
 	const s = r.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
@@ -57,48 +57,59 @@ function num(v: number): string {
 export function pdfColor(tool: InkStroke["tool"], hex: unknown): string {
 	const safe = normalizeInkColor(tool, hex);
 	const n = Number.parseInt(safe.slice(1), 16);
-	return `${num(((n >> 16) & 0xff) / 255)} ${num(((n >> 8) & 0xff) / 255)} ${num((n & 0xff) / 255)}`;
+	return `${pdfNum(((n >> 16) & 0xff) / 255)} ${pdfNum(((n >> 8) & 0xff) / 255)} ${pdfNum((n & 0xff) / 255)}`;
 }
 
 /**
  * One disc as a closed sub-path of four beziers.
  *
- * KNOWN BUG, and deliberately not fixed here. This traces every disc the same
- * way regardless of which way its stroke's outline turns. Nonzero winding ADDS
- * the turns of every sub-path in a fill, so a disc going the other way
- * subtracts itself from the body it sits on and leaves a hole - one per cap
- * and joint, a nicked edge on a pen line and a row of bubbles on a
- * highlighter, whose discs are wide.
- *
- * It has never been visible because nothing on this line calls it: there is no
- * PDF export command here, only `export-ink-svg`, and this file is unreachable
- * and tree-shaken out of the bundle. It was found on the pdf branch, where
- * ink is genuinely written into documents, by rendering 61 real PDFs.
- *
- * The fix is dc01602 on rc4: measure the outline's turn per stroke - a stroke
- * drawn right to left closes the other way, so it cannot be assumed - and
- * mirror the disc's y offsets to match. Take it from there rather than
- * rewriting it, and take its tests with it. If you are here because you are
- * wiring PDF export on this line, this is the thing that would have shipped
- * holes.
+ * `turn` is which way the stroke's outline goes, and the disc has to agree
+ * with it. Nonzero winding ADDS the turns of every sub-path in a fill, so a
+ * disc going the other way subtracts itself from the body it sits on and
+ * leaves a hole - one per cap and joint. On a pen line that is a nicked edge;
+ * on a highlighter, whose discs are wide, it is a row of bubbles.
  */
-export function discOps(d: Disc): string {
+export function discOps(d: Disc, turn = 1): string {
 	const { x, y, r } = d;
 	const k = K * r;
+	// Only the y offsets take the sign: mirroring the circle top to bottom is
+	// what reverses the direction it is traced in.
+	const kt = k * turn;
+	const rt = r * turn;
 	return (
-		`${num(x + r)} ${num(y)} m ` +
-		`${num(x + r)} ${num(y + k)} ${num(x + k)} ${num(y + r)} ${num(x)} ${num(y + r)} c ` +
-		`${num(x - k)} ${num(y + r)} ${num(x - r)} ${num(y + k)} ${num(x - r)} ${num(y)} c ` +
-		`${num(x - r)} ${num(y - k)} ${num(x - k)} ${num(y - r)} ${num(x)} ${num(y - r)} c ` +
-		`${num(x + k)} ${num(y - r)} ${num(x + r)} ${num(y - k)} ${num(x + r)} ${num(y)} c h `
+		`${pdfNum(x + r)} ${pdfNum(y)} m ` +
+		`${pdfNum(x + r)} ${pdfNum(y + kt)} ${pdfNum(x + k)} ${pdfNum(y + rt)} ${pdfNum(x)} ${pdfNum(y + rt)} c ` +
+		`${pdfNum(x - k)} ${pdfNum(y + rt)} ${pdfNum(x - r)} ${pdfNum(y + kt)} ${pdfNum(x - r)} ${pdfNum(y)} c ` +
+		`${pdfNum(x - r)} ${pdfNum(y - kt)} ${pdfNum(x - k)} ${pdfNum(y - rt)} ${pdfNum(x)} ${pdfNum(y - rt)} c ` +
+		`${pdfNum(x + k)} ${pdfNum(y - rt)} ${pdfNum(x + r)} ${pdfNum(y - kt)} ${pdfNum(x + r)} ${pdfNum(y)} c h `
 	);
+}
+
+/**
+ * Which way the closed outline turns: left side forward, right side back.
+ *
+ * Only the SIGN is wanted. It is not a constant - a stroke drawn right to
+ * left closes the other way round - so it is measured per stroke rather than
+ * assumed, and the discs are pointed to match.
+ */
+function outlineTurn(left: readonly Pt[], right: readonly Pt[]): number {
+	const n = left.length + right.length;
+	if (n < 3) return 1;
+	const at = (i: number): Pt => (i < left.length ? left[i]! : right[n - 1 - i]!);
+	let twice = 0;
+	for (let i = 0; i < n; i++) {
+		const p = at(i);
+		const q = at((i + 1) % n);
+		twice += p.x * q.y - q.x * p.y;
+	}
+	return twice < 0 ? -1 : 1;
 }
 
 function polyOps(left: readonly Pt[], right: readonly Pt[]): string {
 	if (left.length === 0) return "";
-	let s = `${num(left[0]!.x)} ${num(left[0]!.y)} m `;
-	for (let i = 1; i < left.length; i++) s += `${num(left[i]!.x)} ${num(left[i]!.y)} l `;
-	for (let i = right.length - 1; i >= 0; i--) s += `${num(right[i]!.x)} ${num(right[i]!.y)} l `;
+	let s = `${pdfNum(left[0]!.x)} ${pdfNum(left[0]!.y)} m `;
+	for (let i = 1; i < left.length; i++) s += `${pdfNum(left[i]!.x)} ${pdfNum(left[i]!.y)} l `;
+	for (let i = right.length - 1; i >= 0; i--) s += `${pdfNum(right[i]!.x)} ${pdfNum(right[i]!.y)} l `;
 	return s + "h ";
 }
 
@@ -106,7 +117,8 @@ function polyOps(left: readonly Pt[], right: readonly Pt[]): string {
 export function strokePdfOps(stroke: InkStroke): string {
 	const o = strokeOutline(stroke);
 	if (!o) return "";
-	return polyOps(o.left, o.right) + o.discs.map(discOps).join("");
+	const turn = outlineTurn(o.left, o.right);
+	return polyOps(o.left, o.right) + o.discs.map((d) => discOps(d, turn)).join("");
 }
 
 /**
@@ -141,13 +153,17 @@ function runs(strokes: readonly InkStroke[]): string {
  * crossing stays one flat wash instead of doubling into a dark seam - the
  * same single-pass rule the canvas layers use.
  */
-export function inkPdfContent(strokes: readonly InkStroke[], heightPx: number): string {
+export function inkPdfContent(
+	strokes: readonly InkStroke[],
+	heightPx: number,
+	gsName = "GSa"
+): string {
 	const hi = strokes.filter((s) => s.tool === "highlighter");
 	const pen = strokes.filter((s) => s.tool !== "highlighter");
 	// Flip once: PDF counts y upward from the bottom, ink counts it downward
 	// from the top. Everything after this is written in note coordinates.
-	let out = `q 1 0 0 -1 0 ${num(heightPx)} cm `;
-	if (hi.length > 0) out += `q /GSa gs ${runs(hi)}Q `;
+	let out = `q 1 0 0 -1 0 ${pdfNum(heightPx)} cm `;
+	if (hi.length > 0) out += `q /${gsName} gs ${runs(hi)}Q `;
 	out += runs(pen);
 	return out + "Q";
 }
@@ -178,18 +194,18 @@ export function inkPageBox(strokes: readonly InkStroke[]): { w: number; h: numbe
  * hex and every other value is a formatted number.
  */
 export function pdfDocument(widthPx: number, heightPx: number, content: string): string {
-	const wPt = num(widthPx * PX_TO_PT);
-	const hPt = num(heightPx * PX_TO_PT);
+	const wPt = pdfNum(widthPx * PX_TO_PT);
+	const hPt = pdfNum(heightPx * PX_TO_PT);
 	// The stream's flip is in px; the page box is in points. The page carries
 	// the px-to-pt scale so the ink never has to know about units.
-	const body = `q ${num(PX_TO_PT)} 0 0 ${num(PX_TO_PT)} 0 0 cm ${content} Q`;
+	const body = `q ${pdfNum(PX_TO_PT)} 0 0 ${pdfNum(PX_TO_PT)} 0 0 cm ${content} Q`;
 	const objects = [
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
 		`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${wPt} ${hPt}]` +
 			" /Contents 4 0 R /Resources << /ExtGState << /GSa 5 0 R >> >> >>",
 		`<< /Length ${body.length} >>\nstream\n${body}\nendstream`,
-		`<< /Type /ExtGState /ca ${num(HIGHLIGHTER_ALPHA)} /CA ${num(HIGHLIGHTER_ALPHA)} >>`,
+		`<< /Type /ExtGState /ca ${pdfNum(HIGHLIGHTER_ALPHA)} /CA ${pdfNum(HIGHLIGHTER_ALPHA)} >>`,
 	];
 	let out = "%PDF-1.7\n";
 	const offsets: number[] = [];

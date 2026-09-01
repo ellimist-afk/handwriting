@@ -1,3 +1,4 @@
 node_modules/
 main.js
 release/
+SECRET_KEY.local.txt

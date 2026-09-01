@@ -12,7 +12,7 @@ import { runDetached } from "../util/Detached";
  * out in world units inside that layer.
  *
  * Idle boxes render through Obsidian's own Markdown renderer, so wiki links,
- * tags and embeds are real (§17, §73). Editing swaps in a plain textarea:
+ * tags and embeds are real (§17, §73). Editing swaps in a bare textarea:
  * one lightweight editor at a time, never a CodeMirror per box (§16).
  *
  * The layer itself is pointer-transparent: ink must be able to cross a text

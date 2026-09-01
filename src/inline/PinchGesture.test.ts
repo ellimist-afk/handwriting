@@ -22,7 +22,7 @@ describe("pinchEngaged", () => {
 })
 
 describe("pinchRatio", () => {
-	it("is the plain ratio of current spread to starting spread", () => {
+	it("is the bare ratio of current spread to starting spread", () => {
 		expect(pinchRatio(100, 200)).toBe(2);
 		expect(pinchRatio(100, 50)).toBe(0.5);
 	});

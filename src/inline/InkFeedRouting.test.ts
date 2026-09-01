@@ -13,178 +13,28 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { InlinePenCallbacks, InlinePenRouter } from "./InlinePenRouter";
 import { PenSample } from "../input/PointerRouter";
 import { setMouseInk } from "./MouseInk";
 import { markPenSeen, resetPenToolsForTest } from "./PenToolsMode";
+// The DOM scaffolding lives in test/routerHarness.ts now, shared with the
+// trace replay - one element fake on purpose, so the two suites cannot
+// drift apart and disagree about what the router saw.
+import {
+	fakeEl,
+	fedTimestamps,
+	harness,
+	installFakeWindow,
+	penEvent,
+} from "../../test/routerHarness";
 
-// ---- window stub -----------------------------------------------------------
-
-/**
- * Window-level capture registrations land here. The touch guards live on the
- * window rather than the scroller precisely so nothing above them can act
- * first, so a test that fired them on the element would be testing the wrong
- * thing.
- */
-const winHandlers = new Map<string, Handler>();
-
-const hadWindow = "window" in globalThis;
+let uninstallWindow: () => void = () => {};
 beforeAll(() => {
-	if (!hadWindow) {
-		(globalThis as Record<string, unknown>).window = {
-			addEventListener: (type: string, h: Handler) => void winHandlers.set(type, h),
-			removeEventListener: () => {},
-			setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
-			clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
-		};
-	}
+	uninstallWindow = installFakeWindow();
 });
 afterAll(() => {
-	if (!hadWindow) delete (globalThis as Record<string, unknown>).window;
+	uninstallWindow();
 });
 
-// ---- element fake ----------------------------------------------------------
-
-type Handler = (ev: Event) => void;
-
-function fakeEl() {
-	const handlers = new Map<string, Handler>();
-	const classes = new Set<string>();
-	const el = {
-		handlers,
-		/** Replaced below with an identity check; the guards ask this. */
-		contains: (_node: unknown) => false,
-		style: { touchAction: "" },
-		scrollLeft: 0,
-		scrollTop: 0,
-		setCssStyles(styles: { touchAction?: string }) {
-			if (styles.touchAction !== undefined) this.style.touchAction = styles.touchAction;
-		},
-		classList: {
-			add: (c: string) => void classes.add(c),
-			remove: (c: string) => void classes.delete(c),
-			contains: (c: string) => classes.has(c),
-			toggle: (c: string, on?: boolean) => {
-				const want = on ?? !classes.has(c);
-				if (want) classes.add(c);
-				else classes.delete(c);
-				return want;
-			},
-		},
-		addEventListener(type: string, h: Handler) {
-			handlers.set(type, h);
-		},
-		removeEventListener() {},
-		getBoundingClientRect: () => ({
-			left: 0,
-			top: 0,
-			right: 800,
-			bottom: 600,
-			width: 800,
-			height: 600,
-			x: 0,
-			y: 0,
-		}),
-		setPointerCapture() {},
-		releasePointerCapture() {},
-	};
-	el.contains = (node: unknown) => node === el;
-	return el;
-}
-
-// ---- event factory ---------------------------------------------------------
-
-interface PenOpts {
-	x?: number;
-	y?: number;
-	pressure?: number;
-	buttons?: number;
-	/** Timestamps for the coalesced list; each becomes one sample. */
-	coalesced?: number[];
-}
-
-function penEvent(type: string, ts: number, opts: PenOpts = {}): PointerEvent {
-	const { x = 100, y = 100, pressure = 0.4, buttons = 1, coalesced } = opts;
-	const base = {
-		type,
-		pointerType: "pen",
-		pointerId: 7,
-		isPrimary: true,
-		clientX: x,
-		clientY: y,
-		pressure,
-		buttons,
-		button: 0,
-		timeStamp: ts,
-		tiltX: 0,
-		tiltY: 0,
-		width: 0,
-		height: 0,
-		preventDefault: () => {},
-		stopPropagation: () => {},
-	};
-	const ev = { ...base } as Record<string, unknown>;
-	if (coalesced) {
-		ev.getCoalescedEvents = () =>
-			coalesced.map((cts) => ({ ...base, timeStamp: cts }) as unknown as PointerEvent);
-	}
-	return ev as unknown as PointerEvent;
-}
-
-// ---- recorder --------------------------------------------------------------
-
-function recorder() {
-	const rawCalls: PenSample[][] = [];
-	const moveCounts: number[] = [];
-	let downs = 0;
-	let ups = 0;
-	const cb: InlinePenCallbacks = {
-		onPenDown: () => void downs++,
-		onPenHover: () => {},
-		onPenLeave: () => {},
-		onPinch: () => {},
-		onPenRaw: (samples) => void rawCalls.push(samples),
-		onPenMove: (_ev, n) => void moveCounts.push(n),
-		onPenUp: () => void ups++,
-	};
-	return {
-		cb,
-		rawCalls,
-		moveCounts,
-		get downs() {
-			return downs;
-		},
-		get ups() {
-			return ups;
-		},
-	};
-}
-
-function harness() {
-	const el = fakeEl();
-	const rec = recorder();
-	const router = new InlinePenRouter(
-		el as unknown as HTMLElement,
-		el as unknown as HTMLElement,
-		rec.cb
-	);
-	const fire = (ev: PointerEvent) => {
-		const h = el.handlers.get(ev.type);
-		if (!h) throw new Error(`router registered no handler for ${ev.type}`);
-		h(ev);
-	};
-	const fireWin = (ev: PointerEvent) => {
-		const h = winHandlers.get(ev.type);
-		if (!h) throw new Error(`router registered no window handler for ${ev.type}`);
-		h(ev);
-	};
-	return { router, rec, fire, fireWin, el };
-}
-
-/** Flatten every fed sample's timestamp, across calls, in delivery order. */
-function fedTimestamps(rawCalls: PenSample[][]): number[] {
-	return rawCalls.flat().map((s) => s.timestamp);
-}
 
 // ---- the streams -----------------------------------------------------------
 

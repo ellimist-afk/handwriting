@@ -229,7 +229,7 @@
 .handwriting-mobile-tools-divider {
 	align-self: stretch;
 	width: 1px;
-	margin: 4px 3px;
+	margin: 6px 4px;
 	background-color: var(--background-modifier-border);
 	flex: 0 0 auto;
 }
@@ -274,6 +274,94 @@
 	margin-top: 2em;
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
+}
+
+/* The pen reticle over a PDF, positioned in the scroller's content
+   coordinates - the same ones the ink uses. Not fixed: a transformed ancestor
+   turns fixed into absolute against itself, and the reticle drifts off the
+   nib. */
+.handwriting-pdf-cursor {
+	position: absolute;
+	left: 0;
+	top: 0;
+	display: none;
+	border-radius: 50%;
+	pointer-events: none;
+	z-index: 100;
+	box-sizing: border-box;
+	/* Fixed colours, not theme variables: this reticle sits on the PDF page,
+	   which is white whatever the app theme says - in dark mode the theme's
+	   text colour is light grey and the ring vanished into the paper. A
+	   white-inside-dark sandwich lights at least one ring on ANY ground,
+	   including a page inverted by "adapt to theme". */
+	border: 1.5px solid rgba(255, 255, 255, 0.95);
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+/* Dimmed while the PDF is still being identified. Ink is refused until the
+   content hash lands, and without this the reticle looks ready when it is
+   not - which is indistinguishable from the plugin being broken. */
+.handwriting-pdf-cursor-waiting {
+	opacity: 0.3;
+}
+
+/* While a pen is near, the system cursor is redundant with the reticle and
+   two markers near each other read as one of them being wrong. */
+.pdf-viewer-container.handwriting-pdf-hover,
+.pdf-viewer-container.handwriting-pdf-hover * {
+	cursor: none;
+}
+
+/* Eraser and lasso show their reach rather than a nib: a dot that lies about
+   what the eraser is about to take is worse than no dot at all. */
+.handwriting-pdf-cursor-ring {
+	/* Same reasoning as the base ring: the page is white in dark mode too. */
+	border: 1px dashed rgba(0, 0, 0, 0.65);
+	box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+
+/* A mouse gets a fixed locator ring around the ink-true dot: with the system
+   cursor hidden, a small nib left a four-pixel speck as the only pointer on
+   the screen. Fixed-size on purpose - it locates, the dot informs. The
+   eraser and lasso rings are already big enough to be their own locator. */
+.handwriting-pdf-cursor-mouse:not(.handwriting-pdf-cursor-ring)::after {
+	content: "";
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	width: 22px;
+	height: 22px;
+	transform: translate(-50%, -50%);
+	/* Page colours, not theme colours - see the base ring. */
+	border: 1px solid rgba(0, 0, 0, 0.55);
+	border-radius: 50%;
+	box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
+}
+
+/* ---- pdf ink ---- */
+
+/*
+ * One overlay per live PDF page, inside the page div so it inherits the
+ * viewer's own placement and scrolling. Never interactive: input is claimed
+ * from the pen router, not by this element sitting in the way of selection.
+ */
+.handwriting-pdf-ink {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	max-width: none;
+	z-index: 2;
+}
+
+/* The committed ink comes up over the wet layer while a highlighter is being
+   drawn, so the live wash passes UNDER the ink it is marking - which is where
+   the committed painter puts it the moment the stroke lands. Raising this one
+   rather than lowering the wet one keeps both above the page: what the viewer
+   stacks underneath them is not ours to reason about. */
+.handwriting-pdf-ink.handwriting-pdf-ink-over {
+	z-index: 3;
 }
 
 .handwriting-embed-ink {
@@ -364,6 +452,50 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 .handwriting-android .handwriting-pen-pill.handwriting-corner-top-left {
 	top: calc(env(safe-area-inset-top, 0px) + 48px);
 }
+
+/* The pill is 34px to the strip's 40 (32px buttons + 4px padding): at the
+   strip's own 8px offsets its circle sat 3px off the corner button it
+   replaces, and collapsing visibly jumped (alan, 2026-08-31: "the circle
+   itself is off center from the toolbar"). These offsets put the circle's
+   centre exactly where the corner button's was - 11px against desktop's
+   32px buttons, 15px against mobile's 40px, and the android top clears the
+   notification shade by the same concentric margin. */
+.handwriting-pen-pill.handwriting-corner-top-right {
+	top: 11px;
+	right: 11px;
+}
+.handwriting-pen-pill.handwriting-corner-top-left {
+	top: 11px;
+	left: 11px;
+}
+.handwriting-pen-pill.handwriting-corner-bottom-right {
+	bottom: 11px;
+	right: 11px;
+}
+.handwriting-pen-pill.handwriting-corner-bottom-left {
+	bottom: 11px;
+	left: 11px;
+}
+.is-mobile .handwriting-pen-pill.handwriting-corner-top-right {
+	top: 15px;
+	right: 15px;
+}
+.is-mobile .handwriting-pen-pill.handwriting-corner-top-left {
+	top: 15px;
+	left: 15px;
+}
+.is-mobile .handwriting-pen-pill.handwriting-corner-bottom-right {
+	bottom: 15px;
+	right: 15px;
+}
+.is-mobile .handwriting-pen-pill.handwriting-corner-bottom-left {
+	bottom: 15px;
+	left: 15px;
+}
+.handwriting-android .handwriting-pen-pill.handwriting-corner-top-right,
+.handwriting-android .handwriting-pen-pill.handwriting-corner-top-left {
+	top: calc(env(safe-area-inset-top, 0px) + 55px);
+}
 /* ---- mobile tool strip ---- */
 
 /*
@@ -397,6 +529,10 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	background: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 10px;
+	/* The same elevation Obsidian's own floating chrome gets. Without it the
+	   strip reads as painted ON the page it floats over, and the border does
+	   all the separating on themes where border and background are close. */
+	box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.15));
 	opacity: 0.92;
 }
 
@@ -490,7 +626,28 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	background: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 10px;
+	box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.15));
 	opacity: 0.92;
+}
+
+/* In a bottom corner the strip sits at the screen edge, so anything hung
+   UNDER it opens into the edge - sliders dropped downward off the glass
+   (alan, 2026-08-31). Bottom corners hang their pops and the tooltip
+   ABOVE the strip instead. */
+.handwriting-mobile-tools.handwriting-corner-bottom-right .handwriting-slider-pop,
+.handwriting-mobile-tools.handwriting-corner-bottom-left .handwriting-slider-pop {
+	top: auto;
+	bottom: 100%;
+	margin-top: 0;
+	margin-bottom: 4px;
+}
+
+.handwriting-mobile-tools.handwriting-corner-bottom-right .handwriting-strip-tip,
+.handwriting-mobile-tools.handwriting-corner-bottom-left .handwriting-strip-tip {
+	top: auto;
+	bottom: 100%;
+	margin-top: 0;
+	margin-bottom: 6px;
 }
 
 .handwriting-slider-pop.is-showing {
@@ -561,7 +718,16 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
  * sizes differently gets a different answer, and none of them are checkable
  * from here. A column count cannot drift.
  */
-.handwriting-color-pop {
+/* Two classes each, because the base rules carry two: the single-class
+   grid rule silently OUTRANKED the base display:none (later at equal
+   specificity), so a closed palette stayed painted - with its stale
+   swatches - forever. Masked for weeks by strip teardown; found the first
+   night a strip lived long enough (alan, pen taps, 2026-08-31). */
+.handwriting-color-pop:not(.is-showing) {
+	display: none;
+}
+
+.handwriting-color-pop.is-showing {
 	display: grid;
 	grid-template-columns: repeat(4, auto);
 	justify-items: center;
@@ -587,7 +753,14 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 .handwriting-slider-val {
 	font-size: 11px;
 	font-variant-numeric: tabular-nums;
-	color: var(--text-muted);
+	/* The readout floats over the PAGE, not over strip chrome - muted gray
+	   on a white note was unreadable (glass, 2026-08-31). Normal text on a
+	   chip of the strip's own background, whatever the theme. */
+	color: var(--text-normal);
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 1px 6px;
 }
 
 /* Collapsed: the strip yields to a single pill (PencilKit's move). Both
@@ -617,6 +790,7 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	padding: 0;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 50%;
+	box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.15));
 	background: var(--background-secondary);
 	box-shadow: none;
 	color: var(--text-muted);
@@ -903,6 +1077,14 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
  * nested scrollers' effective value changes. `!important` so no theme rule
  * on a descendant can re-open a hole. Unit-tested in GuardStyle.test.ts.
  */
+/*
+ * Both surfaces. The rule was written for the editor and scoped to its
+ * scroller, so on a pdf only half the guard was ever active: the inline style
+ * landed on .pdf-viewer-container and the nested scrollers inside the viewer
+ * kept their own touch-action. A pen landing while a hand rests can then be
+ * arbitrated as a two-pointer gesture, which is a pinch, which is a zoom
+ * (hardware, 2026-08-29: "it did a weird zoom when i put pen to surface").
+ */
 .cm-scroller.handwriting-touch-guard * {
 	touch-action: none !important;
 }
@@ -941,8 +1123,7 @@ body.handwriting-active-page .status-bar {
 	display: none;
 }
 
-/* What's new: the first launch after an update says what changed, once,
-   in the corner where Obsidian says everything else. */
+/* The what's-new notice: a corner toast, not a dialog. */
 .handwriting-whats-new-title {
 	font-weight: var(--font-semibold);
 }
@@ -950,4 +1131,92 @@ body.handwriting-active-page .status-bar {
 	margin: 4px 0 0;
 	padding-left: 18px;
 	line-height: 1.6;
+}
+
+/* Bug report modal: the id must outlive any toast, and the JSON steps back. */
+.handwriting-diagnostic-collapsed {
+	display: none;
+}
+
+.handwriting-diagnostic-summary {
+	color: var(--text-muted);
+	margin: 4px 0 8px;
+}
+
+.handwriting-upload-done {
+	margin-top: 10px;
+	font-size: 1.1em;
+}
+
+.handwriting-upload-id {
+	font-family: var(--font-monospace);
+	font-weight: 600;
+	user-select: all;
+	background: var(--background-secondary);
+	padding: 2px 8px;
+	border-radius: 6px;
+}
+
+/* The recording badge must be findable at a glance, not camouflage. */
+.handwriting-recording-badge.is-recording {
+	color: var(--text-error);
+	font-weight: 600;
+}
+
+/* The strip's recording indicator: nothing at all until recording starts,
+   then a red breathing dot until recording ends. Not a control. */
+.handwriting-recording-dot {
+	display: none;
+	/* Accent, not alarm-red: a red pulse read as surveillance to the
+	   very people the friendly tooltip exists for. */
+	color: var(--text-accent);
+	font-size: 12px;
+	padding: 0 6px;
+	align-self: center;
+	cursor: default;
+	animation: handwriting-recording-pulse 1.6s ease-in-out infinite;
+}
+
+.handwriting-recording-dot.is-recording {
+	display: inline-block;
+}
+
+@keyframes handwriting-recording-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.35; }
+}
+
+/* The dot's own tooltip: Obsidian's answers mouse hover only, and a
+   hovering pen showed nothing - and every button was mute, not just the
+   dot. Positioned under the strip, aligned to the hovered control. */
+.handwriting-strip-tip {
+	display: none;
+	position: absolute;
+	top: 100%;
+	right: 0;
+	margin-top: 6px;
+	max-width: 260px;
+	padding: 6px 10px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+	pointer-events: none;
+	z-index: 30;
+}
+
+.handwriting-strip-tip.is-showing {
+	display: block;
+}
+
+/* Screen readers read it; nobody sees it; Obsidian's tooltip cannot key on
+   it the way it keys on aria-label. */
+.handwriting-sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
 }

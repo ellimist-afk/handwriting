@@ -40,6 +40,15 @@ export interface InkStroke {
 	 * reads as scratchiness. Absent = a pen drew it.
 	 */
 	device?: "mouse";
+	/**
+	 * Which PDF page this stroke lives on, 1-based, matching the viewer's own
+	 * `data-page-number`. Present only on the pdf surface.
+	 *
+	 * A stroke belongs to exactly ONE page - the one its first sample landed
+	 * on. Splitting a boundary-crossing stroke would make one gesture into two
+	 * objects that erase and undo separately; see PageMap.strokePage.
+	 */
+	page?: number;
 }
 
 export function computeBBox(points: InkPoint[], padWorld: number): BBox {

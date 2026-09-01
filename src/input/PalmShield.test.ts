@@ -62,6 +62,19 @@ describe("where the shield is allowed to run", () => {
 		).toBe(false);
 	});
 
+	it("stays off android, whose radii are honest too", () => {
+		expect(palmRadiusTrustworthy({ userAgent: "Mozilla/5.0 (Linux; Android 13; Boox)" })).toBe(false);
+	});
+
+	it("a palm that flattens mid-contact is swallowed at the move", () => {
+		// Landed gently under the threshold, then pressed flat: the verdict
+		// on the move must begin the swallow, not just honour old ones.
+		const grew = { identifier: 9, radiusX: 24, radiusY: 24 };
+		const v = palmVerdict([grew], new Set());
+		expect(v.veto).toBe(true);
+		expect(v.begin).toEqual([9]);
+	});
+
 	it("runs on windows, where it was calibrated", () => {
 		expect(
 			palmRadiusTrustworthy({ userAgent: "Mozilla/5.0 (Windows NT 10.0)", platform: "Win32", maxTouchPoints: 10 })

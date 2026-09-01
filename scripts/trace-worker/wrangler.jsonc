@@ -1,0 +1,16 @@
+// The receiving end of "Upload to developer" - deployed with
+// `npx wrangler deploy` from this directory. Nothing here is part of the
+// plugin build; the plugin only knows the deployed URL.
+{
+	"name": "handwriting-traces",
+	"main": "worker.mjs",
+	"compatibility_date": "2026-08-01",
+	"kv_namespaces": [
+		{
+			"binding": "TRACES",
+			// Created 2026-08-31 via the account API; KV over R2 because KV's
+			// free tier needs nothing enabled in the dashboard.
+			"id": "8144ed460a82461f9c8cdd60b4d33230"
+		}
+	]
+}

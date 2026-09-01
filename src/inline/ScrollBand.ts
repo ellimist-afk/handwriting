@@ -133,7 +133,7 @@ export function bandFor(v: BandViewport): Band {
 	const height = v.clientHeight + margin * 2;
 	// `scrollHeight` is reported as a rounded integer while `scrollTop` is
 	// fractional, so a scroller can sit a fraction of a pixel past its own
-	// reported end. Clamping to the plain number would put the band's bottom
+	// reported end. Clamping to the rounded number would put the band's bottom
 	// edge inside the viewport there - a hairline of missing ink at the very
 	// end of a note. Taking whichever bottom is genuinely reachable cannot run
 	// away, because a position the viewport has already reached is by

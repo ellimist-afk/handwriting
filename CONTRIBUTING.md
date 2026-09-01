@@ -51,8 +51,5 @@ Contributions are submitted under `CC-BY-NC-ND-4.0`, the same license
 as the rest of the project. By opening a pull request you are offering your
 change under those terms.
 
-Releases up to and including 1.3.8 went out under `AGPL-3.0-only` and stay
-that way.
-
 There is no contributor license agreement and no copyright assignment. You
 keep the copyright in what you wrote.

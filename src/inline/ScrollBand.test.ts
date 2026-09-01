@@ -48,7 +48,7 @@ describe("bandFor", () => {
 	});
 
 	it("covers the last row when the scroller sits past its rounded end", () => {
-		// scrollHeight is an integer; scrollTop is not. Clamping to the plain
+		// scrollHeight is an integer; scrollTop is not. Clamping to the rounded
 		// reported number leaves a hairline of ink undrawn at the end of a note.
 		const v = viewport({ scrollTop: 19100.6, scrollHeight: 20000, clientHeight: 900 });
 		expect(bandCovers(bandFor(v), v)).toBe(true);

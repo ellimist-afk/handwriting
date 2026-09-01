@@ -118,10 +118,10 @@ export interface InkSvgRun {
  * The same runs inkSvgBody would render, handed over as data.
  *
  * A caller painting into a LIVE document builds elements from these
- * (createElementNS + setAttribute). Writing the markup into a live element
- * would do the same thing, and the community review flags that on sight,
- * safe content or not - so the string form stays for the .svg file export,
- * where it is a file write.
+ * (createElementNS + setAttribute). Writing the markup into a live
+ * element would do the same thing, and the community review flags that on
+ * sight, safe content or not - so the string form stays for the .svg file
+ * export, where it is a file write.
  */
 export function inkSvgLayers(strokes: readonly InkStroke[]): {
 	highlighter: InkSvgRun[];

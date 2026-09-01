@@ -42,6 +42,24 @@ export const HIGHLIGHTER_COLORS: ReadonlyArray<InkColorChoice> = [
 	{ name: "orange", hex: "#ffa94d" },
 ];
 
+/**
+ * Persistence hook, the eraser slider's pattern: main registers a writer so
+ * the strip's swatches can apply a color directly. They used to run the
+ * per-name color commands, which are registered only behind an off-by-default
+ * setting - a fresh install had a palette of dead swatches (audit,
+ * 2026-08-31).
+ */
+let persistColor: ((tool: InkTool, hex: string) => void) | null = null;
+export function setPersistInkColor(fn: (tool: InkTool, hex: string) => void): void {
+	persistColor = fn;
+}
+
+/** Set and persist a tool's color in one move; the strip's path. */
+export function applyInkColor(tool: InkTool, hex: string): void {
+	setInkColorHex(tool, hex);
+	persistColor?.(tool, hex);
+}
+
 export function colorsFor(tool: InkTool): ReadonlyArray<InkColorChoice> {
 	return tool === "highlighter" ? HIGHLIGHTER_COLORS : PEN_COLORS;
 }
@@ -49,7 +67,7 @@ export function colorsFor(tool: InkTool): ReadonlyArray<InkColorChoice> {
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 
 /**
- * Pure, unit-tested: a persisted/foreign value is kept if it is a plain
+ * Pure, unit-tested: a persisted/foreign value is kept if it is an ordinary
  * six-digit hex color (future-proof for custom colors); anything else
  * falls back to the tool's default. Never throws, never returns nonsense.
  */

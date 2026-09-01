@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import { InkStroke, computeBBox } from "./Stroke";
+import { strokeOutline } from "./StrokeOutline";
 import {
 	PX_TO_PT,
 	discOps,
@@ -37,6 +38,93 @@ function stroke(
 		createdAt: 0,
 	};
 }
+
+/**
+ * The sub-paths a viewer would trace, from the operators actually emitted.
+ * Beziers are sampled; everything else is followed literally.
+ */
+function subpaths(ops: string): { x: number; y: number }[][] {
+	const out: { x: number; y: number }[][] = [];
+	let cur: { x: number; y: number }[] = [];
+	let at = { x: 0, y: 0 };
+	let stack: number[] = [];
+	for (const token of ops.trim().split(/\s+/)) {
+		if (/^-?[\d.]+$/.test(token)) {
+			stack.push(Number(token));
+			continue;
+		}
+		const n = stack.length;
+		if (token === "m") {
+			if (cur.length > 0) out.push(cur);
+			at = { x: stack[n - 2]!, y: stack[n - 1]! };
+			cur = [at];
+		} else if (token === "l") {
+			at = { x: stack[n - 2]!, y: stack[n - 1]! };
+			cur.push(at);
+		} else if (token === "c") {
+			const [x1, y1, x2, y2, x3, y3] = stack.slice(n - 6) as number[];
+			for (let i = 1; i <= 8; i++) {
+				const t = i / 8;
+				const u = 1 - t;
+				cur.push({
+					x: u * u * u * at.x + 3 * u * u * t * x1! + 3 * u * t * t * x2! + t * t * t * x3!,
+					y: u * u * u * at.y + 3 * u * u * t * y1! + 3 * u * t * t * y2! + t * t * t * y3!,
+				});
+			}
+			at = { x: x3!, y: y3! };
+		} else if (token === "h" && cur.length > 0) {
+			out.push(cur);
+			cur = [];
+		}
+		stack = [];
+	}
+	if (cur.length > 0) out.push(cur);
+	return out;
+}
+
+/** The nonzero winding number at a point: what decides whether it is filled. */
+function windingAt(ops: string, px: number, py: number): number {
+	let w = 0;
+	for (const path of subpaths(ops)) {
+		for (let i = 0; i < path.length; i++) {
+			const a = path[i]!;
+			const b = path[(i + 1) % path.length]!;
+			const side = (b.x - a.x) * (py - a.y) - (px - a.x) * (b.y - a.y);
+			if (a.y <= py) {
+				if (b.y > py && side > 0) w++;
+			} else if (b.y <= py && side < 0) w--;
+		}
+	}
+	return w;
+}
+
+describe("the fill", () => {
+	// The bug this exists for shipped invisible: every test passed, the file
+	// opened, and the ink came out with a hole punched at every cap and joint
+	// because the discs turned against the body. Nothing here asked what the
+	// fill rule would actually DO, so this does.
+	it("covers a disc that sits on the body instead of cancelling it", () => {
+		const s = stroke("highlighter", [0, 20, 40, 60, 80], 100);
+		const disc = strokeOutline(s)!.discs[0]!;
+		expect(windingAt(strokePdfOps(s), disc.x, disc.y)).not.toBe(0);
+	});
+
+	it("covers it whichever way the stroke was drawn", () => {
+		// The outline closes the other way round on a stroke drawn backwards,
+		// so a disc direction fixed at write time is right only half the time.
+		for (const xs of [[0, 20, 40, 60, 80], [80, 60, 40, 20, 0]]) {
+			const s = stroke("pen", xs, 100);
+			for (const disc of strokeOutline(s)!.discs) {
+				expect(windingAt(strokePdfOps(s), disc.x, disc.y)).not.toBe(0);
+			}
+		}
+	});
+
+	it("leaves the paper outside the stroke alone", () => {
+		const s = stroke("pen", [0, 20, 40], 100);
+		expect(windingAt(strokePdfOps(s), -500, -500)).toBe(0);
+	});
+});
 
 describe("the cross-reference table", () => {
 	// The offsets are the whole reason this file is assembled rather than

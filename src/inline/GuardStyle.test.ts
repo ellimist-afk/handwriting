@@ -33,6 +33,16 @@ describe("guard style — inline touch-action and subtree class move together", 
 		expect(el.classes.has(GUARD_SUBTREE_CLASS)).toBe(true);
 	});
 
+	it("writes whatever value the surface asked for", () => {
+		// A pdf viewer passes pinch-zoom: single-finger panning stays denied,
+		// which is the arbitration a cold pen contact must survive, while the
+		// browser keeps two-finger gestures instead of leaking them to the app.
+		const el = fakeScroller();
+		armGuardStyle(el, "pinch-zoom");
+		expect(el.style.touchAction).toBe("pinch-zoom");
+		expect(el.classes.has(GUARD_SUBTREE_CLASS)).toBe(true);
+	});
+
 	it("disarming restores the saved inline value AND drops the mark", () => {
 		const el = fakeScroller("pan-y");
 		armGuardStyle(el);

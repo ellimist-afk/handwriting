@@ -65,7 +65,7 @@ type Tool = "pen" | "highlighter" | "eraser" | "lasso";
  * Text lives in the `.md` (indexed by Obsidian, readable without the plugin);
  * geometry and ink live in `.handwriting/<page-id>.json`. The pen pipeline below is
  * frozen as approved at the checkpoint: synchronous drawing inside
- * `pointerrawupdate`, current processing, plain (non-desynchronized) canvas.
+ * `pointerrawupdate`, current processing, synchronized (non-desynchronized) canvas.
  */
 export class HandwritingPageView extends TextFileView {
 	private host: HandwritingHost;
@@ -217,7 +217,7 @@ export class HandwritingPageView extends TextFileView {
 		if (!ctx || !hctx) throw new Error("Handwriting: no 2d context");
 		this.committedCtx = ctx;
 		this.highlightCtx = hctx;
-		// Frozen pen pipeline: plain canvas. A desynchronized canvas felt worse
+		// Frozen pen pipeline: synchronized canvas. A desynchronized canvas felt worse
 		// on the test Surface. The highlighter uses the same renderer on its own
 		// layer; the pipeline is unchanged, only the canvas it draws into differs.
 		this.wetInk = new WetInkRenderer(this.wetCanvas, false);
@@ -427,7 +427,7 @@ export class HandwritingPageView extends TextFileView {
 			);
 		} else if (result?.recovered && !result.damagedKeptAs) {
 			// (The corrupt-file promotion announces itself through the
-			// store's onRecovered, with the kept path; this is the plain
+			// store's onRecovered, with the kept path; this is the bare
 			// interrupted-save case.)
 			// A success, and it must read as one: this fires when the atomic
 			// tmp/rename recovery worked. An earlier text reported "sidecar

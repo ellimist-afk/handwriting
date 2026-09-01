@@ -1,9 +1,10 @@
 # How Handwriting stores ink
 
 Written against the code in `src/persistence/PageStore.ts`,
-`src/inline/InlineInkStore.ts`, `src/model/PageData.ts` and
-`src/model/MarkdownPage.ts`. Where this document and the code disagree, the
-code is right.
+`src/inline/InlineInkStore.ts`, `src/model/PageData.ts`,
+`src/model/MarkdownPage.ts`, `src/pdf/PdfIdentity.ts` and
+`src/pdf/PdfInkStore.ts`. Where this document and the code disagree, the code
+is right.
 
 ## the split
 
@@ -46,6 +47,65 @@ own. `handwriting: page` means "open this note on the canvas view", and is
 written only by `New canvas page`. `handwriting-version` appears only on
 notes that carry canvas block markers.
 
+## pdfs
+
+PDF ink is stored exactly like note ink: one JSON file per PDF, under
+`.handwriting/`, through the same writes, the same conflict checks and the
+same trash.
+
+What differs is identity. A note carries its page id in its frontmatter. A
+PDF cannot: there is nowhere to put one, and writing into the PDF is the one
+thing this feature promises never to do. So the id comes from the file's
+content instead, and looks like this:
+
+```
+pdf-4c1f9a2b7e0d5836a1c4e9f20b7d8a63
+```
+
+That is a SHA-256 over the first 64 KiB of the file plus its exact byte
+length, kept to 32 hex characters. The head rather than the whole file
+because a hundred-megabyte scan should not be read end to end every time it
+opens. The length is in there so truncation cannot forge an identity: two
+documents sharing a 64 KiB prefix, like a template and a filled-in copy of
+it, differ in length, and that difference reaches the hash.
+
+Three things follow from keying on content:
+
+- Renaming or moving a PDF costs nothing. The ink follows the bytes.
+- Two machines syncing the same file agree on the id by construction, with no
+  coordination. This is the only reason ink drawn on a tablet appears on a
+  desktop.
+- Two copies of the same PDF in one vault share their ink. That is a choice,
+  not an accident: they are the same document, and someone who files a
+  duplicate under a second name expects their annotations there.
+
+**A fresh copy of a document you already annotated arrives with your ink
+on it.** Export the same source to PDF twice - the same OneNote page, the
+same print run, the same download - and the second file can be byte-identical
+to the first. It resolves to the same id, so it shows the same ink,
+immediately, under any filename. This is the sharing rule above meeting you
+in the wild, and it surprises people the first time.
+
+The ink is not inside the PDF. It is an overlay from the sidecar, exactly as
+on notes. Open that file in any other reader and it is clean; disable the
+plugin and it is clean. The file itself is never touched.
+
+There is no way around this under content identity, and that is the point:
+if two files are byte-identical they are the same document, and only keying
+on the filename could tell them apart - which would break the rename and
+sync guarantees above. One document, one set of annotations, however many
+copies of it you keep.
+
+**Re-exporting a PDF deliberately does not carry the ink over.** A file that
+has been through another editor is a different document, its pages may have
+reflowed, and old ink positions would be lies. The sidecar is orphaned rather
+than misapplied. The file is kept, nothing is overwritten, and you are told
+once.
+
+Stored PDF ink carries `surface: "pdf"`. That marks a separate coordinate
+world - page-local CSS pixels at scale 1, measured from the corner of the
+page it was drawn on - which must never be read as note-surface geometry.
+
 ## the sidecar format
 
 JSON, one object, with `schemaVersion` first. Version 1 is current.
@@ -54,8 +114,8 @@ Stable fields, safe to depend on:
 
 - `schemaVersion` (number)
 - `pageId` (string, matches the note's `handwriting-page-id`)
-- `surface` (`"inline"` for editor ink; absent or another value means a
-  canvas page)
+- `surface` (`"inline"` for editor ink, `"pdf"` for ink on a PDF; absent
+  means a canvas page)
 - `strokes` (array; each has `id`, `tool`, `color`, `width`, `createdAt`, and
   points)
 - `textBoxes` and `images` (canvas pages only; `id`, position, size, `z`)

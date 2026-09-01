@@ -1,0 +1,100 @@
+{
+	"v": 1,
+	"env": {
+		"note": "synthetic webkit-shaped stream: no raw ever; moves carry the ink",
+		"ua": "synthetic",
+		"dpr": 2
+	},
+	"events": [
+		{
+			"t": 100,
+			"type": "pointerdown",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 1,
+			"button": 0,
+			"pressure": 0.35,
+			"x": 200.5,
+			"y": 150.5,
+			"tx": 0,
+			"ty": 0,
+			"note": "pen CLAIMED (synthetic) guard=COLD"
+		},
+		{
+			"t": 108,
+			"type": "pointermove",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 1,
+			"button": 0,
+			"pressure": 0.4,
+			"x": 203.4,
+			"y": 151.6,
+			"tx": 0,
+			"ty": 0,
+			"note": "move-fed coalesced=2",
+			"cs": [
+				{
+					"t": 104,
+					"x": 201.9,
+					"y": 151,
+					"p": 0.38
+				},
+				{
+					"t": 108,
+					"x": 203.4,
+					"y": 151.6,
+					"p": 0.4
+				}
+			]
+		},
+		{
+			"t": 116,
+			"type": "pointermove",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 1,
+			"button": 0,
+			"pressure": 0.44,
+			"x": 207.1,
+			"y": 153.2,
+			"tx": 0,
+			"ty": 0,
+			"note": "move-fed coalesced=3",
+			"cs": [
+				{
+					"t": 110,
+					"x": 204.6,
+					"y": 152.1,
+					"p": 0.41
+				},
+				{
+					"t": 113,
+					"x": 205.9,
+					"y": 152.6,
+					"p": 0.43
+				},
+				{
+					"t": 116,
+					"x": 207.1,
+					"y": 153.2,
+					"p": 0.44
+				}
+			]
+		},
+		{
+			"t": 124,
+			"type": "pointerup",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 0,
+			"button": 0,
+			"pressure": 0,
+			"x": 207.3,
+			"y": 153.3,
+			"tx": 0,
+			"ty": 0,
+			"note": ""
+		}
+	]
+}

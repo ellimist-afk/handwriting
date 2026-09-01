@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ensureFolder,
+import {
 	DEFAULT_INK_FOLDER,
 	FolderChangeSteps,
 	MigrationAdapter,
 	changeFolder,
+	ensureFolder,
 	baseName,
 	inkFolderSyncs,
 	isSidecarFile,
@@ -12,7 +13,7 @@ import { ensureFolder,
 } from "./InkFolder";
 
 describe("normalizeInkFolder", () => {
-	it("keeps a plain folder name", () => {
+	it("keeps an ordinary folder name", () => {
 		expect(normalizeInkFolder("handwriting")).toBe("handwriting");
 		expect(normalizeInkFolder(".handwriting")).toBe(".handwriting");
 		expect(normalizeInkFolder("assets/ink")).toBe("assets/ink");

@@ -1,0 +1,52 @@
+{
+	"v": 1,
+	"env": {
+		"note": "synthetic hover-only: pen near, never touching",
+		"ua": "synthetic",
+		"dpr": 1
+	},
+	"events": [
+		{
+			"t": 100,
+			"type": "pointermove",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 0,
+			"button": 0,
+			"pressure": 0,
+			"x": 300.5,
+			"y": 200.5,
+			"tx": 0,
+			"ty": 0,
+			"note": "hover"
+		},
+		{
+			"t": 110,
+			"type": "pointermove",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 0,
+			"button": 0,
+			"pressure": 0,
+			"x": 302.2,
+			"y": 201.1,
+			"tx": 0,
+			"ty": 0,
+			"note": "hover"
+		},
+		{
+			"t": 120,
+			"type": "pointermove",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 0,
+			"button": 0,
+			"pressure": 0,
+			"x": 304,
+			"y": 201.8,
+			"tx": 0,
+			"ty": 0,
+			"note": "hover"
+		}
+	]
+}

@@ -66,7 +66,19 @@ export interface PageData {
 	 * overwrite a canvas sidecar, and vice-versa nothing reinterprets legacy
 	 * geometry until it is deliberately migrated.
 	 */
-	surface?: "inline";
+	surface?: "inline" | "pdf";
+	/**
+	 * Which coordinate convention the geometry is written in, for surfaces
+	 * where that could ever change. `"page-css@1"` = page-local css px at
+	 * scale 1.0, top-left origin of the page div.
+	 *
+	 * Written so a future migration is VERSIONED rather than guessed. If a
+	 * later build needs PDF user units (rotation support is the likely
+	 * reason), it can tell which convention a file was written in instead of
+	 * inferring it from the numbers - and inferring it from the numbers is
+	 * not possible, because both conventions produce plausible coordinates.
+	 */
+	coordSpace?: string;
 	textBoxes: TextBoxData[];
 	images: ImageData[];
 	strokes: InkStroke[];
@@ -141,6 +153,7 @@ const KNOWN_TOP = new Set([
 	"schemaVersion",
 	"pageId",
 	"surface",
+	"coordSpace",
 	"textBoxes",
 	"images",
 	"strokes",
@@ -148,7 +161,7 @@ const KNOWN_TOP = new Set([
 const KNOWN_BOX = new Set(["id", "x", "y", "width", "z"]);
 const KNOWN_IMAGE = new Set(["id", "x", "y", "width", "height", "z"]);
 const KNOWN_STROKE = new Set(["id", "tool", "color", "width", "createdAt", "device", "pts",
-	"ptsd", "points"]);
+	"ptsd", "points", "page"]);
 
 /** Everything in `raw` that is not a key we claim to own. */
 function unknownKeys(raw: Record<string, unknown>, known: Set<string>): Record<string, unknown> {
@@ -266,6 +279,7 @@ export function serializePage(page: PageData, version: number = SCHEMA_VERSION):
 				schemaVersion: version,
 				pageId: page.pageId,
 				...(page.surface ? { surface: page.surface } : {}),
+				...(page.coordSpace ? { coordSpace: page.coordSpace } : {}),
 				textBoxes: page.textBoxes.map((b) =>
 					withUnknown(
 						{
@@ -300,6 +314,7 @@ export function serializePage(page: PageData, version: number = SCHEMA_VERSION):
 							width: round(s.width, 3),
 							createdAt: s.createdAt,
 							...(s.device === "mouse" ? { device: s.device } : {}),
+							...(typeof s.page === "number" ? { page: s.page } : {}),
 							...(version >= 2
 								? { ptsd: packPointsV2(s.points) }
 								: { pts: packPoints(s.points) }),
@@ -324,6 +339,11 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 	const o = raw as Record<string, unknown>;
 	page.pageId = str(o.pageId) ?? fallbackPageId;
 	if (o.surface === "inline") page.surface = "inline";
+	// The pdf surface is a separate coordinate world - page-local css px at
+	// scale 1 - and must never be confused with note-surface geometry. The
+	// stores are separate instances and each refuses the other's sidecars.
+	if (o.surface === "pdf") page.surface = "pdf";
+	if (typeof o.coordSpace === "string" && o.coordSpace !== "") page.coordSpace = o.coordSpace;
 	page.unknownTop = unknownKeys(o, KNOWN_TOP);
 
 	if (Array.isArray(o.textBoxes)) {
@@ -397,6 +417,11 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 				bbox: computeBBox(points, width * 2),
 				createdAt: num(s.createdAt) ?? Date.now(),
 				...(s.device === "mouse" ? { device: "mouse" as const } : {}),
+				// Page numbers are 1-based; anything else is not a page and is
+				// dropped rather than stored as a number that indexes nowhere.
+				...(Number.isInteger(s.page) && (s.page as number) >= 1
+					? { page: s.page as number }
+					: {}),
 			});
 			const extra = unknownKeys(s, KNOWN_STROKE);
 			if (Object.keys(extra).length > 0) page.unknownByObject[id] = extra;

@@ -181,15 +181,23 @@ export function readCapabilities(
 		// sniffing, and the host flags (Platform, passed in by the view)
 		// answer the same question honestly.
 		devicePixelRatio: window.devicePixelRatio || 1,
-		// Same trap as the router's shield gate: ?. does not guard an
-		// UNDECLARED binding, and Node 20 has no navigator at all.
+		// `typeof`, not `navigator?.` - optional chaining still throws a
+		// ReferenceError on an UNDECLARED binding, and CI pins node 20, which
+		// has no global navigator (node 21 added it). This machine's node 22
+		// does, so the local gate cannot catch it; the release line shipped
+		// exactly this bug in 1.3.11 and failed its checks.
 		maxTouchPoints: typeof navigator === "undefined" ? 0 : (navigator.maxTouchPoints ?? 0),
 		viewportWidth: window.innerWidth,
 		viewportHeight: window.innerHeight,
 		apis: {
 			coalescedEventsOnPrototype: typeof proto.getCoalescedEvents === "function",
 			predictedEventsOnPrototype: typeof proto.getPredictedEvents === "function",
-			pointerCapture: typeof Element.prototype.setPointerCapture === "function",
+			// Same undeclared-binding hazard as navigator above, and worse:
+			// `Element` is absent on EVERY node, not just 20. The `typeof`
+			// here guards the property, never the binding it reads from.
+			pointerCapture:
+				typeof Element !== "undefined" &&
+				typeof Element.prototype.setPointerCapture === "function",
 		},
 		observed,
 		host,

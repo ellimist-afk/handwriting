@@ -294,7 +294,7 @@ describe("H4 — corrupt main file beside its own complete .tmp", () => {
 		fake.failRenameWhen = (_from, to) => to === FINAL;
 		const r = await store.load("p1");
 		expect(r?.damaged).toBe(true); // this session stays read-only
-		// Disk: corrupt bytes kept, main missing, .tmp intact — the plain
+		// Disk: corrupt bytes kept, main missing, .tmp intact — the bare
 		// interrupted-write recovery path takes it from here.
 		expect(fake.files.has(FINAL)).toBe(false);
 		expect(fake.files.get(TMP)).toContain("FROM-TMP");

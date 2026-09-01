@@ -6,7 +6,7 @@
  * only showed up once people had two devices - **Obsidian Sync ignores
  * dot-folders**, so ink written on a tablet never reached the desktop and
  * looked like data loss (reported on release day, 2026-08-27, by a user who
- * diagnosed it himself and moved his ink to a plain folder).
+ * diagnosed it himself and moved his ink to an ordinary folder).
  *
  * So the folder becomes a setting. The default does not change, because
  * changing where existing vaults keep their ink without being asked is worse

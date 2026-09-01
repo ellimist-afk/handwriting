@@ -108,7 +108,7 @@ export class PenLabView extends ItemView {
 		const ctx = this.committedCanvas.getContext("2d");
 		if (!ctx) throw new Error("Handwriting: no 2d context");
 		this.committedCtx = ctx;
-		// Frozen pipeline: plain canvas, sync draw in pointerrawupdate.
+		// Frozen pipeline: synchronized canvas, sync draw in pointerrawupdate.
 		this.wetInk = new WetInkRenderer(this.wetCanvas, false);
 		this.wetInk.smooth = this.smooth;
 		this.head = new TailRenderer(this.headCanvas);

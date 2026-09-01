@@ -65,10 +65,16 @@ export interface MobileToolsHost {
 	/** Mouse ink: on for people writing with a mouse instead of a pen. */
 	mouseInkOn(): boolean;
 	setMouseInk(on: boolean): void;
+	/** Arm without a toast: for arming that rides inside a tool click. */
+	armMouseInkQuietly(): void;
+	/** Bug-report recording state, for the strip's dot. */
+	recordingOn(): boolean;
 	/** Whether a lasso selection exists, so copy and trash can dim. */
 	hasInkSelection(): boolean;
 	/** The active tool's palette, for the swatch pop. */
 	palette(): ReadonlyArray<{ name: string; hex: string }>;
+	/** A swatch was tapped: apply the color, pick up its nib, toast it. */
+	pickColor(name: string, hex: string): void;
 }
 
 /**
@@ -202,12 +208,14 @@ export class MobileTools {
 	/** Which nib's size slider is open; tap the active tool again to toggle. */
 	private openInkSlider: "pen" | "highlighter" | null = null;
 	private sliderHoverTimer: number | null = null;
-	private mouseReArm = false;
-	/** The last pointer type seen anywhere in the document, so the nib
-	 * buttons can light for the input actually in hand: a purple pen
-	 * button beside a text-mode mouse claims a tool the mouse does not
-	 * have. Unknown reads as pen, which is the pre-existing look. */
-	private lastPointer = "pen";
+	private recordingDot!: HTMLElement;
+	private collapseBtn!: HTMLElement;
+	/** True when HOVER opened the slider - only those evaporate on leave.
+	 * A clicked-open slider is a decision and stays until a click, a tap
+	 * elsewhere, or writing closes it (the pen LEAVES a button it just
+	 * tapped, and 300ms later the slider it asked for was gone). */
+	private sliderFromHover = false;
+
 	/** Whether the color swatch pop is open. */
 	private colorsOpen = false;
 	private strokeChip!: HTMLElement;
@@ -218,10 +226,6 @@ export class MobileTools {
 
 	/** Closes open pops when a tap lands anywhere that is not the strip. */
 	private readonly outsideTap = (ev: PointerEvent): void => {
-		if (ev.pointerType && ev.pointerType !== this.lastPointer) {
-			this.lastPointer = ev.pointerType;
-			this.refresh();
-		}
 		const t = ev.target;
 		if (!(t instanceof Node)) return;
 		if (this.el.contains(t) || this.pill.contains(t)) return;
@@ -257,19 +261,63 @@ export class MobileTools {
 			el.addEventListener("pointercancel", release);
 		};
 		noFocus(this.pill);
+		this.attachTip(this.pill);
 		this.pill.addEventListener("click", (ev) => {
 			ev.preventDefault();
 			this.setCollapsed(false);
 		});
 		parent.ownerDocument.addEventListener("pointerdown", this.outsideTap, { capture: true });
 		this.el = parent.createDiv({ cls: "handwriting-mobile-tools" });
+		// The recording indicator lives HERE, not the status bar: status
+		// bars get hidden by themes and snippets, and an indicator nobody
+		// can see indicates nothing. The strip is the plugin's own chrome.
+		// An INDICATOR, not a button - it appears when recording starts and
+		// disappears when recording ends, and does nothing when touched.
+		this.recordingDot = this.el.createSpan({
+			cls: "handwriting-recording-dot",
+			attr: {
+				"aria-label":
+					"from Alan: records how your pen behaves - nothing from your notes 🙈 press and hold to stop",
+			},
+		});
+		// Obsidian's tooltip machinery answers MOUSE hover only - a hovering
+		// pen showed nothing (surface, windows ink). And it was not just the
+		// dot: EVERY strip button relied on aria-label, so the whole toolbar
+		// explained nothing on hover. One shared tip serves them all now,
+		// driven by pointerenter, which every input fires. Text comes from
+		// each element's aria-label - one source, editable in one place.
+		this.tip = this.el.createDiv({ cls: "handwriting-strip-tip" });
+		this.recordingDot.setText("●");
+		this.attachTip(this.recordingDot);
+		// Touch has no hover and deserves an exit: press and HOLD the dot to
+		// stop recording. A hold, not a tap, so a stray finger cannot end a
+		// recording someone is mid-way through reproducing a bug for. Runs
+		// the real toggle command so every indicator syncs.
+		let holdTimer: number | null = null;
+		const cancelHold = () => {
+			if (holdTimer !== null) window.clearTimeout(holdTimer);
+			holdTimer = null;
+		};
+		this.recordingDot.addEventListener("pointerdown", (ev) => {
+			ev.preventDefault();
+			cancelHold();
+			holdTimer = window.setTimeout(() => {
+				holdTimer = null;
+				this.host.exec("handwriting:toggle-diagnostics");
+			}, 600);
+		});
+		this.recordingDot.addEventListener("pointerup", cancelHold);
+		this.recordingDot.addEventListener("pointerleave", cancelHold);
+		this.recordingDot.addEventListener("pointercancel", cancelHold);
 		const collapse = this.el.createEl("button", {
 			cls: "handwriting-mobile-tool handwriting-tools-collapse",
 			attr: { "aria-label": "Collapse pen tools", type: "button" },
 		});
+		this.collapseBtn = collapse;
 		setIcon(collapse, "chevron-right");
 		if (!collapse.querySelector("svg")) collapse.setText(">");
 		noFocus(collapse);
+		this.attachTip(collapse);
 		collapse.addEventListener("click", (ev) => {
 			ev.preventDefault();
 			this.setCollapsed(true);
@@ -295,11 +343,14 @@ export class MobileTools {
 							? "highlighter"
 							: null;
 				if (!hoverNib || !spec.isActive?.(this.host)) return;
-				if (ev.pointerType === "mouse" && !this.host.mouseInkOn()) return;
+				// A hover is a preview, not a decision: crossing this button on
+				// the way to the palette must not close what a CLICK opened.
+				// While the palette is up, hover keeps its hands off entirely.
+				if (this.colorsOpen) return;
 				this.cancelSliderClose();
 				if (this.openInkSlider !== hoverNib) {
 					this.openInkSlider = hoverNib as "pen" | "highlighter";
-					this.colorsOpen = false;
+					this.sliderFromHover = true;
 					this.refresh();
 				}
 			});
@@ -326,22 +377,33 @@ export class MobileTools {
 					// Clicking the tool you are drawing with hands the mouse
 					// back to text. Click it again and it draws again.
 					this.host.setMouseInk(false);
-					this.mouseReArm = true;
 					this.openInkSlider = null;
 					this.colorsOpen = false;
-				} else if (nib && spec.isActive?.(this.host) && ptr === "mouse" && this.mouseReArm) {
+				} else if (nib && spec.isActive?.(this.host) && ptr === "mouse") {
+					// Cold or warm: clicking the ACTIVE tool with a mouse is
+					// meaningless for a pen (it is already selected), so it can
+					// only mean "give the mouse this tool". Clicking again hands
+					// the mouse back - the branch above. The toggle's own toast
+					// names the tool picked up.
 					this.host.setMouseInk(true);
-					this.mouseReArm = false;
+					this.openInkSlider = nib;
+					this.sliderFromHover = false;
+					this.colorsOpen = false;
 				} else if (nib && spec.isActive?.(this.host) && ptr === "touch") {
 					// Touch has no hover, so the tap is the toggle.
 					this.openInkSlider = this.openInkSlider === nib ? null : nib;
+					this.sliderFromHover = false;
 					// One pop at a time: a size slider sliding out from under
 					// the open palette read as the strip coming apart.
 					this.colorsOpen = false;
 				} else if (nib && spec.isActive?.(this.host)) {
+					this.sliderFromHover = false;
 					// A pen hovers BEFORE it taps, so hover has already opened
 					// the slider; a toggle here would flash it shut under the
-					// nib. The tap just makes sure it is open.
+					// nib. The tap just makes sure it is open. Re-tapping the
+					// tool you already hold RESELECTS it - a deselect-to-pen
+					// was tried and unwanted (alan, 2026-08-31): the nib
+					// buttons pick, they never put down.
 					this.openInkSlider = nib;
 					this.colorsOpen = false;
 				} else if (spec.commandId === "handwriting:ink-color-cycle") {
@@ -350,12 +412,38 @@ export class MobileTools {
 					this.colorsOpen = !this.colorsOpen;
 					this.openInkSlider = null;
 				} else {
-					this.openInkSlider = null;
+					// Selecting a nib leaves its slider OUT: the pointer is
+					// already sitting on the button it just clicked, so no
+					// pointerenter will ever fire to open it - the slider
+					// needed a leave-and-return to appear (glass, 2026-08-31).
+					this.openInkSlider = nib;
+					this.sliderFromHover = false;
 					this.colorsOpen = false;
+					// A mouse picking a tool it cannot use means "give the
+					// mouse this tool" - nib, eraser, lasso, space or pan
+					// alike. Without arming, the mode switched but the mouse
+					// still could not use it: a dead-looking button (glass,
+					// 2026-08-31). Only on the way IN - clicking an active
+					// mode toggles it off, and turning a thing off must not
+					// claim the mouse. The exec's own toast names what was
+					// picked; the arming is silent beside it.
+					const claimsTip =
+						nib !== null ||
+						spec.commandId === "handwriting:inline-tool-eraser" ||
+						spec.commandId === "handwriting:inline-tool-lasso" ||
+						spec.commandId === "handwriting:inline-tool-space" ||
+						spec.commandId === "handwriting:inline-tool-pan";
+					const wasActive = spec.isActive?.(this.host) ?? false;
 					this.host.exec(spec.commandId);
+					if (claimsTip && !wasActive && ptr === "mouse" && !this.host.mouseInkOn()) {
+						// Quietly: the exec above already toasted the tool.
+						// One click, one toast (alan, 2026-08-31).
+						this.host.armMouseInkQuietly();
+					}
 				}
 				this.refresh();
 			});
+			this.attachTip(b);
 			this.buttons.push({ el: b, spec });
 		}
 		// Drop-down sliders. No noFocus here: a range input needs its native
@@ -463,15 +551,32 @@ export class MobileTools {
 
 	/** The synchronous body; the constructor uses it before first paint. */
 	refreshNow(): void {
+		this.recordingDot.toggleClass("is-recording", this.host.recordingOn());
 		for (const { el, spec } of this.buttons) {
-			// Every tool and mode light follows the input in hand: a
-			// text-mode mouse holds no nib, no eraser, no lasso.
-			const inputDraws = this.lastPointer !== "mouse" || this.host.mouseInkOn();
-			el.classList.toggle("is-active", (spec.isActive?.(this.host) ?? false) && inputDraws);
+			// The lights follow the TOOL state and nothing else. They used to
+			// dim for a text-mode mouse, keyed off the last pointer type seen
+			// - but hover events on a Surface arrive mouse-flavoured even
+			// from a pen, so the eraser's light died under a hovering pen and
+			// came back when the nib touched the editor (glass, 2026-08-31).
+			// The mouse is just a pen here; pointer type is not state.
+			el.classList.toggle("is-active", spec.isActive?.(this.host) ?? false);
 			el.classList.toggle("is-disabled", !(spec.isEnabled?.(this.host) ?? true));
 			// The palette button answers "which color" by BEING it.
 			if (spec.commandId === "handwriting:ink-color-cycle") {
-				el.setCssStyles({ color: this.host.activeColor() });
+				const hex = this.host.activeColor();
+				el.setCssStyles({ color: hex });
+				// The tooltip names the color too - "Ink color" told a hover
+				// nothing the tinted icon had not already said (alan,
+				// 2026-08-31). The label is read at hover time, so keeping
+				// the dataset current is all it takes; the sr-only span is
+				// the same name for screen readers.
+				const name = this.host.palette().find((c) => c.hex.toLowerCase() === hex.toLowerCase())?.name;
+				const label = name ? name.charAt(0).toUpperCase() + name.slice(1) : "Ink color";
+				if (el.dataset.tipLabel !== label) {
+					el.dataset.tipLabel = label;
+					const sr = el.querySelector(".handwriting-sr-only");
+					if (sr instanceof HTMLElement) sr.setText(label);
+				}
 			}
 		}
 		// Hang a drop-down under its button, measured live so it survives
@@ -489,8 +594,14 @@ export class MobileTools {
 			slider.val.setText(format(value));
 			const btn = this.buttons.find((b) => b.spec.commandId === commandId)?.el;
 			if (btn) {
-				const right = this.el.offsetWidth - btn.offsetLeft - btn.offsetWidth;
-				slider.pop.setCssStyles({ right: `${Math.max(0, right - 4)}px` });
+				// Measured rects, and CENTERED under the button: the offset
+				// arithmetic drifted a full button's width in the bottom-left
+				// corner (glass, 2026-08-31). The pop is visible by here, so
+				// its width is real.
+				const stripR = this.el.getBoundingClientRect();
+				const btnR = btn.getBoundingClientRect();
+				const right = stripR.right - btnR.right + (btnR.width - slider.pop.offsetWidth) / 2;
+				slider.pop.setCssStyles({ right: `${Math.max(0, right)}px` });
 			}
 		};
 		const whole = this.host.eraserWholeStroke();
@@ -538,7 +649,10 @@ export class MobileTools {
 				sw.addEventListener("pointerdown", (ev) => ev.preventDefault());
 				sw.addEventListener("click", (ev) => {
 					ev.preventDefault();
-					this.host.exec(`handwriting:ink-color-${c.name}`);
+					// Not through the per-name commands: those live behind an
+					// off-by-default setting, and a palette that only works
+					// when a hidden toggle is on is a dead palette.
+					this.host.pickColor(c.name, c.hex);
 					this.colorsOpen = false;
 					this.refresh();
 				});
@@ -547,8 +661,12 @@ export class MobileTools {
 				(b) => b.spec.commandId === "handwriting:ink-color-cycle"
 			)?.el;
 			if (btn) {
-				const right = this.el.offsetWidth - btn.offsetLeft - btn.offsetWidth;
-				this.colorPop.setCssStyles({ right: `${Math.max(0, right - 4)}px` });
+				// Measured rects and centered, like the sliders - the offset
+				// arithmetic drifted in the bottom-left corner.
+				const stripR = this.el.getBoundingClientRect();
+				const btnR = btn.getBoundingClientRect();
+				const right = stripR.right - btnR.right + (btnR.width - this.colorPop.offsetWidth) / 2;
+				this.colorPop.setCssStyles({ right: `${Math.max(0, right)}px` });
 			}
 		}
 	}
@@ -565,7 +683,7 @@ export class MobileTools {
 	 * The chrome steps aside while the pen is down. The original reason was
 	 * that anything overlapping a desynchronized canvas can demote it off the
 	 * low-latency path; that flag is off now (see INLINE_DESYNCHRONIZED), so
-	 * the behaviour rests on the plainer reason instead - a toolbar over the
+	 * the behaviour rests on the simpler reason instead - a toolbar over the
 	 * page is a toolbar in the way of the nib.
 	 *
 	 * Pure class toggles - no reads, nothing forced, safe inside the pen-down
@@ -588,6 +706,18 @@ export class MobileTools {
 			for (const c of stale) el.classList.remove(c);
 			el.classList.add(want);
 		}
+		// The chevron points at the corner the strip collapses INTO; a
+		// hardwired chevron-right pointed off-screen from a left corner.
+		// Emptied FIRST: setIcon does not clear the button, and setCorner
+		// runs on every bind, so the chevrons stacked up side by side
+		// (glass, 2026-08-31, bottom corners). The tooltip's sr-only name
+		// goes back in after the sweep.
+		const left = corner.endsWith("left");
+		this.collapseBtn.empty();
+		setIcon(this.collapseBtn, left ? "chevron-left" : "chevron-right");
+		if (!this.collapseBtn.querySelector("svg")) this.collapseBtn.setText(left ? "<" : ">");
+		const label = this.collapseBtn.dataset.tipLabel;
+		if (label) this.collapseBtn.createSpan({ cls: "handwriting-sr-only", text: label });
 	}
 
 	setCollapsed(on: boolean): void {
@@ -602,11 +732,64 @@ export class MobileTools {
 		this.cancelSliderClose();
 		this.sliderHoverTimer = window.setTimeout(() => {
 			this.sliderHoverTimer = null;
-			if (this.openInkSlider !== null) {
+			if (this.openInkSlider !== null && this.sliderFromHover) {
 				this.openInkSlider = null;
 				this.refresh();
 			}
 		}, 300);
+	}
+
+	private tip!: HTMLElement;
+	private tipTimer: number | null = null;
+
+	/** OS-style tooltip: a beat of hover shows it, anything else hides it.
+	 * Touch is skipped - a tap would flash the tip under the finger while
+	 * the button acts, explaining nothing and covering the pops. */
+	/**
+	 * Obsidian renders its own tooltip from aria-label on MOUSE hover, so
+	 * every control showed two bubbles - Obsidian's and ours. The name
+	 * moves into a visually-hidden span (screen readers read content), the
+	 * attribute goes, and our tip - which also answers PEN hover - is the
+	 * only one left.
+	 */
+	private ownName(el: HTMLElement): void {
+		const label = el.getAttribute("aria-label");
+		if (!label) return;
+		el.removeAttribute("aria-label");
+		el.dataset.tipLabel = label;
+		el.createSpan({ cls: "handwriting-sr-only", text: label });
+	}
+
+	private attachTip(el: HTMLElement): void {
+		this.ownName(el);
+		const hide = () => {
+			if (this.tipTimer !== null) window.clearTimeout(this.tipTimer);
+			this.tipTimer = null;
+			this.tip.removeClass("is-showing");
+		};
+		el.addEventListener("pointerenter", (ev: PointerEvent) => {
+			if (ev.pointerType === "touch") return;
+			hide();
+			this.tipTimer = window.setTimeout(() => {
+				this.tipTimer = null;
+				const text = el.dataset.tipLabel ?? el.getAttribute("aria-label");
+				if (!text) return;
+				this.tip.setText(text);
+				// Aligned to the hovered control and clamped by the tip's
+				// MEASURED width - the old guess of 180px let a long label
+				// (the recording dot's) run 80px past the strip's edge.
+				// Shown first, so the width is real when read.
+				this.tip.addClass("is-showing");
+				const left = Math.max(
+					0,
+					Math.min(el.offsetLeft, this.el.offsetWidth - this.tip.offsetWidth)
+				);
+				this.tip.setCssStyles({ left: `${left}px`, right: "auto" });
+			}, 350);
+		});
+		el.addEventListener("pointerleave", hide);
+		el.addEventListener("pointercancel", hide);
+		el.addEventListener("pointerdown", hide);
 	}
 
 	private cancelSliderClose(): void {

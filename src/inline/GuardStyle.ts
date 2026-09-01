@@ -42,8 +42,19 @@ export interface GuardStyleTarget {
 }
 
 /** Arm: inline `none` on the scroller plus the subtree class. */
-export function armGuardStyle(el: GuardStyleTarget): void {
-	el.setCssStyles({ touchAction: "none" });
+/**
+ * `none` suits an editor, where the plugin replaces finger scrolling with its
+ * own 1:1 assist pan and owes the browser nothing back. A pdf viewer is
+ * different: nothing here implements a pinch, so `none` does not merely
+ * disable zooming - it hands the raw two-finger touches to the app, which
+ * reads their sideways component as its open-the-sidebar swipe. That surface
+ * passes `pinch-zoom`: single-finger panning stays denied, which is the
+ * arbitration a cold pen contact has to survive, while the browser owns
+ * two-finger gestures and consumes them (hardware, ipad, 2026-08-29 -
+ * unreliable pinch, and a backlinks panel that kept appearing).
+ */
+export function armGuardStyle(el: GuardStyleTarget, touchAction = "none"): void {
+	el.setCssStyles({ touchAction });
 	el.classList.add(GUARD_SUBTREE_CLASS);
 }
 

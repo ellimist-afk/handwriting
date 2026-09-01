@@ -1,4 +1,4 @@
-import { App, MarkdownRenderChild, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { requestUrl, App, MarkdownRenderChild, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import { CameraState } from "./camera/coordinates";
 import { HANDWRITING_PAGE_VIEW_TYPE, HandwritingHost, HandwritingPageView } from "./view/HandwritingPageView";
 import {
@@ -23,8 +23,10 @@ import {
 	inkOverlayExtension,
 	inlineInk,
 	inlineReloadCandidates,
+	InkOverlayPlugin,
 	overlayForPath,
 	refreshPenToolsAll,
+	refreshAllStrips,
 	repaintAllInkOverlays,
 	setEraserRadiusPx,
 	setEraserWholeStrokes,
@@ -40,10 +42,9 @@ import {
 	setPersistInkSize,
 	setShapeSnap,
 	setToolbarCorner,
-	stripQuiet,
 } from "./inline/InkOverlay";
 import { destroyProbeMarkers } from "./inline/PenProbe";
-import { clearInlinePenTrace, formatInlinePenTrace } from "./inline/InlinePenRouter";
+import { captureInlinePenTrace, clearInlinePenTrace, formatInlinePenTrace } from "./inline/InlinePenRouter";
 import {
 	clearHitProbe,
 	formatHitReport,
@@ -65,12 +66,17 @@ import {
 	nextInkColor,
 	normalizeInkColor,
 	setInkColorHex,
+	setPersistInkColor,
 } from "./ink/InkColor";
 import { diagnosticsEnabled, setDiagnosticsEnabled } from "./diag/DiagSwitch";
-import { mouseInkEnabled, setMouseInk } from "./inline/MouseInk";
+import { mouseInkEnabled, setMouseInk, setPersistMouseInk } from "./inline/MouseInk";
 import { setPrediction } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
 import { inkToSvg } from "./ink/SvgExport";
+import { InkTool } from "./ink/Stroke";
+import { appendInkToPdf, flattenedPdfPath } from "./ink/InkPdfAppend";
+import { inkToPdf } from "./ink/InkPdf";
+import { bytesOf } from "./pdf/PdfSyntax";
 import { clipboardSize } from "./inline/InkClipboard";
 import {
 	attachEmbedInk,
@@ -89,14 +95,19 @@ import {
 	normalizePenToolsMode,
 	setPenToolsMode,
 } from "./inline/PenToolsMode";
-import { showDiagnosticText } from "./diag/DiagnosticTextModal";
+import { DiagnosticTextModal, showDiagnosticText } from "./diag/DiagnosticTextModal";
+import { pdfInkReport } from "./pdf/PdfInkReport";
+import { PdfInkController } from "./pdf/PdfInkController";
+import { calibrationStrokes } from "./pdf/PdfCalibration";
+import { PdfInkStore } from "./pdf/PdfInkStore";
+import { pdfInkId } from "./pdf/PdfIdentity";
+import { applyOp } from "./pdf/PdfInkHistory";
 import { newPageId } from "./model/PageData";
 import { PageIdIndex } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
 import { decideWhatsNew, whatsNewFragment, WHATS_NEW_MS } from "./update/WhatsNew";
-import { PdfPalmWatch } from "./input/PdfPalmWatch";
 import {
 	changeFolder,
 	DEFAULT_INK_FOLDER,
@@ -117,6 +128,15 @@ import {
 	resetPressureCalibration,
 	setPressureStore,
 } from "./ink/PressureGain";
+
+/**
+ * Where "Upload to developer" sends a replay recording. Empty string means
+ * the button does not exist - recording and Copy/Save work entirely offline,
+ * which keeps the no-required-network rule intact. The receiving end is
+ * scripts/trace-upload-worker.mjs on Cloudflare; nothing runs anywhere
+ * between uploads.
+ */
+const TRACE_UPLOAD_URL: string = "https://handwriting-traces.trace-worker.workers.dev";
 
 interface HandwritingSettings {
 	/** Per-page camera, kept out of the synced note on purpose (§22). */
@@ -167,10 +187,14 @@ interface HandwritingSettings {
 	penReticle: boolean;
 	/** Hold-at-end snaps the figure to a clean shape (1.0.14). Default on. */
 	shapeSnap: boolean;
+	/** Shows the developer diagnostics commands in the palette. */
+	devDiagnostics: boolean;
+	/** One command per colour and per nib size, for hotkeys. */
+	colorSizeCommands: boolean;
 	/**
-	 * The version whose what's-new notes have been shown (1.3.10). Null in
-	 * every vault written before that build, which is why the popup asks
-	 * whether a settings file existed at all rather than trusting this.
+	 * The version whose notes this vault has already been shown. Null until
+	 * a release with notes has been seen. A brand new install is told apart
+	 * by whether a settings file existed at all rather than trusting this.
 	 */
 	lastSeenVersion: string | null;
 }
@@ -193,6 +217,8 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	eraserMode: "stroke",
 	penReticle: true,
 	shapeSnap: true,
+	devDiagnostics: false,
+	colorSizeCommands: false,
 	lastSeenVersion: null,
 	toolbarCorner: DEFAULT_TOOLBAR_CORNER,
 	inkFolder: DEFAULT_INK_FOLDER,
@@ -205,14 +231,14 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
  * a note in Live Preview or source mode and the ink is stored beside the file.
  * The standalone canvas is still there for notes carrying `handwriting: page` in
  * their frontmatter. Opening one swaps the Markdown view for the canvas, and
- * it can always be opened as plain Markdown again. Either way the note stays
+ * it can always be opened as ordinary Markdown again. Either way the note stays
  * readable, linkable and indexable.
  */
 /**
  * How many one-second ticks to skip between sidecar checks.
  *
  * One second while ink is arriving, stretching to five when it is not. What
- * is being spread out is a filesystem stat per open note, which is this
+ * is being spread out is a filesystem stat per open document, which is this
  * plugin's largest standing cost when nothing at all is happening - it runs
  * whether or not a second device exists.
  */
@@ -223,13 +249,379 @@ function reloadStride(quietTicks: number): number {
 export default class HandwritingPlugin extends Plugin implements HandwritingHost {
 	store!: PageStore;
 	settings: HandwritingSettings = { ...DEFAULT_SETTINGS };
-	/** Set at load: this vault had no settings file before now. */
+	/** Set at load: no settings file at all means a first-ever install. */
 	private freshInstall = false;
 	private settingsDirty = false;
 	private settingsTimer: number | null = null;
 	/** Files we are mid-swap on, so layout events don't fight each other. */
 	private swapping = new Set<string>();
 
+	/**
+	 * Attach an ink controller to every open PDF view, and drop the ones whose
+	 * views are gone.
+	 *
+	 * Keyed by root element, and swept by checking `isConnected`, because a
+	 * leaf outlives the file in it: closing a PDF and opening another reuses
+	 * the leaf, and a map keyed on the leaf would hand the new document the
+	 * old document's overlays.
+	 */
+	private syncPdfControllers(): void {
+		const seen = new Set<HTMLElement>();
+		for (const leaf of this.app.workspace.getLeavesOfType("pdf")) {
+			const root = (leaf.view as unknown as { containerEl?: HTMLElement }).containerEl;
+			if (!root) continue;
+			seen.add(root);
+			const path = (leaf.view as unknown as { file?: TFile }).file?.path ?? "";
+			const existing = this.pdfInk.get(root);
+			if (existing) {
+				// Same pane, different document: forget the old id and hash the
+				// new one before anything can be written under the wrong key.
+				if (this.pdfFiles.get(root) !== path) {
+					this.pdfFiles.set(root, path);
+					this.pdfIds.delete(root);
+					existing.forgetHistory();
+					runDetached(this.resolvePdfId(leaf, root, existing), "identify a pdf for ink", () =>
+						new Notice("Handwriting: could not identify this PDF - ink is disabled for it. Reopening the file retries.")
+					);
+				}
+				continue;
+			}
+			this.pdfFiles.set(root, path);
+			const win = root.ownerDocument.defaultView ?? window;
+			const controller = new PdfInkController(
+				root,
+				win,
+				(page) => {
+					if (this.pdfCalibration) return calibrationStrokes(page);
+					const id = this.pdfIds.get(root);
+					return id ? this.pdfStore.strokesOnPage(id, page) : [];
+				},
+				// No id yet means the file is still being hashed. The controller
+				// asks before every gesture and does nothing without one:
+				// dropping a stroke is wrong and storing it under a guessed id
+				// is worse.
+				() => this.pdfIds.get(root) ?? null,
+				(op) => {
+					// The op's OWN document, never the pane's current one. An
+					// undo pressed after this pane opened a different PDF must
+					// act on the document the ink lives in; using whatever is on
+					// screen would put strokes back into the wrong file.
+					const id = op.path;
+					if (!id) return;
+					// One path for drawing, erasing and undoing: the op says what
+					// changed, applyOp works out the resulting stroke list, and
+					// the store writes it. Undo is then just the inverse op
+					// arriving through the same door.
+					this.pdfStore.replaceAll(id, applyOp(this.pdfStore.strokes(id), op));
+				},
+				// `commands` is not on the public App type, so it is reached
+				// the way the note surface reaches it: a narrow cast behind a
+				// typeof guard, and nothing happens if it is absent.
+				(commandId) => {
+					const commands = (this.app as unknown as {
+						commands?: { executeCommandById(id: string): void };
+					}).commands;
+					if (typeof commands?.executeCommandById === "function") {
+						commands.executeCommandById(commandId);
+					}
+				},
+				// The controller does not import Notice - it observes the DOM
+				// and nothing else, which is what keeps it constructible in a
+				// test. Saying things is the plugin's job.
+				(message) => {
+					new Notice(message);
+				}
+			);
+			controller.mount();
+			this.pdfInk.set(root, controller);
+			runDetached(this.resolvePdfId(leaf, root, controller), "identify a pdf for ink", () =>
+				new Notice("Handwriting: could not identify this PDF - ink is disabled for it. Reopening the file retries.")
+			);
+		}
+		for (const [root, controller] of [...this.pdfInk]) {
+			if (seen.has(root) && root.isConnected) continue;
+			controller.unmount();
+			this.pdfInk.delete(root);
+			this.pdfIds.delete(root);
+			this.pdfFiles.delete(root);
+		}
+	}
+
+	/**
+	 * Work out which sidecar this PDF's ink belongs in, then show it.
+	 *
+	 * Content-keyed, so this reads the file rather than any metadata - see
+	 * PdfIdentity for why a PDF cannot carry an id of its own. Asynchronous by
+	 * nature, which is why the controller mounts first and renders nothing
+	 * until this lands: a blank page for a moment is fine, ink under the wrong
+	 * id is not.
+	 */
+	private async resolvePdfId(
+		leaf: WorkspaceLeaf,
+		root: HTMLElement,
+		controller: PdfInkController
+	): Promise<void> {
+		const file = (leaf.view as unknown as { file?: TFile }).file;
+		if (!file) return;
+		const path = file.path;
+		const bytes = await this.app.vault.readBinary(file);
+		// Two awaits, and the pane can change document across either. Checking
+		// only `isConnected` catches a closed view but not a switched one: two
+		// resolutions racing in the same pane could finish out of order and
+		// stamp the earlier document's id onto the later one.
+		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
+		const id = await pdfInkId(bytes, window.crypto);
+		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
+		this.pdfIds.set(root, id);
+		await this.pdfStore.ensureLoaded(id);
+		controller.refresh();
+	}
+
+	/**
+	 * The ink id of an open PDF, or null while it is still being hashed.
+	 *
+	 * By path rather than by pane, because the command acts on the active
+	 * FILE. The same document open in two panes resolves to the same id, so
+	 * which one answers does not matter.
+	 */
+	private pdfIdForPath(path: string): string | null {
+		for (const [root, at] of this.pdfFiles) {
+			if (at === path) return this.pdfIds.get(root) ?? null;
+		}
+		return null;
+	}
+
+	/**
+	 * The confirmed pdf wipe. Same permanence invariant as the note wipe: the
+	 * trash copy is made FIRST and a failed copy aborts everything -
+	 * Handwriting never deletes ink it could not preserve. `preserve` also
+	 * flushes any pending write, so the copy holds today's ink, not
+	 * yesterday's file.
+	 *
+	 * The controllers' undo history is cleared rather than left holding ops
+	 * against strokes that no longer exist: an undo replayed across the wipe
+	 * would restore a fragment and call it the past. The trash copy is the
+	 * recovery path, and the dialog said so.
+	 */
+	private async deleteAllPdfInk(id: string): Promise<void> {
+		let kept: string | null = null;
+		try {
+			kept = await this.store.preserve(id);
+		} catch (err) {
+			console.error("[handwriting] delete-all-pdf-ink backup failed", err);
+			new Notice(
+				"Handwriting: could not copy this PDF's ink to the trash (disk error). Nothing was deleted."
+			);
+			return;
+		}
+		const n = this.pdfStore.strokes(id).length;
+		this.pdfStore.replaceAll(id, []);
+		for (const [root, controller] of this.pdfInk) {
+			if (this.pdfIds.get(root) === id) {
+				controller.forgetHistory();
+				controller.refresh();
+			}
+		}
+		const what = n === 1 ? "1 stroke" : `${n} strokes`;
+		new Notice(
+			kept
+				? `Handwriting: removed ${what}. A copy is kept in ${kept}.`
+				: `Handwriting: removed ${what}.`
+		);
+	}
+
+	/**
+	 * The controller holding a selection ON THIS FILE, or null.
+	 *
+	 * Scoped to the file's own panes, where the first version scanned every
+	 * open view and returned the first selection anywhere: two PDFs open,
+	 * selection in the background one, and the snip rendered that selection
+	 * while writing the image - and the embed link - beside the ACTIVE file.
+	 * Wrong document, wrong backlink, silently. Pairing through the path
+	 * makes divergence impossible, and the same file open twice still snips:
+	 * either pane's selection is that document's ink.
+	 */
+	private pdfControllerWithSelection(path: string): PdfInkController | null {
+		for (const [root, at] of this.pdfFiles) {
+			if (at !== path) continue;
+			const c = this.pdfInk.get(root);
+			if (c?.hasSelection) return c;
+		}
+		return null;
+	}
+
+	/**
+	 * The first path in a numbered series that nothing occupies yet.
+	 * `candidate(1)` is the plain name; the count only shows once it must.
+	 *
+	 * Asked of the adapter rather than the vault index: a file another
+	 * device dropped in through sync exists on disk before the index has
+	 * seen it, and the index saying "free" would have this overwrite it.
+	 */
+	private async firstFreePath(candidate: (n: number) => string): Promise<string> {
+		for (let n = 1; ; n++) {
+			const path = normalizePath(candidate(n));
+			if (!(await this.app.vault.adapter.exists(path))) return path;
+		}
+	}
+
+	/**
+	 * Write the snip beside its PDF and put the markdown on the clipboard.
+	 * The name counts up rather than overwriting: two snips of one figure
+	 * are two attempts, and the second should not eat the first.
+	 *
+	 * The clipboard is written BEFORE the file. Everything the markdown
+	 * needs is known once the name is chosen, and on iPadOS the clipboard
+	 * only accepts a write while the tap that ran the command is still
+	 * fresh; put it after the disk write and it refuses there every time,
+	 * with nothing to say why. Should the write then fail, the notice says
+	 * so and the embed on the clipboard points at a file that is not there
+	 * - visible and recoverable, where the other order was a silent no.
+	 *
+	 * The embed is the bare name only while the vault has no other file by
+	 * that name. Two `intro.pdf` in different folders both snip to
+	 * `intro.snip-1.png`, and Obsidian resolves a bare name to whichever it
+	 * finds first - the second paper's note would show the first paper's
+	 * figure. The full path is unambiguous, so it is used exactly when the
+	 * short one is not. The write goes through the vault so the file is
+	 * indexed as it lands: an adapter write is invisible to link resolution
+	 * until the watcher catches up, and the paste comes sooner than that.
+	 */
+	/** The note twin of snipPdf: ink on white, counted name, embed copied. */
+	private async snipNote(file: TFile, overlay: InkOverlayPlugin): Promise<void> {
+		const snip = await overlay.snipSelection();
+		if (!snip.ok) {
+			new Notice(`Handwriting: ${snip.reason}`);
+			return;
+		}
+		const base = file.path.replace(/\.md$/, "");
+		const out = await this.firstFreePath((n) => `${base}.snip-${n}.png`);
+		const name = out.split("/").pop() ?? out;
+		const taken = this.app.metadataCache.getFirstLinkpathDest(name, file.path) !== null;
+		const md = `![[${taken ? out : name}]]
+[[${file.basename}]]`;
+		let copied = true;
+		try {
+			await navigator.clipboard.writeText(md);
+		} catch {
+			copied = false;
+		}
+		try {
+			await this.app.vault.createBinary(out, snip.bytes.buffer as ArrayBuffer);
+		} catch (e) {
+			console.error("[handwriting] snip the selection", e);
+			new Notice(
+				copied
+					? "Handwriting: the snip could not be written; the embed on your clipboard has nowhere to point"
+					: "Handwriting: the snip could not be written"
+			);
+			return;
+		}
+		new Notice(
+			copied
+				? `Handwriting: snipped to ${name}; the embed is on your clipboard`
+				: `Handwriting: snipped to ${name}; the clipboard refused the embed`
+		);
+	}
+
+	private async snipPdf(file: TFile, controller: PdfInkController): Promise<void> {
+		const snip = await controller.snipSelection();
+		if (!snip.ok) {
+			new Notice(`Handwriting: ${snip.reason}`);
+			return;
+		}
+		const base = file.path.replace(/\.pdf$/i, "");
+		const out = await this.firstFreePath((n) => `${base}.snip-${n}.png`);
+		const name = out.split("/").pop() ?? out;
+		const taken = this.app.metadataCache.getFirstLinkpathDest(name, file.path) !== null;
+		const md = `![[${taken ? out : name}]]
+[[${file.name}#page=${snip.pageNumber}|${file.basename} p.${snip.pageNumber}]]`;
+		let copied = true;
+		try {
+			await navigator.clipboard.writeText(md);
+		} catch {
+			copied = false;
+		}
+		try {
+			await this.app.vault.createBinary(out, snip.bytes.buffer as ArrayBuffer);
+		} catch (e) {
+			console.error("[handwriting] snip the selection", e);
+			new Notice(
+				copied
+					? "Handwriting: the snip could not be written; the embed on your clipboard has nowhere to point"
+					: "Handwriting: the snip could not be written"
+			);
+			return;
+		}
+		new Notice(
+			copied
+				? `Handwriting: snipped to ${name}; the embed is on your clipboard`
+				: `Handwriting: snipped to ${name}; the clipboard refused the embed`
+		);
+	}
+
+	/**
+	 * A copy of this PDF with its ink drawn in.
+	 *
+	 * A COPY, and the only step that ever puts ink inside a PDF. Everywhere
+	 * else the document on disk stays exactly as it arrived and the ink is an
+	 * overlay above it - which is why the viewer's thumbnail sidebar shows
+	 * clean pages while the main view shows marked-up ones. That difference is
+	 * load-bearing rather than cosmetic: inked thumbnails mean the file itself
+	 * carries the ink, so this command's output is distinguishable at a glance
+	 * from the original it came from. See PAGE_SELECTOR in PdfViewerProbe.
+	 *
+	 * The bytes are re-read here rather than kept from the open view: sync may
+	 * have replaced the document on disk since it was opened, and flattening
+	 * onto a stale copy writes a file that matches neither.
+	 *
+	 * A refusal is shown and nothing is written. `appendInkToPdf` says why in
+	 * words, and its reasons are things the reader can act on - an encrypted
+	 * document, a format this cannot restate - so they are repeated rather
+	 * than flattened into "it did not work".
+	 */
+	private async flattenPdf(file: TFile, id: string): Promise<void> {
+		const bytes = new Uint8Array(await this.app.vault.readBinary(file));
+		const result = appendInkToPdf(bytes, this.pdfStore.strokes(id));
+		if (!result.ok) {
+			new Notice(`Handwriting: this PDF cannot be flattened - ${result.reason}`);
+			return;
+		}
+		// Counted, not overwritten - the snip's bargain, now this one's too:
+		// two flattens are two attempts, and the second must not eat the
+		// first (alan, 2026-08-30). The plain name goes first; the count only
+		// appears once it must.
+		const base = flattenedPdfPath(file.path).replace(/\.pdf$/, "");
+		const out = await this.firstFreePath((n) => (n === 1 ? `${base}.pdf` : `${base}-${n}.pdf`));
+		await this.app.vault.adapter.writeBinary(out, result.bytes.buffer as ArrayBuffer);
+		new Notice(`Handwriting: exported ${out}`);
+	}
+
+	/** One ink controller per open PDF view, keyed by its root element. */
+	private pdfInk = new Map<HTMLElement, PdfInkController>();
+	/**
+	 * What the reload poll actually did, counted for the report.
+	 *
+	 * Before today every tick was a check: one stat per open document per
+	 * second, forever. `hidden` and `spaced` are the checks not made.
+	 */
+	private pollStats = { ticks: 0, hidden: 0, spaced: 0, checks: 0 };
+	/** Every open PDF's sidecar id, resolved from its bytes. */
+	private pdfIds = new Map<HTMLElement, string>();
+	/**
+	 * Which file each PDF view is currently showing.
+	 *
+	 * A leaf outlives the file in it: opening a second PDF in the same pane
+	 * reuses the view, the root element and therefore the controller. Without
+	 * noticing the change, the second document's ink would be written into the
+	 * FIRST document's sidecar - which is not a glitch, it is one document's
+	 * annotations landing in another's file.
+	 */
+	private pdfFiles = new Map<HTMLElement, string>();
+	/** Session ink for PDFs. Separate instance from the note store, by design. */
+	private pdfStore = new PdfInkStore();
+	/** M1 only: draw calibration crosses instead of real ink. Off by default. */
+	private pdfCalibration = false;
 	/** Notes the user explicitly opened as Markdown this session (§ no bounce-back). */
 	private preferMarkdown = new Set<string>();
 	/** Page-id ownership ledger (duplicate detection, v0.13.6). */
@@ -254,7 +646,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.store = new PageStore(this.app);
 		// Persistence must never fail silently: a write that keeps failing
 		// after bounded retries, or an external revision preserved as a
-		// conflict file, is surfaced once in plain language.
+		// conflict file, is surfaced once in words the reader can act on.
 		//
 		// RC4: both messages name the NOTE. A page id is Handwriting's bookkeeping
 		// and is hidden from the Properties UI on purpose, so a truncated one
@@ -286,27 +678,6 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			);
 		};
 		await this.loadSettings();
-		// After layout, not during onload: a modal that opens while the
-		// workspace is still assembling fights the app for the screen.
-		this.app.workspace.onLayoutReady(() => this.showWhatsNewIfDue());
-		// On iOS and Android the webview is frozen or killed on background
-		// with no further JS, so anything mid-debounce - ink sidecars,
-		// settings - was silently lost: write on a Boox, swipe away, come
-		// back to a note missing its last strokes. Both events, because iOS
-		// does not reliably fire either one alone; both handlers DISPATCH
-		// writes synchronously and never await, because nothing after a
-		// freeze runs to hear a promise resolve. onunload still covers the
-		// ordinary teardown path via finishPersistence().
-		this.registerDomEvent(document, "visibilitychange", () => {
-			if (document.visibilityState === "hidden") this.flushOnHide();
-		});
-		this.registerDomEvent(window, "pagehide", () => this.flushOnHide());
-		// Palm-shaped touches must not zoom a pdf someone is reading. Ink on
-		// pdfs is the 1.4 line; this is only the shield.
-		const pdfPalms = new PdfPalmWatch(this.app);
-		this.register(() => pdfPalms.dispose());
-		this.registerEvent(this.app.workspace.on("layout-change", () => pdfPalms.sync()));
-		this.app.workspace.onLayoutReady(() => pdfPalms.sync());
 
 		this.registerView(HANDWRITING_PAGE_VIEW_TYPE, (leaf) => new HandwritingPageView(leaf, this));
 		this.registerView(HANDWRITING_PEN_LAB_VIEW_TYPE, (leaf) => new PenLabView(leaf));
@@ -406,26 +777,28 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			})
 		);
 		// Live reload: ink synced in from another device appears without a
-		// restart. One stat per open, quiet editor every second; the store
+		// restart. One stat per open, quiet editor per check; the store
 		// adopts a changed sidecar only when nothing local is unsaved and no
 		// gesture is active, and the write-path conflict guard keeps its
 		// last word. Dot-folders are invisible to vault events (sidecars
 		// are not vault-indexed files), which is why this polls.
 		let reloadTickBusy = false;
 		// Idle backoff. This exists to notice another device's write, and every
-		// tick that finds nothing still costs a stat per open note - forever, on
-		// battery, whether or not a second device exists. Quiet ticks get rarer;
-		// anything found puts it straight back to one second.
+		// tick that finds nothing still costs a stat per open document -
+		// forever, on battery, whether or not a second device exists. Quiet
+		// ticks get rarer; anything found puts it straight back to one second.
 		let quietTicks = 0;
 		let ticks = 0;
 		let wasHidden = false;
 		this.registerInterval(
 			window.setInterval(() => {
 				if (reloadTickBusy) return;
+				this.pollStats.ticks++;
 				// Nobody is watching ink arrive in a hidden window, and the
 				// first visible tick catches up on everything missed.
 				if (document.hidden) {
 					wasHidden = true;
+					this.pollStats.hidden++;
 					return;
 				}
 				if (wasHidden) {
@@ -433,11 +806,34 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					quietTicks = 0;
 				}
 				ticks++;
-				if (ticks % reloadStride(quietTicks) !== 0) return;
+				if (ticks % reloadStride(quietTicks) !== 0) {
+					this.pollStats.spaced++;
+					return;
+				}
+				this.pollStats.checks++;
 				reloadTickBusy = true;
 				runDetached(
 					(async () => {
 						let changed = false;
+						// Open PDFs, on the same tick. Their sidecars live in
+						// the same unindexed folder and change for the same
+						// reason - another device wrote them - so they need the
+						// same poll rather than a second one keeping its own
+						// time.
+						for (const [root, controller] of [...this.pdfInk]) {
+							const id = this.pdfIds.get(root);
+							if (!id || !controller.idle) continue;
+							if (!(await this.store.externallyChanged(id))) continue;
+							// The check above is a tick old and the stat was
+							// awaited; a pen can have landed since. Re-asking
+							// costs nothing and a swap mid-stroke costs the
+							// stroke.
+							if (!controller.idle) continue;
+							if (await this.pdfStore.reloadExternal(id)) {
+								controller.refresh();
+								changed = true;
+							}
+						}
 						for (const path of inlineReloadCandidates()) {
 							// Per note, because this list is walked in the same
 							// order every tick: one note that reliably throws -
@@ -480,6 +876,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-pen",
 			name: "Pen",
 			callback: () => {
+				// Asking for a pen tool is asking for the pen UI: without
+				// this, the command worked invisibly when no pen had been seen
+				// and the palette appeared to do nothing.
+				markPenSeen();
+				refreshPenToolsAll();
 				// Picking a nib is also the exit from eraser and lasso modes:
 				// on the strip, Pen LOOKS like the way out, so it has to be.
 				setInlineTool("pen");
@@ -487,7 +888,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				setInlineLassoMode(false);
 				setInlineSpaceMode(false);
 				setInlinePanMode(false);
-				if (!stripQuiet()) new Notice("Handwriting: pen");
+				new Notice("Handwriting: pen");
 			},
 		});
 		// The eraser used to need a pen with an eraser end. Plenty of pens do
@@ -498,7 +899,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// selection, so it stays off until someone without a pen asks for it.
 		this.addCommand({
 			id: "mouse-ink-toggle",
-			name: "Mouse ink: toggle",
+			name: "Mouse",
 			callback: () => {
 				const on = !mouseInkEnabled();
 				setMouseInk(on);
@@ -510,12 +911,26 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					markPenSeen();
 					refreshPenToolsAll();
 				}
-				new Notice(on ? "Handwriting: mouse draws (left button)" : "Handwriting: mouse is a mouse again");
+				// Named after the TOOL the mouse now holds, nothing else - no
+				// "(mouse ink on)" rider. The mouse is a pen; a pen picking
+				// up the highlighter says "highlighter" (alan, 2026-08-31).
+				// The tip's CLAIM, not just the nib: armed while erasing,
+				// "pen" would be a lie.
+				const tip = getInlineEraserMode()
+					? "eraser"
+					: getInlineLassoMode()
+						? "lasso"
+						: getInlineSpaceMode()
+							? "insert space"
+							: getInlinePanMode()
+								? "pan"
+								: getInlineTool();
+				new Notice(on ? `Handwriting: ${tip}` : "Handwriting: mouse ink off");
 			},
 		});
 		this.addCommand({
 			id: "pen-tools-cycle",
-			name: "Pen tools: cycle (auto / show / hide)",
+			name: "Toolbar: auto / show / hide",
 			callback: () => {
 				const next = nextPenToolsMode(getPenToolsMode());
 				setPenToolsMode(next);
@@ -535,7 +950,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 		this.addCommand({
 			id: "paper-cycle",
-			name: "Paper: cycle (none / lines / grid)",
+			name: "Paper: none / lines / grid",
 			callback: () => {
 				const next = nextPaperStyle(this.settings.paperStyle);
 				this.settings.paperStyle = next;
@@ -548,17 +963,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-eraser",
 			name: "Eraser: toggle",
 			callback: () => {
+				// Asking for a pen tool is asking for the pen UI: without
+				// this, the command worked invisibly when no pen had been seen
+				// and the palette appeared to do nothing.
+				markPenSeen();
+				refreshPenToolsAll();
 				const on = !getInlineEraserMode();
 				setInlineEraserMode(on);
 				// A tool is only reachable once the tip exists; see armTipModeInput.
-				const armed = on && this.armTipModeInput();
-				if (!stripQuiet()) {
-					new Notice(
-						on
-							? `Handwriting: eraser${armed ? " (mouse ink on)" : ""}`
-							: `Handwriting: ${getInlineTool()}`
-					);
-				}
+				if (on) this.armTipModeInput();
+				new Notice(on ? "Handwriting: eraser" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		// Lasso as a mode: the side button was the only way in, and every
@@ -567,17 +981,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-lasso",
 			name: "Lasso: toggle",
 			callback: () => {
+				// Asking for a pen tool is asking for the pen UI: without
+				// this, the command worked invisibly when no pen had been seen
+				// and the palette appeared to do nothing.
+				markPenSeen();
+				refreshPenToolsAll();
 				const on = !getInlineLassoMode();
 				setInlineLassoMode(on);
 				// A tool is only reachable once the tip exists; see armTipModeInput.
-				const armed = on && this.armTipModeInput();
-				if (!stripQuiet()) {
-					new Notice(
-						on
-							? `Handwriting: lasso (tip selects)${armed ? " (mouse ink on)" : ""}`
-							: `Handwriting: ${getInlineTool()}`
-					);
-				}
+				if (on) this.armTipModeInput();
+				new Notice(on ? "Handwriting: lasso" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		// Insert space as a mode, same shape as lasso: plant a divider with
@@ -586,17 +999,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-space",
 			name: "Insert space: toggle",
 			callback: () => {
+				// Asking for a pen tool is asking for the pen UI: without
+				// this, the command worked invisibly when no pen had been seen
+				// and the palette appeared to do nothing.
+				markPenSeen();
+				refreshPenToolsAll();
 				const on = !getInlineSpaceMode();
 				setInlineSpaceMode(on);
 				// A tool is only reachable once the tip exists; see armTipModeInput.
-				const armed = on && this.armTipModeInput();
-				if (!stripQuiet()) {
-					new Notice(
-						on
-							? `Handwriting: insert space (tip shifts ink below)${armed ? " (mouse ink on)" : ""}`
-							: `Handwriting: ${getInlineTool()}`
-					);
-				}
+				if (on) this.armTipModeInput();
+				new Notice(on ? "Handwriting: insert space" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		// Pan as a mode: touch already pans by finger, but a pen on glass had
@@ -605,17 +1017,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-pan",
 			name: "Pan: toggle",
 			callback: () => {
+				// Asking for a pen tool is asking for the pen UI: without
+				// this, the command worked invisibly when no pen had been seen
+				// and the palette appeared to do nothing.
+				markPenSeen();
+				refreshPenToolsAll();
 				const on = !getInlinePanMode();
 				setInlinePanMode(on);
 				// A tool is only reachable once the tip exists; see armTipModeInput.
-				const armed = on && this.armTipModeInput();
-				if (!stripQuiet()) {
-					new Notice(
-						on
-							? `Handwriting: pan (tip drags the page)${armed ? " (mouse ink on)" : ""}`
-							: `Handwriting: ${getInlineTool()}`
-					);
-				}
+				if (on) this.armTipModeInput();
+				new Notice(on ? "Handwriting: pan" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
 		this.addCommand({
@@ -624,7 +1035,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const next = nextEraserSize(getEraserRadiusPx());
 				runDetached(this.setEraserSize(next.radiusPx, next.name), "save the eraser size", () =>
-					new Notice("Handwriting: the eraser size changed, but the setting could not be saved.")
+					new Notice("Handwriting: the eraser size changed, but the setting could not be saved")
 				);
 			},
 		});
@@ -642,24 +1053,29 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 		// Nib sizes (OneNote-style): three steps on the ACTIVE tool, plus a
 		// cycle command for a hotkey. Applies from the next stroke; persisted.
-		for (const step of INK_SIZE_STEPS) {
-			this.addCommand({
-				id: `ink-size-${step.name}`,
-				name: `Ink size: ${step.name}`,
-				callback: () => {
-					runDetached(this.setInkSize(step.mult, step.name), "save the ink size", () =>
-						new Notice("Handwriting: the ink size changed, but the setting could not be saved.")
-					);
-				},
-			});
-		}
+		// Eleven per-colour and per-size entries buried the pen commands:
+		// the palette shows the same colours as swatches you can see, and
+		// the cycle commands cover the rest. Behind a setting for anyone who
+		// wants one hotkey per colour.
+		if (this.settings.colorSizeCommands)
+			for (const step of INK_SIZE_STEPS) {
+				this.addCommand({
+					id: `ink-size-${step.name}`,
+					name: `Ink size: ${step.name}`,
+					callback: () => {
+						runDetached(this.setInkSize(step.mult, step.name), "save the ink size", () =>
+							new Notice("Handwriting: the ink size changed, but the setting could not be saved.")
+						);
+					},
+				});
+			}
 		this.addCommand({
 			id: "ink-size-cycle",
 			name: "Ink size: next",
 			callback: () => {
 				const next = nextInkSize(getInkSizeMult(getInlineTool()));
 				runDetached(this.setInkSize(next.mult, next.name), "save the ink size", () =>
-					new Notice("Handwriting: the ink size changed, but the setting could not be saved.")
+					new Notice("Handwriting: the ink size changed, but the setting could not be saved")
 				);
 			},
 		});
@@ -670,26 +1086,48 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			const names = [
 				...new Set([...PEN_COLORS, ...HIGHLIGHTER_COLORS].map((c) => c.name)),
 			];
-			for (const name of names) {
-				this.addCommand({
-					id: `ink-color-${name}`,
-					name: `Ink color: ${name}`,
-					callback: () => {
-						const tool = getInlineTool();
-						const choice = colorsFor(tool).find((c) => c.name === name);
-						if (!choice) {
-							new Notice(
-								`Handwriting: the ${tool} has no ${name}. Its colors are ${colorsFor(tool)
-									.map((c) => c.name)
-									.join(", ")}.`
+			if (this.settings.colorSizeCommands) {
+				for (const name of names) {
+					this.addCommand({
+						id: `ink-color-${name}`,
+						name: `Ink color: ${name}`,
+						callback: () => {
+							const tool = getInlineTool();
+							const choice = colorsFor(tool).find((c) => c.name === name);
+							if (!choice) {
+								new Notice(
+									`Handwriting: the ${tool} has no ${name}. Its colors are ${colorsFor(tool)
+										.map((c) => c.name)
+										.join(", ")}.`
+								);
+								return;
+							}
+							// Picking a color from lasso or eraser mode picked
+							// NOTHING up - white chosen, lasso still armed
+							// (glass, 2026-08-31). Choosing a color reaches
+							// for the nib that wears it, here like everywhere.
+							this.pickUpNib(tool);
+							runDetached(this.setInkColor(tool, choice.hex, choice.name), "save the ink color", () =>
+								new Notice("Handwriting: the ink color changed, but the setting could not be saved.")
 							);
-							return;
-						}
-						runDetached(this.setInkColor(choice.hex, choice.name), "save the ink color", () =>
-							new Notice("Handwriting: the ink color changed, but the setting could not be saved.")
-						);
-					},
-				});
+						},
+					});
+				}
+				// Highlighter by name: one hotkey takes you from anything to
+				// highlighting in that color. Its own palette's names only,
+				// so there is no wrong-tool case to report.
+				for (const c of HIGHLIGHTER_COLORS) {
+					this.addCommand({
+						id: `highlighter-color-${c.name}`,
+						name: `Highlighter color: ${c.name}`,
+						callback: () => {
+							this.pickUpNib("highlighter");
+							runDetached(this.setInkColor("highlighter", c.hex, c.name), "save the ink color", () =>
+								new Notice("Handwriting: the ink color changed, but the setting could not be saved.")
+							);
+						},
+					});
+				}
 			}
 		}
 		// Delete all ink on the active note: explicit, and recoverable three
@@ -712,17 +1150,179 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				if (!checking) {
 					const svg = inkToSvg(inlineInk.strokes(file.path));
 					if (!svg) {
-						new Notice("Handwriting: no ink to export on this note.");
+						new Notice("Handwriting: no ink to export on this note");
 						return true;
 					}
-					const out = normalizePath(file.path.replace(/\.md$/, "") + ".ink.svg");
+					// Counted like the snip and the flatten: two exports are two
+					// attempts, and the second must not eat the first.
+					const svgBase = file.path.replace(/\.md$/, "") + ".ink";
 					runDetached(
-						this.app.vault.adapter.write(out, svg).then(() => {
-							new Notice(`Handwriting: exported ${out}`);
-						}),
+						this.firstFreePath((n) => (n === 1 ? `${svgBase}.svg` : `${svgBase}-${n}.svg`)).then(
+							async (out) => {
+								await this.app.vault.adapter.write(out, svg);
+								new Notice(`Handwriting: exported ${out}`);
+							}
+						),
 						"export ink as svg",
-						() => new Notice("Handwriting: the SVG export could not be written.")
+						() => new Notice("Handwriting: the SVG export could not be written")
 					);
+				}
+				return true;
+			},
+		});
+		// The same export as a PDF, for the places that will not take an SVG -
+		// which is most of them outside a browser. ONE page, sized to the ink:
+		// a PDF page may be any size up to 200 inches, so the drawing never
+		// has to be cut into pieces or clipped to a paper size it was never
+		// drawn for. That sidesteps both failures of printing through the
+		// reading view.
+		//
+		// Ink only, and the name says so. Text would need a font embedded in
+		// the file, which needs a subsetter, which is its own project; the
+		// SVG export has the same problem and degrades to substitution rather
+		// than failure. See pdf-plan.md, P2.
+		this.addCommand({
+			id: "export-ink-pdf",
+			name: "Export ink as PDF (drawing only)",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || file.extension !== "md" || !inlineInk.hasInk(file.path)) {
+					return false;
+				}
+				if (!checking) {
+					const pdf = inkToPdf(inlineInk.strokes(file.path));
+					if (!pdf) {
+						new Notice("Handwriting: no ink to export on this note");
+						return true;
+					}
+					// Beside the note, like the SVG, and counted like every
+					// other export now: the second must not eat the first.
+					const pdfBase = file.path.replace(/\.md$/, "") + ".ink";
+					runDetached(
+						this.firstFreePath((n) => (n === 1 ? `${pdfBase}.pdf` : `${pdfBase}-${n}.pdf`)).then(
+							async (out) => {
+								await this.app.vault.adapter.writeBinary(out, bytesOf(pdf).buffer as ArrayBuffer);
+								new Notice(`Handwriting: exported ${out}`);
+							}
+						),
+						"export ink as pdf",
+						() => new Notice("Handwriting: the PDF export could not be written")
+					);
+				}
+				return true;
+			},
+		});
+		// Flatten: the same idea for a PDF, and the thing that makes ink on
+		// one a feature rather than a private note to self. A document
+		// annotated here is trapped here - copy the file anywhere and the
+		// marks are gone, because they live in a sidecar. This writes a copy
+		// with the ink drawn into the page, which anybody can open.
+		this.addCommand({
+			id: "flatten-pdf-ink",
+			name: "Flatten ink into a copy of this PDF",
+			checkCallback: (checking) => {
+				// Listed on every pdf, the lesson the wipe command already
+				// carries: a command hidden by a has-ink gate reads as "does
+				// not exist" to someone searching for it - and it did, on the
+				// first fresh vault anyone tried (emulation, 2026-08-30).
+				const file = this.app.workspace.getActiveFile();
+				if (!file || file.extension.toLowerCase() !== "pdf") return false;
+				if (!checking) {
+					const id = this.pdfIdForPath(file.path);
+					if (!id) {
+						new Notice("Handwriting: still identifying this PDF - try again in a moment");
+						return true;
+					}
+					if (this.pdfStore.strokes(id).length === 0) {
+						new Notice("Handwriting: no ink on this PDF to flatten");
+						return true;
+					}
+					runDetached(
+						this.flattenPdf(file, id),
+						"flatten pdf ink",
+						() => new Notice("Handwriting: the flattened PDF could not be written")
+					);
+				}
+				return true;
+			},
+		});
+		// Snip: the selected region leaves the PDF as an image a note can
+		// hold. The lasso already marks the box; this renders page and ink
+		// inside it to a PNG beside the PDF and puts the embed markdown on
+		// the clipboard, with a link back to the page it came from - so the
+		// figure lands in a note still knowing where it lives.
+		this.addCommand({
+			id: "snip-pdf-selection",
+			name: "Snip the selection to an image",
+			checkCallback: (checking) => {
+				// One command, both surfaces: a snip is a snip whether the
+				// lasso was drawn on a pdf page or a note.
+				const file = this.app.workspace.getActiveFile();
+				if (!file) return false;
+				if (file.extension.toLowerCase() === "pdf") {
+					// Listed whenever a pdf is open, the flatten command's own
+					// lesson: a command hidden by a has-selection gate reads
+					// as "does not exist" to the person searching for it - and
+					// it did, on the first pdf anyone tried to snip from the
+					// palette. No selection is an ANSWER, not an absence.
+					const controller = this.pdfControllerWithSelection(file.path);
+					if (!checking && !controller) {
+						new Notice("Handwriting: lasso the ink to snip first");
+						return true;
+					}
+					if (!checking && controller) {
+						runDetached(
+							this.snipPdf(file, controller),
+							"snip the selection",
+							() => new Notice("Handwriting: the snip could not be written")
+						);
+					}
+					return true;
+				}
+				if (file.extension === "md") {
+					const overlay = overlayForPath(file.path);
+					if (!overlay) return false;
+					if (!checking && !overlay.hasSelection) {
+						new Notice("Handwriting: lasso the ink to snip first");
+						return true;
+					}
+					if (!checking && overlay.hasSelection) {
+						runDetached(
+							this.snipNote(file, overlay),
+							"snip the selection",
+							() => new Notice("Handwriting: the snip could not be written")
+						);
+					}
+					return true;
+				}
+				return false;
+			},
+		});
+		// The pdf twin of "Delete all ink on this note", for the same reason
+		// that one exists: erasing a document's worth of test scribbles one
+		// lasso at a time is how ink never gets cleaned up at all.
+		this.addCommand({
+			id: "delete-all-pdf-ink",
+			name: "Delete all ink on this PDF",
+			checkCallback: (checking) => {
+				// Listed on every pdf, like the note command on every note: a
+				// command hidden by a has-ink gate reads as "does not exist"
+				// to someone searching for it.
+				const file = this.app.workspace.getActiveFile();
+				if (!file || file.extension.toLowerCase() !== "pdf") return false;
+				if (!checking) {
+					const id = this.pdfIdForPath(file.path);
+					if (!id) {
+						new Notice("Handwriting: still identifying this PDF - try again in a moment");
+					} else {
+						const count = this.pdfStore.strokes(id).length;
+						if (count === 0) new Notice("Handwriting: no ink on this PDF");
+						else {
+							new ConfirmDeleteInkModal(this.app, count, "PDF", () => {
+								runDetached(this.deleteAllPdfInk(id), `delete all ink on ${file.path}`);
+							}).open();
+						}
+					}
 				}
 				return true;
 			},
@@ -783,7 +1383,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				if (!overlay) return false;
 				if (!checking) {
 					if (clipboardSize() === 0) {
-						new Notice("Handwriting: the ink clipboard is empty. Copy selected ink first.");
+						new Notice("Handwriting: the ink clipboard is empty, copy selected ink first");
 					} else {
 						const n = overlay.pasteInkHere();
 						new Notice(`Handwriting: pasted ${n} stroke(s)`);
@@ -802,7 +1402,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				if (!file || file.extension !== "md") return false;
 				if (!checking) {
 					if (!inlineInk.hasInk(file.path)) {
-						new Notice("Handwriting: no ink on this note.");
+						new Notice("Handwriting: no ink on this note");
 					} else {
 						this.confirmDeleteAllInk(file.path);
 					}
@@ -816,8 +1416,35 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const tool = getInlineTool();
 				const next = nextInkColor(tool, getInkColorHex(tool));
-				runDetached(this.setInkColor(next.hex, next.name), "save the ink color", () =>
-					new Notice("Handwriting: the ink color changed, but the setting could not be saved.")
+				this.pickUpNib(tool);
+				runDetached(this.setInkColor(tool, next.hex, next.name), "save the ink color", () =>
+					new Notice("Handwriting: the ink color changed, but the setting could not be saved")
+				);
+			},
+		});
+		// "Ink color: next" answers for the tool in hand, and so do the
+		// strip's swatches. These two each always mean their tool, and
+		// choosing the color picks the tool up (pickUpNib) - one command
+		// from anything to drawing in that color.
+		this.addCommand({
+			id: "highlighter-color-cycle",
+			name: "Highlighter color: next",
+			callback: () => {
+				const next = nextInkColor("highlighter", getInkColorHex("highlighter"));
+				this.pickUpNib("highlighter");
+				runDetached(this.setInkColor("highlighter", next.hex, next.name), "save the ink color", () =>
+					new Notice("Handwriting: the ink color changed, but the setting could not be saved")
+				);
+			},
+		});
+		this.addCommand({
+			id: "pen-color-cycle",
+			name: "Pen color: next",
+			callback: () => {
+				const next = nextInkColor("pen", getInkColorHex("pen"));
+				this.pickUpNib("pen");
+				runDetached(this.setInkColor("pen", next.hex, next.name), "save the ink color", () =>
+					new Notice("Handwriting: the ink color changed, but the setting could not be saved")
 				);
 			},
 		});
@@ -825,18 +1452,28 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-highlighter",
 			name: "Highlighter",
 			callback: () => {
+				// Asking for a pen tool is asking for the pen UI: without
+				// this, the command worked invisibly when no pen had been seen
+				// and the palette appeared to do nothing.
+				markPenSeen();
+				refreshPenToolsAll();
 				setInlineTool("highlighter");
 				setInlineEraserMode(false);
 				setInlineLassoMode(false);
 				setInlineSpaceMode(false);
 				setInlinePanMode(false);
-				if (!stripQuiet()) new Notice("Handwriting: highlighter");
+				new Notice("Handwriting: highlighter");
 			},
 		});
 		this.addCommand({
 			id: "inline-tool-toggle",
-			name: "Switch between pen and highlighter",
+			name: "Pen / highlighter: switch",
 			callback: () => {
+				// Asking for a pen tool is asking for the pen UI: without
+				// this, the command worked invisibly when no pen had been seen
+				// and the palette appeared to do nothing.
+				markPenSeen();
+				refreshPenToolsAll();
 				const next = getInlineTool() === "pen" ? "highlighter" : "pen";
 				setInlineTool(next);
 				new Notice(`Handwriting: ${next}`);
@@ -847,19 +1484,164 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// trace, turn recording off.
 		this.addCommand({
 			id: "copy-inline-pen-trace",
-			name: "Diagnostics: show pen trace",
+			name: "Bug report: show as text",
 			callback: () => {
-				showDiagnosticText(this.app, "Handwriting pen trace", formatInlinePenTrace());
+				// Read-only, like send: only Bug report: record starts and
+				// stops recording. This used to auto-stop - the right design
+				// when the text report WAS the end of the flow, an
+				// inconsistency once Upload became the end and kept recording.
+				setDiagnosticsEnabled(false);
+				this.syncRecordingBadge();
+				refreshAllStrips();
+				new DiagnosticTextModal(
+					this.app,
+					"Handwriting pen trace",
+					formatInlinePenTrace(),
+					undefined,
+					() => {
+						setDiagnosticsEnabled(false);
+						// Cleared as well: a delivered report is DONE. Leaving the
+						// rows made the next send show stale data while new
+						// scribbles went unrecorded - the same dead-recorder trap
+						// wearing a different face. The open modal keeps its own
+						// snapshot, so every button in it still works.
+						clearInlinePenTrace();
+						this.syncRecordingBadge();
+						refreshAllStrips();
+					}
+				).open();
 			},
 		});
+		// The machine-readable twin: what becomes a replay fixture in
+		// test/traces/. The table above stays for humans and GitHub issues;
+		// this one carries floats, coalesced samples, and the world the
+		// events landed in - a pointerdown at (400, 300) means nothing
+		// without dpr, viewport and settings.
 		this.addCommand({
+			id: "copy-inline-pen-trace-json",
+			name: "Bug report: send",
+			callback: () => {
+				// An empty capture is an upload nobody can use: the user ran
+				// send without ever recording. Say so instead of opening a
+				// modal around nothing.
+				if (captureInlinePenTrace({}).events.length === 0) {
+					// Two different emptinesses: recording never started, or it
+					// is running and the bug has not been reproduced yet. One
+					// message for both sent a tester in circles.
+					new Notice(
+						diagnosticsEnabled()
+							? "Handwriting: recording is on - reproduce the bug with the pen, then send"
+							: "Handwriting: nothing recorded - run Bug report: record first"
+					);
+					return;
+				}
+				// Running ANY bug-report viewer closes the capture window:
+				// what you see is what you deliver. Record starts a fresh one.
+				setDiagnosticsEnabled(false);
+				this.syncRecordingBadge();
+				refreshAllStrips();
+				// Recording deliberately KEEPS RUNNING here - reproduce again
+				// or retry Upload without starting over. The text-trace
+				// command ends it because that one IS the end of a report.
+				const capture = captureInlinePenTrace({
+					ua: navigator.userAgent,
+					dpr: window.devicePixelRatio,
+					viewport: { w: window.innerWidth, h: window.innerHeight },
+					settings: {
+						smoothInk: this.settings.smoothInk,
+						inkSmoothing: this.settings.inkSmoothing,
+						strokePrediction: this.settings.strokePrediction,
+						pressureSensitivity: this.settings.pressureSensitivity,
+						mouseInk: this.settings.mouseInk,
+						eraserMode: this.settings.eraserMode,
+						eraserRadiusPx: this.settings.eraserRadiusPx,
+					},
+				});
+				new DiagnosticTextModal(
+					this.app,
+					"Handwriting pen trace (replay JSON)",
+					JSON.stringify(capture, null, "\t"),
+					TRACE_UPLOAD_URL === ""
+						? undefined
+						: async (text: string) => {
+								const res = await requestUrl({
+									url: TRACE_UPLOAD_URL + "/upload",
+									method: "POST",
+									contentType: "application/json",
+									body: text,
+									throw: false,
+								});
+								if (res.status !== 200 || !res.json?.id) {
+									throw new Error(`upload refused (${res.status})`);
+								}
+								return String(res.json.id);
+							}
+,
+					// Delivering the report - by ANY door - ends the recording.
+					() => {
+						setDiagnosticsEnabled(false);
+						// Cleared as well: a delivered report is DONE. Leaving the
+						// rows made the next send show stale data while new
+						// scribbles went unrecorded - the same dead-recorder trap
+						// wearing a different face. The open modal keeps its own
+						// snapshot, so every button in it still works.
+						clearInlinePenTrace();
+						this.syncRecordingBadge();
+						refreshAllStrips();
+					}				).open();
+			},
+		});
+		// The deep diagnostics are instruments, not features. Off by
+		// default so the palette shows the pen before the probes; the
+		// developer diagnostics setting brings them back after a reload.
+		if (this.settings.devDiagnostics)
+			this.addCommand({
+			id: "toggle-pdf-ink-calibration",
+			name: "Diagnostics: PDF ink calibration marks",
+			callback: () => {
+				// The M1 oracle: green crosses at the same coordinates the test
+				// fixture prints its red registration marks at. If the two
+				// coincide, ink stored in page points is drawn where those
+				// points say. Page 1 and every tenth page, so page SELECTION is
+				// checked too and not just position.
+				this.pdfCalibration = !this.pdfCalibration;
+				this.syncPdfControllers();
+				for (const c of this.pdfInk.values()) c.refresh();
+				new Notice(
+					this.pdfCalibration
+						? "Handwriting: PDF calibration marks on (page 1 and every 10th)"
+						: "Handwriting: PDF calibration marks off"
+				);
+			},
+		});
+		if (this.settings.devDiagnostics)
+			this.addCommand({
+			id: "show-pdf-view-report",
+			name: "Diagnostics: show PDF view report",
+			callback: () => {
+				const controllers = [...this.pdfInk.values()]
+					.map((c, i) => `--- ink controller ${i + 1} ---\n${c.describe()}`)
+					.join("\n");
+				const body =
+					`${pdfInkReport(this.app)}\n\n` +
+					`reload poll: ${this.pollStats.ticks} ticks, ${this.pollStats.checks} checks ` +
+					`(${this.pollStats.hidden} skipped hidden, ${this.pollStats.spaced} spaced ` +
+					`out; every tick was a check before today)\n` +
+					`calibration marks: ${this.pdfCalibration ? "ON" : "off"}\n` +
+					`${controllers || "(no ink controller attached)"}`;
+				showDiagnosticText(this.app, "Handwriting PDF view report", body);
+			},
+		});
+		if (this.settings.devDiagnostics)
+			this.addCommand({
 			id: "show-ink-metrics",
 			name: "Diagnostics: show ink metrics",
 			callback: () => {
 				showDiagnosticText(this.app, "Handwriting ink metrics", copyInlineInkMetrics());
 			},
 		});
-		this.addCommand({
+		if (this.settings.devDiagnostics)
+			this.addCommand({
 			id: "clear-inline-pen-trace",
 			name: "Diagnostics: clear pen trace",
 			callback: () => {
@@ -867,107 +1649,127 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				new Notice("Handwriting: pen trace cleared");
 			},
 		});
-		this.addCommand({
+		if (this.settings.devDiagnostics)
+			this.addCommand({
 			id: "copy-inline-zoom-report",
 			name: "Diagnostics: show zoom report",
 			callback: () => {
 				showDiagnosticText(this.app, "Handwriting zoom report", copyInlineZoomReport());
 			},
 		});
+
 		// Dead-region diagnosis: what the page has under a client point, and
 		// what every pen pointerdown's dispatch actually looked like.
-		this.addCommand({
-			id: "toggle-inline-hit-probe",
-			name: "Diagnostics: toggle pointer hit probe",
-			callback: () => {
-				const on = !isHitProbeEnabled();
-				setHitProbeEnabled(on);
-				if (on) clearHitProbe();
-				new Notice(`Handwriting: pointer hit probe ${on ? "on. Hover, then touch down." : "off"}`);
-			},
-		});
-		this.addCommand({
-			id: "copy-inline-hit-report",
-			name: "Diagnostics: show pointer hit report",
-			callback: () => {
-				showDiagnosticText(this.app, "Handwriting pointer hit report", formatHitReport());
-			},
-		});
-		this.addCommand({
-			id: "clear-inline-hit-probe",
-			name: "Diagnostics: clear pointer hit probe",
-			callback: () => {
-				clearHitProbe();
-				new Notice("Handwriting: pointer hit probe cleared");
-			},
-		});
+		if (this.settings.devDiagnostics) {
+			this.addCommand({
+				id: "toggle-inline-hit-probe",
+				name: "Diagnostics: toggle pointer hit probe",
+				callback: () => {
+					const on = !isHitProbeEnabled();
+					setHitProbeEnabled(on);
+					if (on) clearHitProbe();
+					new Notice(`Handwriting: pointer hit probe ${on ? "on. Hover, then touch down." : "off"}`);
+				},
+			});
+		}
+		if (this.settings.devDiagnostics) {
+			this.addCommand({
+				id: "copy-inline-hit-report",
+				name: "Diagnostics: show pointer hit report",
+				callback: () => {
+					showDiagnosticText(this.app, "Handwriting pointer hit report", formatHitReport());
+				},
+			});
+		}
+		if (this.settings.devDiagnostics) {
+			this.addCommand({
+				id: "clear-inline-hit-probe",
+				name: "Diagnostics: clear pointer hit probe",
+				callback: () => {
+					clearHitProbe();
+					new Notice("Handwriting: pointer hit probe cleared");
+				},
+			});
+		}
 		// Touchpad dead-zone diagnosis: the wheel/scroll/repaint pipeline,
 		// always recording. Capture: clear -> touchpad-scroll -> draw inside
 		// and outside the dead zone -> show the report. Then repeat with touchscreen
 		// scrolling as the control.
 		// Presentation ground truth: what is actually in the composited frame
 		// and what paints above the ink at the last stroke's screen box.
-		this.addCommand({
-			id: "copy-region-census",
-			name: "Diagnostics: show region census",
-			callback: () => {
-				showDiagnosticText(this.app, "Handwriting region census", copyRegionCensus());
-			},
-		});
-		this.addCommand({
-			id: "copy-presentation-capture",
-			name: "Diagnostics: show presentation capture",
-			callback: () => {
-				runDetached(
-					copyPresentationReport().then((report) =>
-						showDiagnosticText(this.app, "Handwriting presentation capture", report)
-					),
-					"prepare a presentation capture",
-					() =>
-						new Notice(
-							"Handwriting: could not prepare the presentation capture. See the developer console."
-						)
-				);
-			},
-		});
+		if (this.settings.devDiagnostics) {
+			this.addCommand({
+				id: "copy-region-census",
+				name: "Diagnostics: show region census",
+				callback: () => {
+					showDiagnosticText(this.app, "Handwriting region census", copyRegionCensus());
+				},
+			});
+		}
+		if (this.settings.devDiagnostics) {
+			this.addCommand({
+				id: "copy-presentation-capture",
+				name: "Diagnostics: show presentation capture",
+				callback: () => {
+					runDetached(
+						copyPresentationReport().then((report) =>
+							showDiagnosticText(this.app, "Handwriting presentation capture", report)
+						),
+						"prepare a presentation capture",
+						() =>
+							new Notice(
+								"Handwriting: could not prepare the presentation capture. See the developer console."
+							)
+					);
+				},
+			});
+		}
 		// Investigation instruments (scroll trace, pen trace, presentation
 		// capture) are kept but explicitly invoked: recording is OFF by
 		// default and costs one boolean check per event while off.
 		this.addCommand({
 			id: "toggle-diagnostics",
-			name: "Diagnostics: begin recording",
+			name: "Bug report: record",
 			callback: () => {
 				const on = !diagnosticsEnabled();
 				setDiagnosticsEnabled(on);
-				new Notice(`Handwriting: diagnostics ${on ? "on, traces recording" : "off"}`);
+				this.syncRecordingBadge();
+				refreshAllStrips();
+				new Notice(`Handwriting: recording ${on ? "on" : "off"}`);
 			},
 		});
-		this.addCommand({
-			id: "copy-inline-scroll-trace",
-			name: "Diagnostics: show scroll trace",
-			callback: () => {
-				showDiagnosticText(this.app, "Handwriting scroll trace", formatScrollProbe());
-			},
-		});
-		this.addCommand({
-			id: "clear-inline-scroll-trace",
-			name: "Diagnostics: clear scroll trace",
-			callback: () => {
-				clearScrollProbe();
-				new Notice("Handwriting: scroll trace cleared");
-			},
-		});
+		if (this.settings.devDiagnostics) {
+			this.addCommand({
+				id: "copy-inline-scroll-trace",
+				name: "Diagnostics: show scroll trace",
+				callback: () => {
+					showDiagnosticText(this.app, "Handwriting scroll trace", formatScrollProbe());
+				},
+			});
+		}
+		if (this.settings.devDiagnostics) {
+			this.addCommand({
+				id: "clear-inline-scroll-trace",
+				name: "Diagnostics: clear scroll trace",
+				callback: () => {
+					clearScrollProbe();
+					new Notice("Handwriting: scroll trace cleared");
+				},
+			});
+		}
 
 		// The probe view is the whole point of this build, and a registered view
 		// with nothing to open it is unreachable: there is no UI in Obsidian for
 		// opening a view type by name. A remote tester needs one palette entry.
-		this.addCommand({
-			id: "open-pen-diagnostics",
-			name: "Diagnostics: open pen probe",
-			callback: () => {
-				runDetached(this.openPenDiagnostics(), "open the pen probe");
-			},
-		});
+		if (this.settings.devDiagnostics) {
+			this.addCommand({
+				id: "open-pen-diagnostics",
+				name: "Diagnostics: open pen probe",
+				callback: () => {
+					runDetached(this.openPenDiagnostics(), "open the pen probe");
+				},
+			});
+		}
 
 		this.addCommand({
 			id: "new-page",
@@ -1090,6 +1892,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			);
 		};
 		this.registerEvent(this.app.workspace.on("active-leaf-change", updateStatusBarClass));
+		// PDF ink controllers follow the open PDF views. Keyed by root element
+		// rather than by leaf: a leaf can be reused for a different file, and
+		// the element is what the overlays actually live inside.
+		const syncPdfInk = () => this.syncPdfControllers();
+		this.registerEvent(this.app.workspace.on("layout-change", syncPdfInk));
+		this.registerEvent(this.app.workspace.on("active-leaf-change", syncPdfInk));
+		this.register(() => {
+			for (const c of this.pdfInk.values()) c.unmount();
+			this.pdfInk.clear();
+		});
+		syncPdfInk();
 		this.registerEvent(this.app.workspace.on("file-open", updateStatusBarClass));
 		// The claim on a note's FIRST stroke changes its metadata. That is the
 		// moment an ordinary note becomes a Handwriting page under the cursor.
@@ -1101,6 +1914,24 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			})
 		);
 		this.app.workspace.onLayoutReady(updateStatusBarClass);
+
+		// After layout, not during onload: a modal that opens while the
+		// workspace is still assembling fights the app for the screen.
+		this.app.workspace.onLayoutReady(() => this.showWhatsNewIfDue());
+
+		// ---- background/freeze flush ------------------------------------------
+		// On iOS and Android the webview is frozen or killed on background
+		// with no further JS, so anything mid-debounce - ink sidecars,
+		// settings - was silently lost: write on a Boox, swipe away, come
+		// back to a note missing its last strokes. Both events, because iOS
+		// does not reliably fire either one alone; both handlers DISPATCH
+		// writes synchronously and never await, because nothing after a
+		// freeze runs to hear a promise resolve. onunload still covers the
+		// ordinary teardown path via finishPersistence().
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "hidden") this.flushOnHide();
+		});
+		this.registerDomEvent(window, "pagehide", () => this.flushOnHide());
 
 		// ---- duplicate page-id watch (v0.13.6) --------------------------------
 		// A page id must map to exactly one note; copying a note copies the id.
@@ -1343,8 +2174,23 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		);
 	}
 
-	private async setInkColor(hex: string, name: string): Promise<void> {
-		const tool = getInlineTool();
+	/**
+	 * Selecting a color picks up its tool: choosing "highlighter yellow" is
+	 * reaching for the yellow highlighter, not annotating a preference for
+	 * later (alan, 2026-08-31). The nib goes active and every tip mode ends,
+	 * exactly as the tool's own command does it.
+	 */
+	private pickUpNib(tool: InkTool): void {
+		markPenSeen();
+		refreshPenToolsAll();
+		setInlineTool(tool);
+		setInlineEraserMode(false);
+		setInlineLassoMode(false);
+		setInlineSpaceMode(false);
+		setInlinePanMode(false);
+	}
+
+	private async setInkColor(tool: InkTool, hex: string, name: string): Promise<void> {
 		this.settings.inkColors[tool] = setInkColorHex(tool, hex);
 		await this.saveData(this.settings);
 		new Notice(`Handwriting: ${tool} ${name}`);
@@ -1369,7 +2215,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	private confirmDeleteAllInk(path: string): void {
 		const count = inlineInk.strokes(path).length;
 		if (count === 0) return;
-		new ConfirmDeleteInkModal(this.app, count, () => {
+		new ConfirmDeleteInkModal(this.app, count, "note", () => {
 			runDetached(this.deleteAllInk(path), `delete all ink on ${path}`);
 		}).open();
 	}
@@ -1470,6 +2316,45 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		runDetached(this.finishPersistence(), "finish persistence during unload");
 	}
 
+	/** The first launch after an update says what changed, once. */
+	private showWhatsNewIfDue(): void {
+		const d = decideWhatsNew(
+			this.manifest.version,
+			this.settings.lastSeenVersion,
+			this.freshInstall
+		);
+		if (d.show) {
+			try {
+				new Notice(whatsNewFragment(d.version, d.notes), WHATS_NEW_MS);
+			} catch (err) {
+				// Recording first would spend the one chance this user gets.
+				// The notes appear on exactly ONE launch, so a popup that threw
+				// is a popup nobody will ever read: leave the version
+				// unrecorded and let the next launch try again.
+				console.error("[handwriting] the what's new notice failed to open", err);
+				return;
+			}
+		}
+		if (d.record !== this.settings.lastSeenVersion) {
+			this.settings.lastSeenVersion = d.record;
+			runDetached(this.saveData(this.settings), "remember the version whose notes were shown");
+		}
+	}
+
+	/** Status-bar dot while a bug-report recording is running. A toast was
+	 * the only sign, and a toast is gone in seconds - people forgot it was
+	 * on and wondered why nothing said so. */
+	private recordingBadge: HTMLElement | null = null;
+
+	syncRecordingBadge(): void {
+		if (!this.recordingBadge) {
+			this.recordingBadge = this.addStatusBarItem();
+			this.recordingBadge.addClass("handwriting-recording-badge");
+		}
+		this.recordingBadge.setText(diagnosticsEnabled() ? "● recording pen" : "");
+		this.recordingBadge.toggleClass("is-recording", diagnosticsEnabled());
+	}
+
 	/** The background/freeze path: start every pending write, wait for none. */
 	private flushOnHide(): void {
 		this.store.flushDispatch();
@@ -1520,17 +2405,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	private async newPage(): Promise<void> {
 		const folder = this.app.workspace.getActiveFile()?.parent?.path ?? "";
 		const base = "Handwriting page";
-		let name = base;
-		let n = 2;
-		while (await this.app.vault.adapter.exists(this.pathFor(folder, name))) {
-			name = `${base} ${n++}`;
-		}
+		const path = await this.firstFreePath((n) => this.pathFor(folder, n === 1 ? base : `${base} ${n}`));
 		const pageId = newPageId();
 		try {
-			const file = await this.app.vault.create(
-				this.pathFor(folder, name),
-				newPageMarkdown(pageId)
-			);
+			const file = await this.app.vault.create(path, newPageMarkdown(pageId));
 			const leaf = this.app.workspace.getLeaf(true);
 			await leaf.setViewState({
 				type: HANDWRITING_PAGE_VIEW_TYPE,
@@ -1721,31 +2599,6 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		);
 	}
 
-	/** The first launch after an update says what changed, once. */
-	private showWhatsNewIfDue(): void {
-		const d = decideWhatsNew(
-			this.manifest.version,
-			this.settings.lastSeenVersion,
-			this.freshInstall
-		);
-		if (d.show) {
-			try {
-				new Notice(whatsNewFragment(d.version, d.notes), WHATS_NEW_MS);
-			} catch (err) {
-				// Recording first would spend the one chance this user gets.
-				// The notes appear on exactly ONE launch, so a popup that threw
-				// is a popup nobody will ever read: leave the version
-				// unrecorded and let the next launch try again.
-				console.error("[handwriting] the what's new notice failed to open", err);
-				return;
-			}
-		}
-		if (d.record !== this.settings.lastSeenVersion) {
-			this.settings.lastSeenVersion = d.record;
-			runDetached(this.saveData(this.settings), "remember the version whose notes were shown");
-		}
-	}
-
 	private async loadSettings(): Promise<void> {
 		const raw = (await this.loadData()) as Partial<HandwritingSettings> | null;
 		// No settings file at all means nobody has ever run this plugin here.
@@ -1787,10 +2640,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			eraserMode: raw?.eraserMode === "reticle" ? "reticle" : "stroke",
 			penReticle: raw?.penReticle !== false,
 			shapeSnap: raw?.shapeSnap !== false,
-			lastSeenVersion:
-				typeof raw?.lastSeenVersion === "string" ? raw.lastSeenVersion : null,
+			devDiagnostics: raw?.devDiagnostics === true,
+			colorSizeCommands: raw?.colorSizeCommands === true,
 			toolbarCorner: normalizeToolbarCorner(raw?.toolbarCorner),
 			inkFolder: normalizeInkFolder(raw?.inkFolder),
+			lastSeenVersion: typeof raw?.lastSeenVersion === "string" ? raw.lastSeenVersion : null,
 		};
 		// Android pulls its notification shade from the very top of the glass,
 		// and that gesture wins over anything underneath it: a top-corner
@@ -1815,9 +2669,25 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			this.settings.eraserMode = on ? "stroke" : "reticle";
 			runDetached(this.saveData(this.settings), "save the eraser mode");
 		});
+		setPersistMouseInk((on) => {
+			this.settings.mouseInk = on;
+			runDetached(this.saveData(this.settings), "save the mouse ink setting");
+		});
+		setPersistInkColor((tool, hex) => {
+			this.settings.inkColors[tool] = hex;
+			runDetached(this.saveData(this.settings), "save the ink color");
+		});
 		setPersistInkSize((tool, mult) => {
 			this.settings.inkSizes[tool] = clampInkSize(mult);
 			runDetached(this.saveData(this.settings), "save the ink size");
+		});
+		// The pdf store writes through the same PageStore as notes: same
+		// debounce, same conflict guard, same trash, same ink folder. Only the
+		// id shape and the surface tag differ.
+		this.pdfStore.attachHost({
+			load: (id) => this.store.load(id),
+			schedule: (id, data) => this.store.schedule(id, data),
+			notice: (message) => void new Notice(message),
 		});
 		setMouseInk(this.settings.mouseInk);
 		setPrediction(this.settings.strokePrediction);
@@ -1863,19 +2733,28 @@ class ConfirmDeleteInkModal extends Modal {
 	constructor(
 		app: App,
 		private count: number,
+		private noun: "note" | "PDF",
 		private onConfirm: () => void
 	) {
 		super(app);
 	}
 
 	onOpen(): void {
-		this.titleEl.setText("Delete all ink on this note?");
+		this.titleEl.setText(`Delete all ink on this ${this.noun}?`);
 		const what = this.count === 1 ? "1 stroke" : `${this.count} strokes`;
+		// The promises differ because the recovery paths do. Note ink is one
+		// pane's history away; pdf ink is wiped across every page and its
+		// history is cleared with it, so the trash copy is the whole net and
+		// the dialog must not promise more than that.
 		this.contentEl.createEl("p", {
 			text:
-				`${what} will be removed. Undo (Ctrl+Z) restores them while the ` +
-				"note stays open, and a copy of the saved ink is kept in the " +
-				"vault's .handwriting/trash folder.",
+				this.noun === "note"
+					? `${what} will be removed. Undo (Ctrl+Z) restores them while the ` +
+						"note stays open, and a copy of the saved ink is kept in the " +
+						"vault's .handwriting/trash folder."
+					: `${what} will be removed from every page of this document. ` +
+						"A copy of the saved ink is kept in the vault's " +
+						".handwriting/trash folder.",
 		});
 		const row = this.contentEl.createDiv({ cls: "modal-button-container" });
 		const del = row.createEl("button", { text: "Delete all ink", cls: "mod-warning" });
@@ -1909,46 +2788,101 @@ class HandwritingSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		new Setting(containerEl).setName("Toolbar").setHeading();
-		new Setting(containerEl)
-			.setName("Pen toolbar")
-			.setDesc("Determines when the toolbar appears. Default auto.")
-			.addDropdown((d) =>
-				d
-					.addOption("auto", "Auto")
-					.addOption("show", "Show")
-					.addOption("hide", "Hide")
-					.setValue(this.plugin.settings.penTools)
-					.onChange((v) => {
-						const m = normalizePenToolsMode(v);
-						this.plugin.settings.penTools = m;
-						setPenToolsMode(m);
-						refreshPenToolsAll();
-						this.plugin.saveSettingsNow();
-					})
-			);
-		// One button, not a path field. "Where should the ink live" is not a
-		// question anyone wants asked - the only reason to move it is that
-		// Obsidian Sync skips hidden folders, so the control offers exactly
-		// that and nothing else. No free text also means no path to validate,
-		// no nested folder to create, and no way to typo your ink somewhere
-		// strange.
-		const current = this.plugin.settings.inkFolder;
-		const hidden = !inkFolderSyncs(current);
-		new Setting(containerEl)
-			.setName("Toolbar corner")
-			.setDesc("Where the floating pen toolbar sits. Default top right.")
-			.addDropdown((d) => {
-				for (const { value, label } of TOOLBAR_CORNER_LABELS) d.addOption(value, label);
-				d.setValue(this.plugin.settings.toolbarCorner).onChange((v) => {
-					const corner = normalizeToolbarCorner(v);
-					this.plugin.settings.toolbarCorner = corner;
-					setToolbarCorner(corner);
-					this.plugin.saveSettingsNow();
-				});
-			});
+		new Setting(containerEl).setName("Ink").setHeading();
 
-		new Setting(containerEl).setName("The pen").setHeading();
+		new Setting(containerEl)
+			.setName("Pressure sensitivity")
+			.setDesc(
+				"Line width follows how hard you press. Off gives an even line; " +
+					"strokes still thin with speed and taper at the ends. Default on."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.pressureSensitivity).onChange((on) => {
+					this.plugin.settings.pressureSensitivity = on;
+					setPressureSensitivity(on);
+					repaintAllInkOverlays();
+					this.plugin.saveSettingsNow();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Ink prediction")
+			// The e-ink flicker advice came out with 1.3.9: that flicker was the
+			// wet canvas asking for the low-latency path, not prediction, so
+			// sending people here to fix it cost a boox user a pointless toggle
+			// and told us nothing. Flicking past sharp corners is a real
+			// prediction artefact and stays.
+			.setDesc(
+				"Draws a little ahead of the pen to hide latency. Off by default: " +
+					"turn it on if ink feels behind your hand, and back off if the line " +
+					"runs ahead of the nib or flicks past sharp corners."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.strokePrediction).onChange((on) => {
+					this.plugin.settings.strokePrediction = on;
+					setPrediction(on);
+					this.plugin.saveSettingsNow();
+				})
+			);
+
+		// The smoothing users can actually feel. setInkShaping has been
+		// honoured by the renderers all along but nothing ever called it: the
+		// toggle that drove it was renamed into "pressure sensitivity" and the
+		// shaping half lost its wiring, so the line has been permanently
+		// shaped with no way to say otherwise. Two people asked for exactly
+		// this on the same day (boox thread, 2026-08-30) and were told to turn
+		// prediction off, which is a different feature and did nothing.
+		new Setting(containerEl)
+			.setName("Ink smoothing")
+			.setDesc(
+				"Shapes the line: thinner when you move fast, tapered at each end. " +
+					"Off draws an unshaped stroke that follows the pen more literally. Default on."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.inkSmoothing).onChange((on) => {
+					this.plugin.settings.inkSmoothing = on;
+					setInkShaping(on);
+					repaintAllInkOverlays();
+					this.plugin.saveSettingsNow();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Shape snap")
+			.setDesc("Hold the pen still after drawing a shape. Default on.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.shapeSnap).onChange((on) => {
+					this.plugin.settings.shapeSnap = on;
+					setShapeSnap(on);
+					this.plugin.saveSettingsNow();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("A command per colour and size")
+			.setDesc(
+				"Adds one command for every ink colour and nib size, for hotkeys. " +
+					"The palette button and the cycle commands already cover both. " +
+					"Takes effect after the plugin reloads."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.colorSizeCommands).onChange((on) => {
+					this.plugin.settings.colorSizeCommands = on;
+					this.plugin.saveSettingsNow();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Developer diagnostics")
+			.setDesc(
+				"Shows the developer diagnostics commands in the palette. " +
+					"Takes effect after the plugin reloads."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.devDiagnostics).onChange((on) => {
+					this.plugin.settings.devDiagnostics = on;
+					this.plugin.saveSettingsNow();
+				})
+			);
 		new Setting(containerEl)
 			.setName("Mouse ink")
 			.setDesc("Left click draws. Default off.")
@@ -1963,95 +2897,9 @@ class HandwritingSettingTab extends PluginSettingTab {
 					this.plugin.saveSettingsNow();
 				})
 			);
-		new Setting(containerEl)
-			.setName("Pressure sensitivity")
-			// "Off gives an even line" was not true, and a user found the gap:
-			// pressure off stops width tracking how hard you press, but speed
-			// thinning and the end taper are SHAPE, not pressure, and both
-			// stay. The old wording sent people hunting for a setting that
-			// would flatten the line completely (boox thread, 2026-08-30).
-			.setDesc("Off stops the line thickening when you press harder. Default on.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.pressureSensitivity).onChange((on) => {
-					this.plugin.settings.pressureSensitivity = on;
-					setPressureSensitivity(on);
-					repaintAllInkOverlays();
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Ink smoothing")
-			.setDesc(
-				"Shapes the line: thinner when you move fast, tapered at each end. " +
-					"Off draws a plainer stroke that follows the pen more literally. Default on."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.inkSmoothing).onChange((on) => {
-					this.plugin.settings.inkSmoothing = on;
-					setInkShaping(on);
-					repaintAllInkOverlays();
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Ink prediction")
-			// The e-ink flicker advice came out with 1.3.9: that flicker was the
-			// wet canvas asking for the low-latency path, not prediction, so
-			// sending people here to fix it cost a boox user a pointless toggle
-			// and told us nothing. Flicking past sharp corners is a real
-			// prediction artefact and stays.
-			.setDesc("Draws a little ahead of the pen to hide latency. Off by default: turn it on if ink feels behind your hand, and back off if the line runs ahead of the nib or flicks past sharp corners.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.strokePrediction).onChange((on) => {
-					this.plugin.settings.strokePrediction = on;
-					setPrediction(on);
-					this.plugin.saveSettingsNow();
-				})
-			);
-		// The smoothing users can actually feel. setInkShaping has been
-		// honoured by the renderers all along but nothing ever called it: the
-		// toggle that drove it was renamed into "pressure sensitivity" and the
-		// shaping half lost its wiring, so the line has been permanently
-		// shaped with no way to say otherwise. Two people asked for exactly
-		// this on the same day (boox thread, 2026-08-30) and were told to turn
-		// prediction off, which is a different feature and did nothing.
-		new Setting(containerEl)
-			.setName("Pen reticle")
-			.setDesc("A ring under the hovering nib, showing where the pen will land. Default on.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.penReticle).onChange((on) => {
-					this.plugin.settings.penReticle = on;
-					setPenReticle(on);
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Shape snap")
-			.setDesc("Hold the pen still at the end of a shape and it redraws as a clean one. Default on.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.shapeSnap).onChange((on) => {
-					this.plugin.settings.shapeSnap = on;
-					setShapeSnap(on);
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Eraser")
-			.setDesc("Whether touching a stroke removes all of it, or only the part under the nib. Default whole stroke.")
-			.addDropdown((d) =>
-				d
-					.addOption("stroke", "Whole stroke")
-					.addOption("reticle", "Only what the nib touches")
-					.setValue(this.plugin.settings.eraserMode)
-					.onChange((v) => {
-						const mode = v === "reticle" ? "reticle" : "stroke";
-						this.plugin.settings.eraserMode = mode;
-						setEraserWholeStrokes(mode === "stroke");
-						this.plugin.saveSettingsNow();
-					})
-			);
 
-		new Setting(containerEl).setName("The page").setHeading();
+		new Setting(containerEl).setName("Appearance").setHeading();
+
 		new Setting(containerEl)
 			.setName("Paper background")
 			.setDesc("Lined or grid paper. Default none.")
@@ -2069,8 +2917,59 @@ class HandwritingSettingTab extends PluginSettingTab {
 					})
 			);
 
-		new Setting(containerEl).setName("Syncing").setHeading();
 		new Setting(containerEl)
+			.setName("Pen toolbar")
+			.setDesc("Determines when the toolbar appears. Default auto.")
+			.addDropdown((d) =>
+				d
+					.addOption("auto", "Auto")
+					.addOption("show", "Show")
+					.addOption("hide", "Hide")
+					.setValue(this.plugin.settings.penTools)
+					.onChange((v) => {
+						const m = normalizePenToolsMode(v);
+						this.plugin.settings.penTools = m;
+						setPenToolsMode(m);
+						refreshPenToolsAll();
+						this.plugin.saveSettingsNow();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Toolbar corner")
+			.setDesc("Where the floating pen toolbar sits. Default top right.")
+			.addDropdown((d) => {
+				for (const { value, label } of TOOLBAR_CORNER_LABELS) d.addOption(value, label);
+				d.setValue(this.plugin.settings.toolbarCorner).onChange((v) => {
+					const corner = normalizeToolbarCorner(v);
+					this.plugin.settings.toolbarCorner = corner;
+					setToolbarCorner(corner);
+					this.plugin.saveSettingsNow();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Pen reticle")
+			.setDesc("Shows a dot where the pen is. Default on.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.penReticle).onChange((on) => {
+					this.plugin.settings.penReticle = on;
+					setPenReticle(on);
+					this.plugin.saveSettingsNow();
+				})
+			);
+
+		new Setting(containerEl).setName("Storage").setHeading();
+
+
+		// One button, not a path field. "Where should the ink live" is not a
+		// question anyone wants asked - the only reason to move it is that
+		// Obsidian Sync skips hidden folders, so the control offers exactly
+		// that and nothing else. No free text also means no path to validate,
+		// no nested folder to create, and no way to typo your ink somewhere
+		// strange.
+		const current = this.plugin.settings.inkFolder;
+		const hidden = !inkFolderSyncs(current);		new Setting(containerEl)
 			.setName("Compatibility with Obsidian Sync")
 			// No description. The name is the description - Alan's rule, and
 			// three attempts at wording proved it: a status line, a paragraph
@@ -2093,7 +2992,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 							"move the ink folder",
 							() => {
 								btn.setDisabled(false);
-								new Notice("Handwriting: the ink folder could not be changed.");
+								new Notice("Handwriting: the ink folder could not be changed");
 							}
 						);
 					})
@@ -2101,7 +3000,9 @@ class HandwritingSettingTab extends PluginSettingTab {
 
 		// One line at the bottom, after every setting, because that is where
 		// someone who has been using the thing ends up - not where someone
-		// deciding whether to install it starts.
+		// deciding whether to install it starts. It states a fact and links
+		// out; it does not ask twice, sit above the settings, or appear
+		// anywhere in the plugin's own surfaces.
 		const support = containerEl.createEl("p", { cls: "handwriting-support" });
 		support.appendText("Handwriting is free. i'm still working on it almost every night. ");
 		support.createEl("a", {

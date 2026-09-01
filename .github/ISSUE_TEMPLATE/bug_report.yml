@@ -55,10 +55,14 @@ body:
         This is the fastest way to get a pen or ink bug fixed, and it usually
         makes the difference between a guess and a fix.
 
-        Run `Diagnostics: begin recording` from the command palette, reproduce
-        the problem, then run `Diagnostics: show pen trace` and paste what it
+        Run `Bug report: record` from the command palette, reproduce
+        the problem, then run `Bug report: show as text` and paste what it
         gives you here. Showing the trace stops the recording for you. Skip
         this whole field if the bug has nothing to do with the pen.
+
+        If you can, record a replay instead: run `Bug report: send` and
+        press Upload to developer, then paste the id it gives you here
+        rather than the whole trace.
       render: text
 
   - type: textarea

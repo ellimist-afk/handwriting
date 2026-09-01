@@ -108,7 +108,7 @@ describe("frontmatterPropertyKeys", () => {
 	});
 
 	it("returns null when there is no frontmatter or the fence never closes", () => {
-		expect(frontmatterPropertyKeys("plain text")).toBeNull();
+		expect(frontmatterPropertyKeys("ordinary text")).toBeNull();
 		expect(frontmatterPropertyKeys("---\nhandwriting-page-id: x\ntruncated")).toBeNull();
 	});
 });

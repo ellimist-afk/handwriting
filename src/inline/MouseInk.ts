@@ -15,11 +15,26 @@
  */
 
 let enabled = false;
-
 export function mouseInkEnabled(): boolean {
 	return enabled;
 }
 
 export function setMouseInk(on: boolean): void {
 	enabled = on;
+}
+
+/**
+ * Persistence hook, the eraser slider's pattern: main registers a writer so
+ * the strip can arm mouse ink QUIETLY as part of a tool click - one click,
+ * one toast (alan, 2026-08-31) - without losing the setting on restart.
+ * The toggle command stays the loud path.
+ */
+let persist: ((on: boolean) => void) | null = null;
+export function setPersistMouseInk(fn: (on: boolean) => void): void {
+	persist = fn;
+}
+export function armMouseInkQuietly(): void {
+	if (enabled) return;
+	enabled = true;
+	persist?.(true);
 }

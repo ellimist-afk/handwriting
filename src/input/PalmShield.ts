@@ -68,6 +68,11 @@ export function palmRadiusTrustworthy(nav: {
 	platform?: string;
 	maxTouchPoints?: number;
 }): boolean {
+	// Android Chromium reports honest ellipses like iOS does: on a Boox a
+	// fingertip meets the 16px line and the shield ate all finger scroll
+	// (found in the 1.3.11 review before any Boox user could). The
+	// threshold is desktop-calibrated and runs only there.
+	if (/Android/i.test(nav.userAgent ?? "")) return false;
 	return !isAppleTouchPlatform(nav);
 }
 
@@ -129,9 +134,10 @@ export class PalmShield {
 	};
 
 	private onMove = (e: TouchEvent): void => {
-		// Palms are re-judged on move, not only at start: a heel that lands
-		// gently reports a fingertip radius for its first event and flattens
-		// past the threshold as it settles. Still shape, never timing.
+		// The same begin logic as the start handler: a palm that lands
+		// gently and FLATTENS mid-contact only crosses the threshold on a
+		// move, and judging moves by past verdicts alone let it through.
+		// Still shape, never timing.
 		const { veto, begin } = palmVerdict(Array.from(e.changedTouches), this.swallowed);
 		for (const id of begin) this.swallowed.add(id);
 		this.rejected += begin.length;

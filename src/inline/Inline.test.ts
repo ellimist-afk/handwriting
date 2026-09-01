@@ -639,7 +639,7 @@ describe("damaged sidecar fails CLOSED (v0.13.6 permanence pass)", () => {
 		// …but NOTHING is scheduled for disk: writing would replace whatever
 		// the damaged file still holds with a blank page plus s1/s2.
 		expect(log.scheduled).toHaveLength(0);
-		// Exactly one plain-language notice, and it promises the file is safe.
+		// Exactly one human-readable notice, and it promises the file is safe.
 		const notices = log.calls.filter((c) => c.startsWith("notify:"));
 		expect(notices).toHaveLength(1);
 	});

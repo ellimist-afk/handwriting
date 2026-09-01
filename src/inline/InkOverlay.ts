@@ -66,13 +66,14 @@ import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
 import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
 import { clampInkSize } from "../ink/InkSize";
-import { colorsFor, getInkColorHex } from "../ink/InkColor";
+import { applyInkColor, colorsFor, getInkColorHex } from "../ink/InkColor";
 import { Point2 } from "../ink/Smoothing";
 import { BBox, InkStroke, InkTool, newStrokeId } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
 import { drawCommitted,
 	drawRegion, drawStroke } from "../ink/StrokeRenderer";
+import { snipViewport } from "../pdf/PageMap";
 import { TailRenderer } from "../ink/TailRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { PenSample } from "../input/PointerRouter";
@@ -118,7 +119,7 @@ import {
 	setProbeGeometry,
 } from "./PenProbe";
 import { InlinePenRouter, bandEraserIntent } from "./InlinePenRouter";
-import { mouseInkEnabled } from "./MouseInk";
+import { armMouseInkQuietly, mouseInkEnabled } from "./MouseInk";
 import { describeEl, setHitProbeContext } from "./PenHitProbe";
 import { Extent, inkFrontier, isScrollableOverflow, ScrollAxisGuard, spacerPosition, surfaceExtents, surfaceOriginInScroller, ZERO_EXTENT, zoomFrontier } from "./SurfaceExtent";
 import { ProbeBox, capturePresented, parseHexColor, regionCensus } from "./PresentProbe";
@@ -386,13 +387,6 @@ export function setPersistEraserMode(fn: ((on: boolean) => void) | null): void {
 }
 
 /**
- * True while a command is being invoked FROM THE STRIP, whose buttons show
- * their own state - the palette's confirmation toasts are noise there.
- * Commands read it through stripQuiet() and skip their Notice.
- */
-let stripInvoked = false;
-
-/**
  * Put the ink marker on the system clipboard so ctrl+v can recognize it.
  * Best-effort by design: a denied clipboard (no user gesture, locked-down
  * platform) costs the keyboard paste and nothing else - the command and
@@ -410,8 +404,26 @@ function publishInkMarker(): void {
 	}
 }
 
-export function stripQuiet(): boolean {
-	return stripInvoked;
+/**
+ * A strip swatch was tapped: pick up the nib that wears this color, apply
+ * and persist it, say so. One function serving BOTH strips (notes and pdf),
+ * because the swatches must not depend on the per-name color commands -
+ * those are registered behind an off-by-default setting, and a fresh
+ * install had a palette of dead swatches (audit, 2026-08-31).
+ */
+export function pickStripColor(name: string, hex: string): void {
+	const tool = getInlineTool();
+	// Choosing a color reaches for the nib that wears it: every mode that
+	// holds the tip lets go, the same exits the nib commands make.
+	setInlineEraserMode(false);
+	setInlineLassoMode(false);
+	setInlineSpaceMode(false);
+	setInlinePanMode(false);
+	applyInkColor(tool, hex);
+	// Every strip, not just the tapped one: exiting a mode here must dim
+	// its light on every open pane, exactly as the commands do.
+	refreshAllStrips();
+	new Notice(`Handwriting: ${tool} ${name}`);
 }
 
 export function commitEraserRadius(): void {
@@ -428,6 +440,10 @@ export function setPersistInkSize(fn: ((tool: InkTool, mult: number) => void) | 
 export const inlineInk = new InlineInkStore();
 const instances = new Set<InkOverlayPlugin>();
 /** Shared across editors so an A/B session accumulates one summary list. */
+/** Same area cap as the pdf snip (MAX_OVERLAY_PX there): one budget for
+ * every raster this plugin produces. */
+const NOTE_SNIP_CAP_PX = 4_000_000;
+
 const metrics = new StrokeMetrics();
 
 export function isInlineInkEnabled(): boolean {
@@ -450,6 +466,16 @@ export function overlayForPath(path: string): InkOverlayPlugin | null {
 /** Re-evaluate the pen-tools strip on every open editor (mode command). */
 export function refreshPenToolsAll(): void {
 	for (const p of instances) p.ensurePenTools();
+}
+
+/**
+ * Refresh every open editor's strip. The recording dot lives on the strip
+ * and recording toggles from the PALETTE, with no pen anywhere near - the
+ * pen-driven refreshes fire far too late for it (the dot appeared only
+ * after the first stroke and outlived the recording it announced).
+ */
+export function refreshAllStrips(): void {
+	for (const p of instances) p.refreshStrip();
 }
 
 /** Repaint every open editor's committed ink (the shaping toggle uses this). */
@@ -569,7 +595,7 @@ export function copyInlineSurfaceReport(): string {
 	return parts.join("\n");
 }
 
-class InkOverlayPlugin {
+export class InkOverlayPlugin {
 	private view: EditorView;
 	private container: HTMLElement | null = null;
 	private committedCanvas!: HTMLCanvasElement;
@@ -903,7 +929,7 @@ class InkOverlayPlugin {
 		}
 		this.committedCtx = ctx;
 		this.highlightCtx = hctx;
-		// Frozen pipeline: plain canvas (desynchronized: false), smoothed tail.
+		// Frozen pipeline: synchronized canvas (desynchronized: false), smoothed tail.
 		this.wet = new WetInkRenderer(this.wetCanvas, INLINE_DESYNCHRONIZED);
 		this.wet.smooth = true;
 		this.wet.shape = true; // pen ink takes the shaped width law (InkShape)
@@ -1174,25 +1200,20 @@ class InkOverlayPlugin {
 		const commands = app.commands;
 		this.mobileTools = new MobileTools(this.chromeHost(), {
 			exec: (id) => {
-				stripInvoked = true;
-				try {
-					// Undo and redo are NOT Obsidian commands - they are native
-					// keybindings, so executeCommandById("editor:undo") returns
-					// false and does nothing, silently. The strip's undo button
-					// has therefore never worked on any shipped build; nobody
-					// noticed because everyone reaches for Ctrl+Z, until issue
-					// #1 (2026-08-30, Surface Pro 11 - reproduced on alan's own
-					// surface in a fresh vault). Run CodeMirror's own history on
-					// OUR view instead, which is what Ctrl+Z was doing all along.
-					if (id === "editor:undo") {
-						undo(this.view);
-					} else if (id === "editor:redo") {
-						redo(this.view);
-					} else {
-						commands.executeCommandById(id);
-					}
-				} finally {
-					stripInvoked = false;
+				{
+					// "editor:undo" and "editor:redo" are NOT Obsidian
+					// commands - undo/redo are native keybindings - so
+					// executeCommandById returned false and did nothing,
+					// silently, on every build that ever shipped. Nobody
+					// noticed because everyone presses Ctrl+Z; the tracker's
+					// first real issue was the first person who tapped the
+					// button before the keys (issue #1, fixed on the release
+					// line as 7b5aa20, ported here). Dispatched straight into
+					// this view's own history, which also makes the button
+					// definitionally equal to Ctrl+Z.
+					if (id === "editor:undo") undo(this.view);
+					else if (id === "editor:redo") redo(this.view);
+					else commands.executeCommandById(id);
 				}
 			},
 			activeTool: () => getInlineTool(),
@@ -1214,14 +1235,17 @@ class InkOverlayPlugin {
 			canUndo: () => undoDepth(this.view.state) > 0,
 			canRedo: () => redoDepth(this.view.state) > 0,
 			canPasteInk: () => clipboardSize() > 0,
+			recordingOn: () => diagnosticsEnabled(),
 			hasInkSelection: () => !this.selection.isEmpty,
 			mouseInkOn: () => mouseInkEnabled(),
 			setMouseInk: (on) => {
 				// Through the command, so the setting persists and the Notice
-				// says what just happened to the mouse.
+				// says what the mouse now holds.
 				if (mouseInkEnabled() !== on) commands.executeCommandById("handwriting:mouse-ink-toggle");
 			},
+			armMouseInkQuietly: () => armMouseInkQuietly(),
 			palette: () => colorsFor(getInlineTool()),
+			pickColor: (name, hex) => pickStripColor(name, hex),
 			inkSizeMult: (tool) => getInkSizeMult(tool as InkTool),
 			setInkSizeMult: (tool, mult, commit) => {
 				setInkSizeMult(tool as InkTool, mult);
@@ -3066,8 +3090,6 @@ class InkOverlayPlugin {
 		if (this.spaceIds.length === 0) {
 			// A gesture that moves nothing is indistinguishable from a broken
 			// one - it cost an evening of hardware testing to learn that once.
-			// (No stripQuiet guard: this is a pen gesture, and stripInvoked is
-			// only ever true inside a strip button's own command call.)
 			new Notice("Handwriting: no ink below the line");
 		}
 		this.redrawSelectionUI();
@@ -3282,6 +3304,53 @@ class InkOverlayPlugin {
 	 * Copy the lasso selection to the session ink clipboard (roadmap:
 	 * copy/paste ink). Returns how many strokes were copied; 0 = no selection.
 	 */
+	/**
+	 * The lassoed region as a PNG: ink on white, cropped to the selection
+	 * plus a little air. The pdf surface composites the page under its
+	 * strokes; a note's ground is live editor DOM, which is not honestly
+	 * rasterizable, so this is the drawing alone - the same bargain the SVG
+	 * export states. Same crop math and area cap as the pdf snip, so the
+	 * two commands cannot drift apart in kind.
+	 */
+	async snipSelection(): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; reason: string }> {
+		if (this.selection.isEmpty) return { ok: false, reason: "nothing is selected to snip" };
+		const bounds = this.selectionBounds();
+		if (!bounds) return { ok: false, reason: "nothing is selected to snip" };
+		const strokes = this.strokesHere();
+		const pxPerWorld = this.winRef.devicePixelRatio || 1;
+		// No page to clamp to: a note's canvas is as big as its ink.
+		const vp = snipViewport(bounds, 8, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, pxPerWorld, NOTE_SNIP_CAP_PX);
+		if (!vp) return { ok: false, reason: "the selection could not be framed" };
+		const out = this.winRef.document.createElement("canvas");
+		try {
+			out.width = Math.max(1, Math.round((vp.x1 - vp.x0) * vp.scale));
+			out.height = Math.max(1, Math.round((vp.y1 - vp.y0) * vp.scale));
+			const ctx = out.getContext("2d");
+			if (!ctx) return { ok: false, reason: "the image could not be drawn" };
+			ctx.fillStyle = "#ffffff";
+			ctx.fillRect(0, 0, out.width, out.height);
+			ctx.setTransform(1, 0, 0, 1, -vp.x0 * vp.scale, -vp.y0 * vp.scale);
+			const cam = { x: 0, y: 0, zoom: vp.scale };
+			// The pdf snip's layering exactly: highlighter as a wash under
+			// the pen, both from committed geometry.
+			ctx.globalAlpha = 0.35;
+			for (const st of strokes) if (st.tool === "highlighter") drawStroke(ctx, cam, st, undefined, true);
+			ctx.globalAlpha = 1;
+			for (const st of strokes) if (st.tool !== "highlighter") drawStroke(ctx, cam, st, undefined, true);
+			const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, "image/png"));
+			if (!blob) return { ok: false, reason: "the image could not be encoded" };
+			return { ok: true, bytes: new Uint8Array(await blob.arrayBuffer()) };
+		} finally {
+			out.width = 0;
+			out.height = 0;
+		}
+	}
+
+	/** Whether the lasso currently holds anything, for command gating. */
+	get hasSelection(): boolean {
+		return !this.selection.isEmpty;
+	}
+
 	copySelectedInk(): number {
 		const path = this.filePath();
 		if (!path || this.selection.isEmpty) return 0;
@@ -3351,7 +3420,7 @@ class InkOverlayPlugin {
 	}
 
 	/**
-	 * Record a finished gesture in the EDITOR's history, so plain Ctrl+Z /
+	 * Record a finished gesture in the EDITOR's history, so unmodified Ctrl+Z /
 	 * Redo covers ink in chronological order with text edits. The store
 	 * already reflects the gesture (inkApplied), and isolateHistory keeps
 	 * each gesture its own undo step; strokes never merge into one entry.

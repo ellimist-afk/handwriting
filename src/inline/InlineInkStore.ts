@@ -75,7 +75,7 @@ interface NoteRecord {
 	 * exactly as it is on disk, and Handwriting refuses to persist for this note.
 	 * Writing would replace whatever the damaged file still holds with a
 	 * blank page. New session ink renders but is not saved, and the user is
-	 * told so once, in plain language.
+	 * told so once, in words they can act on.
 	 */
 	damagedLocked: boolean;
 	/** Written by a newer Handwriting: render nothing extra, write nothing. */
@@ -623,7 +623,7 @@ export class InlineInkStore {
 	/**
 	 * Fail closed on an ambiguous duplicate: this note's writes are blocked
 	 * (its id is shared and no safe owner exists) and the user is told once,
-	 * with the fix in plain language. Rendering is untouched.
+	 * with the fix spelled out. Rendering is untouched.
 	 */
 	markDuplicateLocked(path: string, otherPath: string): void {
 		const rec = this.record(path);

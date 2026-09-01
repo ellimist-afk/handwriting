@@ -1,7 +1,7 @@
 /**
  * Ink ops as CodeMirror history citizens — proven against the REAL
  * @codemirror/commands history plugin, headless. This is the mechanism that
- * makes plain Ctrl+Z / Redo cover ink: if these pass, the editor's own undo
+ * makes unmodified Ctrl+Z / Redo cover ink: if these pass, the editor's own undo
  * emits our inverted effects in chronological order, interleaved with text.
  */
 
@@ -104,7 +104,7 @@ class Harness {
 	}
 }
 
-describe("plain undo/redo over the real history plugin", () => {
+describe("unmodified undo/redo over the real history plugin", () => {
 	it("undoing an ink add emits the inverse remove; redo re-adds", () => {
 		const h = new Harness("hello");
 		h.gesture({ type: "add", path: "n.md", strokes: [stroke("s1")] });

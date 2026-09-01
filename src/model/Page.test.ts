@@ -445,3 +445,52 @@ describe("duplicate block ids (content preservation)", () => {
 		expect(again.images.map((i) => i.id)).toEqual(parsed.images.map((i) => i.id));
 	});
 });
+
+describe("the pdf surface round-trips", () => {
+	// A persistence change that does not survive save-and-load is silent data
+	// loss: the ink is drawn, the file is written, and the page number is gone
+	// by the time anyone reopens it.
+	function pdfPage() {
+		const page = emptyPage("pdf-abc123");
+		page.surface = "pdf";
+		page.strokes = [
+			{ ...stroke("s1"), page: 1 },
+			{ ...stroke("s2"), page: 50 },
+		];
+		return page;
+	}
+
+	it("keeps the surface and every stroke's page", () => {
+		const back = parsePage(serializePage(pdfPage()), "pdf-abc123").data;
+		expect(back.surface).toBe("pdf");
+		expect(back.strokes.map((s) => s.page)).toEqual([1, 50]);
+	});
+
+	it("leaves note strokes without a page, rather than inventing one", () => {
+		// The note surface has no pages. A default of 1 would make every note
+		// stroke look like a pdf stroke to anything that switches on it.
+		const page = emptyPage("note");
+		page.strokes = [stroke("s1")];
+		const back = parsePage(serializePage(page), "note").data;
+		expect(back.surface).toBeUndefined();
+		expect(back.strokes[0]!.page).toBeUndefined();
+	});
+
+	it("records which coordinate convention it was written in", () => {
+		// Both conventions produce plausible numbers, so a file that does not
+		// say cannot be told apart later. The stamp is what would make a future
+		// migration safe rather than a guess.
+		const page = pdfPage();
+		page.coordSpace = "page-css@1";
+		const back = parsePage(serializePage(page), "pdf-abc123").data;
+		expect(back.coordSpace).toBe("page-css@1");
+	});
+
+	it("drops a page number that is not a page", () => {
+		const raw = JSON.parse(serializePage(pdfPage()));
+		raw.strokes[0].page = 0;
+		raw.strokes[1].page = "50";
+		const back = parsePage(JSON.stringify(raw), "pdf-abc123").data;
+		expect(back.strokes.every((s) => s.page === undefined)).toBe(true);
+	});
+});

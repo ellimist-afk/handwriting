@@ -17,10 +17,37 @@ export class DiagnosticTextModal extends Modal {
 	constructor(
 		app: App,
 		private readonly heading: string,
-		private readonly text: string
+		private readonly text: string,
+		/**
+		 * When present, the modal offers an Upload button that sends the
+		 * text to the developer and resolves to a short receipt id. Only
+		 * the replay-JSON command passes this: a report a stranger on an
+		 * e-ink tablet can send with ONE tap, because copy-pasting a
+		 * megabyte of JSON through a Boox on-screen keyboard is where bug
+		 * reports go to die.
+		 */
+		private readonly upload?: (text: string) => Promise<string>,
+		/**
+		 * Fired once, on the FIRST successful delivery - copy, save to
+		 * vault, or upload. "Delivering the report ends the recording" is
+		 * the rule; which door it left through is irrelevant. Failed
+		 * attempts never fire it.
+		 */
+		private readonly onDelivered?: () => void
 	) {
 		super(app);
 	}
+
+	private deliveredOnce = false;
+
+	private delivered(): void {
+		if (this.deliveredOnce) return;
+		this.deliveredOnce = true;
+		this.onDelivered?.();
+	}
+
+	/** Set once an upload succeeds; blocks accidental duplicates. */
+	private uploadedId: string | null = null;
 
 	onOpen(): void {
 		this.contentEl.empty();
@@ -28,19 +55,79 @@ export class DiagnosticTextModal extends Modal {
 		this.contentEl.createEl("h2", { text: this.heading });
 		this.contentEl.createEl("p", {
 			text: Platform.isMobileApp
-				? "Tap Copy, then paste it into a message. Save to vault writes it to a note instead."
-				: "Press Copy, or select the text and press Ctrl+C.",
+				? this.upload
+					? "Tap Copy to paste it into a message, Upload to send it straight to the developer, or Save to vault for a note instead."
+					: "Tap Copy, then paste it into a message. Save to vault writes it to a note instead."
+				: this.upload
+					? "Press Copy, or select the text and Ctrl+C. Upload sends it straight to the developer."
+					: "Press Copy, or select the text and press Ctrl+C.",
 		});
+		// With an Upload button present the reporter's job is one tap; the
+		// raw data is a wall of JSON that buries the tap. It collapses behind
+		// a toggle - still there for Copy and for anyone who wants to look,
+		// no longer the first thing on screen.
+		let summary: HTMLElement | null = null;
+		if (this.upload) {
+			summary = this.contentEl.createEl("p", { cls: "handwriting-diagnostic-summary" });
+			try {
+				const parsed = JSON.parse(this.text) as {
+					events?: Array<{ cs?: unknown[] }>;
+				};
+				const events = parsed.events?.length ?? 0;
+				const samples =
+					parsed.events?.reduce((n, e) => n + (Array.isArray(e.cs) ? e.cs.length : 0), 0) ?? 0;
+				summary.setText(`${events} events captured, ${samples} pen samples`);
+			} catch {
+				summary.setText("recording ready");
+			}
+		}
 		const field = this.contentEl.createEl("textarea", {
 			cls: "handwriting-diagnostic-text",
 			attr: { "aria-label": this.heading },
 		});
 		field.readOnly = true;
 		field.value = this.text;
+		if (this.upload) field.addClass("handwriting-diagnostic-collapsed");
 
 		const controls = this.contentEl.createDiv({ cls: "handwriting-diagnostic-text-controls" });
+		// A clicked button held keyboard focus, and themes animate the
+		// focus ring - the upload button sat there sparkling in a square
+		// after every press. Click means done; the ring is for keyboards.
+		controls.addEventListener("click", (ev) => {
+			(ev.target as HTMLElement | null)?.blur?.();
+		});
 
-		const copy = controls.createEl("button", { text: "Copy", cls: "mod-cta" });
+		if (this.upload) {
+			// Primary and FIRST: the whole flow exists for this tap. Copy was
+			// wearing the accent while Upload sat third and plain.
+			const up = controls.createEl("button", { text: "Upload to developer", cls: "mod-cta" });
+			up.addEventListener("click", () => {
+				if (this.uploadedId) return; // one recording, one upload
+				up.disabled = true;
+				up.setText("Uploading…");
+				this.upload!(this.text)
+					.then((id) => {
+						this.uploadedId = id;
+						this.delivered();
+						up.setText("Uploaded");
+						// The id used to live ONLY in a ten-second toast: look
+						// away to start writing the report and it was gone,
+						// unrecoverable. It lands in the modal now and stays.
+						const done = this.contentEl.createDiv({ cls: "handwriting-upload-done" });
+						done.createSpan({ text: "id " });
+						done.createSpan({ cls: "handwriting-upload-id", text: id });
+						summary?.setText("uploaded");
+						new Notice(`Handwriting: uploaded - id ${id}`, 10000);
+					})
+					.catch(() => {
+						up.disabled = false;
+						up.setText("Upload to developer");
+						new Notice("Handwriting: upload failed - Copy or Save to vault instead");
+					});
+			});
+		}
+
+		const copy = controls.createEl("button", { text: "Copy", cls: this.upload ? "" : "mod-cta" });
 		copy.addEventListener("click", () => {
 			void this.copyToClipboard(field, copy);
 		});
@@ -50,13 +137,27 @@ export class DiagnosticTextModal extends Modal {
 			void this.saveToVault();
 		});
 
+		if (this.upload) {
+			const details = controls.createEl("button", { text: "Show data" });
+			details.addEventListener("click", () => {
+				const hidden = field.classList.toggle("handwriting-diagnostic-collapsed");
+				details.setText(hidden ? "Show data" : "Hide data");
+			});
+			this.contentEl.createEl("p", {
+				cls: "handwriting-diagnostic-upload-note",
+				text:
+					"Upload sends this recording - pen coordinates, timing and device info, never your note text - " +
+					"to the developer. Copy and Save to vault never touch the network.",
+			});
+		}
+
 		const close = controls.createEl("button", { text: "Close" });
 		close.addEventListener("click", () => this.close());
 
 		// Selecting on open is a desktop convenience; on iOS it summons the
 		// selection UI (and sometimes the keyboard) over the buttons the
 		// tester is being told to press.
-		if (!Platform.isMobileApp) {
+		if (!Platform.isMobileApp && !this.upload) {
 			window.setTimeout(() => {
 				field.focus();
 				field.select();
@@ -82,6 +183,7 @@ export class DiagnosticTextModal extends Modal {
 			if (navigator.clipboard?.writeText) {
 				await navigator.clipboard.writeText(this.text);
 				done();
+				this.delivered();
 				return;
 			}
 		} catch {
@@ -108,6 +210,7 @@ export class DiagnosticTextModal extends Modal {
 			}
 			await this.app.vault.create(path, this.text);
 			new Notice(`Saved to ${path}`, 8000);
+			this.delivered();
 		} catch (err) {
 			new Notice(`Could not save the report: ${String(err)}`, 10000);
 		}

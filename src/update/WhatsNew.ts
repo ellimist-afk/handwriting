@@ -16,6 +16,27 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"ui fixes",
 		"bug fixes",
 	],
+	"1.4.1": [
+		"write on pdfs",
+		"flatten a pdf with the ink in it",
+		"export ink as pdf",
+		"data safety fix",
+		"palm rejection fix",
+		"bug fixes",
+	],
+	// Most vaults update to this straight from 1.3.x, so the pdf headline
+	// rides here too - notes only show for the version landed on.
+	"1.4.2": [
+		"write on pdfs",
+		"flatten a pdf with the ink in it",
+		"export ink as pdf",
+		"snip pdf regions to png",
+		"pinch zoom on pdfs",
+		"bug report: record and send",
+		"pen and highlighter color commands",
+		"toolbar ui fixes",
+		"bug fixes",
+	],
 };
 
 /** Show the notes, or don't - and either way, the version to remember. */

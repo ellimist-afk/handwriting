@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	formatCapabilities,
 	formatHost,
 	inkPathVerdict,
 	predictionVerdict,
+	readCapabilities,
 	type HostCapabilities,
 	type PlatformCapabilities,
 	type PointerApis,
@@ -199,5 +200,29 @@ describe("the full header", () => {
 		const text = formatCapabilities(caps(bareObserved, chromiumApis));
 		expect(text).toContain("getCoalescedEvents on prototype:  yes");
 		expect(text).toContain("getCoalescedEvents seen:  NO");
+	});
+});
+
+describe("readCapabilities on a host with no global navigator", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	/**
+	 * CI pins node 20, which has NO global `navigator`; node 21 added it and
+	 * this machine runs 22, so the ordinary gate cannot see this. A bare
+	 * `navigator` here throws ReferenceError under CI - and `navigator?.x`
+	 * throws too, because optional chaining guards null values, not
+	 * UNDECLARED bindings. The release line shipped exactly that in 1.3.11
+	 * and its checks went red.
+	 */
+	it("reports zero touch points instead of throwing", () => {
+		vi.stubGlobal("navigator", undefined);
+		vi.stubGlobal("window", { devicePixelRatio: 2, innerWidth: 800, innerHeight: 600 });
+
+		const caps = readCapabilities("1.4.2", desktopHost, "1.12.3", bareObserved);
+
+		expect(caps.maxTouchPoints).toBe(0);
+		expect(caps.devicePixelRatio).toBe(2);
 	});
 });

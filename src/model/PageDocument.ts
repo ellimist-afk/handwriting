@@ -24,7 +24,7 @@ import { joinImages, joinPage } from "./PageJoin";
  *
  * So: the DOM is a view of this, never the source. Everything that decides what
  * ends up in the `.md` is here, in one place, with no Obsidian and no DOM, so
- * it can be tested with plain strings.
+ * it can be tested with bare strings.
  */
 
 export interface DocBox {

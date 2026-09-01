@@ -1,0 +1,114 @@
+{
+	"v": 1,
+	"env": {
+		"note": "synthetic chromium-shaped stream; recorded fixtures replace this",
+		"ua": "synthetic",
+		"dpr": 1
+	},
+	"events": [
+		{
+			"t": 100,
+			"type": "pointerdown",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 1,
+			"button": 0,
+			"pressure": 0.4,
+			"x": 100.5,
+			"y": 100.5,
+			"tx": 0,
+			"ty": 0,
+			"note": "pen CLAIMED (synthetic) guard=prearmed"
+		},
+		{
+			"t": 100,
+			"type": "guard",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": -1,
+			"button": 0,
+			"pressure": -1,
+			"x": 0,
+			"y": 0,
+			"tx": 0,
+			"ty": 0,
+			"note": "touch-action: none (synthetic)"
+		},
+		{
+			"t": 108,
+			"type": "pointerrawupdate",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 1,
+			"button": 0,
+			"pressure": 0.45,
+			"x": 103.2,
+			"y": 101.1,
+			"tx": 0,
+			"ty": 0,
+			"note": "coalesced=2",
+			"cs": [
+				{
+					"t": 104,
+					"x": 101.8,
+					"y": 100.7,
+					"p": 0.42
+				},
+				{
+					"t": 108,
+					"x": 103.2,
+					"y": 101.1,
+					"p": 0.45
+				}
+			]
+		},
+		{
+			"t": 116,
+			"type": "pointerrawupdate",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 1,
+			"button": 0,
+			"pressure": 0.5,
+			"x": 106.9,
+			"y": 102.4,
+			"tx": 0,
+			"ty": 0,
+			"note": "coalesced=3",
+			"cs": [
+				{
+					"t": 110,
+					"x": 104.4,
+					"y": 101.6,
+					"p": 0.47
+				},
+				{
+					"t": 113,
+					"x": 105.7,
+					"y": 102,
+					"p": 0.48
+				},
+				{
+					"t": 116,
+					"x": 106.9,
+					"y": 102.4,
+					"p": 0.5
+				}
+			]
+		},
+		{
+			"t": 124,
+			"type": "pointerup",
+			"id": 7,
+			"ptr": "pen",
+			"buttons": 0,
+			"button": 0,
+			"pressure": 0,
+			"x": 107.2,
+			"y": 102.5,
+			"tx": 0,
+			"ty": 0,
+			"note": ""
+		}
+	]
+}

@@ -1,8 +1,6 @@
-import { Platform } from "obsidian";
 import { telemetry } from "../diag/Telemetry";
 import { GuardDecision, ManipulationGuard } from "../input/ManipulationGuard";
 import { PalmGate, paroleEarned } from "../input/PalmGate";
-import { PalmShield, palmRadiusTrustworthy } from "../input/PalmShield";
 import { PenSample, silentLift } from "../input/PointerRouter";
 import { visualToNote } from "./ZoomScale";
 import { hideProbeMarkers, markRawPointer } from "./PenProbe";
@@ -120,7 +118,15 @@ export function bandEraserIntent(
 // `lostpointercapture` without a cancel (someone stole capture), or a silent
 // stop (delivery ceased).
 
-interface TraceEntry {
+/** One coalesced sample as the ink consumed it - floats, untouched. */
+export interface TraceSample {
+	t: number;
+	x: number;
+	y: number;
+	p: number;
+}
+
+export interface TraceEntry {
 	t: number;
 	type: string;
 	id: number;
@@ -130,13 +136,22 @@ interface TraceEntry {
 	pressure: number;
 	x: number;
 	y: number;
+	tx: number;
+	ty: number;
 	note: string;
+	/**
+	 * The coalesced list the ink path actually consumed, when there was
+	 * one. NOT diagnostic decoration: the router expands this list into
+	 * builder samples (see the RC4 comment at the raw handler), so a replay
+	 * without it collapses an iPad's 4-per-move stream into single points.
+	 */
+	cs?: TraceSample[];
 }
 
 const TRACE_MAX = 3000;
 const trace: TraceEntry[] = [];
 
-function tr(type: string, e: PointerEvent | null, note = ""): void {
+function tr(type: string, e: PointerEvent | null, note = "", cs?: TraceSample[]): void {
 	if (!diagnosticsEnabled()) return;
 	trace.push({
 		t: performance.now(),
@@ -146,11 +161,22 @@ function tr(type: string, e: PointerEvent | null, note = ""): void {
 		buttons: e?.buttons ?? -1,
 		button: e?.button ?? -1,
 		pressure: e?.pressure ?? -1,
-		x: e ? Math.round(e.clientX) : 0,
-		y: e ? Math.round(e.clientY) : 0,
+		// Floats, deliberately: the ink path consumes the UNROUNDED values,
+		// and a rounded trace made every replay lossy by half a pixel per
+		// point. The human table rounds at FORMAT time instead.
+		x: e ? e.clientX : 0,
+		y: e ? e.clientY : 0,
+		tx: e?.tiltX ?? 0,
+		ty: e?.tiltY ?? 0,
 		note,
+		...(cs && cs.length > 0 ? { cs } : {}),
 	});
 	if (trace.length > TRACE_MAX) trace.splice(0, trace.length - TRACE_MAX);
+}
+
+/** The consumed coalesced list, as trace samples. */
+function csOf(events: ReadonlyArray<PointerEvent>): TraceSample[] {
+	return events.map((ce) => ({ t: ce.timeStamp, x: ce.clientX, y: ce.clientY, p: ce.pressure }));
 }
 
 /** Pure, unit-tested: the acquisition-health counts the summary prints. */
@@ -184,7 +210,7 @@ export function formatInlinePenTrace(): string {
 		return (
 			`${at}ms  ${e.type.padEnd(18)} id=${e.id} ${e.ptr || "-"} ` +
 			`buttons=${e.buttons} button=${e.button} p=${e.pressure.toFixed(3)} ` +
-			`(${e.x},${e.y})${e.note ? "  " + e.note : ""}`
+			`(${Math.round(e.x)},${Math.round(e.y)})${e.note ? "  " + e.note : ""}`
 		);
 	});
 	const s = summarizeAcquisitions(trace);
@@ -214,6 +240,34 @@ export function formatInlinePenTrace(): string {
 		"",
 		...lines,
 	].join("\n");
+}
+
+/**
+ * Environment context for a capture. Loose on purpose: the recorder fills
+ * what it can reach, a future version adds fields, and unknown ones ride
+ * through parse and re-serialize untouched - the sidecar discipline.
+ */
+export type TraceEnv = Record<string, unknown>;
+
+export interface TraceCapture {
+	v: 1;
+	env: TraceEnv;
+	events: TraceEntry[];
+}
+
+/**
+ * A machine-readable snapshot of the ring buffer. The human table
+ * (formatInlinePenTrace) stays exactly as it is - people paste it into
+ * GitHub issues - and this is what becomes a replay fixture: a pointerdown
+ * at (400, 300) is meaningless without the world it landed in, so the
+ * recorder passes that world in env.
+ */
+export function captureInlinePenTrace(env: TraceEnv): TraceCapture {
+	return {
+		v: 1,
+		env: { ...env },
+		events: trace.map((r) => ({ ...r, ...(r.cs ? { cs: r.cs.map((c) => ({ ...c })) } : {}) })),
+	};
 }
 
 export function clearInlinePenTrace(): void {
@@ -406,7 +460,7 @@ export function suppressNativeFallout(opts: {
  * Yes when a claimed gesture owns the moment, when the event itself is
  * pen-sourced (Chromium ≥115 delivers contextmenu as a PointerEvent), or when
  * a pen is writing or hovering, because a side-button press while hovering raises
- * the menu with no contact to claim. A plain mouse right-click away from the pen is
+ * the menu with no contact to claim. An ordinary mouse right-click away from the pen is
  * never suppressed.
  */
 export function contextMenuSuppressed(opts: {
@@ -561,7 +615,15 @@ export class InlinePenRouter {
 		 * in layout px. Without this the pen lands in the wrong place, and
 		 * draws at the wrong size, whenever the editor is scaled.
 		 */
-		scaleProvider: () => number = () => 1
+		scaleProvider: () => number = () => 1,
+		/**
+		 * What the standing guard writes while armed. An editor wants "none",
+		 * because the assist pan replaces finger scrolling and owes the browser
+		 * nothing back. A pdf viewer wants "pinch-zoom": nothing here implements
+		 * a pinch, so "none" hands two-finger touches to the app, which reads
+		 * them as its open-the-sidebar swipe.
+		 */
+		private guardTouchAction: string = "none"
 	) {
 		this.scrollEl = scrollEl;
 		this.rectEl = rectEl;
@@ -585,26 +647,6 @@ export class InlinePenRouter {
 				this.scrollEl.removeEventListener(type, h, { capture: true })
 			);
 		};
-
-		// Palm-shaped touches are refused by SHAPE at capture, complementing
-		// the pen-proximity gate: a hand nudging the glass with no pen near
-		// lands as two contacts and our own pinch would zoom the note. Off on
-		// platforms whose fingers look like palms (see PalmShield).
-		// Desktop only: the 16px threshold is calibrated on Windows touch
-		// hardware. Android reports honest contact ellipses like iOS does, so
-		// on a Boox a fingertip would read as a palm and the shield would eat
-		// scrolling - the iPad failure again, on the main user base.
-		const shield = new PalmShield();
-		// typeof, not optional chaining: Node 20 (the CI runner) has no
-		// global navigator BINDING at all, and ?. only guards values -
-		// an undeclared identifier still throws. Shipped 1.3.11's red X.
-		const nav =
-			this.scrollEl.win?.navigator ??
-			(typeof navigator === "undefined" ? undefined : navigator);
-		if (!Platform.isMobileApp && nav !== undefined && palmRadiusTrustworthy(nav)) {
-			shield.attach(this.scrollEl);
-			this.disposers.push(() => shield.dispose());
-		}
 
 		on("pointerdown", (e) => this.pointerDown(e));
 		on("pointermove", (e) => this.pointerMove(e));
@@ -949,7 +991,7 @@ export class InlinePenRouter {
 				this.savedTouchActionKnown = true;
 			}
 			this.guardApplied = true;
-			armGuardStyle(this.scrollEl);
+			armGuardStyle(this.scrollEl, this.guardTouchAction);
 			tr("guard", null, `touch-action: none (${why})`);
 		} else if (!wantNone && this.guardApplied) {
 			this.guardApplied = false;
@@ -1093,6 +1135,15 @@ export class InlinePenRouter {
 	 * Cancelled by ANY new pointer contact. The pen always wins instantly.
 	 */
 	private startFling(vx: number, vy: number): void {
+		// The one number a "scrolling feels too fast" report needs: what the
+		// release actually measured. Everything downstream is deterministic
+		// physics, so a bad glide is either a bad velocity here or a surface
+		// with too much room to glide in - and the trace says which.
+		tr(
+			"fling",
+			null,
+			`release v=(${vx.toFixed(2)}, ${vy.toFixed(2)}) px/ms  speed ${Math.hypot(vx, vy).toFixed(2)}`
+		);
 		this.cancelFling();
 		this.flingVx = vx;
 		this.flingVy = vy;
@@ -1510,6 +1561,10 @@ export class InlinePenRouter {
 			const coalesced =
 				typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
 			const events = coalesced.length > 0 ? coalesced : [e];
+			// This row IS the webkit stream's record: on the iPad no raw ever
+			// arrives, so without it a capture holds no geometry at all for
+			// the events that carried the ink.
+			tr("pointermove", e, `move-fed coalesced=${events.length}`, csOf(events));
 			const fed = this.inkFeed.feed(events.map((ce) => ce.timeStamp));
 			const samples: PenSample[] = [];
 			for (const i of fed) {
@@ -1543,7 +1598,7 @@ export class InlinePenRouter {
 			const coalesced =
 				typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
 			const n = coalesced.length > 0 ? coalesced.length : 1;
-			tr("pointermove", e, `coalesced=${n}`);
+			tr("pointermove", e, `coalesced=${n}`, coalesced.length > 0 ? csOf(coalesced) : undefined);
 			this.cb.onPenMove(e, n);
 		} else {
 			this.cb.onPenMove(e, 1);
@@ -1597,7 +1652,7 @@ export class InlinePenRouter {
 					`+${sinceDown.toFixed(1)}ms after down, ${events.length} coalesced spanning ${span.toFixed(1)}ms`
 				);
 			}
-			tr("pointerrawupdate", e, `coalesced=${events.length}`);
+			tr("pointerrawupdate", e, `coalesced=${events.length}`, csOf(events));
 		}
 		// Through the arbiter like every ink delivery, so a raw flushing the
 		// samples a move already fed (session-first cold strike) drops its
