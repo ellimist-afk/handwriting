@@ -10,7 +10,8 @@ import { drawCommitted, drawStroke } from "../ink/StrokeRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { TailRenderer } from "../ink/TailRenderer";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
-import { DEFAULT_CAPS, buildTail, correctionError } from "../ink/Prediction";
+import { DEFAULT_CAPS, EINK_CAPS, buildTail, correctionError } from "../ink/Prediction";
+import { predictionEinkOn } from "../inline/StrokePrediction";
 import { strokesHitByCircle } from "../ink/Eraser";
 import { padBBox, pointInBBox } from "../objects/Selection";
 import { SelectionModel } from "../objects/SelectionModel";
@@ -881,7 +882,12 @@ export class HandwritingPageView extends TextFileView {
 			);
 		}
 		if (!this.predictionOn) return;
-		const result = buildTail(this.penHistory, predicted, predicted.length > 0 ? "chromium" : "extrap", DEFAULT_CAPS);
+		const result = buildTail(
+			this.penHistory,
+			predicted,
+			predicted.length > 0 ? "chromium" : "extrap",
+			predictionEinkOn() ? EINK_CAPS : DEFAULT_CAPS
+		);
 		if (result.points.length === 0) return;
 		const last = this.penHistory[this.penHistory.length - 1]!;
 		const widthPx =

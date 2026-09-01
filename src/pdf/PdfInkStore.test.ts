@@ -243,3 +243,52 @@ describe("strokes the read cannot place", () => {
 		expect(saved.at(-1)!.strokes.map((s) => s.id)).toEqual(["orphan", "s1", "s2"]);
 	});
 });
+
+describe("path claims (instance identity)", () => {
+	it("a fresh instance claims lazily: opening writes nothing, the first stroke writes the claim", () => {
+		const { store, saved } = harness();
+		store.claimPath("pdf-a", "copy.pdf");
+		expect(saved).toHaveLength(0); // merely opening a pdf never creates a sidecar
+		store.commit("pdf-a", stroke("s1", 1));
+		expect(saved).toHaveLength(1);
+		expect(saved[0]!.pdfPaths).toEqual(["copy.pdf"]);
+	});
+
+	it("an adoption on a loaded sidecar is durable at once", async () => {
+		const { store, saved } = harness(sidecar("pdf-a", [stroke("old", 1)]));
+		await store.ensureLoaded("pdf-a");
+		store.claimPath("pdf-a", "renamed.pdf");
+		expect(saved).toHaveLength(1);
+		expect(saved[0]!.pdfPaths).toEqual(["renamed.pdf"]);
+		// And a repeat claim is a no-op, not a second write.
+		store.claimPath("pdf-a", "renamed.pdf");
+		expect(saved).toHaveLength(1);
+	});
+
+	it("claims made before the read landed survive it, merged with the disk's", async () => {
+		const base = sidecar("pdf-a", []);
+		base.data.pdfPaths = ["from-disk.pdf"];
+		const { store, saved } = harness(base);
+		store.claimPath("pdf-a", "session.pdf");
+		await store.ensureLoaded("pdf-a");
+		store.commit("pdf-a", stroke("s1", 1));
+		expect(saved.at(-1)!.pdfPaths?.slice().sort()).toEqual(["from-disk.pdf", "session.pdf"]);
+	});
+
+	it("a rename replaces the old claim rather than accumulating it", async () => {
+		const base = sidecar("pdf-a", [stroke("old", 1)]);
+		base.data.pdfPaths = ["before.pdf"];
+		const { store, saved } = harness(base);
+		await store.ensureLoaded("pdf-a");
+		store.renamePath("pdf-a", "before.pdf", "after.pdf");
+		expect(saved.at(-1)!.pdfPaths).toEqual(["after.pdf"]);
+	});
+
+	it("a sidecar with no claims stays claimless until someone claims it", async () => {
+		const { store, saved } = harness(sidecar("pdf-a", [stroke("old", 1)]));
+		await store.ensureLoaded("pdf-a");
+		store.commit("pdf-a", stroke("s1", 1));
+		// Pre-instance data round-trips without inventing a pdfPaths field.
+		expect(saved.at(-1)!.pdfPaths).toEqual([]);
+	});
+});

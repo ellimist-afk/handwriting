@@ -75,26 +75,26 @@ Three things follow from keying on content:
 - Two machines syncing the same file agree on the id by construction, with no
   coordination. This is the only reason ink drawn on a tablet appears on a
   desktop.
-- Two copies of the same PDF in one vault share their ink. That is a choice,
-  not an accident: they are the same document, and someone who files a
-  duplicate under a second name expects their annotations there.
+- Two copies of the same PDF in one vault are separate INSTANCES: each vault
+  file gets its own sidecar, so a fresh copy of a document you already
+  annotated starts blank. Export the same source twice and the second file
+  is its own clean page, whatever its bytes.
 
-**A fresh copy of a document you already annotated arrives with your ink
-on it.** Export the same source to PDF twice - the same OneNote page, the
-same print run, the same download - and the second file can be byte-identical
-to the first. It resolves to the same id, so it shows the same ink,
-immediately, under any filename. This is the sharing rule above meeting you
-in the wild, and it surprises people the first time.
+Instances work by path claims. The content hash names a FAMILY; the first
+file opened in a family keeps the bare `pdf-<hash>` id (which is exactly the
+pre-instance id, so existing sidecars carry straight over), and each further
+copy gets `pdf-<hash>-2` and up. Every sidecar records the vault paths it
+belongs to, in the sidecar itself - so synced devices agree by reading the
+same files, with no coordination.
 
-The ink is not inside the PDF. It is an overlay from the sidecar, exactly as
-on notes. Open that file in any other reader and it is clean; disable the
+That is also what keeps renames working: a renamed or moved PDF turns up
+with no sidecar claiming its path, but one sidecar's claimed path has just
+vanished from the vault - the ink follows. A sidecar with no recorded paths
+is older data; the first file to open it adopts it.
+
+The ink is never inside the PDF. It is an overlay from the sidecar, exactly
+as on notes. Open the file in any other reader and it is clean; disable the
 plugin and it is clean. The file itself is never touched.
-
-There is no way around this under content identity, and that is the point:
-if two files are byte-identical they are the same document, and only keying
-on the filename could tell them apart - which would break the rename and
-sync guarantees above. One document, one set of annotations, however many
-copies of it you keep.
 
 **Re-exporting a PDF deliberately does not carry the ink over.** A file that
 has been through another editor is a different document, its pages may have

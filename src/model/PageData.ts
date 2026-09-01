@@ -79,6 +79,15 @@ export interface PageData {
 	 * not possible, because both conventions produce plausible coordinates.
 	 */
 	coordSpace?: string;
+	/**
+	 * PDF sidecars only: the vault paths this sidecar believes it belongs
+	 * to. Stored IN the sidecar so replicas agree by sync rather than
+	 * coordination - this is what lets two byte-identical PDFs be different
+	 * INSTANCES of one content family (a fresh copy starts blank) while a
+	 * renamed file keeps its ink. Absent = pre-instance data, adopted by
+	 * the first opener. See PdfIdentity.chooseInstance.
+	 */
+	pdfPaths?: string[];
 	textBoxes: TextBoxData[];
 	images: ImageData[];
 	strokes: InkStroke[];
@@ -154,6 +163,7 @@ const KNOWN_TOP = new Set([
 	"pageId",
 	"surface",
 	"coordSpace",
+	"pdfPaths",
 	"textBoxes",
 	"images",
 	"strokes",
@@ -280,6 +290,7 @@ export function serializePage(page: PageData, version: number = SCHEMA_VERSION):
 				pageId: page.pageId,
 				...(page.surface ? { surface: page.surface } : {}),
 				...(page.coordSpace ? { coordSpace: page.coordSpace } : {}),
+				...(page.pdfPaths ? { pdfPaths: page.pdfPaths } : {}),
 				textBoxes: page.textBoxes.map((b) =>
 					withUnknown(
 						{
@@ -344,6 +355,10 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 	// stores are separate instances and each refuses the other's sidecars.
 	if (o.surface === "pdf") page.surface = "pdf";
 	if (typeof o.coordSpace === "string" && o.coordSpace !== "") page.coordSpace = o.coordSpace;
+	if (Array.isArray(o.pdfPaths)) {
+		const paths = o.pdfPaths.filter((p): p is string => typeof p === "string" && p !== "");
+		if (paths.length > 0) page.pdfPaths = paths;
+	}
 	page.unknownTop = unknownKeys(o, KNOWN_TOP);
 
 	if (Array.isArray(o.textBoxes)) {

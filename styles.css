@@ -1225,3 +1225,19 @@ body.handwriting-active-page .status-bar {
 	border: 0;
 	white-space: nowrap;
 }
+
+/* Boox mode: e-ink pays for every repaint, so the chrome stops moving -
+   no fade on the strip or pill, no pulse on the recording dot, no press
+   scale. Everything still appears and responds; it snaps instead of
+   animating. */
+body.handwriting-boox .handwriting-mobile-tools,
+body.handwriting-boox .handwriting-pen-pill {
+	transition: none;
+}
+body.handwriting-boox .handwriting-recording-dot {
+	animation: none;
+}
+body.handwriting-boox .handwriting-mobile-tool:active:not(.is-disabled),
+body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
+	transform: none;
+}

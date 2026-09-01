@@ -71,7 +71,7 @@ import {
 } from "./ink/InkColor";
 import { diagnosticsEnabled, setDiagnosticsEnabled } from "./diag/DiagSwitch";
 import { mouseInkEnabled, setMouseInk, setPersistMouseInk } from "./inline/MouseInk";
-import { setPrediction } from "./inline/StrokePrediction";
+import { setPrediction, setPredictionEink } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
 import { inkToSvg } from "./ink/SvgExport";
 import { InkTool } from "./ink/Stroke";
@@ -101,7 +101,7 @@ import { pdfInkReport } from "./pdf/PdfInkReport";
 import { PdfInkController } from "./pdf/PdfInkController";
 import { calibrationStrokes } from "./pdf/PdfCalibration";
 import { PdfInkStore } from "./pdf/PdfInkStore";
-import { pdfInkId } from "./pdf/PdfIdentity";
+import { InstanceClaim, chooseInstance, familyOf, pdfInkId } from "./pdf/PdfIdentity";
 import { applyOp } from "./pdf/PdfInkHistory";
 import { newPageId } from "./model/PageData";
 import { PageIdIndex } from "./model/PageIdIndex";
@@ -178,6 +178,7 @@ interface HandwritingSettings {
 	/** Mouse-ink mode (v0.13.16): left mouse button draws like a pen tip. */
 	mouseInk: boolean;
 	strokePrediction: boolean;
+	booxMode: boolean;
 	/** Ruled paper background (v0.13.16): none, lines or grid. Per device. */
 	paperStyle: PaperStyle;
 	/** Pen tools strip (v0.13.16): auto (pen summons it), show, or hide. */
@@ -210,9 +211,11 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
 	pageOwners: {},
 	eraserRadiusPx: DEFAULT_ERASER_RADIUS_PX,
 	mouseInk: false,
-	// Off by default; see StrokePrediction.ts for why that is a judgement
-	// about e-ink users rather than caution.
-	strokePrediction: false,
+	// On by default since 1.4.5. It was off for e-ink's sake (see
+	// StrokePrediction.ts); e-ink has Boox mode now, so the default serves
+	// everyone else.
+	strokePrediction: true,
+	booxMode: false,
 	paperStyle: "none",
 	penTools: "auto",
 	eraserMode: "stroke",
@@ -366,15 +369,37 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		if (!file) return;
 		const path = file.path;
 		const bytes = await this.app.vault.readBinary(file);
-		// Two awaits, and the pane can change document across either. Checking
-		// only `isConnected` catches a closed view but not a switched one: two
-		// resolutions racing in the same pane could finish out of order and
-		// stamp the earlier document's id onto the later one.
+		// Several awaits, and the pane can change document across any of
+		// them. Checking only `isConnected` catches a closed view but not a
+		// switched one: two resolutions racing in the same pane could finish
+		// out of order and stamp the earlier document's id onto the later
+		// one - so the guard repeats after every await.
 		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
-		const id = await pdfInkId(bytes, window.crypto);
+		const family = await pdfInkId(bytes, window.crypto);
 		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
-		this.pdfIds.set(root, id);
-		await this.pdfStore.ensureLoaded(id);
+		// Which INSTANCE of the content family this file is. Byte-identical
+		// copies are one family, but each vault file is its own instance -
+		// launch day proved why: a re-export of an unchanged OneNote page
+		// arrived already wearing the original's ink (2026-09-01). The
+		// sidecars' own path claims decide; see PdfIdentity.chooseInstance.
+		const candidates: InstanceClaim[] = [];
+		for (const cid of (await this.store.listIds(family)).filter((i) => familyOf(i) === family)) {
+			const res = await this.store.load(cid);
+			candidates.push({ id: cid, paths: res?.data.pdfPaths ?? [] });
+		}
+		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
+		const choice = chooseInstance(
+			family,
+			path,
+			candidates,
+			(p) => this.app.vault.getAbstractFileByPath(p) !== null
+		);
+		this.pdfIds.set(root, choice.id);
+		await this.pdfStore.ensureLoaded(choice.id);
+		// Always claimed: an adoption becomes durable at once, a fresh
+		// instance merely remembers until its first stroke, and a repeat
+		// claim is a no-op.
+		this.pdfStore.claimPath(choice.id, path);
 		controller.refresh();
 	}
 
@@ -1563,6 +1588,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 						smoothInk: this.settings.smoothInk,
 						inkSmoothing: this.settings.inkSmoothing,
 						strokePrediction: this.settings.strokePrediction,
+						booxMode: this.settings.booxMode,
 						pressureSensitivity: this.settings.pressureSensitivity,
 						mouseInk: this.settings.mouseInk,
 						eraserMode: this.settings.eraserMode,
@@ -1881,6 +1907,19 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					// created at the old path inherits "the user opened this
 					// on the canvas" from a note that no longer exists.
 					if (this.canvasIntent.delete(oldPath)) this.canvasIntent.add(file.path);
+				}
+				// A pdf renamed while OPEN: the pane keeps its id, and the
+				// sidecar's path claim moves with the file - left stale, the
+				// next resolution would read this file as a fresh copy and
+				// open it blank. Renamed while closed, chooseInstance sees
+				// the dead path and adopts; this is the live-pane mirror.
+				if (file instanceof TFile && file.extension === "pdf") {
+					for (const [root, p] of this.pdfFiles) {
+						if (p !== oldPath) continue;
+						this.pdfFiles.set(root, file.path);
+						const id = this.pdfIds.get(root);
+						if (id) this.pdfStore.renamePath(id, oldPath, file.path);
+					}
 				}
 			})
 		);
@@ -2319,6 +2358,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	onunload(): void {
 		this.applyPaper("none");
 		document.body.classList.remove("handwriting-active-page");
+		document.body.classList.remove("handwriting-boox");
 		destroyProbeMarkers();
 		// The print swap arms itself once per window and the guard is a WeakSet
 		// in module scope, which a reload replaces - leaving the previous pair
@@ -2646,7 +2686,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				raw?.pageOwners && typeof raw.pageOwners === "object" ? raw.pageOwners : {},
 			eraserRadiusPx: clampEraserRadius(raw?.eraserRadiusPx ?? DEFAULT_ERASER_RADIUS_PX),
 			mouseInk: raw?.mouseInk === true,
-			strokePrediction: raw?.strokePrediction === true,
+			strokePrediction: raw?.strokePrediction !== false,
+			booxMode: raw?.booxMode === true,
 			paperStyle: normalizePaperStyle(raw?.paperStyle),
 			penTools: normalizePenToolsMode(raw?.penTools),
 			// A fresh key on purpose: the old boolean keys carried the OLD
@@ -2706,21 +2747,43 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			notice: (message) => void new Notice(message),
 		});
 		setMouseInk(this.settings.mouseInk);
-		setPrediction(this.settings.strokePrediction);
 		this.applyPaper(this.settings.paperStyle);
 		setInkSizeMult("pen", this.settings.inkSizes.pen);
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
 		setPressureSensitivity(this.settings.pressureSensitivity);
-		setInkShaping(this.settings.inkSmoothing);
+		this.applyBooxMode();
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
 		setEraserWholeStrokes(this.settings.eraserMode === "stroke");
-		setPenReticle(this.settings.penReticle);
 		setShapeSnap(this.settings.shapeSnap);
 	}
 
 	/** Settings-tab writes: persist now, quietly. */
+	/**
+	 * Boox mode: the slice of e-ink latency the plugin owns. E-ink pays per
+	 * redraw, so everything that redraws for polish goes quiet while it is
+	 * on - prediction (draws ahead, then corrects), ink smoothing (reshapes
+	 * behind the nib) and the chrome's animations (via body class). Runtime
+	 * overrides, never setting rewrites: toggling off restores the user's
+	 * own choices exactly.
+	 */
+	applyBooxMode(): void {
+		const on = this.settings.booxMode;
+		document.body.classList.toggle("handwriting-boox", on);
+		// Prediction is EXTENDED on e-ink, not paused: the first NoteAir
+		// trace (2026-09-01) measured the webview delivering pen events
+		// 58-103ms late - the one delay prediction can mask, and the 12ms
+		// default horizon vanishes inside it. Boox mode runs prediction
+		// with e-ink caps; the user's own toggle returns when it is off.
+		setPredictionEink(on);
+		setPrediction(on || this.settings.strokePrediction);
+		setInkShaping(this.settings.inkSmoothing && !on);
+		// The reticle is a dot repainted under the pen on every event: a
+		// second damaged region per frame, which e-ink pays for.
+		setPenReticle(this.settings.penReticle && !on);
+	}
+
 	saveSettingsNow(): void {
 		runDetached(this.saveData(this.settings), "save settings");
 	}
@@ -2841,9 +2904,8 @@ class HandwritingSettingTab extends PluginSettingTab {
 						// and told us nothing. Flicking past sharp corners is a real
 						// prediction artefact and stays.
 						desc:
-							"Draws a little ahead of the pen to hide latency. Off by default: " +
-							"turn it on if ink feels behind your hand, and back off if the line " +
-							"runs ahead of the nib or flicks past sharp corners.",
+							"Draws a little ahead of the pen to hide latency. Default on. " +
+							"Turn it off if the line runs ahead of the nib or flicks past sharp corners.",
 						control: { type: "toggle", key: "strokePrediction" },
 					},
 					{
@@ -2859,6 +2921,13 @@ class HandwritingSettingTab extends PluginSettingTab {
 							"Shapes the line: thinner when you move fast, tapered at each end. " +
 							"Off draws an unshaped stroke that follows the pen more literally. Default on.",
 						control: { type: "toggle", key: "inkSmoothing" },
+					},
+					{
+						name: "Boox mode",
+						desc:
+							"For e-ink. Pen prediction sized for e-ink delays; smoothing, the pen reticle and animations " +
+							"off - every redraw costs on e-ink. Your settings come back when it's off. Default off.",
+						control: { type: "toggle", key: "booxMode" },
 					},
 					{
 						name: "Shape snap",
@@ -2971,12 +3040,16 @@ class HandwritingSettingTab extends PluginSettingTab {
 				break;
 			case "strokePrediction":
 				s.strokePrediction = on;
-				setPrediction(on);
+				this.plugin.applyBooxMode();
 				break;
 			case "inkSmoothing":
 				s.inkSmoothing = on;
-				setInkShaping(on);
+				this.plugin.applyBooxMode();
 				repaintAllInkOverlays();
+				break;
+			case "booxMode":
+				s.booxMode = on;
+				this.plugin.applyBooxMode();
 				break;
 			case "shapeSnap":
 				s.shapeSnap = on;
@@ -3017,7 +3090,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 			}
 			case "penReticle":
 				s.penReticle = on;
-				setPenReticle(on);
+				this.plugin.applyBooxMode();
 				break;
 			default:
 				return;

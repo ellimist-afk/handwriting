@@ -39,8 +39,8 @@ import { TailRenderer } from "../ink/TailRenderer";
 import { PalmShield, isAppleTouchPlatform, palmRadiusTrustworthy } from "../input/PalmShield";
 import { PinchBridge } from "./PinchBridge";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
-import { buildTail, correctionError } from "../ink/Prediction";
-import { predictionEnabled } from "../inline/StrokePrediction";
+import { DEFAULT_CAPS, EINK_CAPS, buildTail, correctionError } from "../ink/Prediction";
+import { predictionEinkOn, predictionEnabled } from "../inline/StrokePrediction";
 import { rowsOf, snapLine, strokeIdsBelow } from "../inline/InsertSpace";
 import { copyInk, pasteInk } from "../inline/InkClipboard";
 import { drawStroke } from "../ink/StrokeRenderer";
@@ -1303,10 +1303,14 @@ export class PdfInkController {
 			x: pr.x + scroller.scrollLeft - box.leftPx,
 			y: pr.y + scroller.scrollTop - box.topPx,
 		}));
+		// Boox mode's e-ink horizon applies HERE too - writing on pdfs is
+		// the headline use, and the caps switch must not be an inline-only
+		// courtesy.
 		const result = buildTail(
 			this.predReal.map(toScreen),
 			predicted,
-			predicted.length > 0 ? "chromium" : "extrap"
+			predicted.length > 0 ? "chromium" : "extrap",
+			predictionEinkOn() ? EINK_CAPS : DEFAULT_CAPS
 		);
 		this.metrics.setPrediction("on", result.source);
 		// Page units for SCORING only - the next event compares in screen
@@ -1819,8 +1823,13 @@ export class PdfInkController {
 		const box = this.frameBox(page);
 		if (!stroke) {
 			if (attached && box) {
-				attached.wet.clear(box.widthPx, box.heightPx);
-				attached.tail.clearAll(box.widthPx, box.heightPx);
+				if (predictionEinkOn()) {
+					attached.wet.clearStroke(box.widthPx, box.heightPx);
+					attached.tail.clear();
+				} else {
+					attached.wet.clear(box.widthPx, box.heightPx);
+					attached.tail.clearAll(box.widthPx, box.heightPx);
+				}
 			}
 			this.undressWet(attached);
 			return;
@@ -1845,8 +1854,13 @@ export class PdfInkController {
 		if (attached && this.wetHighlighter) attached.wetCanvas.setCssProps({ opacity: "0" });
 		this.sync();
 		if (attached && box) {
-			attached.wet.clear(box.widthPx, box.heightPx);
-			attached.tail.clearAll(box.widthPx, box.heightPx);
+			if (predictionEinkOn()) {
+				attached.wet.clearStroke(box.widthPx, box.heightPx);
+				attached.tail.clear();
+			} else {
+				attached.wet.clear(box.widthPx, box.heightPx);
+				attached.tail.clearAll(box.widthPx, box.heightPx);
+			}
 		}
 		this.undressWet(attached);
 	}

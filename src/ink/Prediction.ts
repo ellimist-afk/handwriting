@@ -55,6 +55,24 @@ export const DEFAULT_CAPS: PredictionCaps = {
 	minSpeedPxPerMs: 0.02,
 };
 
+/**
+ * E-ink caps, sized from the field rather than this desk: the first NoteAir
+ * trace (2026-09-01, upload 9b223109) measured the webview DELIVERING pen
+ * events a median 58ms / p90 103ms after their samples were generated,
+ * against a clean 60Hz digitizer underneath. A 12ms horizon aimed into that
+ * hole is invisible - which is exactly what its user reported. 48ms closes
+ * most of the median gap while staying under it; the distance cap widens to
+ * match the longer window. The turn and speed guards do NOT loosen: on a
+ * panel that cannot quietly erase, a wrong guess is a visible artifact, so
+ * the horizon grows but the wrongness guards hold.
+ */
+export const EINK_CAPS: PredictionCaps = {
+	maxHorizonMs: 48,
+	maxDistPx: 24,
+	maxTurnDeg: 30,
+	minSpeedPxPerMs: 0.02,
+};
+
 export interface PredictionResult {
 	/** Tail points to draw after the last real sample, in order. Never persisted. */
 	points: PenSample[];

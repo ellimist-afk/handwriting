@@ -9,9 +9,12 @@ import { describe, expect, it } from "vitest";
 import {
 	HEAD_BYTES,
 	ID_HEX_CHARS,
+	chooseInstance,
+	familyOf,
 	headOf,
 	idFromDigest,
 	idInput,
+	nextInstanceId,
 	pdfInkId,
 	toHex,
 } from "./PdfIdentity";
@@ -109,5 +112,75 @@ describe("pdfInkId", () => {
 	it("accepts an ArrayBuffer, which is what readBinary returns", async () => {
 		const view = filled(1000);
 		expect(await pdfInkId(view.buffer as ArrayBuffer, subtle)).toBe(await pdfInkId(view, subtle));
+	});
+});
+
+describe("instances within a content family", () => {
+	const F = "pdf-" + "ab".repeat(16);
+
+	it("familyOf strips the instance suffix and nothing else", () => {
+		expect(familyOf(F)).toBe(F);
+		expect(familyOf(`${F}-2`)).toBe(F);
+		expect(familyOf(`${F}-17`)).toBe(F);
+		expect(familyOf("not-a-pdf-id")).toBe("not-a-pdf-id");
+	});
+
+	it("nextInstanceId fills the lowest hole and ignores other families", () => {
+		expect(nextInstanceId(F, [])).toBe(F);
+		expect(nextInstanceId(F, [F])).toBe(`${F}-2`);
+		expect(nextInstanceId(F, [F, `${F}-2`])).toBe(`${F}-3`);
+		expect(nextInstanceId(F, [`${F}-2`])).toBe(F);
+		expect(nextInstanceId(F, ["pdf-" + "cd".repeat(16)])).toBe(F);
+	});
+
+	const exists = (live: string[]) => (p: string) => live.includes(p);
+
+	it("no sidecars at all: the first instance takes the bare family id", () => {
+		expect(chooseInstance(F, "a.pdf", [], exists([]))).toEqual({ id: F, action: "fresh" });
+	});
+
+	it("a sidecar already claiming the path is simply this file", () => {
+		const c = [
+			{ id: F, paths: ["a.pdf"] },
+			{ id: `${F}-2`, paths: ["b.pdf"] },
+		];
+		expect(chooseInstance(F, "b.pdf", c, exists(["a.pdf", "b.pdf"]))).toEqual({
+			id: `${F}-2`,
+			action: "use",
+		});
+	});
+
+	it("a claimless sidecar is pre-instance data: the first opener adopts it", () => {
+		const c = [{ id: F, paths: [] }];
+		expect(chooseInstance(F, "a.pdf", c, exists(["a.pdf"]))).toEqual({ id: F, action: "adopt" });
+	});
+
+	it("a sidecar whose every claimed path vanished follows a rename", () => {
+		const c = [{ id: F, paths: ["old.pdf"] }];
+		expect(chooseInstance(F, "new.pdf", c, exists(["new.pdf"]))).toEqual({
+			id: F,
+			action: "adopt",
+		});
+	});
+
+	it("every instance claimed by a living file means THIS one is a fresh copy", () => {
+		const c = [{ id: F, paths: ["original.pdf"] }];
+		// The launch-day bug: a byte-identical OneNote re-export arrived
+		// wearing the original's ink. A copy starts blank.
+		expect(chooseInstance(F, "copy.pdf", c, exists(["original.pdf", "copy.pdf"]))).toEqual({
+			id: `${F}-2`,
+			action: "fresh",
+		});
+	});
+
+	it("a sidecar claimed by a still-living file is never adopted for a rename", () => {
+		const c = [
+			{ id: F, paths: ["alive.pdf"] },
+			{ id: `${F}-2`, paths: ["gone.pdf"] },
+		];
+		expect(chooseInstance(F, "moved.pdf", c, exists(["alive.pdf", "moved.pdf"]))).toEqual({
+			id: `${F}-2`,
+			action: "adopt",
+		});
 	});
 });

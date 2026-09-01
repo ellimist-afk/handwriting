@@ -87,8 +87,8 @@ import {
 } from "./InlineSelectionDelete";
 import { StrokeFrame } from "./StrokeFrame";
 import { Band, BandViewport, bandFor, bandNeedsMove } from "./ScrollBand";
-import { buildTail, correctionError } from "../ink/Prediction";
-import { predictionEnabled } from "./StrokePrediction";
+import { DEFAULT_CAPS, EINK_CAPS, buildTail, correctionError } from "../ink/Prediction";
+import { predictionEinkOn, predictionEnabled } from "./StrokePrediction";
 import {
 	clearMetadataVisibility,
 	frontmatterPropertyKeys,
@@ -2047,7 +2047,9 @@ export class InkOverlayPlugin {
 		}
 		const predicted = this.router?.predictedSamples(ev) ?? [];
 		const mode = predicted.length > 0 ? "chromium" : "extrap";
-		const result = buildTail(real, predicted, mode);
+		// Boox mode swaps in the e-ink horizon: same guards, longer reach,
+		// sized to the delivery delay e-ink webviews actually measured.
+		const result = buildTail(real, predicted, mode, predictionEinkOn() ? EINK_CAPS : DEFAULT_CAPS);
 		metrics.setPrediction("on", result.source);
 		this.predLastTail = result.points;
 		if (result.suppressed || result.points.length === 0) {
@@ -2239,8 +2241,15 @@ export class InkOverlayPlugin {
 			);
 		}
 		if (!stroke || !path) {
-			this.activeWet.clear(this.cssWidth, this.cssHeight);
-			this.tail.clearAll(this.cssWidth, this.cssHeight);
+			// Boox mode clears the stroke's own box; everyone else keeps the full
+			// clear until an e-ink user has confirmed the box on hardware.
+			if (predictionEinkOn()) {
+				this.activeWet.clearStroke(this.cssWidth, this.cssHeight);
+				this.tail.clear();
+			} else {
+				this.activeWet.clear(this.cssWidth, this.cssHeight);
+				this.tail.clearAll(this.cssWidth, this.cssHeight);
+			}
 			this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
 			return;
 		}
@@ -2280,8 +2289,15 @@ export class InkOverlayPlugin {
 				}
 			},
 			clearTransient: () => {
-				this.activeWet.clear(this.cssWidth, this.cssHeight);
-				this.tail.clearAll(this.cssWidth, this.cssHeight);
+				// Boox mode clears the stroke's own box; everyone else keeps the full
+				// clear until an e-ink user has confirmed the box on hardware.
+				if (predictionEinkOn()) {
+					this.activeWet.clearStroke(this.cssWidth, this.cssHeight);
+					this.tail.clear();
+				} else {
+					this.activeWet.clear(this.cssWidth, this.cssHeight);
+					this.tail.clearAll(this.cssWidth, this.cssHeight);
+				}
 				// Cleared, so it is safe to be visible again for the next
 				// stroke. Restoring here rather than on the next pen-down
 				// keeps the element's resting state honest.

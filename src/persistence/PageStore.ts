@@ -170,6 +170,33 @@ export class PageStore {
 		return normalizePath(`${this.folder}/${pageId}.json`);
 	}
 
+	/**
+	 * Every sidecar id in the folder starting with `prefix` - the instance
+	 * enumeration behind pdf identity. Conflict, damaged and tmp artifacts
+	 * are not sidecars and are not listed. An adapter without list() (test
+	 * doubles, an exotic platform) yields none, which degrades resolution
+	 * to "first instance" rather than failing anything.
+	 */
+	async listIds(prefix: string): Promise<string[]> {
+		const adapter = this.app.vault.adapter;
+		if (typeof adapter.list !== "function") return [];
+		try {
+			const l = await adapter.list(this.folder);
+			return l.files
+				.map((f) => f.split("/").pop() ?? "")
+				.filter(
+					(n) =>
+						n.startsWith(prefix) &&
+						n.endsWith(".json") &&
+						!n.includes(".conflict-") &&
+						!n.includes(".damaged-")
+				)
+				.map((n) => n.slice(0, -".json".length));
+		} catch {
+			return [];
+		}
+	}
+
 	/** Where sidecars are being kept right now. */
 	inkFolder(): string {
 		return this.folder;

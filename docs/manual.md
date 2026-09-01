@@ -41,6 +41,10 @@ Ink stays glued to the text while you scroll and scales with Obsidian's zoom
 text edits in the order they happened. Draw below the last line or far off to
 the right and the note grows scroll room to reach it.
 
+Ink prediction draws a little ahead of the pen to hide display latency. It
+is on by default; turn it off in settings if the line runs ahead of the nib
+or flicks past sharp corners.
+
 To wipe a note, run `Delete all ink on this note`. It asks first, copies the
 ink to the trash described in [storage.md](storage.md), and one undo brings
 everything back.
@@ -61,6 +65,25 @@ one, and native scrolling returns a second later.
 On Windows a pen contact also raises synthetic mouse events. Those are
 suppressed during a stroke and briefly after it, so an eraser pass cannot
 drag the text caret.
+
+## e-ink and Boox
+
+E-ink pays for every redraw, and the Android webview on those devices hands
+over pen events late: the first NoteAir trace measured a median 58ms between
+the pen moving and the plugin hearing about it. Two things follow.
+
+Turn on **Boox mode** in the plugin settings. It sizes ink prediction to that
+delay, turns off smoothing and the pen reticle, stops the toolbar animating,
+and makes the end of a stroke clear only the ink it drew instead of the whole
+screen, which on e-ink was a full refresh per stroke. Your own settings come
+back when you switch it off.
+
+Set the device's per-app refresh mode for Obsidian to its fastest option (X
+mode or similar) in the Boox system settings. That is the largest lever and
+it is outside the plugin.
+
+If it still lags, run the bug report command. It records a short pen trace,
+and that trace is how Boox mode got its numbers.
 
 ## where the ink is
 

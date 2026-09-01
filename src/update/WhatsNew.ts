@@ -37,6 +37,13 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"toolbar ui fixes",
 		"bug fixes",
 	],
+	"1.4.4": [
+		"boox mode: new setting for e-ink, should reduce latency. please bug report",
+		"ink prediction on by default",
+		"pdf v2 groundwork",
+		"house cleaning",
+		"bug fixes",
+	],
 };
 
 /** Show the notes, or don't - and either way, the version to remember. */

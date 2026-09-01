@@ -25,6 +25,11 @@
  * defaulting this on would be shipping them a downgrade they never asked for.
  *
  * So: on for whoever wants it, after feeling both, on their own hardware.
+ *
+ * 1.4.5: on by default after all. The e-ink case above has its own switch
+ * now (Boox mode, which predicts with e-ink caps), so the default no longer
+ * has to protect it - and a Surface owner on 1.4.4 reported the line behind
+ * the nib when the fix was a toggle they had no reason to know about.
  * `predCorrectionPx` in the ink metrics reports how far wrong the guesses
  * actually were, so the question can be answered with a number instead of an
  * impression.
@@ -41,4 +46,22 @@ export function predictionEnabled(): boolean {
 
 export function setPrediction(on: boolean): void {
 	enabled = on;
+}
+
+/**
+ * Boox mode's revision of the e-ink judgement above: the default horizon is
+ * invisible inside e-ink's delivery delay, not harmful - the first NoteAir
+ * trace measured events arriving 58-103ms late, and 12ms of prediction
+ * inside that hole is nothing. So Boox mode runs prediction WITH e-ink
+ * sized caps (EINK_CAPS) instead of leaving it off; the wrongness guards
+ * are unchanged, only the horizon grows.
+ */
+let eink = false;
+
+export function setPredictionEink(on: boolean): void {
+	eink = on;
+}
+
+export function predictionEinkOn(): boolean {
+	return eink;
 }

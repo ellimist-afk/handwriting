@@ -36,6 +36,8 @@ export class WetInkRenderer {
 	private lastPoint: InkPoint | undefined;
 	private smoother = new IncrementalSmoother();
 	private lastRibbon: RibbonPt | undefined;
+	/** Screen box of everything this stroke has painted, for clearStroke. */
+	private dirty: { x0: number; y0: number; x1: number; y1: number } | null = null;
 
 	/** What we asked Chromium for. */
 	readonly requested: boolean;
@@ -104,6 +106,7 @@ export class WetInkRenderer {
 		this.lastPoint = first;
 		this.smoother.reset(first);
 		this.lastRibbon = undefined;
+		this.dirty = null;
 		this.shapingThisStroke = this.shape && inkShapingEnabled();
 		if (this.shapingThisStroke) {
 			this.shaper.reset(first, style);
@@ -143,11 +146,20 @@ export class WetInkRenderer {
 						? [this.lastRibbon, ...flatSeg]
 						: flatSeg;
 					fillRibbon(this.ctx, cam, strip, style.color);
+					this.growDirtyStrip(cam, strip);
 					this.lastRibbon = strip[strip.length - 1];
 				}
 				if (this.shapingThisStroke) this.prevSampleHw = sampleHw;
 			} else {
 				drawSegment(this.ctx, cam, style, this.lastPoint, point);
+				const hw = widthForPressure(style, (this.lastPoint.pressure + point.pressure) / 2) / 2;
+				this.growDirty(
+					(this.lastPoint.x - cam.x) * cam.zoom,
+					(this.lastPoint.y - cam.y) * cam.zoom,
+					(point.x - cam.x) * cam.zoom,
+					(point.y - cam.y) * cam.zoom,
+					hw * cam.zoom + 2
+				);
 			}
 			if (!this.drewOnce) {
 				this.drewOnce = true;
@@ -200,14 +212,84 @@ export class WetInkRenderer {
 			? [this.lastRibbon, ...flatSeg]
 			: flatSeg;
 		fillRibbon(this.ctx, cam, strip, style.color);
+		this.growDirtyStrip(cam, strip);
 		this.lastRibbon = strip[strip.length - 1];
 	}
 
 	clear(cssWidth: number, cssHeight: number): void {
 		this.ctx.clearRect(0, 0, cssWidth, cssHeight);
+		this.reset();
+	}
+
+	/**
+	 * Clear only what this stroke painted. Same result as clear() when the
+	 * canvas holds one finished stroke, which at pen-up it always does.
+	 *
+	 * E-ink refreshes the region a frame damaged. A whole-canvas clearRect
+	 * damages the whole canvas, so every pen-up was a whole-screen refresh -
+	 * the ~800ms freezes a NoteAir reported once per stroke (2026-09-01).
+	 * Clearing the stroke's own box keeps the damage the size of the ink.
+	 */
+	clearStroke(cssWidth: number, cssHeight: number): void {
+		const d = this.dirty;
+		const x0 = d ? Math.max(0, Math.floor(d.x0)) : NaN;
+		const y0 = d ? Math.max(0, Math.floor(d.y0)) : NaN;
+		const x1 = d ? Math.min(cssWidth, Math.ceil(d.x1)) : NaN;
+		const y1 = d ? Math.min(cssHeight, Math.ceil(d.y1)) : NaN;
+		// No box, or a box that is not a box (a NaN pressure poisons the
+		// width): clear everything. Leaving wet ink behind is the one outcome
+		// this must never produce.
+		if (x1 > x0 && y1 > y0) this.ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+		else this.ctx.clearRect(0, 0, cssWidth, cssHeight);
+		this.reset();
+	}
+
+	private reset(): void {
 		this.lastPoint = undefined;
 		this.lastRibbon = undefined;
+		this.dirty = null;
 		this.smoother.reset();
+	}
+
+	private growDirty(x1: number, y1: number, x2: number, y2: number, pad: number): void {
+		const box = {
+			x0: Math.min(x1, x2) - pad,
+			y0: Math.min(y1, y2) - pad,
+			x1: Math.max(x1, x2) + pad,
+			y1: Math.max(y1, y2) + pad,
+		};
+		this.dirty = this.dirty
+			? {
+					x0: Math.min(this.dirty.x0, box.x0),
+					y0: Math.min(this.dirty.y0, box.y0),
+					x1: Math.max(this.dirty.x1, box.x1),
+					y1: Math.max(this.dirty.y1, box.y1),
+				}
+			: box;
+	}
+
+	/** The ribbon's points are world-space with a world half-width each. */
+	private growDirtyStrip(cam: CameraState, strip: readonly RibbonPt[]): void {
+		let hw = 0;
+		let minX = Infinity;
+		let minY = Infinity;
+		let maxX = -Infinity;
+		let maxY = -Infinity;
+		for (const p of strip) {
+			if (p.hw > hw) hw = p.hw;
+			if (p.x < minX) minX = p.x;
+			if (p.y < minY) minY = p.y;
+			if (p.x > maxX) maxX = p.x;
+			if (p.y > maxY) maxY = p.y;
+		}
+		if (!Number.isFinite(minX)) return;
+		this.growDirty(
+			(minX - cam.x) * cam.zoom,
+			(minY - cam.y) * cam.zoom,
+			(maxX - cam.x) * cam.zoom,
+			(maxY - cam.y) * cam.zoom,
+			hw * cam.zoom + 2
+		);
 	}
 
 	/**

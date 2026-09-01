@@ -103,3 +103,90 @@ export async function pdfInkId(bytes: ArrayBuffer | Uint8Array, crypto?: Crypto)
 	}
 	return idFromDigest(sha256(input).buffer as ArrayBuffer);
 }
+
+// ---- instances (1.4.3) ------------------------------------------------------
+//
+// Content identity alone cannot tell two byte-identical files apart - and on
+// launch day that surfaced immediately: export the same OneNote page twice
+// and the second copy arrived already wearing the first one's ink (alan,
+// 2026-09-01). So a content id becomes a FAMILY, and each vault file gets an
+// INSTANCE within it: `pdf-<hash>` for the first (which is exactly the
+// pre-instance id, so every existing sidecar is instance one and nobody's
+// ink moves), `pdf-<hash>-2` and up for fresh copies.
+//
+// Which instance a path belongs to is decided by the paths each sidecar
+// CLAIMS (stored in the sidecar itself, so replicas agree by sync rather
+// than coordination): see chooseInstance.
+
+const INSTANCE = /^(pdf-[0-9a-f]+)(?:-(\d+))?$/;
+
+/** The content family an instance id belongs to: its `pdf-<hash>` prefix. */
+export function familyOf(id: string): string {
+	const m = INSTANCE.exec(id);
+	return m ? m[1]! : id;
+}
+
+/** The lowest instance id in `family` not already taken. */
+export function nextInstanceId(family: string, taken: Iterable<string>): string {
+	const used = new Set<number>();
+	for (const id of taken) {
+		const m = INSTANCE.exec(id);
+		if (!m || m[1] !== family) continue;
+		used.add(m[2] === undefined ? 1 : Number(m[2]));
+	}
+	for (let n = 1; ; n++) {
+		if (!used.has(n)) return n === 1 ? family : `${family}-${n}`;
+	}
+}
+
+/** A sidecar instance offered to chooseInstance: its id and path claims. */
+export interface InstanceClaim {
+	id: string;
+	/** Vault paths this sidecar believes it belongs to; [] = pre-instance. */
+	paths: string[];
+}
+
+export type InstanceChoice =
+	| { id: string; action: "use" }
+	/** Adopt: write `path` into this sidecar's claims (legacy or renamed). */
+	| { id: string; action: "adopt" }
+	/** A fresh copy: a new blank instance under this id. */
+	| { id: string; action: "fresh" };
+
+/**
+ * Which instance of a content family the file at `path` is.
+ *
+ * In order: a sidecar already claiming this path is simply this file. A
+ * sidecar with NO claims is pre-1.4.3 data; the first opener adopts it,
+ * which is the migration path. A sidecar whose every claimed path has
+ * vanished from the vault belonged to a file that was renamed or moved -
+ * the ink follows. And when every instance is claimed by a file that still
+ * exists, this file is a fresh COPY, and a copy starts blank: that is the
+ * whole point of instances.
+ *
+ * Pure - the vault reaches in only through `exists` - so every branch is
+ * testable without a vault.
+ */
+export function chooseInstance(
+	family: string,
+	path: string,
+	candidates: readonly InstanceClaim[],
+	exists: (path: string) => boolean
+): InstanceChoice {
+	for (const c of candidates) {
+		if (c.paths.includes(path)) return { id: c.id, action: "use" };
+	}
+	for (const c of candidates) {
+		if (c.paths.length === 0) return { id: c.id, action: "adopt" };
+	}
+	for (const c of candidates) {
+		if (c.paths.every((p) => !exists(p))) return { id: c.id, action: "adopt" };
+	}
+	return {
+		id: nextInstanceId(
+			family,
+			candidates.map((c) => c.id)
+		),
+		action: "fresh",
+	};
+}

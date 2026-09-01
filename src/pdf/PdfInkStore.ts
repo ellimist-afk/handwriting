@@ -68,6 +68,12 @@ interface PdfRecord {
 	load: "no" | "loading" | "yes";
 	/** The parsed sidecar, kept so unknown keys survive a round-trip. */
 	basePage: PageData | null;
+	/**
+	 * The vault paths this sidecar belongs to - instance identity's anchor
+	 * (see PdfIdentity.chooseInstance). Null until a claim or a load sets
+	 * it; authoritative once set, and written out as `pdfPaths`.
+	 */
+	claimedPaths: string[] | null;
 	loadInFlight: Promise<void> | null;
 	/** The sidecar could not be read; writing would destroy it. */
 	unreadableLocked: boolean;
@@ -81,6 +87,7 @@ function freshRecord(): PdfRecord {
 		strokes: [],
 		load: "no",
 		basePage: null,
+		claimedPaths: null,
 		loadInFlight: null,
 		unreadableLocked: false,
 		futureLocked: false,
@@ -165,6 +172,10 @@ export class PdfInkStore {
 				return false;
 			}
 			rec.basePage = result.data;
+			// Claims made before the read landed survive it: the disk's paths
+			// and the session's are one set.
+			const disk = result.data.pdfPaths ?? [];
+			rec.claimedPaths = [...new Set([...disk, ...(rec.claimedPaths ?? [])])];
 			// Session strokes drawn while the read was in flight come FIRST in
 			// time but must not be lost to it, so the persisted set is merged
 			// underneath them rather than replacing them.
@@ -269,8 +280,31 @@ export class PdfInkStore {
 			pageId: id,
 			surface: "pdf",
 			coordSpace: PDF_COORD_SPACE,
+			...(rec.claimedPaths !== null ? { pdfPaths: rec.claimedPaths } : {}),
 			strokes: [...unplaceable, ...rec.strokes],
 		});
+	}
+
+	/**
+	 * Record that the file at `path` belongs to this sidecar. Persisted at
+	 * once when the sidecar already exists on disk (an adoption must be
+	 * durable before the next device resolves), but only REMEMBERED for a
+	 * fresh instance - its sidecar is born with the first stroke, exactly
+	 * as before, so merely opening a PDF still writes nothing.
+	 */
+	claimPath(id: string, path: string): void {
+		const rec = this.record(id);
+		if (rec.claimedPaths?.includes(path)) return;
+		rec.claimedPaths = [...(rec.claimedPaths ?? []), path];
+		if (rec.basePage !== null) this.persist(id, rec);
+	}
+
+	/** The file moved: its old claim is a lie now, the new one replaces it. */
+	renamePath(id: string, oldPath: string, newPath: string): void {
+		const rec = this.record(id);
+		const kept = (rec.claimedPaths ?? []).filter((p) => p !== oldPath && p !== newPath);
+		rec.claimedPaths = [...kept, newPath];
+		if (rec.basePage !== null) this.persist(id, rec);
 	}
 
 	private noteOnce(rec: PdfRecord, message: string): void {
