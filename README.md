@@ -1,6 +1,6 @@
 # Handwriting
 
-Handwrite, highlight, erase and lasso on your notes and PDFs. Your notes stay Markdown.
+Handwrite, highlight, erase and lasso directly on your notes and PDFs. Your notes stay Markdown.
 
 Open a note and write. The note stays a `.md` file.
 
