@@ -32,7 +32,7 @@ not to wax poetic but i am beyond ready to break out.
 
 Handwriting is designed for students, educators, engineers, artists, or anyone who needs to handwrite and type in Obsidian.
 
-i designed this app with a decade of OneNote experience driving my tastes, so a few of the quirks and nuances of operation should feel remarkably similar or remarkably bad. like I said, sometimes it's a matter of taste
+i designed this app with a decade of OneNote experience driving my tastes, so a few of the quirks and nuances of operation should feel remarkably similar or remarkably bad. sometimes it's a matter of taste
 
 Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 
