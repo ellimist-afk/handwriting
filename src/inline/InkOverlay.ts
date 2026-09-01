@@ -3321,7 +3321,7 @@ export class InkOverlayPlugin {
 		// No page to clamp to: a note's canvas is as big as its ink.
 		const vp = snipViewport(bounds, 8, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, pxPerWorld, NOTE_SNIP_CAP_PX);
 		if (!vp) return { ok: false, reason: "the selection could not be framed" };
-		const out = this.winRef.document.createElement("canvas");
+		const out = createEl("canvas");
 		try {
 			out.width = Math.max(1, Math.round((vp.x1 - vp.x0) * vp.scale));
 			out.height = Math.max(1, Math.round((vp.y1 - vp.y0) * vp.scale));

@@ -40,7 +40,7 @@ Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 
 * handwrite, highlight, color palette, size sliders
 * erase, two modes, size slider
-* lasso, compatible with side button; move the selection, delete it, copy/paste it across notes [resize + rotate coming soon]
+* lasso, compatible with side button; move the selection, delete it, copy/paste it across notes (resize and rotate coming soon)
 * insert space tool
 * undo/redo ink + text
 * draw + pan with the mouse if you want

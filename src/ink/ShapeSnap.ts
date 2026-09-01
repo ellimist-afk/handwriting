@@ -202,7 +202,7 @@ function classifyClosed(body: readonly P[], gapFrac: number): SnapResult | null 
 	// corner) must not mask the real corner sitting there.
 	const chordStart = gapFrac > 0.05 ? Math.floor(N * (1 - gapFrac)) : N;
 	const onChord = (i: number): boolean => chordStart < N && (i >= chordStart - K || i < K);
-	const turns: number[] = new Array(N);
+	const turns: number[] = new Array<number>(N);
 	for (let i = 0; i < N; i++) {
 		const a = ring[(i - K + N) % N]!;
 		const c = ring[i]!;

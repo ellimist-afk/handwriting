@@ -1,4 +1,5 @@
-import { requestUrl, App, MarkdownRenderChild, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { requestUrl, App, MarkdownRenderChild, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { formatHost } from "./diag/PlatformCapabilities";
 import { CameraState } from "./camera/coordinates";
 import { HANDWRITING_PAGE_VIEW_TYPE, HandwritingHost, HandwritingPageView } from "./view/HandwritingPageView";
 import {
@@ -1544,7 +1545,18 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				// or retry Upload without starting over. The text-trace
 				// command ends it because that one IS the end of a report.
 				const capture = captureInlinePenTrace({
-					ua: navigator.userAgent,
+					// Host flags, not navigator.userAgent: the directory review
+					// reads a UA lookup as OS sniffing, and Platform answers the
+					// same question honestly. The device model goes with it.
+					host: formatHost({
+						isDesktopApp: Platform.isDesktopApp,
+						isMobileApp: Platform.isMobileApp,
+						isIosApp: Platform.isIosApp,
+						isAndroidApp: Platform.isAndroidApp,
+						isTablet: Platform.isTablet,
+						isPhone: Platform.isPhone,
+					}),
+					os: platformOs(),
 					dpr: window.devicePixelRatio,
 					viewport: { w: window.innerWidth, h: window.innerHeight },
 					settings: {
@@ -1571,10 +1583,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 									body: text,
 									throw: false,
 								});
-								if (res.status !== 200 || !res.json?.id) {
+								// `json` is typed any: read the one field through a shape, so
+								// nothing else in the body is trusted.
+								const id: unknown = (res.json as { id?: unknown } | null | undefined)?.id;
+								const accepted = typeof id === "number" || (typeof id === "string" && id !== "");
+								if (res.status !== 200 || !accepted) {
 									throw new Error(`upload refused (${res.status})`);
 								}
-								return String(res.json.id);
+								return String(id);
 							}
 ,
 					// Delivering the report - by ANY door - ends the recording.
@@ -2772,10 +2788,29 @@ class ConfirmDeleteInkModal extends Modal {
 	}
 }
 
+/** The operating system as Platform reports it, for bug-report headers. */
+function platformOs(): string {
+	if (Platform.isWin) return "windows";
+	if (Platform.isMacOS) return "macos";
+	if (Platform.isLinux) return "linux";
+	if (Platform.isIosApp) return "ios";
+	if (Platform.isAndroidApp) return "android";
+	return "unknown";
+}
+
+type SettingKey = keyof HandwritingSettings;
+
+const SUPPORT_LINE = "Handwriting is free. i'm still working on it almost every night.";
+
 /**
  * The device-level knobs, most of which already existed as commands. The
  * strip's sliders stay the source of truth for sizes and colors, so those
  * are not duplicated here.
+ *
+ * One list of definitions, two painters. Obsidian 1.13 renders the list
+ * itself and indexes it for settings search (getSettingDefinitions); 1.12
+ * has no such renderer and calls display(), which paints the same list by
+ * hand. Neither path has a row the other lacks.
  */
 class HandwritingSettingTab extends PluginSettingTab {
 	constructor(
@@ -2785,229 +2820,303 @@ class HandwritingSettingTab extends PluginSettingTab {
 		super(app, plugin);
 	}
 
+	getSettingDefinitions(): SettingDefinitionItem<SettingKey>[] {
+		return [
+			{
+				type: "group",
+				heading: "Ink",
+				items: [
+					{
+						name: "Pressure sensitivity",
+						desc:
+							"Line width follows how hard you press. Off gives an even line; " +
+							"strokes still thin with speed and taper at the ends. Default on.",
+						control: { type: "toggle", key: "pressureSensitivity" },
+					},
+					{
+						name: "Ink prediction",
+						// The e-ink flicker advice came out with 1.3.9: that flicker was the
+						// wet canvas asking for the low-latency path, not prediction, so
+						// sending people here to fix it cost a boox user a pointless toggle
+						// and told us nothing. Flicking past sharp corners is a real
+						// prediction artefact and stays.
+						desc:
+							"Draws a little ahead of the pen to hide latency. Off by default: " +
+							"turn it on if ink feels behind your hand, and back off if the line " +
+							"runs ahead of the nib or flicks past sharp corners.",
+						control: { type: "toggle", key: "strokePrediction" },
+					},
+					{
+						// The smoothing users can actually feel. setInkShaping has been
+						// honoured by the renderers all along but nothing ever called it: the
+						// toggle that drove it was renamed into "pressure sensitivity" and the
+						// shaping half lost its wiring, so the line has been permanently
+						// shaped with no way to say otherwise. Two people asked for exactly
+						// this on the same day (boox thread, 2026-08-30) and were told to turn
+						// prediction off, which is a different feature and did nothing.
+						name: "Ink smoothing",
+						desc:
+							"Shapes the line: thinner when you move fast, tapered at each end. " +
+							"Off draws an unshaped stroke that follows the pen more literally. Default on.",
+						control: { type: "toggle", key: "inkSmoothing" },
+					},
+					{
+						name: "Shape snap",
+						desc: "Hold the pen still after drawing a shape. Default on.",
+						control: { type: "toggle", key: "shapeSnap" },
+					},
+					{
+						name: "A command per colour and size",
+						desc:
+							"Adds one command for every ink colour and nib size, for hotkeys. " +
+							"The palette button and the cycle commands already cover both. " +
+							"Takes effect after the plugin reloads.",
+						control: { type: "toggle", key: "colorSizeCommands" },
+					},
+					{
+						name: "Developer diagnostics",
+						desc:
+							"Shows the developer diagnostics commands in the palette. " +
+							"Takes effect after the plugin reloads.",
+						control: { type: "toggle", key: "devDiagnostics" },
+					},
+					{
+						name: "Mouse ink",
+						desc: "Left click draws. Default off.",
+						control: { type: "toggle", key: "mouseInk" },
+					},
+				],
+			},
+			{
+				type: "group",
+				heading: "Appearance",
+				items: [
+					{
+						name: "Paper background",
+						desc: "Lined or grid paper. Default none.",
+						control: {
+							type: "dropdown",
+							key: "paperStyle",
+							options: { none: "None", lines: "Lines", grid: "Grid" },
+						},
+					},
+					{
+						name: "Pen toolbar",
+						desc: "Determines when the toolbar appears. Default auto.",
+						control: {
+							type: "dropdown",
+							key: "penTools",
+							options: { auto: "Auto", show: "Show", hide: "Hide" },
+						},
+					},
+					{
+						name: "Toolbar corner",
+						desc: "Where the floating pen toolbar sits. Default top right.",
+						control: {
+							type: "dropdown",
+							key: "toolbarCorner",
+							options: Object.fromEntries(TOOLBAR_CORNER_LABELS.map(({ value, label }) => [value, label])),
+						},
+					},
+					{
+						name: "Pen reticle",
+						desc: "Shows a dot where the pen is. Default on.",
+						control: { type: "toggle", key: "penReticle" },
+					},
+				],
+			},
+			{
+				type: "group",
+				heading: "Storage",
+				items: [
+					{
+						name: "Compatibility with Obsidian Sync",
+						aliases: ["ink folder", "hidden folder", "sync"],
+						render: (setting) => this.renderSyncButton(setting),
+					},
+				],
+			},
+			// One line at the bottom, after every setting, because that is where
+			// someone who has been using the thing ends up - not where someone
+			// deciding whether to install it starts. It states a fact and links
+			// out; it does not ask twice, sit above the settings, or appear
+			// anywhere in the plugin's own surfaces.
+			{
+				name: SUPPORT_LINE,
+				searchable: false,
+				render: (setting) => this.renderSupport(setting),
+			},
+		];
+	}
+
+	getControlValue(key: string): unknown {
+		return key in this.plugin.settings ? this.plugin.settings[key as SettingKey] : undefined;
+	}
+
+	/**
+	 * Every toggle and dropdown lands here. The value is applied live - the
+	 * same call the command for that knob makes - and then saved. Unknown
+	 * keys are ignored rather than written: the settings file is the
+	 * plugin's, not the form's.
+	 */
+	setControlValue(key: string, value: unknown): void {
+		const s = this.plugin.settings;
+		const on = value === true;
+		const str = typeof value === "string" ? value : "";
+		switch (key) {
+			case "pressureSensitivity":
+				s.pressureSensitivity = on;
+				setPressureSensitivity(on);
+				repaintAllInkOverlays();
+				break;
+			case "strokePrediction":
+				s.strokePrediction = on;
+				setPrediction(on);
+				break;
+			case "inkSmoothing":
+				s.inkSmoothing = on;
+				setInkShaping(on);
+				repaintAllInkOverlays();
+				break;
+			case "shapeSnap":
+				s.shapeSnap = on;
+				setShapeSnap(on);
+				break;
+			case "colorSizeCommands":
+				s.colorSizeCommands = on;
+				break;
+			case "devDiagnostics":
+				s.devDiagnostics = on;
+				break;
+			case "mouseInk":
+				s.mouseInk = on;
+				setMouseInk(on);
+				if (on) {
+					markPenSeen();
+					refreshPenToolsAll();
+				}
+				break;
+			case "paperStyle": {
+				const style = normalizePaperStyle(str);
+				s.paperStyle = style;
+				this.plugin.applyPaper(style);
+				break;
+			}
+			case "penTools": {
+				const m = normalizePenToolsMode(str);
+				s.penTools = m;
+				setPenToolsMode(m);
+				refreshPenToolsAll();
+				break;
+			}
+			case "toolbarCorner": {
+				const corner = normalizeToolbarCorner(str);
+				s.toolbarCorner = corner;
+				setToolbarCorner(corner);
+				break;
+			}
+			case "penReticle":
+				s.penReticle = on;
+				setPenReticle(on);
+				break;
+			default:
+				return;
+		}
+		this.plugin.saveSettingsNow();
+	}
+
+	/**
+	 * Obsidian 1.12 fallback. Newer versions never call this: they render
+	 * the definitions themselves.
+	 */
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		new Setting(containerEl).setName("Ink").setHeading();
+		this.paint(containerEl, this.getSettingDefinitions());
+	}
 
-		new Setting(containerEl)
-			.setName("Pressure sensitivity")
-			.setDesc(
-				"Line width follows how hard you press. Off gives an even line; " +
-					"strokes still thin with speed and taper at the ends. Default on."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.pressureSensitivity).onChange((on) => {
-					this.plugin.settings.pressureSensitivity = on;
-					setPressureSensitivity(on);
-					repaintAllInkOverlays();
-					this.plugin.saveSettingsNow();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Ink prediction")
-			// The e-ink flicker advice came out with 1.3.9: that flicker was the
-			// wet canvas asking for the low-latency path, not prediction, so
-			// sending people here to fix it cost a boox user a pointless toggle
-			// and told us nothing. Flicking past sharp corners is a real
-			// prediction artefact and stays.
-			.setDesc(
-				"Draws a little ahead of the pen to hide latency. Off by default: " +
-					"turn it on if ink feels behind your hand, and back off if the line " +
-					"runs ahead of the nib or flicks past sharp corners."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.strokePrediction).onChange((on) => {
-					this.plugin.settings.strokePrediction = on;
-					setPrediction(on);
-					this.plugin.saveSettingsNow();
-				})
-			);
-
-		// The smoothing users can actually feel. setInkShaping has been
-		// honoured by the renderers all along but nothing ever called it: the
-		// toggle that drove it was renamed into "pressure sensitivity" and the
-		// shaping half lost its wiring, so the line has been permanently
-		// shaped with no way to say otherwise. Two people asked for exactly
-		// this on the same day (boox thread, 2026-08-30) and were told to turn
-		// prediction off, which is a different feature and did nothing.
-		new Setting(containerEl)
-			.setName("Ink smoothing")
-			.setDesc(
-				"Shapes the line: thinner when you move fast, tapered at each end. " +
-					"Off draws an unshaped stroke that follows the pen more literally. Default on."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.inkSmoothing).onChange((on) => {
-					this.plugin.settings.inkSmoothing = on;
-					setInkShaping(on);
-					repaintAllInkOverlays();
-					this.plugin.saveSettingsNow();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Shape snap")
-			.setDesc("Hold the pen still after drawing a shape. Default on.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.shapeSnap).onChange((on) => {
-					this.plugin.settings.shapeSnap = on;
-					setShapeSnap(on);
-					this.plugin.saveSettingsNow();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("A command per colour and size")
-			.setDesc(
-				"Adds one command for every ink colour and nib size, for hotkeys. " +
-					"The palette button and the cycle commands already cover both. " +
-					"Takes effect after the plugin reloads."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.colorSizeCommands).onChange((on) => {
-					this.plugin.settings.colorSizeCommands = on;
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Developer diagnostics")
-			.setDesc(
-				"Shows the developer diagnostics commands in the palette. " +
-					"Takes effect after the plugin reloads."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.devDiagnostics).onChange((on) => {
-					this.plugin.settings.devDiagnostics = on;
-					this.plugin.saveSettingsNow();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Mouse ink")
-			.setDesc("Left click draws. Default off.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.mouseInk).onChange((on) => {
-					this.plugin.settings.mouseInk = on;
-					setMouseInk(on);
-					if (on) {
-						markPenSeen();
-						refreshPenToolsAll();
-					}
-					this.plugin.saveSettingsNow();
-				})
-			);
-
-		new Setting(containerEl).setName("Appearance").setHeading();
-
-		new Setting(containerEl)
-			.setName("Paper background")
-			.setDesc("Lined or grid paper. Default none.")
-			.addDropdown((d) =>
-				d
-					.addOption("none", "None")
-					.addOption("lines", "Lines")
-					.addOption("grid", "Grid")
-					.setValue(this.plugin.settings.paperStyle)
-					.onChange((v) => {
-						const style = normalizePaperStyle(v);
-						this.plugin.settings.paperStyle = style;
-						this.plugin.applyPaper(style);
-						this.plugin.saveSettingsNow();
+	/** Draw definitions with the classic Setting builder, one row each. */
+	private paint(el: HTMLElement, items: readonly SettingDefinitionItem<SettingKey>[]): void {
+		for (const item of items) {
+			if ("type" in item) {
+				if (item.type === "page") continue;
+				if (item.heading !== undefined) new Setting(el).setName(item.heading).setHeading();
+				this.paint(el, item.items ?? []);
+				continue;
+			}
+			const setting = new Setting(el).setName(item.name);
+			if (item.desc !== undefined) setting.setDesc(item.desc);
+			if (item.render) {
+				// The rows rendered here never read the group argument, which
+				// 1.12 has no class for.
+				(item.render as (setting: Setting) => void)(setting);
+			} else if (item.control?.type === "toggle") {
+				const { key } = item.control;
+				setting.addToggle((t) =>
+					t.setValue(this.getControlValue(key) === true).onChange((v) => {
+						this.setControlValue(key, v);
 					})
-			);
-
-		new Setting(containerEl)
-			.setName("Pen toolbar")
-			.setDesc("Determines when the toolbar appears. Default auto.")
-			.addDropdown((d) =>
-				d
-					.addOption("auto", "Auto")
-					.addOption("show", "Show")
-					.addOption("hide", "Hide")
-					.setValue(this.plugin.settings.penTools)
-					.onChange((v) => {
-						const m = normalizePenToolsMode(v);
-						this.plugin.settings.penTools = m;
-						setPenToolsMode(m);
-						refreshPenToolsAll();
-						this.plugin.saveSettingsNow();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Toolbar corner")
-			.setDesc("Where the floating pen toolbar sits. Default top right.")
-			.addDropdown((d) => {
-				for (const { value, label } of TOOLBAR_CORNER_LABELS) d.addOption(value, label);
-				d.setValue(this.plugin.settings.toolbarCorner).onChange((v) => {
-					const corner = normalizeToolbarCorner(v);
-					this.plugin.settings.toolbarCorner = corner;
-					setToolbarCorner(corner);
-					this.plugin.saveSettingsNow();
+				);
+			} else if (item.control?.type === "dropdown") {
+				const { key, options } = item.control;
+				setting.addDropdown((d) => {
+					for (const [value, label] of Object.entries(options)) d.addOption(value, label);
+					const current = this.getControlValue(key);
+					d.setValue(typeof current === "string" ? current : "").onChange((v) => {
+						this.setControlValue(key, v);
+					});
 				});
-			});
+			}
+		}
+	}
 
-		new Setting(containerEl)
-			.setName("Pen reticle")
-			.setDesc("Shows a dot where the pen is. Default on.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.penReticle).onChange((on) => {
-					this.plugin.settings.penReticle = on;
-					setPenReticle(on);
-					this.plugin.saveSettingsNow();
+	// One button, not a path field. "Where should the ink live" is not a
+	// question anyone wants asked - the only reason to move it is that
+	// Obsidian Sync skips hidden folders, so the control offers exactly
+	// that and nothing else. No free text also means no path to validate,
+	// no nested folder to create, and no way to typo your ink somewhere
+	// strange.
+	//
+	// No description. The name is the description - Alan's rule, and
+	// three attempts at wording proved it: a status line, a paragraph
+	// of mechanics, and a one-line effect were all worse than the
+	// name plus a button that says Turn on. The explanation lives in
+	// the README, where someone goes when they want the reason.
+	private renderSyncButton(setting: Setting): void {
+		const label = (): string => (inkFolderSyncs(this.plugin.settings.inkFolder) ? "Turn off" : "Turn on");
+		setting.setName("Compatibility with Obsidian Sync").addButton((btn) =>
+			btn
+				.setButtonText(label())
+				.setCta()
+				.onClick(() => {
+					btn.setDisabled(true);
+					const target = inkFolderSyncs(this.plugin.settings.inkFolder) ? DEFAULT_INK_FOLDER : SYNCED_INK_FOLDER;
+					runDetached(
+						this.plugin.changeInkFolder(target).then(() => {
+							// The button names the next move, which depends on
+							// where the ink actually is now.
+							btn.setButtonText(label()).setDisabled(false);
+						}),
+						"move the ink folder",
+						() => {
+							btn.setDisabled(false);
+							new Notice("Handwriting: the ink folder could not be changed");
+						}
+					);
 				})
-			);
+		);
+	}
 
-		new Setting(containerEl).setName("Storage").setHeading();
-
-
-		// One button, not a path field. "Where should the ink live" is not a
-		// question anyone wants asked - the only reason to move it is that
-		// Obsidian Sync skips hidden folders, so the control offers exactly
-		// that and nothing else. No free text also means no path to validate,
-		// no nested folder to create, and no way to typo your ink somewhere
-		// strange.
-		const current = this.plugin.settings.inkFolder;
-		const hidden = !inkFolderSyncs(current);		new Setting(containerEl)
-			.setName("Compatibility with Obsidian Sync")
-			// No description. The name is the description - Alan's rule, and
-			// three attempts at wording proved it: a status line, a paragraph
-			// of mechanics, and a one-line effect were all worse than the
-			// name plus a button that says Turn on. The explanation lives in
-			// the README, where someone goes when they want the reason.
-			.addButton((btn) =>
-				btn
-					.setButtonText(hidden ? "Turn on" : "Turn off")
-					.setCta()
-					.onClick(() => {
-						btn.setDisabled(true);
-						const target = hidden ? SYNCED_INK_FOLDER : DEFAULT_INK_FOLDER;
-						runDetached(
-							this.plugin.changeInkFolder(target).then(() => {
-								// Re-render so the button and the description
-								// describe where the ink actually is now.
-								this.display();
-							}),
-							"move the ink folder",
-							() => {
-								btn.setDisabled(false);
-								new Notice("Handwriting: the ink folder could not be changed");
-							}
-						);
-					})
-			);
-
-		// One line at the bottom, after every setting, because that is where
-		// someone who has been using the thing ends up - not where someone
-		// deciding whether to install it starts. It states a fact and links
-		// out; it does not ask twice, sit above the settings, or appear
-		// anywhere in the plugin's own surfaces.
-		const support = containerEl.createEl("p", { cls: "handwriting-support" });
-		support.appendText("Handwriting is free. i'm still working on it almost every night. ");
-		support.createEl("a", {
-			text: "Buy me a coffee :)",
-			href: "https://ko-fi.com/ellimistafk",
-		});
+	private renderSupport(setting: Setting): void {
+		setting.settingEl.addClass("handwriting-support");
+		setting.setName(
+			createFragment((f) => {
+				f.appendText(`${SUPPORT_LINE} `);
+				f.createEl("a", {
+					text: "Buy me a coffee :)",
+					href: "https://ko-fi.com/ellimistafk",
+				});
+			})
+		);
 	}
 }

@@ -272,6 +272,10 @@
    it is a fact someone can act on, not a banner. */
 .handwriting-support {
 	margin-top: 2em;
+}
+/* The name element carries its own font and colour, so it is named too. */
+.handwriting-support,
+.handwriting-support .setting-item-name {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
@@ -790,7 +794,6 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	padding: 0;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 50%;
-	box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.15));
 	background: var(--background-secondary);
 	box-shadow: none;
 	color: var(--text-muted);
@@ -1217,6 +1220,8 @@ body.handwriting-active-page .status-bar {
 	width: 1px;
 	height: 1px;
 	overflow: hidden;
-	clip-path: inset(50%);
+	margin: -1px;
+	padding: 0;
+	border: 0;
 	white-space: nowrap;
 }

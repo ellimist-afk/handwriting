@@ -349,7 +349,7 @@ export class MobileTools {
 				if (this.colorsOpen) return;
 				this.cancelSliderClose();
 				if (this.openInkSlider !== hoverNib) {
-					this.openInkSlider = hoverNib as "pen" | "highlighter";
+					this.openInkSlider = hoverNib;
 					this.sliderFromHover = true;
 					this.refresh();
 				}
@@ -372,7 +372,7 @@ export class MobileTools {
 				// them the nib button IS the mode: clicking the active tool
 				// hands the mouse back to text. Pen and touch keep the tap
 				// (hover already opened the slider for anything that hovers).
-				const ptr = (ev as PointerEvent).pointerType;
+				const ptr = ev.pointerType;
 				if (nib && spec.isActive?.(this.host) && ptr === "mouse" && this.host.mouseInkOn()) {
 					// Clicking the tool you are drawing with hands the mouse
 					// back to text. Click it again and it draws again.

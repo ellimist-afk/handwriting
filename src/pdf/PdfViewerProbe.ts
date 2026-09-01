@@ -215,7 +215,7 @@ export function canvasBoxOf(
 /** The scrolling container for a PDF view's root element, if recognizable. */
 export function findScroller(root: HTMLElement): { el: HTMLElement | null; matched: string } {
 	for (const sel of SCROLLER_SELECTORS) {
-		const el = root.querySelector(sel) as HTMLElement | null;
+		const el = root.querySelector<HTMLElement>(sel);
 		if (el) return { el, matched: sel };
 	}
 	return { el: null, matched: "(none matched)" };
@@ -232,7 +232,7 @@ export function findScroller(root: HTMLElement): { el: HTMLElement | null; match
 export function probeViewer(root: HTMLElement, win: Window): ProbedViewer | null {
 	const { el: scroller } = findScroller(root);
 	if (!scroller) return null;
-	const pageEls = Array.from(scroller.querySelectorAll(PAGE_SELECTOR)) as HTMLElement[];
+	const pageEls = Array.from(scroller.querySelectorAll<HTMLElement>(PAGE_SELECTOR));
 	const first = pageEls[0];
 	const scale = first
 		? findScaleFactor(first, win)

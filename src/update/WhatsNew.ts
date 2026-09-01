@@ -82,7 +82,7 @@ export function decideWhatsNew(
  * dialog in the middle of the screen demanding dismissal is neither.
  */
 export function whatsNewFragment(version: string, notes: string[]): DocumentFragment {
-	const frag = document.createDocumentFragment();
+	const frag = createFragment();
 	frag.createDiv({ cls: "handwriting-whats-new-title", text: `Handwriting ${version}` });
 	const list = frag.createEl("ul", { cls: "handwriting-whats-new-list" });
 	for (const line of notes) list.createEl("li", { text: line });

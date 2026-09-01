@@ -20,7 +20,6 @@
  */
 
 import { TouchLike } from "../input/PalmShield";
-import { diagnosticsEnabled } from "../diag/DiagSwitch";
 
 export interface PinchPoint {
 	identifier: number;
@@ -104,8 +103,7 @@ export class PinchBridge {
 		const cy = this.startCentroid.y;
 		let best: { pageNo: string; ax: number; ay: number } | null = null;
 		let bestDist = Infinity;
-		for (const page of Array.from(el.querySelectorAll("div.page[data-page-number]"))) {
-			if (!(page instanceof HTMLElement)) continue;
+		for (const page of Array.from(el.querySelectorAll<HTMLElement>("div.page[data-page-number]"))) {
 			const pageNo = page.getAttribute("data-page-number");
 			if (pageNo === null) continue;
 			const r = page.getBoundingClientRect();
@@ -133,8 +131,8 @@ export class PinchBridge {
 		const scale = this.getScale();
 		if (scale === null || scale === p.preScale) return;
 		this.pending = null;
-		const page = el.querySelector(`div.page[data-page-number="${p.pageNo}"]`);
-		if (!(page instanceof HTMLElement)) return;
+		const page = el.querySelector<HTMLElement>(`div.page[data-page-number="${p.pageNo}"]`);
+		if (!page) return;
 		const f = scale / p.preScale;
 		const r = page.getBoundingClientRect();
 		el.scrollLeft += r.left + p.ax * f - p.cx;
@@ -175,7 +173,7 @@ export class PinchBridge {
 		const el = this.el;
 		if (el) {
 			this.contentEl =
-				(el.querySelector(".pdfViewer") as HTMLElement | null) ??
+				el.querySelector<HTMLElement>(".pdfViewer") ??
 				(el.firstElementChild as HTMLElement | null);
 			if (this.contentEl) {
 				const rect = el.getBoundingClientRect();
@@ -250,15 +248,10 @@ export class PinchBridge {
 		if (Math.abs(Math.log(ratio)) < 0.08) return;
 		const preScale = this.getScale();
 		if (preScale === null) return;
-		const target = preScale * ratio;
 		const win = el.ownerDocument.defaultView ?? window;
-		const lg = (m: string): void => {
-			if (diagnosticsEnabled()) console.log(`[pinch] ${m}`);
-		};
 		const zoomIn = ratio > 1;
 		const k = zoomIn ? this.kIn : this.kOut;
 		const delta = -Math.log(ratio) / k;
-		lg(`commit: pre=${preScale.toFixed(4)} target=${target.toFixed(4)} delta=${delta.toFixed(1)} k=${k.toFixed(5)}`);
 		this.armAnchor(preScale);
 		el.dispatchEvent(
 			new WheelEvent("wheel", {
@@ -290,9 +283,6 @@ export class PinchBridge {
 				else this.kOut = learned;
 				this.calibrated = true;
 			}
-			lg(
-				`landed: actual=${actual.toFixed(4)} (target ${target.toFixed(4)}) kIn=${this.kIn.toFixed(5)} kOut=${this.kOut.toFixed(5)}`
-			);
 		}, 120);
 	}
 
@@ -344,9 +334,6 @@ export class PinchBridge {
 			if (zoomIn) this.kIn = k;
 			else this.kOut = k;
 			this.calibrated = true;
-			if (diagnosticsEnabled()) {
-				console.log(`[pinch] probed ${zoomIn ? "kIn" : "kOut"}=${k.toFixed(5)}`);
-			}
 		}, 120);
 	}
 

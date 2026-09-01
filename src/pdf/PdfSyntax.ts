@@ -69,7 +69,7 @@ export function bytesOf(text: string): Uint8Array {
 export interface Source {
 	bytes: Uint8Array;
 	/** Latin-1 text of [from, to), clamped to the file. */
-	text(from: number, to: number): string;
+	text: (from: number, to: number) => string;
 }
 
 export function sourceOf(input: string | Uint8Array): Source {

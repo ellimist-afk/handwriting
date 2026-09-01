@@ -1603,7 +1603,7 @@ export class PdfInkController {
 		const pxPerPt = k ?? (wPx / wPt) * (this.win.devicePixelRatio || 1);
 		const vp = snipViewport(b, 8, wPt, size.hPt, pxPerPt, MAX_OVERLAY_PX);
 		if (!vp) return { ok: false, reason: "the selection lies off the page" };
-		const out = this.win.document.createElement("canvas");
+		const out = createEl("canvas");
 		try {
 			out.width = Math.max(1, Math.round((vp.x1 - vp.x0) * vp.scale));
 			out.height = Math.max(1, Math.round((vp.y1 - vp.y0) * vp.scale));
@@ -1842,7 +1842,7 @@ export class PdfInkController {
 		// the wet element out of the composite in the same frame keeps the
 		// handoff atomic without the double paint, which is what the note
 		// surface does (InkOverlay, drawCommitted).
-		if (attached && this.wetHighlighter) attached.wetCanvas.style.opacity = "0";
+		if (attached && this.wetHighlighter) attached.wetCanvas.setCssProps({ opacity: "0" });
 		this.sync();
 		if (attached && box) {
 			attached.wet.clear(box.widthPx, box.heightPx);
@@ -1869,10 +1869,10 @@ export class PdfInkController {
 	 */
 	private dressWet(attached: Attached): void {
 		const alpha = this.wetHighlighter ? String(HIGHLIGHTER_ALPHA) : "1";
-		attached.wetCanvas.style.opacity = alpha;
+		attached.wetCanvas.setCssProps({ opacity: alpha });
 		// The head is the same stroke, one segment further on - it wears the
 		// same wash or a highlighter's tip runs darker than its trail.
-		attached.headCanvas.style.opacity = alpha;
+		attached.headCanvas.setCssProps({ opacity: alpha });
 		attached.canvas.toggleClass(INK_OVER_CLASS, this.wetHighlighter);
 	}
 

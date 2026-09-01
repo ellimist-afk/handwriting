@@ -164,7 +164,7 @@ class InkDemo {
 
 	private schedule(): void {
 		if (this.frame) return;
-		this.frame = requestAnimationFrame(() => {
+		this.frame = window.requestAnimationFrame(() => {
 			this.frame = 0;
 			this.paint();
 		});

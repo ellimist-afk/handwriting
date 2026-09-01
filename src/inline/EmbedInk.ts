@@ -97,10 +97,10 @@ let strokesFor: ((path: string) => readonly InkStroke[]) | null = null;
  */
 export function embedInkRoot(sectionEl: HTMLElement): HTMLElement | null {
 	return (
-		(sectionEl.closest(".markdown-embed-content") as HTMLElement | null) ??
-		(sectionEl.closest(".markdown-preview-sizer") as HTMLElement | null) ??
-		(sectionEl.closest(".markdown-preview-view") as HTMLElement | null) ??
-		(sectionEl.closest(".markdown-rendered") as HTMLElement | null)
+		sectionEl.closest<HTMLElement>(".markdown-embed-content") ??
+		sectionEl.closest<HTMLElement>(".markdown-preview-sizer") ??
+		sectionEl.closest<HTMLElement>(".markdown-preview-view") ??
+		sectionEl.closest<HTMLElement>(".markdown-rendered")
 	);
 }
 
@@ -259,12 +259,12 @@ function usePrintVector(on: boolean): void {
 	if (on) printSwaps++;
 	sweepDisconnected();
 	for (const [root, path] of layers) {
-		const canvas = root.querySelector(
+		const canvas = root.querySelector<HTMLCanvasElement>(
 			":scope > canvas.handwriting-embed-ink"
-		) as HTMLCanvasElement | null;
-		const existing = root.querySelector(
+		);
+		const existing = root.querySelector<SVGSVGElement>(
 			":scope > svg.handwriting-embed-ink"
-		) as SVGSVGElement | null;
+		);
 		if (!on) {
 			existing?.remove();
 			canvas?.style.removeProperty("display");
@@ -310,9 +310,9 @@ function inkPathEl(root: HTMLElement, run: InkSvgRun): SVGPathElement {
 
 function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): void {
 	const marker = embedInkMarker(path, revisions.get(path) ?? 0);
-	let canvas = root.querySelector(
+	let canvas = root.querySelector<HTMLCanvasElement>(
 		":scope > canvas.handwriting-embed-ink"
-	) as HTMLCanvasElement | null;
+	);
 	if (!embedInkNeedsPaint(root.getAttribute(MARKER_ATTR), marker, canvas !== null)) return;
 	root.setAttribute(MARKER_ATTR, marker);
 	const view = root.ownerDocument.defaultView ?? window;

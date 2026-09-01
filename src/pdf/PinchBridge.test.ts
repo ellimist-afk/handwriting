@@ -21,8 +21,8 @@ describe("the pinch bridge's numbers", () => {
 });
 
 // Node has neither WheelEvent nor HTMLElement; the bridge constructs the
-// former and instanceof-checks the latter, so both get shims - stubs are
-// hung off the HTMLElement prototype to pass the check.
+// former, and the fakes below are typed as the latter, so both get shims -
+// stubs are hung off the HTMLElement prototype so they read as elements.
 class FakeWheelEvent {
 	constructor(type: string, init: Record<string, unknown>) {
 		Object.assign(this, { type }, init);
