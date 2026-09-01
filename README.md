@@ -20,7 +20,7 @@ a note you never inked on is never modified.
 
 ## why i built this
 
-back in uni i remember taking biochem notes on my new surface pro 4 with stars in my eyes. drawing structures and typing labels on the same page felt like literal magic. i can still remember how good it felt, how proud i was showing my OneNote pages to friends and professors
+back in uni i remember taking biochem notes on my new surface pro 4 with stars in my eyes. drawing structures and typing labels on the same OneNote page felt like literal magic. i can still remember how good it felt, how proud i was showing my notes to friends and professors
 
 ten years later, now for work, I'm still using onenote - and i consider it a prison. things change.
 
