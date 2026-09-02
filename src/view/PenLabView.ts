@@ -254,6 +254,18 @@ export class PenLabView extends ItemView {
 	 * The unsmoothed stub that reaches the nib. Erased and redrawn on every
 	 * event, so the visible tip sits exactly where the raw build put it while
 	 * everything behind it is curved.
+	 *
+	 * DELIBERATELY LEFT ON RAW PRESSURE. Every other surface now passes
+	 * `wetInk.liveHalfWidth(...)` here so the stub matches the ribbon under
+	 * it; this one does not, and the omission is the point.
+	 *
+	 * The lab is a comparison instrument, not a writing surface - no user can
+	 * open it (nothing registers a command, a ribbon entry or a setViewState
+	 * for its view type), it has no file and no persistence, so it cannot
+	 * show anyone a wrong stroke. What it CAN show is the raw stub against
+	 * the shaped ribbon, side by side, which is the thing this fix removes
+	 * everywhere else. Matching them here would delete the measurement the
+	 * surface exists to make.
 	 */
 	private drawHead(): void {
 		this.head.clear();

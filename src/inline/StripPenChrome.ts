@@ -15,8 +15,9 @@ import type { MobileTools } from "./MobileTools";
  * the trash button, and this seam covers only the key - see `stripPenFocus`).
  * Each hand-copy is another chance to diverge, so both surfaces call only
  * these functions;
- * StripPenChrome.test.ts asserts nothing else in either source file calls
- * `setInking(`, `closeInkSliders(` or `.focus(` directly.
+ * StripPenChrome.test.ts sweeps every non-test .ts file under src for
+ * `setInking(`, `closeInkSliders(` and `.focus(`, and fails on any call past
+ * what a named allowlist permits that file.
  */
 
 /**

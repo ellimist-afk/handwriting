@@ -95,10 +95,12 @@ const tipInks = (h: MobileToolsHost): boolean =>
  * the tip must nominally hold this tool AND the tip must actually ink with
  * it - true once a pen has been seen this session, or for a mouse user only
  * while mouse ink is armed. Pulled out as a pure function of (host, tool) -
- * MobileTools has no test harness (DOM-heavy, cannot be constructed under
- * the suite) but this needs only a fake MobileToolsHost, so MobileTools.test.ts
- * pins it directly. See ButtonSpec.isLit for why this is a separate read
- * from isActive, which the click chain still branches on.
+ * this needs only a fake MobileToolsHost, so MobileTools.test.ts pins it
+ * directly, with no element tree at all. (That comment used to say the class
+ * itself "cannot be constructed under the suite"; the C16 test in that same
+ * file constructs it against a fake tree now, so the claim is gone rather
+ * than left standing - P5.) See ButtonSpec.isLit for why this is a separate
+ * read from isActive, which the click chain still branches on.
  */
 export const nibIsLit = (h: MobileToolsHost, tool: "pen" | "highlighter"): boolean =>
 	tipInks(h) && h.activeTool() === tool && (penSeenThisSession() || h.mouseInkOn());
@@ -589,7 +591,28 @@ export class MobileTools {
 				// Guarded here rather than with pointer-events: none, which
 				// would also take the tooltip away. A disabled control that
 				// still explains itself on hover is the more useful one.
-				if (!(spec.isEnabled?.(this.host) ?? true)) return;
+				//
+				// The refresh on the way out is the whole reason this branch
+				// is not just `return` (design doc §5i, C16). `isEnabled` is
+				// read LIVE here; `is-disabled` is a class written by
+				// `refresh()` and left alone until the next one, and nothing
+				// on this surface refreshes the strip when the document
+				// changes. So Redo lights after an undo, a keystroke drops
+				// CodeMirror's redo stack, and the button goes on LOOKING
+				// available while its predicate says no - and the bare return
+				// skipped the trailing refresh at the bottom of this handler,
+				// so it kept looking available and kept doing nothing on
+				// every press after that. Refreshing here recomputes the
+				// class from the same live predicate the guard just asked,
+				// which costs one wasted press and then the button tells the
+				// truth. Deliberately NOT a toast: the user asked for nothing
+				// and a notice for pressing a button that looked pressable is
+				// noise (the eraser/Backspace ruling, 2026-09-02). The button
+				// stops lying rather than explaining itself.
+				if (!(spec.isEnabled?.(this.host) ?? true)) {
+					this.refresh();
+					return;
+				}
 				// The GoodNotes pattern: tapping the tool you are already
 				// holding opens its options instead of re-picking it.
 				const nib =

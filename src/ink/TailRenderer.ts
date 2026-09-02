@@ -163,8 +163,23 @@ export class TailRenderer {
 	}
 
 	/**
-	 * Draw the live head: one straight world-space segment, widthed by the
-	 * same pressure law as the rest of the stroke so the join is invisible.
+	 * Draw the live head: one straight world-space segment, widthed to match
+	 * the ribbon underneath it so the join is invisible.
+	 *
+	 * `hwWorld` is that width - a WORLD half-width, the same unit as a ribbon
+	 * point's `hw` - and it wins when given. Callers get it from
+	 * `WetInkRenderer.liveHalfWidth`, which is the wet layer reporting what it
+	 * is actually laying down. Widthing the head from raw pressure instead
+	 * misses three things the ribbon has (velocity thinning, the start taper,
+	 * smoothed pressure) and the head is a separate canvas layer over the
+	 * ribbon, so the difference reads as a step at the join - up to ~12x wide
+	 * at stroke start with a fast pen.
+	 *
+	 * `pressure` stays, and stays the fallback, because it is honest: it is
+	 * exactly what the wet layer's own non-shaping branch computes. A caller
+	 * with no wet renderer to ask still gets the width this drew before
+	 * `hwWorld` existed rather than a zero or a guess.
+	 *
 	 * Accumulates into the dirty rect, so it can be combined with a predicted
 	 * tail in the same pass.
 	 */
@@ -173,13 +188,14 @@ export class TailRenderer {
 		style: PenStyle,
 		from: Point2,
 		to: Point2,
-		pressure: number
+		pressure: number,
+		hwWorld?: number
 	): void {
 		const x1 = (from.x - cam.x) * cam.zoom;
 		const y1 = (from.y - cam.y) * cam.zoom;
 		const x2 = (to.x - cam.x) * cam.zoom;
 		const y2 = (to.y - cam.y) * cam.zoom;
-		const hw = widthForPressure(style, pressure) / 2;
+		const hw = hwWorld ?? widthForPressure(style, pressure) / 2;
 		fillRibbon(
 			this.ctx,
 			cam,

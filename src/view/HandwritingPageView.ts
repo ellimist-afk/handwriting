@@ -3,7 +3,7 @@ import { Camera } from "../camera/Camera";
 import { CameraState } from "../camera/coordinates";
 import { telemetry } from "../diag/Telemetry";
 import { PointerRouter, PenSample } from "../input/PointerRouter";
-import { DEFAULT_PEN, HIGHLIGHTER_PEN, PenStyle, widthForPressure } from "../ink/PenStyle";
+import { DEFAULT_PEN, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
 import { InkStroke, InkTool } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { drawCommitted, drawStroke } from "../ink/StrokeRenderer";
@@ -25,7 +25,7 @@ import { ImageData, PageData, TextBoxData, newId } from "../model/PageData";
 import { MarkdownBlock, MarkdownImage } from "../model/MarkdownPage";
 import { PageDocument, inkRefusal } from "../model/PageDocument";
 import { createMoveOp, moveObjects } from "../objects/ObjectOps";
-import { PageStore } from "../persistence/PageStore";
+import { PageStore, PageWriter, newPageWriter } from "../persistence/PageStore";
 import { computeCanvasSize, formatRaster, inspectRaster } from "../diag/Raster";
 import { runDetached } from "../util/Detached";
 
@@ -104,6 +104,24 @@ export class HandwritingPageView extends TextFileView {
 	 * text layer is a view of this, never the source of truth.
 	 */
 	private doc = new PageDocument();
+	/**
+	 * This view's identity as a writer of sidecars, stable for its whole life
+	 * and distinct from every other view's.
+	 *
+	 * The `PageStore` is SHARED (one per plugin, on the host) and `doc` is not,
+	 * so two panes on one canvas page hand the store two independently composed
+	 * pages under the same id. Nothing else the store keeps can tell them
+	 * apart - `knownMtime` and `knownHash` are one pair per pageId and `load`
+	 * stamps them too, so the second pane's OPEN looks exactly like a write by
+	 * the first. Passing this token at every schedule site is what lets the
+	 * store reconcile the two instead of letting the later one overwrite the
+	 * earlier one's ink. See PageWriter, and PageStoreTwoDocuments.test.ts.
+	 *
+	 * Per VIEW, not per document: `doc` is replaced on every openFrom/clear, so
+	 * a token taken from it would make a view look like a stranger to its own
+	 * previous save the moment the same page was reopened in the same pane.
+	 */
+	private readonly writer: PageWriter = newPageWriter("canvas-page-view");
 	/** Convenience alias so spatial code reads the same as it always did. */
 	private get page(): PageData {
 		return this.doc.page;
@@ -549,7 +567,7 @@ export class HandwritingPageView extends TextFileView {
 				const pageId = this.pageId;
 				const page = this.doc.page;
 				runDetached(
-					this.claimInFlight.then(() => this.host.store.schedule(pageId, page)),
+					this.claimInFlight.then(() => this.host.store.schedule(pageId, page, this.writer)),
 					"schedule a canvas sidecar after saving its page id"
 				);
 				return;
@@ -557,7 +575,7 @@ export class HandwritingPageView extends TextFileView {
 			// No file / read-only Markdown: fall through and write the sidecar
 			// anyway. Orphan-tolerant beats ink-losing.
 		}
-		this.host.store.schedule(this.pageId, this.page);
+		this.host.store.schedule(this.pageId, this.page, this.writer);
 	}
 
 	// ---- text boxes ---------------------------------------------------------
@@ -643,6 +661,21 @@ export class HandwritingPageView extends TextFileView {
 	private setCaret(wx: number, wy: number): void {
 		this.caret = { x: wx, y: wy };
 		this.positionCaret();
+		// A bare focus, and NOT stripPenChrome's `stripPenFocus`, on purpose.
+		// That helper reclaims a keyboard the pen router took away: a claimed
+		// pen gesture preventDefaults mousedown, which suppresses native
+		// focus. Nothing of the sort happens here. setCaret is reached only
+		// from onTap with source === "mouse" (touch returns into createBox,
+		// and pen contact goes to penDown, which CLEARS the caret), and
+		// PointerRouter.mouseDown preventDefaults the middle-button and space
+		// pans only, so the left click that got here focused this root
+		// natively already. Two further mismatches if it were routed there:
+		// this root is tabIndex 0 (a whole view is a tab stop, where the
+		// in-editor overlay armStripPenFocus serves must not be), and
+		// stripPenFocus declines whenever focus is already inside the root -
+		// true right after a click on this view's own in-root toolbar, which
+		// would place a caret and leave the keys on a button.
+		// StripPenChrome.test.ts pins this exemption by name.
 		this.rootEl.focus();
 	}
 
@@ -828,6 +861,16 @@ export class HandwritingPageView extends TextFileView {
 			this.lassoDown(sample);
 			return;
 		}
+		// Tip and eraser return the pen to normal behavior: selection
+		// dissolves. The note surface has done this since the OneNote grammar
+		// landed (InkOverlay.ts, the same comment); this surface kept a stale
+		// outline on screen while inking straight through it, and Delete then
+		// deleted strokes the user had stopped meaning. Below the lasso
+		// branch, so a lasso still owns what it is about to move, and below
+		// the refusal above, so a page that cannot save ink does not quietly
+		// drop the selection either. clearSelection is a no-op when there is
+		// nothing selected.
+		this.clearSelection();
 		this.erasing = eraserButton || this.tool === "eraser";
 		this.erasedThisStroke = [];
 		this.penHistory = [sample];
@@ -942,12 +985,15 @@ export class HandwritingPageView extends TextFileView {
 
 		const head = this.wet().head();
 		if (head) {
+			// Width from the wet layer rather than raw pressure, so the stub
+			// matches the ribbon it continues instead of stepping at the join.
 			this.tail.drawHead(
 				this.camera.snapshot,
 				this.strokeStyle(),
 				head.from,
 				head.to,
-				head.pressure
+				head.pressure,
+				this.wet().liveHalfWidth(this.strokeStyle(), head.pressure)
 			);
 		}
 		if (!this.predictionOn) return;
@@ -959,9 +1005,27 @@ export class HandwritingPageView extends TextFileView {
 		);
 		if (result.points.length === 0) return;
 		const last = this.penHistory[this.penHistory.length - 1]!;
-		const widthPx =
-			widthForPressure(this.penStyle, normalizePressure(last.pressure)) * this.camera.zoom;
-		this.tail.draw(last.x, last.y, result.points, this.penStyle.color, widthPx);
+		// The active tool's style, like every other stroke path on this surface:
+		// with the pen's, a highlighter tail ran ahead of the nib in the wrong
+		// colour at a fraction of the width.
+		const style = this.strokeStyle();
+		// Width from the wet layer, like the head above and like the other two
+		// ink surfaces (InkOverlay, PdfInkController): the tail is ink guessed
+		// ahead of the nib and the ribbon is the ink behind it, so a tail sized
+		// from pressure alone misses the ribbon's velocity thinning, start
+		// taper and smoothed pressure, and the join reads as a seam.
+		// `liveWidthPx` returns a FULL width in css px, which is exactly what
+		// `draw` takes - no conversion here, and any `/ 2` or `* zoom` at this
+		// call site would be the factor-of-two error the accessor exists to
+		// prevent. The pressure keeps this surface's own normalisation, the
+		// same one `penDown` and `penRaw` feed the ribbon, so the unshaped
+		// branch stays bit for bit what it computed before.
+		const widthPx = this.wet().liveWidthPx(
+			this.camera.snapshot,
+			style,
+			normalizePressure(last.pressure)
+		);
+		this.tail.draw(last.x, last.y, result.points, style.color, widthPx);
 		this.lastTail = result.points;
 	}
 

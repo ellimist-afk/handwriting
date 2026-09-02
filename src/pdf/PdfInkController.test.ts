@@ -19,7 +19,14 @@ import { PenSample } from "../input/PointerRouter";
 import { resetTipModeForTest, setTipMode, setTipModeListener, tipMode } from "../inline/TipMode";
 import { DEFAULT_PEN } from "../ink/PenStyle";
 import { setInkShaping } from "../ink/InkShape";
-import { setInlineTool, setPenReticle } from "../inline/InkOverlay";
+import {
+	getEraserRadiusPx,
+	setEraserWholeStrokes,
+	setInlineTool,
+	setPenReticle,
+} from "../inline/InkOverlay";
+import { strokesHitByCircle } from "../ink/Eraser";
+import { calibrationStrokes } from "./PdfCalibration";
 import { clearInkClipboard, clipboardSize } from "../inline/InkClipboard";
 
 /**
@@ -1214,5 +1221,327 @@ describe("PdfInkController deleteSelectionCommand (what the strip, palette and a
 		expect(controller.deleteSelectionCommand()).toBe(false);
 		expect(ops).toEqual([]);
 		expect(strokes).toEqual([]);
+	});
+});
+
+/**
+ * C13 (1.4.7-design.md §5h): the trash button and the delete ask one question
+ * of two different lists, and nothing in this class ties the two together.
+ *
+ * `hasSelection` goes through `selectionBounds`, which filters `strokes(page)`
+ * - the PAGE-filtered source. `deleteSelection` goes through `opList`, which
+ * filters `allStrokes()` - the WHOLE-DOCUMENT source, falling back to the page
+ * list only when the document list is empty. They are two independently
+ * injected constructor callbacks. `d7b02e9` made the button ask the bounds
+ * rather than the raw id list, so the two now ask the same QUESTION; they
+ * still read different LISTS, and they agree in production only because
+ * main.ts builds both from one store at one synchronous instant.
+ *
+ * Latent, not live: ids are unique across pages, so filtering either list by
+ * the picked ids lands on the same strokes today. This therefore CANNOT be
+ * shown red against the shipped wiring, and was shown red against a divergent
+ * one instead - `allStrokes` returning a document list that predates the
+ * selected page's ink, which is what a lagging document source or a second
+ * page filter looks like. There `hasSelection` stayed true and
+ * `deleteSelection` returned false having removed nothing: "trashcan lit up,
+ * hit delete, nothing deleted", the report this class's lasso work started
+ * from.
+ *
+ * The harness is the part that can go quietly worthless (P3). `allStrokes`
+ * defaults to `() => []`, which sends `opList` back to the page list, so a
+ * controller built without it makes both questions read ONE list and every
+ * assertion below becomes a tautology. Hence a document across three pages,
+ * a selection on page three rather than page one, and the difference between
+ * the two lists asserted before the invariant that depends on it.
+ */
+describe("PdfInkController: the button's list and the delete's list resolve alike (C13)", () => {
+	const SELECTION_PAGE = 3;
+	let strokes: InkStroke[];
+	let ops: InkOp[];
+	let controller: PdfInkController;
+	let pen: { penDown(s: PenSample): void; penRaw(s: PenSample[]): void; penUp(): void };
+
+	/** `inkAt`'s stroke, moved onto a page and optionally out of the loop. */
+	function inkOn(id: string, page: number, dx = 0): InkStroke {
+		const base = inkAt(id);
+		const points = base.points.map((p) => ({ ...p, x: p.x + dx }));
+		return { ...base, points, bbox: computeBBox(points, 4), page };
+	}
+
+	/** The page source main.ts installs: this page's ink and nothing else. */
+	function onPage(page: number): InkStroke[] {
+		return strokes.filter((s) => (s.page ?? 1) === page);
+	}
+
+	beforeEach(() => {
+		resetTipModeForTest();
+		// Interleaved deliberately. The two strokes inside the loop sit at
+		// document positions 2 and 4 and at page positions 0 and 1, so an
+		// index or a filter taken from the wrong list cannot come out right
+		// by coincidence - which is exactly what page one hides.
+		strokes = [
+			inkOn("p1-a", 1),
+			inkOn("p1-b", 1),
+			inkOn("p3-in-1", SELECTION_PAGE),
+			inkOn("p2-a", 2),
+			inkOn("p3-in-2", SELECTION_PAGE),
+			inkOn("p3-out", SELECTION_PAGE, 200),
+		];
+		ops = [];
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+				{ pageNumber: 2, leftPx: 0, topPx: 810, widthPx: 600, heightPx: 800, hasCanvas: true },
+				{ pageNumber: 3, leftPx: 0, topPx: 1620, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: () => {},
+			setTimeout: () => 0,
+			requestAnimationFrame: () => 0,
+		};
+		controller = new PdfInkController(
+			{} as HTMLElement,
+			win as unknown as Window,
+			// The two sources, wired as main.ts wires them and as nothing else
+			// in this file's older blocks does: page-filtered here, whole
+			// document below. Wiring both from one list is the P3 hole.
+			(page) => onPage(page),
+			() => "doc-1",
+			() => strokes,
+			(op) => {
+				ops.push(op);
+				strokes = applyOp(strokes, op);
+			}
+		);
+		pen = controller as unknown as typeof pen;
+	});
+
+	/** Trace a closed loop over page three's ink, through the real pen path. */
+	function lassoPageThree(): void {
+		setTipMode("lasso");
+		// Page three's box starts at 1620 content px, so these are the same
+		// page-local corners the page-one lasso above traces.
+		const corners: [number, number][] = [
+			[150, 1770],
+			[250, 1770],
+			[250, 1870],
+			[150, 1870],
+		];
+		pen.penDown(sample(corners[0]![0], corners[0]![1]));
+		for (const [x, y] of corners.slice(1)) pen.penRaw([sample(x, y)]);
+		pen.penRaw([sample(corners[0]![0], corners[0]![1])]);
+		pen.penUp();
+	}
+
+	it("a selection on page three: the delete takes exactly the strokes the button lit for", () => {
+		lassoPageThree();
+		// Captured before the delete, which replaces the array.
+		const documentList = strokes;
+		const pageList = onPage(SELECTION_PAGE);
+
+		// Anti-vacuity, first because everything after it depends on it: the
+		// two sources must genuinely differ, or both questions read one list
+		// and the invariant is asserted about nothing.
+		expect(documentList.length).toBeGreaterThan(pageList.length);
+		expect(pageList.map((s) => s.id)).toEqual(["p3-in-1", "p3-in-2", "p3-out"]);
+
+		// The ids the lasso actually picked, rather than a list written out by
+		// hand - the shared input both sides filter by.
+		const picked = new Set((controller as unknown as { selected: string[] }).selected);
+		expect([...picked]).toEqual(["p3-in-1", "p3-in-2"]);
+		const viaPageSource = pageList.filter((s) => picked.has(s.id));
+		const viaDocumentSource = documentList.filter((s) => picked.has(s.id));
+
+		// The button is lit, off the page source.
+		expect(controller.hasSelection).toBe(true);
+
+		// And the delete, off the document source, removes exactly those - one
+		// question, one answer, whichever list it was asked of.
+		const documentIndices = viaPageSource.map((s) => documentList.indexOf(s));
+		expect(documentIndices).toEqual([2, 4]);
+		expect(viaPageSource.map((s) => pageList.indexOf(s))).toEqual([0, 1]);
+		expect(controller.deleteSelection()).toBe(true);
+		expect(ops).toEqual([
+			{ type: "remove", path: "doc-1", strokes: viaPageSource, indices: documentIndices },
+		]);
+		// The op is half of it; the store is the other half. A delete that
+		// returns true and leaves the ink where it was is the original report.
+		expect(strokes.map((s) => s.id)).toEqual(["p1-a", "p1-b", "p2-a", "p3-out"]);
+
+		// The invariant itself, stated against the two callbacks rather than
+		// against the controller's behaviour: whatever the lasso picked, the
+		// page list and the document list resolve it to the same strokes.
+		expect(viaDocumentSource).toEqual(viaPageSource);
+	});
+});
+
+/**
+ * Calibration mode: a synthetic stroke source, and the ops it must not emit.
+ *
+ * Design §5o/C22. With `pdfCalibration` on, main.ts deliberately makes the two
+ * sources disagree: the PAGE source hands back `calibrationStrokes(page)` and
+ * the DOCUMENT source hands back an empty list. The controller had no idea, so
+ * every mutating gesture hit-tested the synthetic crosses like real ink and
+ * emitted a real op against the user's sidecar - and `applyOp`'s `replace`
+ * removes by id (a no-op, those ids are not in the document) while splicing the
+ * eraser's split fragments in at `insertedAt`. Synthetic geometry, in a real
+ * file, in the one class §4 calls unrecoverable.
+ *
+ * The wiring below is main.ts's calibration wiring, not an approximation of it:
+ * page source `calibrationStrokes`, document source `[]`, and a sink that runs
+ * the real `applyOp` against a real document list - so what these tests read at
+ * the end is what would have been written.
+ */
+describe("PdfInkController with a synthetic stroke source", () => {
+	/** The user's actual ink. Nothing in this block may ever change it. */
+	let real: InkStroke[];
+	let ops: InkOp[];
+	let persists: string[];
+	let controller: PdfInkController;
+	let pen: { penDown(s: PenSample, ev?: unknown): void; penRaw(s: PenSample[]): void; penUp(): void };
+
+	/** Page point (100,100) is a calibration mark, and content px (200,200). */
+	const MARK_X = 100;
+	const MARK_Y = 100;
+
+	beforeEach(() => {
+		resetTipModeForTest();
+		real = [inkAt("real-1")];
+		ops = [];
+		persists = [];
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: () => {},
+			setTimeout: () => 0,
+			requestAnimationFrame: () => 0,
+		};
+		controller = new PdfInkController(
+			{} as HTMLElement,
+			win as unknown as Window,
+			// main.ts: `if (this.pdfCalibration) return calibrationStrokes(page)`.
+			(page) => calibrationStrokes(page),
+			() => "doc-1",
+			// main.ts: `if (this.pdfCalibration) return []`.
+			() => [],
+			(op) => {
+				ops.push(op);
+				real = applyOp(real, op);
+			},
+			() => {},
+			() => {},
+			(id) => persists.push(id),
+			// The flag main.ts already holds. Without it the controller cannot
+			// know its sources are made up.
+			() => true
+		);
+		pen = controller as unknown as typeof pen;
+		(controller as unknown as { boundScroller: unknown }).boundScroller = scroller;
+	});
+
+	/**
+	 * Anti-vacuity, and the point of the whole block: the nib really is on a
+	 * calibration cross. Asserted against the same hit test `eraseAt` runs,
+	 * over the same generated strokes, so a fix that stopped the gesture
+	 * reaching the ink at all could not make these tests pass by accident.
+	 */
+	it("the nib is genuinely on synthetic ink - precondition", () => {
+		const page = calibrationStrokes(1);
+		expect(page.length).toBeGreaterThan(0);
+		const hit = strokesHitByCircle(page, MARK_X, MARK_Y, getEraserRadiusPx() / SCALE);
+		expect(hit.length).toBeGreaterThan(0);
+		for (const id of hit) expect(id.startsWith("cal-")).toBe(true);
+	});
+
+	// Restored because it is module state: leaving it off would change what
+	// every later eraser test in this file is measuring.
+	afterEach(() => setEraserWholeStrokes(true));
+
+	it("erasing a calibration cross writes nothing to the document", () => {
+		// Split erase, not whole-stroke: this is the setting under which the
+		// defect actually SPLICES geometry in. Whole-stroke erase emits an op
+		// with an empty `inserted`, which is a no-op against the real list and
+		// would let a broken guard look fine.
+		setEraserWholeStrokes(false);
+		setTipMode("eraser");
+		pen.penDown(sample(MARK_X * SCALE, MARK_Y * SCALE));
+		pen.penRaw([sample(MARK_X * SCALE + 2, MARK_Y * SCALE)]);
+		pen.penUp();
+		// The user's ink first, because it is the thing that cannot be
+		// recovered: before the guard this list came back holding the split
+		// halves of a synthetic cross.
+		expect(real.map((s) => s.id)).toEqual(["real-1"]);
+		// No op at all - not an op that happens to be harmless. `replace`
+		// splices `inserted` in whether or not `removed` matched anything.
+		expect(ops).toEqual([]);
+		// And no write, so the sidecar is not even rewritten.
+		expect(persists).toEqual([]);
+	});
+
+	it("lasso-deleting a calibration cross writes nothing, and leaves no undo to write later", () => {
+		setTipMode("lasso");
+		pen.penDown(sample(150, 150));
+		const corners: [number, number][] = [
+			[250, 150],
+			[250, 250],
+			[150, 250],
+			[150, 150],
+		];
+		for (const [x, y] of corners) pen.penRaw([sample(x, y)]);
+		pen.penUp();
+		// The lasso still SELECTS - calibration ink is drawn, so it is
+		// selectable; what it may not do is produce an op. And the boolean has
+		// to say so: `deleteSelectionCommand` picks its sentence off it.
+		expect(controller.hasSelection).toBe(true);
+		expect(controller.deleteSelection()).toBe(false);
+		expect(ops).toEqual([]);
+		// Cut is a copy and a delete, and the clipboard is the slower door:
+		// synthetic ink parked there outlives calibration mode and comes back
+		// as an `add` into a real document.
+		clearInkClipboard();
+		expect(controller.cutSelection()).toBe(0);
+		expect(clipboardSize()).toBe(0);
+		// The delayed leg: a recorded `remove` inverts to an `add`, so an undo
+		// pressed later would splice the crosses into the real document even
+		// though the delete itself removed nothing.
+		expect((controller as unknown as { historyStep(r: boolean): boolean }).historyStep(false)).toBe(
+			false
+		);
+		expect(ops).toEqual([]);
+		expect(real.map((s) => s.id)).toEqual(["real-1"]);
+	});
+
+	it("insert-space over calibration ink writes nothing", () => {
+		setTipMode("space");
+		pen.penDown(sample(MARK_X * SCALE, 60 * SCALE));
+		pen.penRaw([sample(MARK_X * SCALE, 90 * SCALE), sample(MARK_X * SCALE, 120 * SCALE)]);
+		pen.penUp();
+		expect(ops).toEqual([]);
+		expect(persists).toEqual([]);
+		expect(real.map((s) => s.id)).toEqual(["real-1"]);
 	});
 });

@@ -893,8 +893,17 @@ export class InlinePenRouter {
 	 * tail) owns the interaction. Window precedes document in capture order, so
 	 * these pre-empt Obsidian's app-level handlers, which is where the eraser's
 	 * caret-drag leak lived. Touch and mouse OUTSIDE a claimed pen gesture never
-	 * meet this code; the palm gate already quarantines touches for longer than
-	 * the tail, so no finger behavior changes.
+	 * meet this code.
+	 *
+	 * A finger INSIDE the tail is a different question, and the answer is no
+	 * longer the palm gate. This comment used to say the gate quarantined
+	 * touches for longer than the tail, which was true when RELEASE_TAIL_MS was
+	 * 500 and has been false since v0.13.2 lowered it to 250 - below the 350 of
+	 * OWNERSHIP_TAIL_MS, leaving 100ms the gate does not cover. What protects
+	 * the finger there is the explicit `fromTouch` exemption in
+	 * `suppressNativeFallout`, added in that same commit for that same reason:
+	 * a finger tap right after pen-up is caret placement, and eating it made
+	 * the pen-to-touch handoff feel dead for a third of a second.
 	 */
 	private armOwnership(): void {
 		if (this.ownershipDisarmTimer !== null) {

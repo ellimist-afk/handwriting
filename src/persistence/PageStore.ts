@@ -8,6 +8,7 @@ import {
 	parsePage,
 	serializePage,
 } from "../model/PageData";
+import { mergePages } from "./PageMerge";
 import { runDetached } from "../util/Detached";
 
 /**
@@ -29,6 +30,36 @@ export interface PageAdapterLike {
 
 export interface PageStoreHost {
 	vault: { adapter: PageAdapterLike };
+}
+
+/**
+ * Opaque identity for ONE in-process writer of a page.
+ *
+ * The store is shared and the model is not: `main.ts` builds a single
+ * `PageStore` and hands it to every view, but each `HandwritingPageView` holds
+ * its own `PageDocument`. Two panes on one canvas page therefore reach
+ * `schedule(pageId, ownPage)` with two different, independently composed
+ * pages, and the second one's page never saw the first one's strokes.
+ *
+ * NOTHING ELSE IN THE STORE CAN TELL THEM APART. `knownMtime` and `knownHash`
+ * are one pair per pageId for the whole process, and `load` stamps them too, so
+ * a second pane's OPEN re-stamps them exactly as a write does. The external
+ * guard asks "is the file on disk the one this session last read or wrote", and
+ * a second in-process writer IS the same session. Writer identity is the only
+ * thing that separates them, and it has to come from the caller.
+ *
+ * Callers that genuinely share their model - `InlineInkStore` (notes) and
+ * `PdfInkStore` - pass nothing. Undefined means "unidentified", and an
+ * unidentified writer never triggers any of this, so their behaviour and the
+ * single-document behaviour are untouched.
+ */
+export type PageWriter = string;
+
+let writerSeq = 0;
+
+/** A fresh writer identity. One per view, for the life of the view. */
+export function newPageWriter(label = "writer"): PageWriter {
+	return `${label}#${++writerSeq}`;
 }
 
 /** Bounded, event-driven retry of a failed write. Not polling. */
@@ -101,6 +132,14 @@ export const MAX_DIRTY_MS = 5000;
 
 export class PageStore {
 	private pending = new Map<string, PageData>();
+	/**
+	 * Who composed the payload sitting in `pending`. See PageWriter: this is
+	 * the only thing that distinguishes two panes on one canvas page, because
+	 * every other identity the store keeps is per-pageId.
+	 */
+	private pendingWriter = new Map<string, PageWriter | undefined>();
+	/** Who composed the bytes currently in the live sidecar. */
+	private lastWriter = new Map<string, PageWriter | undefined>();
 	private timers = new Map<string, number>();
 	/** One-shot maximum-dirty-interval timer per page; see MAX_DIRTY_MS. */
 	private maxTimers = new Map<string, number>();
@@ -663,8 +702,10 @@ export class PageStore {
 	 * clears both. Changes arriving during a write start a new batch and wait
 	 * for the next write; writes for one page stay serialized on the queue.
 	 */
-	schedule(pageId: string, data: PageData): void {
+	schedule(pageId: string, data: PageData, writer?: PageWriter): void {
+		this.displaceForeignBatch(pageId, writer);
 		this.pending.set(pageId, data);
+		this.pendingWriter.set(pageId, writer);
 		const existing = this.timers.get(pageId);
 		if (existing !== undefined) window.clearTimeout(existing);
 		this.timers.set(
@@ -692,10 +733,41 @@ export class PageStore {
 	 * attempt is over: the rename has landed, or the failure has re-queued
 	 * the state for the bounded retry path.
 	 */
-	async saveNow(pageId: string, data: PageData): Promise<void> {
+	async saveNow(pageId: string, data: PageData, writer?: PageWriter): Promise<void> {
+		this.displaceForeignBatch(pageId, writer);
 		this.pending.set(pageId, data);
+		this.pendingWriter.set(pageId, writer);
 		this.clearTimers(pageId);
 		await this.writePending(pageId);
+	}
+
+	/**
+	 * The debounce collapses a batch to its NEWEST state, which is right for
+	 * one writer and is the mechanism of the two-pane loss for two: the second
+	 * pane's `pending.set` replaces the first pane's payload and `clearTimeout`
+	 * cancels its timer, so the first pane's bytes never reach the adapter at
+	 * all. Nothing downstream can recover them - by the time any write runs,
+	 * the only record that they existed is gone.
+	 *
+	 * So the collapse is made PER WRITER rather than per page: a foreign
+	 * writer's queued batch is dispatched instead of dropped, and the incoming
+	 * batch queues behind it (writes for one page are already serialized). The
+	 * two payloads then meet on disk, where `reconcileInProcess` can union
+	 * them, which is the one place both are still available.
+	 *
+	 * `writePending` consumes `pending` and clears both timers SYNCHRONOUSLY -
+	 * everything before its first await - so the caller may set its own state
+	 * and arm its own timers immediately after this returns.
+	 *
+	 * Does nothing unless both writers are identified and differ, so a single
+	 * document and every unidentified caller keep today's collapse exactly.
+	 */
+	private displaceForeignBatch(pageId: string, writer: PageWriter | undefined): void {
+		if (writer === undefined) return;
+		const queued = this.pendingWriter.get(pageId);
+		if (queued === undefined || queued === writer) return;
+		if (!this.pending.has(pageId)) return;
+		runDetached(this.writePending(pageId), `write a displaced batch for ${pageId}`);
 	}
 
 	private clearTimers(pageId: string): void {
@@ -871,19 +943,70 @@ export class PageStore {
 	private async writePending(pageId: string): Promise<void> {
 		const data = this.pending.get(pageId);
 		if (!data) return;
+		const writer = this.pendingWriter.get(pageId);
 		this.pending.delete(pageId);
+		this.pendingWriter.delete(pageId);
 		this.clearTimers(pageId); // the batch is consumed, both timers with it
 		// Serialize writes so two saves for the same page can't interleave
 		// their tmp/rename dance.
-		await this.chain(pageId, () => this.writeNow(pageId, data));
+		await this.chain(pageId, () => this.writeNow(pageId, data, writer));
 	}
 
-	private async writeNow(pageId: string, data: PageData): Promise<void> {
+	/**
+	 * Fold in whatever a DIFFERENT in-process writer put on disk since this
+	 * writer last agreed with it. Returns `data` untouched in every other
+	 * case, including every single-document write and every unidentified
+	 * caller, so the common path costs nothing - not even the read.
+	 *
+	 * `mergePages` is a union: the result is always a superset of `data`, and
+	 * `data` is exactly what the unfixed code wrote. So this can only ever add
+	 * content relative to the behaviour it replaces, never remove any. That is
+	 * the property that makes it safe to put on the save path.
+	 *
+	 * Fails toward the existing machinery rather than toward cleverness: an
+	 * unreadable, damaged or future-schema file is handed back unmerged, and
+	 * the external-revision guard below then does what it always did (an
+	 * unreadable file reads as external and is preserved as a conflict copy).
+	 */
+	private async reconcileInProcess(
+		pageId: string,
+		data: PageData,
+		writer: PageWriter | undefined,
+		final: string
+	): Promise<PageData> {
+		if (writer === undefined) return data;
+		const last = this.lastWriter.get(pageId);
+		if (last === undefined || last === writer) return data;
+		const adapter = this.app.vault.adapter;
+		try {
+			if (!(await adapter.exists(final))) return data;
+			const parsed = parsePage(await adapter.read(final), pageId);
+			if (parsed.damaged || parsed.futureVersion !== undefined) return data;
+			return mergePages(parsed.data, data);
+		} catch (err) {
+			console.error("[handwriting] could not reconcile a second writer's sidecar", pageId, err);
+			return data;
+		}
+	}
+
+	private async writeNow(
+		pageId: string,
+		data: PageData,
+		writer?: PageWriter
+	): Promise<void> {
 		const adapter = this.app.vault.adapter;
 		try {
 			await ensureFolder(adapter, this.folder);
 			const final = this.path(pageId);
 			const tmp = this.tmpPath(pageId);
+			// A second in-process writer's payload is stale by construction:
+			// it was composed by a document that never saw the other one's
+			// strokes. Union it with the live file BEFORE the tmp is written,
+			// so every byte this sequence puts on disk is already complete.
+			// The ORIGINAL `data` is what the failure path re-queues, so a
+			// retry reconciles again from whatever disk holds by then rather
+			// than baking one attempt's merge into the queue.
+			const effective = await this.reconcileInProcess(pageId, data, writer, final);
 			// External-revision guard: if the file on disk is not the one this
 			// session last read or wrote (Sync, another device, another
 			// process), preserve it. Both states survive, ours proceeds.
@@ -901,7 +1024,7 @@ export class PageStore {
 			// never announced, because the announcement waits on the rename
 			// at the end. Writing first means every instant of this sequence
 			// has a complete copy of the ink somewhere load() already looks.
-			const serialized = serializePage(data);
+			const serialized = serializePage(effective);
 			await adapter.write(tmp, serialized);
 			if (await adapter.exists(final)) {
 				const st = await adapter.stat(final).catch(() => null);
@@ -930,6 +1053,9 @@ export class PageStore {
 			const st = await adapter.stat(final).catch(() => null);
 			if (st) this.knownMtime.set(pageId, st.mtime);
 			this.knownHash.set(pageId, contentStamp(serialized));
+			// Recorded only once the rename has landed, so it always names the
+			// writer whose composition the live file actually holds.
+			this.lastWriter.set(pageId, writer);
 			this.failures.delete(pageId);
 			this.errorNotified.delete(pageId);
 			// The write is durable as of the rename above: now, and only now,
@@ -945,7 +1071,12 @@ export class PageStore {
 			// newer state has already been scheduled), retry a bounded number
 			// of times, then tell the user once. The data also stays in the
 			// pending map, so any later schedule() or flush() retries it.
-			if (!this.pending.has(pageId)) this.pending.set(pageId, data);
+			if (!this.pending.has(pageId)) {
+				this.pending.set(pageId, data);
+				// Its writer with it: an unattributed retry would skip the
+				// reconcile and put this writer's stale page back on disk.
+				this.pendingWriter.set(pageId, writer);
+			}
 			const n = (this.failures.get(pageId) ?? 0) + 1;
 			this.failures.set(pageId, n);
 			if (n <= WRITE_MAX_RETRIES) {
@@ -1050,6 +1181,7 @@ export class PageStore {
 	 */
 	discardPending(pageId: string): void {
 		this.pending.delete(pageId);
+		this.pendingWriter.delete(pageId);
 		this.clearTimers(pageId);
 	}
 
@@ -1063,8 +1195,12 @@ export class PageStore {
 		// file.
 		const queued = this.pending.get(pageId);
 		this.pending.delete(pageId);
+		this.pendingWriter.delete(pageId);
 		this.knownMtime.delete(pageId);
 		this.knownHash.delete(pageId);
+		// The page is gone; a later page under this id is a different page,
+		// and must not be reconciled against a writer that predates it.
+		this.lastWriter.delete(pageId);
 		this.clearTimers(pageId);
 		// Deleting the NOTE is recoverable (Obsidian's trash); deleting the
 		// ink outright would not be. Recycle the sidecar instead. A restored

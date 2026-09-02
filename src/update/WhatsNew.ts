@@ -60,6 +60,9 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"data reliability fixes",
 		"bug fixes",
 	],
+	"1.4.7": [
+		"emergency bug fix",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

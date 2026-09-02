@@ -469,7 +469,28 @@ export class PdfInkController {
 		 * Write this document now. Called once at the end of a gesture whose
 		 * ops were applied live; see OpMode.
 		 */
-		private persist: (id: string) => void = () => {}
+		private persist: (id: string) => void = () => {},
+		/**
+		 * Are this controller's stroke sources SYNTHETIC - generated for
+		 * measurement rather than read from the store?
+		 *
+		 * Design doc §5o/C22. PDF calibration mode makes the two sources
+		 * disagree on purpose (main.ts hands the page source
+		 * `calibrationStrokes(page)` and the document source an empty list),
+		 * and the controller could not tell. So the eraser hit-tested the
+		 * synthetic crosses like real ink and emitted a real op, and
+		 * `applyOp`'s `replace` spliced the split halves of a cross into the
+		 * user's sidecar - geometry that was never theirs, in the one class
+		 * §4 calls unrecoverable.
+		 *
+		 * Asked as a QUESTION ABOUT THE SOURCES, not about calibration, and
+		 * answered at the op boundary rather than in the gestures: a guard on
+		 * the `cal-` id prefix would cover exactly today's crosses, and the
+		 * next synthetic source - a third one is already contemplated - would
+		 * arrive uncovered and silent. Whoever adds one substitutes the
+		 * sources in main.ts, which is the same line that sets this.
+		 */
+		private syntheticSources: () => boolean = () => false
 	) {}
 
 	/**
@@ -1402,7 +1423,19 @@ export class PdfInkController {
 				scale
 			),
 		};
-		this.builder = new StrokeBuilder(tool, this.strokeStyle.color, this.strokeStyle.baseWidth);
+		// Fifth argument, past `minDistWorld`'s default: it sets `stroke.device`,
+		// and `device !== "mouse"` is the gate that lets velocity shaping run
+		// (StrokeOutline.ts, StrokeRenderer.ts). `mouseStroke` was already
+		// worked out at pen-down and then never reached the stroke, so a mouse
+		// drawn over a pdf was shaped while the same gesture on a note was not
+		// (InkOverlay.ts passes it; 1.4.7-design.md C6).
+		this.builder = new StrokeBuilder(
+			tool,
+			this.strokeStyle.color,
+			this.strokeStyle.baseWidth,
+			undefined,
+			this.mouseStroke ? "mouse" : undefined
+		);
 		this.predReal = [];
 		this.predLastTail = [];
 		this.metrics.begin("pdf-ink", performance.now());
@@ -1416,7 +1449,23 @@ export class PdfInkController {
 		// Before the first sample, so a clean page has a canvas to draw on.
 		this.ensureOverlay(box.pageNumber);
 		const pair = this.wetOn(box.pageNumber);
-		if (pair) pair.wet.clear(box.widthPx, box.heightPx);
+		if (pair) {
+			pair.wet.clear(box.widthPx, box.heightPx);
+			// Per stroke, from the device, exactly as the note surface does it
+			// (InkOverlay.ts). The layer is built with shaping ON and that is
+			// still its resting state; a mouse stroke turns it off for the one
+			// stroke, because the commit will not shape it either
+			// (`stroke.device !== "mouse"`, StrokeRenderer.ts). Set once at the
+			// pair's construction it was merely wrong-and-consistent while the
+			// commit shaped mice too; since 1c4b250 stopped shaping them, the
+			// live stroke was drawn shaped and redrawn flat at pen-up - the
+			// reshape-under-the-nib this whole path exists to prevent.
+			//
+			// After `this.mouseStroke` above and before the first sample, which
+			// is where `beginStroke` latches it into `shapingThisStroke`
+			// (WetInkRenderer). Written after the latch it would change nothing.
+			pair.wet.shape = !this.mouseStroke;
+		}
 		this.wetHighlighter = tool === "highlighter";
 		this.dressWet(this.overlays.get(box.pageNumber));
 		// With its event, so the down sample's delivery is stamped like every
@@ -1691,7 +1740,19 @@ export class PdfInkController {
 		const head = pair.wet.head();
 		pair.tail.clear();
 		if (head) {
-			pair.tail.drawHead(cam, this.strokeStyle, head.from, head.to, head.pressure);
+			// The width comes from the wet layer, not from raw pressure, so
+			// the stub and the ribbon it continues are the same thickness.
+			// This surface's world unit is a PDF point, but nothing here is
+			// converted - a world half-width is a world half-width on
+			// whatever surface produced it.
+			pair.tail.drawHead(
+				cam,
+				this.strokeStyle,
+				head.from,
+				head.to,
+				head.pressure,
+				pair.wet.liveHalfWidth(this.strokeStyle, head.pressure)
+			);
 		}
 	}
 
@@ -1791,7 +1852,7 @@ export class PdfInkController {
 		const removedAt = removed.map((s) => before.indexOf(s));
 		const inserted = after.filter((s) => !beforeIds.has(s.id));
 		const insertedAt = inserted.map((s) => after.indexOf(s));
-		this.history.record({ type: "replace", path: id, removed, removedAt, inserted, insertedAt });
+		this.recordOp({ type: "replace", path: id, removed, removedAt, inserted, insertedAt });
 	}
 
 	// ---- lasso --------------------------------------------------------------
@@ -2060,7 +2121,13 @@ export class PdfInkController {
 		const strokes = all.filter((s) => picked.has(s.id));
 		if (strokes.length === 0) return false;
 		const indices = strokes.map((s) => all.indexOf(s));
-		this.emit({ type: "remove", path: id, strokes, indices });
+		// The boolean is the caller's whole evidence - `deleteSelectionCommand`
+		// picks its sentence off it - so a refused op has to read as a delete
+		// that did not happen. Reporting true here would put "deleted N
+		// strokes" on screen over ink that is still there, which is the exact
+		// report the rest of this method was written against. The selection
+		// stays for the same reason: nothing was removed from under it.
+		if (!this.emit({ type: "remove", path: id, strokes, indices })) return false;
 		this.clearSelection();
 		this.refreshStrip();
 		return true;
@@ -2097,7 +2164,7 @@ export class PdfInkController {
 			const spaceId = this.documentId();
 			if (spaceId && this.spaceTotalDy !== 0 && this.spaceIds.length > 0) {
 				// Recorded but not re-applied: the moves already landed live.
-				this.history.record({
+				this.recordOp({
 					type: "move",
 					path: spaceId,
 					strokeIds: this.spaceIds,
@@ -2134,7 +2201,7 @@ export class PdfInkController {
 			// One op for the whole drag, recorded but NOT re-applied: the
 			// moves already landed live, sample by sample.
 			if (id && (dx !== 0 || dy !== 0) && this.selected.length > 0) {
-				this.history.record({ type: "move", path: id, strokeIds: this.selected, dx, dy });
+				this.recordOp({ type: "move", path: id, strokeIds: this.selected, dx, dy });
 			}
 			this.persistLive();
 			const box = this.frameBox(page);
@@ -2284,6 +2351,35 @@ export class PdfInkController {
 	}
 
 	/**
+	 * The ONE door every op leaves this controller by. False means refused.
+	 *
+	 * Gated here rather than in the gestures because every mutating path -
+	 * the eraser, lasso delete, the lasso drag, insert-space, cut and paste -
+	 * funnels through `apply` or `historyStep`, and a guard per gesture is a
+	 * guard the next gesture will not have. A write that does not come
+	 * through here is outside the guard; that is the invariant this pair
+	 * exists to make greppable.
+	 */
+	private emitOp(op: InkOp, mode?: OpMode): boolean {
+		if (this.syntheticSources()) return false;
+		this.onOp(op, mode);
+		return true;
+	}
+
+	/**
+	 * The other door: into the undo ring.
+	 *
+	 * A refused op must not be recorded either, or the delayed leg reopens
+	 * the same hole - `invertInkOp` turns a `remove` into an `add`, so an
+	 * undo pressed after the sources went back to normal would splice the
+	 * crosses into the real document that the delete itself never touched.
+	 */
+	private recordOp(op: InkOp): void {
+		if (this.syntheticSources()) return;
+		this.history.record(op);
+	}
+
+	/**
 	 * Apply an op and repaint what it touched.
 	 *
 	 * `onlyPage` is the gesture hot path. A drag and an erase fire an op per
@@ -2291,11 +2387,16 @@ export class PdfInkController {
 	 * - the whole window of canvases the viewer is holding - when the only
 	 * page whose ink can have changed is the one under the nib.
 	 */
-	private apply(op: InkOp, onlyPage?: number, mode: OpMode = "commit"): void {
-		this.onOp(op, mode);
+	private apply(op: InkOp, onlyPage?: number, mode: OpMode = "commit"): boolean {
+		// A refused op is not applied, not marked dirty and not repainted.
+		// There is nothing to repaint: a synthetic source is a pure function
+		// of the page number, so it regenerates the same marks whatever the
+		// gesture believed it had done to them.
+		if (!this.emitOp(op, mode)) return false;
 		if (mode === "live") this.liveDirty = true;
 		if (onlyPage === undefined) this.refresh();
 		else this.refreshPage(onlyPage);
+		return true;
 	}
 
 	/**
@@ -2329,13 +2430,16 @@ export class PdfInkController {
 		this.schedule();
 	}
 
-	/** Apply an op, remember it for undo, and repaint. */
 	/** One undo or redo step, shared by Ctrl+Z and the strip's buttons. */
 	private historyStep(redo: boolean): boolean {
+		// Ahead of the pop, not after it: a refusal further down would consume
+		// the entry and report a step that never happened. The ring can still
+		// hold ops recorded before the sources went synthetic.
+		if (this.syntheticSources()) return false;
 		this.clearSelection();
 		const op = redo ? this.history.redo() : this.history.undo();
 		if (!op) return false;
-		this.onOp(op);
+		if (!this.emitOp(op)) return false;
 		this.refresh();
 		this.refreshStrip();
 		return true;
@@ -2348,6 +2452,12 @@ export class PdfInkController {
 	 * double-notify if it did).
 	 */
 	private copyToClipboard(): number {
+		// The clipboard is a door out of this controller too, and a slower
+		// one: synthetic ink copied here survives calibration being switched
+		// back off, and the next paste is an `add` of it into a real document
+		// through a boundary that has no way left to tell it apart. Cut goes
+		// through here as well, so this covers both.
+		if (this.syntheticSources()) return 0;
 		const id = this.documentId();
 		if (!id || this.selected.length === 0) return 0;
 		const chosen = new Set(this.selected);
@@ -2486,9 +2596,11 @@ export class PdfInkController {
 		this.notify(n === 1 ? "Handwriting: pasted 1 stroke" : `Handwriting: pasted ${n} strokes`);
 	}
 
-	private emit(op: InkOp): void {
-		this.apply(op);
-		this.history.record(op);
+	/** Apply an op, remember it for undo, and repaint. False means refused. */
+	private emit(op: InkOp): boolean {
+		if (!this.apply(op)) return false;
+		this.recordOp(op);
+		return true;
 	}
 
 	/** The viewer geometry, re-read only when it can have changed. */
@@ -2833,6 +2945,12 @@ export class PdfInkController {
 			// the live stroke is drawn one way and redrawn another at pen-up,
 			// and the ends visibly pull back as the taper appears (hardware,
 			// 2026-08-29).
+			//
+			// The resting state only. This pair outlives every stroke drawn on
+			// it, and the device is not a property of the pair, so `penDown`
+			// rewrites this per stroke from `mouseStroke` - the same split the
+			// note surface has (InkOverlay.ts, construction then pen-down).
+			// Do not read this line as the whole answer.
 			wet.shape = true;
 			pair = { wetCanvas, headCanvas, wet, tail };
 			this.pair = pair;

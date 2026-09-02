@@ -1,6 +1,6 @@
 {
 	"name": "handwriting",
-	"version": "1.4.6",
+	"version": "1.4.7",
 	"description": "Handwrite, highlight, erase and lasso on your notes and PDFs. Your notes stay Markdown.",
 	"main": "main.js",
 	"private": true,

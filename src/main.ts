@@ -493,7 +493,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				},
 				// The one write at the end of a gesture whose ops were applied
 				// live. The controller decides when; the store decides how.
-				(id) => this.pdfStore.save(id)
+				(id) => this.pdfStore.save(id),
+				// Both sources above are substituted under calibration, so the
+				// document the controller reads is made up and nothing it works
+				// out from it may be written. Set HERE, next to the
+				// substitution, so a third synthetic source is one line from
+				// being covered instead of one id prefix from being missed.
+				() => this.pdfCalibration
 			);
 			controller.mount();
 			this.pdfInk.set(root, controller);
@@ -2216,6 +2222,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			)
 		);
 		this.app.workspace.onLayoutReady(() => {
+			if (this.unloaded) return;
 			runDetached(
 				this.maybeSwapView(this.app.workspace.getActiveFile()),
 				"switch the active marked note to its canvas view"

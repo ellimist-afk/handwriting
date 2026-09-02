@@ -238,10 +238,87 @@ export class WetInkRenderer {
 	 * perfect; only the guess was drawn wrong.
 	 */
 	liveWidthPx(cam: CameraState, style: PenStyle, pressure: number): number {
-		const world = this.shapingThisStroke
-			? this.shaper.last() * 2
-			: widthForPressure(style, pressure);
-		return world * cam.zoom;
+		return this.liveHalfWidth(style, pressure) * 2 * cam.zoom;
+	}
+
+	/**
+	 * The same width the ribbon is laying down right now, as a WORLD
+	 * half-width - which is what a ribbon point's `hw` is and what
+	 * TailRenderer.drawHead needs.
+	 *
+	 * It exists so no caller has to convert. `liveWidthPx` is a FULL width in
+	 * css px, so getting a head width out of it means `/ cam.zoom / 2`, and
+	 * dropping the `/ 2` ships a head at twice the ribbon - the exact error
+	 * the first draft of this fix's design made. Six call sites is six
+	 * chances to make it; here there is one place to get it right.
+	 *
+	 * The branch is `liveWidthPx`'s, not a simplification of it. On the
+	 * shaped branch `shaper.last()` IS a world half-width and needs no
+	 * arithmetic at all. On the other branch it must NOT be read: the shaper
+	 * is only `reset` when `shapingThisStroke` (beginStroke, above), so off
+	 * that branch it still holds whatever the last shaped stroke left in it.
+	 * There the width comes from pressure and the `/ 2` is real.
+	 *
+	 * The shaped branch carries all three of the ribbon's factors: velocity
+	 * thinning, the start taper, and the SMOOTHED pressure `pHat` rather than
+	 * the raw sample. Taking pHat costs the head a few ms of pressure lag,
+	 * and the head exists to be lag-free, so that is a real cost. It is paid
+	 * deliberately: the head is a separate canvas layer over the ribbon, so a
+	 * head that matches on two factors out of three still draws a visible
+	 * step at the join - which is the defect. Matching all three is the only
+	 * way the seam goes away, and a few ms of pressure lag is invisible
+	 * beside it.
+	 *
+	 * SHAPING off and SMOOTHING off are different switches and have to be
+	 * stated separately; conflating them is how the design first read this.
+	 *
+	 * Shaping off with smoothing on is an ordinary, shipped state - every
+	 * MOUSE stroke (the overlay clears `shape` per stroke) and every
+	 * highlighter (`centerlineSmoothed` returns true for a flat tool
+	 * whatever the switch says). `head()` fires, this takes the pressure
+	 * branch, and the head gets bit for bit the width it computed before this
+	 * accessor existed. Genuinely unchanged.
+	 *
+	 * Smoothing off - Boox mode, which forces the switch off - is different.
+	 * `head()` gates on smoothing and returns undefined, so the five gated
+	 * head sites go dark and there is nothing there to change. But the
+	 * pen-down dot is NOT gated on `head()`: it still draws, so it still
+	 * moves, by the floor in `contactHalfWidth` below. That is the one
+	 * visible change on the raw path and it is the ruled one.
+	 */
+	liveHalfWidth(style: PenStyle, pressure: number): number {
+		return this.shapingThisStroke
+			? this.shaper.last()
+			: widthForPressure(style, pressure) / 2;
+	}
+
+	/**
+	 * The pen-down dot's world half-width: the shaped width, floored at the
+	 * nib.
+	 *
+	 * The contact dot is the one head draw that is NOT gated on `head()`, and
+	 * at pen-down the shaper has just reset to the tip floor - 12% of
+	 * nominal - while the wet layer has painted nothing at all. So for a TAP
+	 * this dot is the entire visible mark, and handing it the bare shaped
+	 * width renders a tap at 12% of the nib: the near-invisible sliver that
+	 * `applyEndTaper`'s `total < style.baseWidth` guard exists to prevent on
+	 * the committed path. That guard's mechanism cannot be reused here - it
+	 * is a whole-stroke length test, and at pen-down there is no stroke - but
+	 * its intent is this line.
+	 *
+	 * The floor is the nib's own base width (Alan, 2026-09-02): a tap should
+	 * look like the nib, not like the start of a stroke. `baseWidth` is a
+	 * FULL width, so the floor on a half-width is `baseWidth / 2`; flooring
+	 * at `baseWidth` itself would draw every tap at twice the nib.
+	 *
+	 * Note what this means in practice, since it is a behaviour change and
+	 * not only a guard: `widthForPressure` never exceeds `baseWidth`, and the
+	 * shaped width multiplies that by two factors that are both <= 1, so the
+	 * floor always wins here. A tap draws at exactly the nib whatever the
+	 * pressure sample says. That is the ruling, stated plainly.
+	 */
+	contactHalfWidth(style: PenStyle, pressure: number): number {
+		return Math.max(this.liveHalfWidth(style, pressure), style.baseWidth / 2);
 	}
 
 	/**

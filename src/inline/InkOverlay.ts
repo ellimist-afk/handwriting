@@ -701,6 +701,27 @@ export class InkOverlayPlugin {
 	// mid-stroke ratchet of the learned device max cannot kink the width.
 	private strokeGain = 1;
 	private strokeRawMax = 0;
+	/**
+	 * The pressure the wet ribbon was last handed, recorded at the moment it
+	 * was handed over - the GAINED value, which is what a builder point
+	 * carries.
+	 *
+	 * The predicted tail reads this instead of the newest raw sample so the
+	 * guess ahead of the nib and the ribbon behind it are sized from one
+	 * input (C21). Recorded rather than re-derived because `gainedPressure`
+	 * is not pure: it feeds `strokeRawMax`, the stroke's running raw maximum,
+	 * and calling it again at the tail site would mean the gain's own
+	 * evidence came partly from a place that lays down no ink.
+	 *
+	 * Recording is also the only ANSWER available, not merely the safe one.
+	 * The tail runs on the newest sample and the builder's dedupe may have
+	 * refused it, in which case the ribbon's tip is still the sample before -
+	 * so re-gaining the newest one would name a pressure the ribbon never
+	 * drew with. A number, not the point: `StrokeBuilder.add` writes the
+	 * newest pressure onto the retained point when it rejects a sample, so a
+	 * reference here would drift off what was actually painted.
+	 */
+	private ribbonPressure = 0;
 	private strokePenGesture = false;
 	// Raw-layer dwell tracking: the last time the pen actually MOVED. The
 	// builder filters stationary samples out of the stroke, so the hold
@@ -2064,16 +2085,23 @@ export class InkOverlayPlugin {
 			// the layer's `shape` made every MOUSE stroke look flat, so mouse
 			// ink drew smoothed and committed raw whenever the setting was
 			// off - the case the line above exists to protect.
+			this.ribbonPressure = point.pressure;
 			this.activeWet.beginStroke(point, this.activeStyle, tool === "highlighter");
 			// A tap that never moves produces no rawupdate, so without this the
 			// dot only appears at pen-up. Draw the contact point immediately.
+			//
+			// This is the ONE head draw that is not gated on `head()`, so for
+			// a tap it is the whole visible mark - which is why it asks for
+			// `contactHalfWidth` and not the bare live width. The floor lives
+			// in there; nothing about it is computed here.
 			this.tail.clear();
 			this.tail.drawHead(
 				this.camera.snapshot,
 				this.activeStyle,
 				{ x: point.x, y: point.y },
 				{ x: point.x, y: point.y },
-				point.pressure
+				point.pressure,
+				this.activeWet.contactHalfWidth(this.activeStyle, point.pressure)
 			);
 			this.probeSample(sample, ev, point, 1, true, "down");
 		}
@@ -2122,6 +2150,7 @@ export class InkOverlayPlugin {
 				s.tiltY
 			);
 			if (point) {
+				this.ribbonPressure = point.pressure;
 				this.activeWet.appendPoint(cam, this.activeStyle, point);
 				lastAccepted = point;
 				accepted++;
@@ -2132,10 +2161,21 @@ export class InkOverlayPlugin {
 		metrics.recordAccepted(accepted);
 		metrics.recordDraw(drawEnd - drawStart, drawEnd - newestTs);
 
-		// Live raw head, exactly as the approved pipeline draws it.
+		// Live raw head, exactly as the approved pipeline draws it - and at
+		// the width the ribbon under it is being laid down at, which the wet
+		// layer reports rather than the head guessing from raw pressure.
 		this.tail.clear();
 		const head = this.activeWet.head();
-		if (head) this.tail.drawHead(cam, this.activeStyle, head.from, head.to, head.pressure);
+		if (head) {
+			this.tail.drawHead(
+				cam,
+				this.activeStyle,
+				head.from,
+				head.to,
+				head.pressure,
+				this.activeWet.liveHalfWidth(this.activeStyle, head.pressure)
+			);
+		}
 		// The predicted tail goes on the same canvas, after the head, so the
 		// one `clear()` above erases both: its dirty rect covers whatever was
 		// drawn last event, whether that was real or a guess.
@@ -2208,7 +2248,14 @@ export class InkOverlayPlugin {
 			// The width the ribbon is actually laying down, not one derived
 			// from raw pressure: with shaping on those differ by a lot at
 			// speed, and the tail was drawing the fatter of the two.
-			this.activeWet.liveWidthPx(cam, this.activeStyle, newest.pressure)
+			//
+			// `ribbonPressure`, not `newest.pressure`: the ribbon is fed
+			// `gainedPressure`, so raw pressure is an input it never saw and
+			// the two disagree wherever the gain is not 1. The argument is
+			// dead on the shaped branch - `liveHalfWidth` returns
+			// `shaper.last()` there - so what this corrects is the UNSHAPED
+			// branch: every mouse stroke and every highlighter.
+			this.activeWet.liveWidthPx(cam, this.activeStyle, this.ribbonPressure)
 		);
 	}
 
@@ -2407,6 +2454,18 @@ export class InkOverlayPlugin {
 		handoffFinishedStroke({
 			store: () => {
 				inlineInk.commitGesture(path, strokes);
+				// The index has to hear about the stroke, and the commit is
+				// the one mutation that reaches this view's store without
+				// passing through scheduleRepaint's full-repaint branch: it
+				// paints straight onto the committed canvas below, and
+				// repaintPath is every pane EXCEPT this one. Left unsaid,
+				// eraseCandidates kept answering from an index that predates
+				// the stroke, so eraseAt returned early on an empty hit list -
+				// ink present at open erased, ink drawn since did not,
+				// silently (user report, Android 1.4.6; not a 1.4.6
+				// regression). Set beside the store call rather than after the
+				// handoff so the mutation and its invalidation cannot drift.
+				this.indexDirty = true;
 				this.updateHandwritingPageClass();
 			},
 			// Paint underneath the still-visible wet layer. Long strokes can
@@ -3453,7 +3512,16 @@ export class InkOverlayPlugin {
 		// and the head is the lag-free tip: erasing it until the next pointer
 		// event is a blink at exactly the place the eye is resting.
 		const head = this.builder ? this.activeWet.head() : undefined;
-		if (head) this.tail.drawHead(cam, this.activeStyle, head.from, head.to, head.pressure);
+		if (head) {
+			this.tail.drawHead(
+				cam,
+				this.activeStyle,
+				head.from,
+				head.to,
+				head.pressure,
+				this.activeWet.liveHalfWidth(this.activeStyle, head.pressure)
+			);
+		}
 	}
 
 	private resetGestureState(): void {

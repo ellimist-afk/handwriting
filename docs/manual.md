@@ -273,10 +273,12 @@ private reporting path.
 
 ## license details
 
-Handwriting is free and open source, under CC BY-NC-ND 4.0. Use it and share
-it, with attribution, for anything noncommercial, including your own work you
-get paid for. You may not sell it, use it commercially, or distribute a
-modified version. For any of those, ask. The full text is in
+Handwriting is free, under CC BY-NC-ND 4.0. Source code is available here:
+[github.com/ellimist-afk/handwriting](https://github.com/ellimist-afk/handwriting)
+
+Use it and share it, with attribution, for anything noncommercial, including
+your own work you get paid for. You may not sell it, use it commercially, or
+distribute a modified version. For any of those, ask. The full text is in
 [LICENSE](../LICENSE).
 
 Releases up to and including 1.3.8 went out under `AGPL-3.0-only`, and
