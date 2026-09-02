@@ -225,9 +225,9 @@ land in the same millisecond. Nothing in `.handwriting/trash/` is ever
 overwritten, so repeated deletions keep every generation. A sidecar that is
 provably empty is deleted rather than adding a useless generation.
 
-**Handwriting never empties that folder.** It only grows. Delete old files
-yourself if you want the space back; nothing outside the folder refers to
-them.
+**Handwriting never empties that folder.** It only grows. You can clear out
+that folder to get the space back. However, delete those files and your ink
+will be gone. So don't do it unless you know what you're doing.
 
 ## what to back up
 
