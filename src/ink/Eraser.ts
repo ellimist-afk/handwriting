@@ -21,6 +21,19 @@ export function bboxHitsCircle(box: BBox, cx: number, cy: number, r: number): bo
 	return dx * dx + dy * dy <= r * r;
 }
 
+/**
+ * The eraser circle's bounding box (design doc §5 C1, 2026-09-02).
+ *
+ * One line, but the note surface now feeds it to StrokeIndex.query to get
+ * erase candidates instead of scanning the whole note on every pointer
+ * sample, and the rect must CONTAIN the circle or the query silently drops
+ * strokes the flat scan would have hit. Written once, here, beside the
+ * circle tests it has to agree with.
+ */
+export function eraserRect(cx: number, cy: number, r: number): BBox {
+	return { x: cx - r, y: cy - r, width: r * 2, height: r * 2 };
+}
+
 /** Squared distance from a point to segment AB. */
 export function pointSegmentDistSq(
 	px: number,

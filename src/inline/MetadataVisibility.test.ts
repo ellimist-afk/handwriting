@@ -4,6 +4,7 @@ import {
 	frontmatterPropertyKeys,
 	ID_ONLY_METADATA_CLASS,
 	clearMetadataVisibility,
+	isMetadataMutation,
 	updateMetadataVisibility,
 } from "./MetadataVisibility";
 
@@ -110,5 +111,90 @@ describe("frontmatterPropertyKeys", () => {
 	it("returns null when there is no frontmatter or the fence never closes", () => {
 		expect(frontmatterPropertyKeys("ordinary text")).toBeNull();
 		expect(frontmatterPropertyKeys("---\nhandwriting-page-id: x\ntruncated")).toBeNull();
+	});
+});
+
+// Minimal stand-ins for the two node kinds the gate distinguishes. Only the
+// members isMetadataMutation reads are present, which is also the point: the
+// predicate must not need a real DOM to be reasoned about.
+function element(opts: { inContainer?: boolean; isContainer?: boolean; holds?: boolean }): Node {
+	return {
+		nodeType: 1,
+		closest: (sel: string) =>
+			sel === ".metadata-container" && (opts.inContainer || opts.isContainer) ? {} : null,
+		matches: (sel: string) => sel === ".metadata-container" && !!opts.isContainer,
+		querySelector: (sel: string) => (sel === ".metadata-container" && opts.holds ? {} : null),
+	} as unknown as Node;
+}
+
+function textNode(parent: Node | null): Node {
+	return { nodeType: 3, parentElement: parent } as unknown as Node;
+}
+
+function record(r: {
+	target: Node;
+	added?: Node[];
+	removed?: Node[];
+}): MutationRecord {
+	return {
+		target: r.target,
+		addedNodes: r.added ?? [],
+		removedNodes: r.removed ?? [],
+	} as unknown as MutationRecord;
+}
+
+describe("isMetadataMutation", () => {
+	it("passes a mutation whose target is inside a Properties block", () => {
+		// A property row's key changing: an attribute record on the row.
+		expect(isMetadataMutation(record({ target: element({ inContainer: true }) }))).toBe(true);
+	});
+
+	it("passes a mutation whose target IS the Properties block", () => {
+		expect(isMetadataMutation(record({ target: element({ isContainer: true }) }))).toBe(true);
+	});
+
+	it("skips a mutation outside every Properties block", () => {
+		// Typing in the body: CodeMirror recycling line DOM, every keystroke.
+		expect(isMetadataMutation(record({ target: element({}) }))).toBe(false);
+	});
+
+	it("passes a text-node target whose parent is inside a block", () => {
+		const target = textNode(element({ inContainer: true }));
+		expect(isMetadataMutation(record({ target }))).toBe(true);
+	});
+
+	it("skips a text-node target with no parent element at all", () => {
+		expect(isMetadataMutation(record({ target: textNode(null) }))).toBe(false);
+	});
+
+	it("passes the container being added, whose target is outside it", () => {
+		// The properties panel appearing. closest() cannot see this one.
+		const rec = record({
+			target: element({}),
+			added: [element({ isContainer: true })],
+		});
+		expect(isMetadataMutation(rec)).toBe(true);
+	});
+
+	it("passes a wrapper being added that merely holds a container", () => {
+		const rec = record({ target: element({}), added: [element({ holds: true })] });
+		expect(isMetadataMutation(rec)).toBe(true);
+	});
+
+	it("passes the container being removed, whose target is its old parent", () => {
+		const rec = record({
+			target: element({}),
+			removed: [element({ isContainer: true })],
+		});
+		expect(isMetadataMutation(rec)).toBe(true);
+	});
+
+	it("skips added and removed nodes that are neither container nor text", () => {
+		const rec = record({
+			target: element({}),
+			added: [textNode(null), element({})],
+			removed: [element({})],
+		});
+		expect(isMetadataMutation(rec)).toBe(false);
 	});
 });

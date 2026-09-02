@@ -73,6 +73,67 @@ export const EINK_CAPS: PredictionCaps = {
 	minSpeedPxPerMs: 0.02,
 };
 
+/**
+ * Digitizer and panel latency, which age@present cannot see.
+ *
+ * age@present measures from the sample's own timestamp to a frame going out,
+ * so it covers this plugin's path and nothing before or after it: the pen
+ * reporting, the OS delivering, and the display lighting the pixel all sit
+ * outside it. DEFAULT_CAPS aims 12ms into a measured 7ms for exactly that
+ * reason. 5ms is that gap, kept as one number rather than a multiplier so it
+ * does not grow on machines that are already slow - a slow path does not
+ * imply a slow digitizer.
+ */
+const UNSEEN_LATENCY_MS = 5;
+
+/**
+ * The band the adaptive horizon may move in.
+ *
+ * The floor is the shipped desktop horizon: adaptation may lengthen the reach
+ * on a machine that needs it, never shorten it below what already ships.
+ * The ceiling is the e-ink horizon, which was chosen against a real NoteAir
+ * trace to stay under the median delivery gap; nothing measured has justified
+ * predicting further than that, and past it a wrong guess gets big enough to
+ * see being erased.
+ */
+const MIN_ADAPTIVE_HORIZON_MS = DEFAULT_CAPS.maxHorizonMs;
+const MAX_ADAPTIVE_HORIZON_MS = EINK_CAPS.maxHorizonMs;
+
+/**
+ * Distance ceiling as a function of the horizon. The two hand-tuned points
+ * are 10px at 12ms and 24px at 48ms; 0.5px/ms clamped to that range passes
+ * through both, so a machine at either end gets the caps that were actually
+ * validated on hardware, and one in between gets the line joining them.
+ */
+const DIST_PX_PER_MS = 0.5;
+
+/**
+ * Caps sized from this machine's own measured presentation lag.
+ *
+ * The wrongness guards - turn and speed - are NOT touched. The horizon is
+ * how far ahead a guess reaches; those two are what stop a wrong guess from
+ * ever being drawn, and they were tuned against handwriting, not against
+ * hardware. Only the reach adapts.
+ *
+ * `undefined` (still warming up, or measurement unavailable) returns the
+ * shipped default unchanged: no measurement means no reason to move.
+ */
+export function adaptiveCaps(presentLagMs: number | undefined): PredictionCaps {
+	if (presentLagMs === undefined || !Number.isFinite(presentLagMs)) return DEFAULT_CAPS;
+	const horizon = clamp(
+		presentLagMs + UNSEEN_LATENCY_MS,
+		MIN_ADAPTIVE_HORIZON_MS,
+		MAX_ADAPTIVE_HORIZON_MS
+	);
+	const dist = clamp(horizon * DIST_PX_PER_MS, DEFAULT_CAPS.maxDistPx, EINK_CAPS.maxDistPx);
+	return {
+		maxHorizonMs: horizon,
+		maxDistPx: dist,
+		maxTurnDeg: DEFAULT_CAPS.maxTurnDeg,
+		minSpeedPxPerMs: DEFAULT_CAPS.minSpeedPxPerMs,
+	};
+}
+
 export interface PredictionResult {
 	/** Tail points to draw after the last real sample, in order. Never persisted. */
 	points: PenSample[];

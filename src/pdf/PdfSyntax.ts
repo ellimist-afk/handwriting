@@ -85,6 +85,18 @@ export function sourceOf(input: string | Uint8Array): Source {
 const WINDOW = 8192;
 
 /**
+ * A hard ceiling on cross-reference rows, in both readers.
+ *
+ * Neither reader capped rows before this (audit-fixes-design.md s3 A1,
+ * 2026-09-02): the stream reader's loop was bounded only by the decompressed
+ * length, and `MAX_INFLATE` (`Flate.ts`) allows a 64 MB stream from a tiny
+ * compressed input - with `/W [1 0 0]` that is 64 million rows and 64
+ * million Map entries. A real PDF with two million objects is already a
+ * 2 GB file, so nothing this plugin opens is near the cap.
+ */
+export const MAX_XREF_ROWS = 2_000_000;
+
+/**
  * Read at `from`, widening until what is being read fits.
  *
  * `read` returns null to ask for more room and a wrapped value - which may
@@ -291,6 +303,15 @@ export interface PdfDoc extends Source {
 	rootNum: number;
 	/** The trailer's `/ID` as written, so an update can repeat it. */
 	trailerId: string | null;
+	/**
+	 * The trailer's `/Info` reference as written, so an update can repeat it.
+	 *
+	 * PDF 32000-1 s7.5.6: an incremental update's trailer carries forward the
+	 * keys of the previous trailer that still apply. Without this, a
+	 * flattened copy loses its title, author and dates in every reader
+	 * (audit-fixes-design.md s3 A2, 2026-09-02).
+	 */
+	infoRef: string | null;
 	/** Where the newest table starts, which becomes our update's `/Prev`. */
 	startxref: number;
 	/**
@@ -423,12 +444,19 @@ function readXrefStream(src: Source, at: number): PdfRead<XrefSection> {
 	const w = numbersIn(d.get("/W") ?? "");
 	if (w.length < 3) return { ok: false, reason: "the cross-reference stream declares no widths" };
 	const size = Number(d.get("/Size") ?? 0);
+	// /Size seeds the default /Index ([0, size]) when the table declares none -
+	// the same row-count attack as a huge /Index, one fewer step (design doc
+	// s3 A1).
+	if (!d.has("/Index") && size > MAX_XREF_ROWS) {
+		return { ok: false, reason: `the cross-reference stream declares more than ${MAX_XREF_ROWS} rows` };
+	}
 	const index = d.has("/Index") ? numbersIn(d.get("/Index")!) : [0, size];
 	const width = w[0]! + w[1]! + w[2]!;
 	if (width <= 0) return { ok: false, reason: "the cross-reference stream declares no widths" };
 	const offsets = new Map<number, number>();
 	const packed = new Map<number, Packed>();
 	let p = 0;
+	let rows = 0;
 	const field = (bytes: number): number => {
 		let v = 0;
 		for (let b = 0; b < bytes; b++) v = v * 256 + data[p++]!;
@@ -437,6 +465,12 @@ function readXrefStream(src: Source, at: number): PdfRead<XrefSection> {
 	for (let sub = 0; sub + 1 < index.length; sub += 2) {
 		let n = index[sub]!;
 		for (let k = 0; k < index[sub + 1]!; k++, n++) {
+			// Counted across every subsection, before the row is read: a table
+			// split into many small subsections is still one table (design doc
+			// s3 A1).
+			if (rows++ >= MAX_XREF_ROWS) {
+				return { ok: false, reason: `the cross-reference stream declares more than ${MAX_XREF_ROWS} rows` };
+			}
 			if (p + width > data.length) {
 				return { ok: false, reason: "the cross-reference stream ends mid-row" };
 			}
@@ -458,6 +492,7 @@ function readXrefSection(src: Source, at: number): PdfRead<XrefSection> {
 		i += 4;
 		const offsets = new Map<number, number>();
 		const packed = new Map<number, Packed>();
+		let rows = 0;
 		for (;;) {
 			i = skipWs(text, i);
 			// Room for the longest thing that can be read next - a subsection
@@ -482,6 +517,14 @@ function readXrefSection(src: Source, at: number): PdfRead<XrefSection> {
 			}
 			i = skipWs(text, i + head[0].length);
 			for (let k = 0; k < count; k++) {
+				// Counted across every subsection, same cap and reasoning as the
+				// stream reader (design doc s3 A1): a classic table split into many
+				// small subsections is still one table.
+				if (rows++ >= MAX_XREF_ROWS) {
+					return {
+						value: { ok: false, reason: `the cross-reference table declares more than ${MAX_XREF_ROWS} rows` },
+					};
+				}
 				if (i + 32 > text.length && !atEof) return null;
 				const entry = /^(\d{1,10})\s+(\d{1,5})\s+([nf])/.exec(text.slice(i, i + 32));
 				if (!entry) {
@@ -531,6 +574,7 @@ export function readPdf(input: string | Uint8Array): PdfRead<PdfDoc> {
 	let size = 0;
 	let rootNum = -1;
 	let trailerId: string | null = null;
+	let infoRef: string | null = null;
 	let streamed = false;
 	let at: number | null = first;
 	// Newest wins, so an object already placed is never replaced by an older
@@ -556,6 +600,7 @@ export function readPdf(input: string | Uint8Array): PdfRead<PdfDoc> {
 		if (rootNum < 0) rootNum = asRef(trailer.get("/Root")) ?? -1;
 		if (size === 0) size = Number(trailer.get("/Size") ?? 0);
 		if (trailerId === null) trailerId = trailer.get("/ID") ?? null;
+		if (infoRef === null) infoRef = trailer.get("/Info") ?? null;
 		if (at === first) streamed = section.value.streamed;
 		// A hybrid file keeps its packed objects in a stream beside the table,
 		// for the sake of readers that only know the table. We know both, and
@@ -581,6 +626,7 @@ export function readPdf(input: string | Uint8Array): PdfRead<PdfDoc> {
 			size,
 			rootNum,
 			trailerId,
+			infoRef,
 			startxref: first,
 			streamed,
 			unpacked: new Map(),

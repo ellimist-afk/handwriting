@@ -210,13 +210,23 @@ export function inflate(data: Uint8Array, limit = MAX_INFLATE): Uint8Array | nul
 		r.at = 16;
 	}
 
-	let out = new Uint8Array(Math.max(1024, data.length * 5));
+	// The guess is 5x the compressed length, which is a reasonable ratio for
+	// PDF content streams - but it was taken BEFORE the limit was consulted,
+	// so a stream that merely CLAIMS to be large made this allocate five
+	// times that much on the spot, whatever `limit` said. The limit is the
+	// ceiling on the whole operation, so it is the ceiling on the first
+	// allocation too; `ensure` grows from here and enforces it properly.
+	let out = new Uint8Array(Math.min(limit, Math.max(1024, data.length * 5)));
 	let len = 0;
 	const ensure = (need: number): boolean => {
 		if (len + need > limit) return false;
 		if (len + need <= out.length) return true;
 		let size = out.length * 2;
 		while (size < len + need) size *= 2;
+		// Doubling overshoots: from just under the limit it asks for twice
+		// it. The check above already proved len + need fits, so clamping
+		// cannot make the buffer too small.
+		size = Math.min(size, limit);
 		const bigger = new Uint8Array(size);
 		bigger.set(out.subarray(0, len));
 		out = bigger;

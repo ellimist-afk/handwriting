@@ -3,6 +3,8 @@ import {
 	DEFAULT_INK_FOLDER,
 	FolderChangeSteps,
 	MigrationAdapter,
+	SYNCED_INK_FOLDER,
+	adoptInkFolder,
 	changeFolder,
 	ensureFolder,
 	baseName,
@@ -65,14 +67,19 @@ describe("isSidecarFile / baseName", () => {
 		// Recovery copies travel with the pages: they are what someone
 		// reaches for after an accident, and orphaning them in a hidden
 		// folder the user thinks they moved out of is how they get lost.
-		expect(isSidecarFile("abc.damaged-123")).toBe(true);
-		expect(isSidecarFile("abc.conflict-1700000000")).toBe(true);
+		// These are the three REAL shapes PageStore.ts ever writes
+		// (freeDamagedPath, freeConflictPath) - always ending in ".json",
+		// which is why isSidecarFile needs no clause beyond the plain one
+		// (audit-fixes-design.md 5i I3).
+		expect(isSidecarFile("abc.damaged-1700000000.json")).toBe(true);
+		expect(isSidecarFile("abc.conflict-1700000000.json")).toBe(true);
+		expect(isSidecarFile("abc.conflict-1700000000-2.json")).toBe(true);
 	});
 
 	it("claims nothing that is not ours", () => {
 		expect(isSidecarFile("notes.md")).toBe(false);
 		expect(isSidecarFile("README")).toBe(false);
-		expect(isSidecarFile("abc.damaged-notanumber")).toBe(false);
+		expect(isSidecarFile("foo.txt")).toBe(false);
 	});
 
 	it("takes the last segment of a path", () => {
@@ -137,17 +144,20 @@ describe("migrateInkFolder", () => {
 	});
 
 	it("leaves files it does not own alone, and takes the ones it does", async () => {
+		// old.damaged-99.json: the real shape PageStore.ts writes
+		// (freeDamagedPath) - see the isSidecarFile tests above for why
+		// there is no shape without the ".json" (5i I3).
 		const { adapter, renames } = fakeAdapter([
 			".handwriting/a.json",
 			".handwriting/README.md",
-			".handwriting/old.damaged-99",
+			".handwriting/old.damaged-99.json",
 		]);
 		const r = await migrateInkFolder(adapter, ".handwriting", "handwriting");
 		expect(r.moved).toBe(2);
 		expect(renames).toContainEqual([".handwriting/a.json", "handwriting/a.json"]);
 		expect(renames).toContainEqual([
-			".handwriting/old.damaged-99",
-			"handwriting/old.damaged-99",
+			".handwriting/old.damaged-99.json",
+			"handwriting/old.damaged-99.json",
 		]);
 		expect(renames.flat()).not.toContain(".handwriting/README.md");
 	});
@@ -306,5 +316,35 @@ describe("ensureFolder raced by a concurrent creator", () => {
 		releaseExists();
 		await expect(Promise.all([a, b])).resolves.toBeDefined();
 		expect(dirs.has(".handwriting")).toBe(true);
+	});
+});
+
+describe("adoptInkFolder (no data.json to ask)", () => {
+	// The folder choice lives only in data.json, which Obsidian Sync does
+	// not carry unless plugin settings are on. Without this, the second
+	// device in a compatibility vault starts on .handwriting, reads none of
+	// the ink sitting in handwriting/, and forks a second sidecar per page.
+	const fs = (...present: string[]) => ({
+		exists: async (p: string) => present.includes(p),
+	});
+
+	it("takes the synced folder when that is the one with ink in it", async () => {
+		expect(await adoptInkFolder(fs(SYNCED_INK_FOLDER))).toBe(SYNCED_INK_FOLDER);
+	});
+
+	it("takes the default when that is the one that exists", async () => {
+		expect(await adoptInkFolder(fs(DEFAULT_INK_FOLDER))).toBe(DEFAULT_INK_FOLDER);
+	});
+
+	it("takes the default in a vault with neither - a genuinely new install", async () => {
+		expect(await adoptInkFolder(fs())).toBe(DEFAULT_INK_FOLDER);
+	});
+
+	it("takes the default when both exist, and leaves the choice to the user", async () => {
+		// Two populated folders is a state somebody has to look at. The read
+		// fallback means neither folder's ink is hidden while they do.
+		expect(await adoptInkFolder(fs(DEFAULT_INK_FOLDER, SYNCED_INK_FOLDER))).toBe(
+			DEFAULT_INK_FOLDER
+		);
 	});
 });

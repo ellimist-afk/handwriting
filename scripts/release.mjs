@@ -22,8 +22,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const EXPECT_VERSION = "1.4.4";
-const EXPECT_MIN_APP = "1.12.3";
 const ASSETS = ["main.js", "manifest.json", "styles.css"];
 
 /**
@@ -116,22 +114,48 @@ const manifest = JSON.parse(manifestBytes.toString("utf8"));
 const pkg = JSON.parse(blobAt(commit, "package.json", root).toString("utf8"));
 const versions = JSON.parse(blobAt(commit, "versions.json", root).toString("utf8"));
 
+// The version is what the COMMIT says it is. There used to be two
+// hand-edited constants here that every version bump had to remember, and
+// forgetting is what aborted the 1.4.2 provenance job: the tag was pushed,
+// CI ran the packager, and the packager refused the very commit it was
+// handed because a string in this file still named the release before it.
+// A packager that can disagree with its own manifest about which release
+// this is has no business being the thing that decides.
+//
+// What is still checked is AGREEMENT, which is the real failure (RC3:
+// main.js from one commit, manifest.json from another), plus the shape of
+// the version itself, so a corrupt manifest cannot make every comparison
+// below trivially true.
+const version = manifest.version;
+const minApp = manifest.minAppVersion;
 require_(
-	manifest.version === EXPECT_VERSION,
-	`manifest.json version is "${manifest.version}", expected "${EXPECT_VERSION}"`
+	typeof version === "string" && /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version),
+	`manifest.json version is not a version: ${JSON.stringify(version)}`
 );
 require_(
-	pkg.version === EXPECT_VERSION,
-	`package.json version is "${pkg.version}", expected "${EXPECT_VERSION}"`
+	typeof minApp === "string" && /^\d+\.\d+\.\d+$/.test(minApp),
+	`manifest.json minAppVersion is not a version: ${JSON.stringify(minApp)}`
 );
 require_(
-	manifest.minAppVersion === EXPECT_MIN_APP,
-	`manifest.json minAppVersion is "${manifest.minAppVersion}", expected "${EXPECT_MIN_APP}"`
+	pkg.version === version,
+	`package.json version is "${pkg.version}", manifest.json says "${version}"`
 );
 require_(
-	versions[EXPECT_VERSION] === EXPECT_MIN_APP,
-	`versions.json maps ${EXPECT_VERSION} to "${versions[EXPECT_VERSION]}", expected "${EXPECT_MIN_APP}"`
+	versions[version] === minApp,
+	`versions.json maps ${version} to "${versions[version]}", manifest.json's minAppVersion is "${minApp}"`
 );
+
+// On a tag build, the tag is the one claim about this release that does NOT
+// come from the commit - so it is the one worth checking against it. The
+// repo's tags carry a leading "v" and sometimes a label (v0.12.8-probe), so
+// the version is the tag's prefix rather than the whole of it.
+if (process.env.GITHUB_REF_TYPE === "tag" && process.env.GITHUB_REF_NAME) {
+	const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "");
+	require_(
+		tag === version || tag.startsWith(`${version}-`),
+		`this build is tagged ${process.env.GITHUB_REF_NAME}, but the commit packages ${version}`
+	);
+}
 
 const css = stylesBytes.toString("utf8");
 for (const [fragment, why] of REQUIRED_CSS) {
@@ -157,7 +181,7 @@ const builtMarker = Date.now();
 const staleBundle = path.join(root, "main.js");
 fs.rmSync(staleBundle, { force: true });
 
-console.log(`building ${EXPECT_VERSION} from ${commit.slice(0, 12)} (${branch})…`);
+console.log(`building ${version} from ${commit.slice(0, 12)} (${branch})…`);
 execFileSync("node", ["esbuild.config.mjs", "production"], { cwd: root, stdio: "inherit" });
 
 if (!fs.existsSync(staleBundle) || fs.statSync(staleBundle).mtimeMs < builtMarker) {

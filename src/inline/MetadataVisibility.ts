@@ -53,6 +53,48 @@ export function updateMetadataVisibility(
 	}
 }
 
+/** The Properties block Obsidian renders; the only thing above cares about. */
+const METADATA_CONTAINER = ".metadata-container";
+
+/** Element nodes only; a text node answers with the element holding it. */
+function elementFor(node: Node | null): Element | null {
+	if (!node) return null;
+	if (node.nodeType === 1) return node as Element;
+	return node.parentElement;
+}
+
+/** True when any element in the list IS, or contains, a Properties block. */
+function touchesContainer(nodes: ArrayLike<Node>): boolean {
+	for (let i = 0; i < nodes.length; i++) {
+		const node = nodes[i];
+		if (!node || node.nodeType !== 1) continue;
+		const el = node as Element;
+		if (el.matches(METADATA_CONTAINER)) return true;
+		// The panel arrives inside a wrapper on some layouts, so an added
+		// subtree counts as well as an added container.
+		if (el.querySelector(METADATA_CONTAINER)) return true;
+	}
+	return false;
+}
+
+/**
+ * Could this mutation have changed a Properties block?
+ *
+ * The overlay observes the WHOLE `.markdown-source-view` with subtree
+ * childList, because the container does not exist at mount and there is
+ * nothing narrower to watch. CodeMirror recycles line DOM, so that observer
+ * fires on every keystroke and every scroll to answer a question that only
+ * changes when the properties panel does (audit doc §5g/G2). This is the
+ * gate: a record survives when its target is inside or IS a container - the
+ * rows and their `data-property-key` attributes - or when the container
+ * itself is being added or removed, which is the case `closest` cannot see
+ * because a removal's target is the parent, outside the container.
+ */
+export function isMetadataMutation(record: MutationRecord): boolean {
+	if (elementFor(record.target)?.closest(METADATA_CONTAINER)) return true;
+	return touchesContainer(record.addedNodes) || touchesContainer(record.removedNodes);
+}
+
 /** Remove presentation state when the editor overlay is unmounted. */
 export function clearMetadataVisibility(root: ParentNode): void {
 	for (const container of root.querySelectorAll<HTMLElement>(".metadata-container")) {

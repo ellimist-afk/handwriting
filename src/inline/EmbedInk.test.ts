@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { embedInkExtent, embedInkMarker, embedInkNeedsPaint, embedInkScale } from "./EmbedInk";
+import {
+	attachEmbedInk,
+	embedInkExtent,
+	embedInkLayerCount,
+	embedInkMarker,
+	embedInkNeedsPaint,
+	embedInkScale,
+	teardownEmbedInk,
+} from "./EmbedInk";
 import { InkStroke } from "../ink/Stroke";
 
 function strokeWithBBox(x: number, y: number, width: number, height: number): InkStroke {
@@ -89,5 +97,83 @@ describe("embedInkNeedsPaint (reading view drops the canvas, keeps the marker)",
 
 	it("paints a root that has never been marked", () => {
 		expect(embedInkNeedsPaint(null, marker, false)).toBe(true);
+	});
+});
+
+/**
+ * Unload takes the layers back out of the DOM (audit, 2026-09-01).
+ *
+ * These layers live in rendered views, hover previews and exported panes -
+ * someone else's tree, which Obsidian does not clean up for us. Disabling the
+ * plugin left the canvas, the marker attribute and the `position: relative`
+ * patch behind on every rendered embed, still showing ink from a plugin that
+ * was no longer running, until each section happened to re-render.
+ *
+ * No jsdom here, so the root is the smallest object the code actually
+ * touches. Zero strokes on purpose: paint() returns before it needs a
+ * canvas context, which keeps the fake to the surface under test.
+ */
+function fakeRoot() {
+	const attrs = new Map<string, string>();
+	const removed: string[] = [];
+	return {
+		removed,
+		attrs,
+		isConnected: true,
+		style: {
+			position: "relative",
+			removeProperty(name: string) {
+				removed.push(`style:${name}`);
+				this.position = "";
+			},
+		},
+		querySelector(sel: string) {
+			if (!sel.includes("canvas") && !sel.includes("svg")) return null;
+			return { remove: () => removed.push(sel.includes("canvas") ? "canvas" : "svg") };
+		},
+		getAttribute: (k: string) => attrs.get(k) ?? null,
+		setAttribute: (k: string, v: string) => void attrs.set(k, v),
+		removeAttribute: (k: string) => void (attrs.delete(k), removed.push(`attr:${k}`)),
+		ownerDocument: {
+			defaultView: { addEventListener() {}, removeEventListener() {} },
+		},
+	};
+}
+
+describe("teardownEmbedInk", () => {
+	it("removes the canvas, the marker and our position patch", () => {
+		const root = fakeRoot();
+		attachEmbedInk(root as unknown as HTMLElement, "note.md", []);
+		expect(embedInkLayerCount()).toBe(1);
+		root.removed.length = 0; // attach's own empty-canvas cleanup is not the subject
+
+		teardownEmbedInk();
+		expect(root.removed).toContain("canvas");
+		expect(root.removed).toContain("svg");
+		expect(root.removed.some((r) => r.startsWith("attr:"))).toBe(true);
+		expect(root.removed).toContain("style:position");
+		expect(embedInkLayerCount()).toBe(0);
+	});
+
+	it("leaves a position the plugin did not set", () => {
+		// `relative` is ours; anything else belonged to the theme or to
+		// Obsidian, and removing it would move somebody else's layout.
+		const root = fakeRoot();
+		root.style.position = "absolute";
+		attachEmbedInk(root as unknown as HTMLElement, "note.md", []);
+		root.removed.length = 0;
+		teardownEmbedInk();
+		expect(root.removed).not.toContain("style:position");
+		expect(root.style.position).toBe("absolute");
+	});
+
+	it("skips roots the DOM already dropped, and still empties the registry", () => {
+		const gone = fakeRoot();
+		gone.isConnected = false;
+		attachEmbedInk(gone as unknown as HTMLElement, "note.md", []);
+		gone.removed.length = 0;
+		teardownEmbedInk();
+		expect(gone.removed).toEqual([]);
+		expect(embedInkLayerCount()).toBe(0);
 	});
 });

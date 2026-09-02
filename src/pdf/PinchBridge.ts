@@ -157,8 +157,12 @@ export class PinchBridge {
 		const pts = this.points(e);
 		if (pts.length !== 2) {
 			// A third finger ends the bridge; whatever the browser makes of
-			// three is not a pinch.
+			// three is not a pinch. The live preview goes with it: nothing
+			// else clears that transform, because onEnd returns the moment
+			// `ids` is null, so the document stayed CSS-scaled with no
+			// gesture left to commit it.
 			this.ids = null;
+			this.clearPreview();
 			return;
 		}
 		this.ids = [pts[0]!.identifier, pts[1]!.identifier];
@@ -212,6 +216,21 @@ export class PinchBridge {
 		}
 	};
 
+	/**
+	 * Drop the CSS preview and report the ratio it was showing.
+	 *
+	 * Separate from commit() because the preview has to come off on every
+	 * way out of a pinch, not just the one that fires a wheel.
+	 */
+	private clearPreview(): number {
+		const content = this.contentEl;
+		this.contentEl = null;
+		const ratio = this.liveRatio;
+		this.liveRatio = 1;
+		content?.setCssStyles({ transform: "", willChange: "", transformOrigin: "" });
+		return ratio;
+	}
+
 	private onEnd = (e: TouchEvent): void => {
 		if (!this.ids) return;
 		for (const t of Array.from(e.changedTouches)) {
@@ -237,11 +256,7 @@ export class PinchBridge {
 	 */
 	private commit(): void {
 		const el = this.el;
-		const content = this.contentEl;
-		this.contentEl = null;
-		const ratio = this.liveRatio;
-		this.liveRatio = 1;
-		content?.setCssStyles({ transform: "", willChange: "", transformOrigin: "" });
+		const ratio = this.clearPreview();
 		if (!el) return;
 		// Dead-zone: a very brief pinch reads as ratio ~1; any wheel would
 		// still zoom. Nothing happened.

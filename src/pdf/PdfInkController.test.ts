@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { InkOp } from "../inline/InkHistory";
 import { InkStroke, computeBBox } from "../ink/Stroke";
 import { PenSample } from "../input/PointerRouter";
-import { resetTipModeForTest, setTipMode } from "../inline/TipMode";
+import { resetTipModeForTest, setTipMode, setTipModeListener, tipMode } from "../inline/TipMode";
 import { DEFAULT_PEN } from "../ink/PenStyle";
 
 /**
@@ -106,6 +106,7 @@ describe("PdfInkController lasso", () => {
 			win as unknown as Window,
 			() => strokes,
 			() => "doc-1",
+			() => strokes,
 			(op) => ops.push(op)
 		);
 		pen = controller as unknown as typeof pen;
@@ -199,6 +200,73 @@ describe("PdfInkController lasso", () => {
 		controller.forgetHistory();
 		expect(controller.idle).toBe(true);
 	});
+
+	it("dissolveSelection empties the selection directly", () => {
+		setTipMode("lasso");
+		lasso([
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		]);
+		controller.dissolveSelection();
+		const priv = controller as unknown as { selected: string[] };
+		expect(priv.selected).toEqual([]);
+		// deleteSelection is the public witness used elsewhere in this file:
+		// true only if the lasso still holds those stroke ids.
+		expect(controller.deleteSelection()).toBe(false);
+	});
+
+	/**
+	 * §5o: production wiring is InkOverlay's tip-mode listener (`:276`)
+	 * walking every `addStripSurface` registrant - main.ts registers
+	 * exactly `() => c.dissolveSelection()` for every open PDF pane.
+	 * Importing InkOverlay from this file DOES load cleanly (obsidian is
+	 * aliased in vitest.config.mts and CodeMirror has no DOM dependency at
+	 * import time), so that is not the obstacle the design doc anticipated.
+	 * The real obstacle: InkOverlay installs its ONE listener singleton via
+	 * `setTipModeListener` once, at module-import time, and this file's own
+	 * `beforeEach(resetTipModeForTest)` nulls that singleton before every
+	 * `it` in this describe block runs - so by the time this test's body
+	 * executes, the listener InkOverlay installed is already gone.
+	 * `vi.resetModules()` plus a fresh dynamic import would reinstall it,
+	 * but against a SECOND, disconnected `TipMode` module instance that
+	 * this file's own `setTipMode` calls could not reach, which would not
+	 * be "the way main.ts wires it" either. So this asserts the rule
+	 * through the documented fallback: `setTipMode("nib")` (the design doc
+	 * said `"pen"`; the code's `TipMode` union has no such literal - the
+	 * plain-pen value is `"nib"`) with a minimal listener of the same
+	 * shape, registered via the real `setTipModeListener` seam.
+	 */
+	it("a tip-mode change away from lasso dissolves the selection (listener seam)", () => {
+		setTipMode("lasso");
+		lasso([
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		]);
+		setTipModeListener(() => {
+			if (tipMode() !== "lasso") controller.dissolveSelection();
+		});
+		setTipMode("nib");
+		expect(controller.deleteSelection()).toBe(false);
+	});
+
+	it("switching to lasso after a fresh lasso does not clear it", () => {
+		setTipMode("lasso");
+		lasso([
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		]);
+		setTipModeListener(() => {
+			if (tipMode() !== "lasso") controller.dissolveSelection();
+		});
+		setTipMode("lasso");
+		expect(controller.deleteSelection()).toBe(true);
+	});
 });
 
 describe("PdfInkController, the rest of what went wrong", () => {
@@ -206,6 +274,8 @@ describe("PdfInkController, the rest of what went wrong", () => {
 	let ops: InkOp[];
 	let notices: string[];
 	let docId: string | null;
+	let modes: (string | undefined)[];
+	let persists: string[];
 	let controller: PdfInkController;
 	let pen: { penDown(s: PenSample, ev?: unknown): void; penRaw(s: PenSample[]): void; penUp(): void };
 
@@ -227,6 +297,8 @@ describe("PdfInkController, the rest of what went wrong", () => {
 		strokes = [inkAt("s1")];
 		ops = [];
 		notices = [];
+		modes = [];
+		persists = [];
 		docId = "doc-1";
 		const scroller = {
 			scrollLeft: 0,
@@ -246,8 +318,11 @@ describe("PdfInkController, the rest of what went wrong", () => {
 			win as unknown as Window,
 			(page) => strokes.filter((s) => (s.page ?? 1) === page),
 			() => docId,
-			(op) => {
+			// The document list, which is what op indices are positions in.
+			() => strokes,
+			(op, mode) => {
 				ops.push(op);
+				modes.push(mode);
 				// A store that actually applies, so an erase can be measured
 				// against what it left behind.
 				if (op.type === "replace") {
@@ -256,7 +331,8 @@ describe("PdfInkController, the rest of what went wrong", () => {
 				}
 			},
 			() => {},
-			(message) => notices.push(message)
+			(message) => notices.push(message),
+			(id) => persists.push(id)
 		);
 		pen = controller as unknown as typeof pen;
 		// Already bound, as it would be after the first sync in the app. Without
@@ -307,6 +383,90 @@ describe("PdfInkController, the rest of what went wrong", () => {
 		// A note's 2.2 rendered at a page scale of 2 would be 4.4 css px; the
 		// stored width is halved so it lands at 2.2 like everywhere else.
 		expect(add.strokes[0]!.width).toBeCloseTo(DEFAULT_PEN.baseWidth / SCALE, 6);
+	});
+
+	// Op indices are positions in the WHOLE document, because that is the
+	// list the store applies every op against (applyOp over pdfStore.strokes).
+	// The controller only ever saw a page-filtered list, so its indices were
+	// page-local and right only on page one: undo an erase on page five and
+	// the ink came back at whatever depth those numbers happened to name.
+	it("indexes an erase against the document, not the page it happened on", () => {
+		// Two strokes on page 1 ahead of the target, so a page-local index (0)
+		// and a document index (2) cannot be mistaken for one another.
+		strokes = [inkAt("s1"), inkAt("s2"), { ...inkAt("s3"), page: 2 }];
+		setTipMode("eraser");
+		// Page 2's box starts at 810, so this is the same page-local point the
+		// page-1 erase test uses.
+		pen.penDown(sample(200, 1010));
+		pen.penUp();
+		const replace = ops.find((op) => op.type === "replace") as {
+			removed: InkStroke[];
+			removedAt: number[];
+		};
+		expect(replace.removed.map((st) => st.id)).toEqual(["s3"]);
+		expect(replace.removedAt).toEqual([2]);
+	});
+
+	it("indexes a selection delete against the document too", () => {
+		strokes = [inkAt("s1"), inkAt("s2"), { ...inkAt("s3"), page: 2 }];
+		const priv = controller as unknown as { selected: string[]; selectionPage: number };
+		priv.selected = ["s3"];
+		priv.selectionPage = 2;
+		expect(controller.deleteSelection()).toBe(true);
+		const remove = ops.find((op) => op.type === "remove") as {
+			strokes: InkStroke[];
+			indices: number[];
+		};
+		expect(remove.strokes.map((st) => st.id)).toEqual(["s3"]);
+		expect(remove.indices).toEqual([2]);
+	});
+
+	// One write per gesture, not one per sample. The eraser, the lasso drag
+	// and insert-space each apply an op per pointer sample, and every one of
+	// those went through replaceAll: a scheduled sidecar write per sample, on
+	// top of the whole-document copies applyOp and replaceAll each make. The
+	// screen has to keep up with the pen; the disk does not.
+	it("erases live and writes once, at pen-up", () => {
+		setTipMode("eraser");
+		pen.penDown(sample(200, 200));
+		pen.penRaw([sample(205, 205), sample(210, 210), sample(215, 215)]);
+		expect(persists).toEqual([]); // nothing written mid-gesture
+		pen.penUp();
+
+		const replaces = modes.filter((m, i) => ops[i]!.type === "replace");
+		expect(replaces.length).toBeGreaterThan(0);
+		expect(replaces.every((m) => m === "live")).toBe(true);
+		expect(persists).toEqual(["doc-1"]);
+	});
+
+	it("a finished stroke still writes immediately - it is not a live gesture", () => {
+		pen.penDown(sample(200, 200));
+		pen.penRaw([sample(230, 230), sample(260, 260)]);
+		pen.penUp();
+		const addAt = ops.findIndex((op) => op.type === "add");
+		expect(addAt).toBeGreaterThanOrEqual(0);
+		expect(modes[addAt]).toBe("commit");
+	});
+
+	it("an erase gesture that removed nothing writes nothing", () => {
+		setTipMode("eraser");
+		// Far from the only stroke, so no sample hits anything.
+		pen.penDown(sample(20, 20));
+		pen.penRaw([sample(25, 25)]);
+		pen.penUp();
+		expect(ops.filter((op) => op.type === "replace")).toEqual([]);
+		expect(persists).toEqual([]);
+	});
+
+	it("an interrupted gesture is written by unmount, not lost", () => {
+		// Before batching, every sample wrote, so an erase interrupted by the
+		// pane closing was already durable. It has to stay that way.
+		setTipMode("eraser");
+		pen.penDown(sample(200, 200));
+		pen.penRaw([sample(205, 205)]);
+		expect(persists).toEqual([]);
+		controller.unmount();
+		expect(persists).toEqual(["doc-1"]);
 	});
 
 	it("records one history entry for a whole erase gesture, not one per sample", () => {
@@ -377,6 +537,7 @@ describe("pan and space on a pdf", () => {
 			win as unknown as Window,
 			(page) => strokes.filter((st) => (st.page ?? 1) === page),
 			() => "doc-1",
+			() => strokes,
 			(op) => ops.push(op),
 			() => {},
 			(message) => notices.push(message)

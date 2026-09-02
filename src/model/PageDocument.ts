@@ -100,6 +100,18 @@ export class PageDocument {
 	private rawMd = "";
 	/** The body exactly as it was on disk, so an ink-only session cannot reflow it. */
 	private rawBody = "";
+	/**
+	 * The file's own line ending (MarkdownPage.ts's `ParsedMarkdownPage.eol`,
+	 * 5i I5). `rawBody` is reassembled with it now instead of always `\n`, so
+	 * the bodyMode branch of compose() below has to rejoin with the same
+	 * ending or a CRLF note's untouched body (still CRLF from rawBody) would
+	 * get a stray LF stitched in front of it by this file's own hardcoded
+	 * separator - not something I5's briefed file list (MarkdownPage.ts,
+	 * InlineClaim.ts) mentioned, but a direct consequence of changing what
+	 * `rawBody` is joined with. Defaults to `\n`, matching every existing
+	 * caller before this field could be populated from a parse.
+	 */
+	private eol: "\r\n" | "\n" = "\n";
 	private bodyEdited = false;
 	/** The user moved something, so an arrangement now exists worth a sidecar. */
 	private geometryEdited = false;
@@ -138,6 +150,7 @@ export class PageDocument {
 		this.extra = parsed.extra;
 		this.rawMd = md;
 		this.rawBody = parsed.rawBody;
+		this.eol = parsed.eol;
 		this.bodyEdited = false;
 		this.geometryEdited = false;
 		this.markdownDirty = false;
@@ -452,8 +465,9 @@ export class PageDocument {
 			const fm = this.identityClaimed
 				? updateFrontmatter(this.frontmatter, this.pageId, { version: false })
 				: this.frontmatter;
-			if (fm.length === 0) return body.replace(/^\n/, "");
-			return `---\n${fm.join("\n")}\n---\n${body.startsWith("\n") ? "" : "\n"}${body}`;
+			if (fm.length === 0) return body.replace(/^\r?\n/, "");
+			const eol = this.eol;
+			return `---${eol}${fm.join(eol)}${eol}---${eol}${body.startsWith(eol) ? "" : eol}${body}`;
 		}
 		return composeMarkdownPage({
 			pageId: this.pageId,
@@ -639,6 +653,7 @@ export class PageDocument {
 		const changed: DocBox[] = [];
 		const skipped: string[] = [];
 		const nextBody = parsed.rawBody;
+		this.eol = parsed.eol;
 		const editing = editingId === BODY_BOX_ID;
 		const textChanged = nextBody.trim() !== (this.texts.get(BODY_BOX_ID) ?? "");
 
@@ -698,3 +713,36 @@ export class PageDocument {
 // The parse in MarkdownPage.ts is the single answer (its rawBody field); a
 // duplicate implementation disagreed on malformed fences and corrupted notes
 // the moment the page id was first written (audit v0.8.0 #3).
+
+/**
+ * Why a pen contact cannot become ink right now, or null if it can.
+ *
+ * The three states in which a sidecar write is refused: the sidecar has not
+ * loaded yet, a newer Handwriting wrote the file, or the file could not be
+ * read at all. Every caller that persists ink already checks these; the pen
+ * paths did not, so a stroke was accepted, drawn, committed to the in-memory
+ * page and then never written - it looked like it worked and was gone on
+ * reload, with nothing said.
+ *
+ * Pure and out here rather than a method on the view, because the view is
+ * DOM-bound and cannot be built in a test, and this rule is the kind that
+ * gets quietly widened later.
+ */
+export function inkRefusal(state: {
+	loaded: boolean;
+	spatialFutureVersion: number | undefined;
+	spatialDamaged: boolean;
+}): string | null {
+	if (!state.loaded) {
+		return "Handwriting: this page's saved ink is still loading. Try again in a moment.";
+	}
+	// Order matters: a page can be both, and "a newer version wrote this" is
+	// the more useful thing to hear - it names something the user can act on.
+	if (state.spatialFutureVersion !== undefined) {
+		return "Handwriting: this page is read-only because a newer version of Handwriting wrote it. New ink could not be saved.";
+	}
+	if (state.spatialDamaged) {
+		return "Handwriting: this page's saved ink cannot be read, so new ink cannot be saved either. The existing file has not been touched.";
+	}
+	return null;
+}

@@ -4,8 +4,6 @@ Handwrite, highlight, erase and lasso directly on your notes and PDFs. Your note
 
 Open a note and write. The note stays a `.md` file.
 
----
-
 ## removing the plugin
 
 your ink is not stored "in" the markdown. it lives in a folder at your vault root, separate from the editor's text.
@@ -15,8 +13,6 @@ disable the plugin and your notes STAY EXACTLY THE SAME - the ink just stops ren
 one line is written to the invisible frontmatter of a note when you first write on it - `handwriting-page-id`.
 
 a note you never inked on is never modified.
-
----
 
 ## why i built this
 
@@ -36,7 +32,9 @@ i designed this app with a decade of OneNote experience driving my tastes, so a 
 
 Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 
-## right now you can
+## what it does
+
+### right now you can
 
 * handwrite, highlight, color palette, size sliders
 * erase, two modes, size slider
@@ -48,11 +46,11 @@ Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 * flatten ink for pdf export
 * snip pdfs
 
-## features
+### features
 
 * data yours forever
    * your ink is all stored here: your vault's `.handwriting/` folder
-   * https://imgur.com/a/60GBWnn
+   * [what that folder looks like](https://imgur.com/a/60GBWnn)
 * pressure sensitivity
 * palm rejection
 * pen toolbar with auto-hide
@@ -64,23 +62,13 @@ Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 * ink embeds
 * handwriting to shape
 
-## works on
+### works on
 
-windows
-
-macos
-
-linux
-
-ios
-
-boox
-
-android
+windows · macos · linux · ios · boox · android
 
 ## installing
 
-### method 1 
+### method 1 - the community plugin directory
 
 it's in the community plugin directory:
 
@@ -90,13 +78,13 @@ it's in the community plugin directory:
 4) search Handwriting
 5) Install and enable
 
-### method 2
+### method 2 - direct link
 
 can also just get it here:
 
 https://community.obsidian.md/plugins/handwriting
 
-### method 3
+### method 3 - BRAT, for beta builds
 
 if you want beta builds before they're released, use BRAT:
 
@@ -104,7 +92,7 @@ open your Obsidian vault > Settings > community plugins in left side bar
 
 turn ON community plugins > browse
 
-search for BRAT > hit install and enable > click Settings > 
+search for BRAT > hit install and enable > click Settings >
 
 Scroll down till you see this and hit the plus in upper right hand
 
@@ -112,53 +100,55 @@ Scroll down till you see this and hit the plus in upper right hand
 
 paste this in : ellimist-afk/handwriting > hit add plugin
 
-## required
+### required
 
 Obsidian 1.12.3 or newer. please send reports.
 
-## ipad notes
+## using it
 
-* turn off Scribble or ios will draw its own black ink over your strokes and scratch-out deletes ink
-* iPad Settings > Apple Pencil > Scribble > Toggle off
-
-## obsidian sync notes
-
-* `.handwriting/` is hidden and about half of all sync tools don't carry hidden folders by default (Obsidian Sync, iCloud, and probably Dropbox don't)
-* if you use one of these services, turn on Compatibility with Obsidian Sync in the Handwriting settings panel to get your ink syncing across devices
-
-## how to use
+### the toolbar
 
 tap any tool in the toolbar to use it: pen, highlighter, eraser, lasso, insert space, pan. hover to see the slider.
 
 (mouse users only) run `Handwriting: Mouse` to activate the toolbar, or go into settings and set Pen toolbar's dropdown menu to Show. once it's up, click any tool and the mouse picks it up; click the tool you're using again and the mouse goes back to your cursor.
 
-## eraser modes
+### eraser modes
 
 the eraser can erase whole strokes or just at the eraser reticle. switch between the two by tapping the eraser button and choosing either stroke or reticle. default erases whole strokes. `Eraser: toggle` toggles the eraser on and off, `Eraser size: next` cycles the reticle size.
 
-## color palette
+### color palette
 
 click the palette button and a 4-wide grid palette drops down. pick from 8 pen colors or 5 highlighter colors. tap one to pick it or run `Ink color: next` to cycle them from the keyboard.
 
 `Pen color: next` and `Highlighter color: next` cycle through their respective colors. as a workaround for not having favorites, you can try binding a hotkey to a color or size.
 
-## palm rejection
+### palm rejection
 
 pdfs: a single touch too wide to be a fingertip gets trashed. heel of the hand reports a bigger contact than fingertip so we measure contact shape instead.
 
 notes: we use a different, timing-based rejection.
 
-## pinch zoom
+### pinch zoom
 
 pinch to zoom works on notes and pdfs. the point you start the pinch on stays under your fingers instead of drifting while you zoom.
 
-## shape snap
+### shape snap
 
 hold the pen still for about a third of a second at the end of a stroke and it redraws as a line, triangle, rectangle, circle or ellipse.
 
-## update notice
+### update notice
 
 the first time you open Obsidian after an update a small notice in the corner shows the changelog. it goes away on its own or click it to dismiss it sooner.
+
+### ipad notes
+
+* turn off Scribble or ios will draw its own black ink over your strokes and scratch-out deletes ink
+* iPad Settings > Apple Pencil > Scribble > Toggle off
+
+### obsidian sync notes
+
+* `.handwriting/` is hidden and about half of all sync tools don't carry hidden folders by default (Obsidian Sync, iCloud, and probably Dropbox don't)
+* if you use one of these services, turn on Compatibility with Obsidian Sync in the Handwriting settings panel to get your ink syncing across devices
 
 ## how it works
 
@@ -218,7 +208,7 @@ if you have any more questions i'd be glad to answer in the comments
 
 ## reporting problems
 
-open an issue. report what happened. remember to include which device and pen please. 
+open an issue. report what happened. remember to include which device and pen please.
 
 EZMODE reporting:
 

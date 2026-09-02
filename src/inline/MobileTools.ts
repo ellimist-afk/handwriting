@@ -31,6 +31,7 @@ import {
 	allToolbarCornerClasses,
 	toolbarCornerClass,
 } from "./ToolbarCorner";
+import { stripEscapeVerdict } from "./StripEscape";
 
 export interface MobileToolsHost {
 	/** Execute a command by its full id (e.g. "handwriting:inline-tool-pen"). */
@@ -224,10 +225,31 @@ export class MobileTools {
 
 	private pill: HTMLElement;
 
+	/**
+	 * The ctor's `parent`, kept by name. Escape's ownership test needs the
+	 * pane itself, not just the elements built inside it (§5p): a strip
+	 * consumes Escape only when the event's target sits inside its OWN pane,
+	 * `this.pane.contains(...)`, never `this.el` alone (the pill and the
+	 * strip are both children of it, and so is everything the editor draws).
+	 */
+	private readonly pane: HTMLElement;
+
+	/** Something open enough that Escape (or a stray tap) should close it. */
+	private hasOpenPop(): boolean {
+		return this.openInkSlider !== null || this.colorsOpen;
+	}
+
 	/** Closes open pops when a tap lands anywhere that is not the strip. */
 	private readonly outsideTap = (ev: PointerEvent): void => {
-		const t = ev.target;
-		if (!(t instanceof Node)) return;
+		// `contains`, never instanceof: a popout window's elements belong to
+		// another realm and instanceof refuses them, so this returned early
+		// on every tap in a popout and the pops never dismissed there. The
+		// note below describes fixing exactly that on glass - it was only
+		// ever fixed for the main window. Same rule the routers already
+		// spell out twice (InlinePenRouter: "a popout window's elements
+		// belong to another realm"); contains works across realms.
+		const t = ev.target as Node | null;
+		if (!t) return;
 		if (this.el.contains(t) || this.pill.contains(t)) return;
 		// On glass there is no pen-down-over-the-page moment to hide behind:
 		// a slider opened with a finger just STAYED, over whatever the next
@@ -236,7 +258,50 @@ export class MobileTools {
 		this.closeInkSliders();
 	};
 
+	/**
+	 * Escape closes an open pop, the way it dismisses everything else
+	 * transient here: a lasso selection and a held tip mode both already go
+	 * that way (InkOverlay), and so does the pdf selection. The size and
+	 * colour pops were the exception - once open, only a tap somewhere else
+	 * would put them away, which is fine on glass and wrong on a keyboard
+	 * (alan, hardware, 2026-09-02: "esc should close the slider").
+	 *
+	 * Consumed ONLY when a pop was actually open. Escape has other jobs in
+	 * this editor, and a toolbar that swallows it whenever the strip exists
+	 * would take the key away from clearing a selection - trading one missing
+	 * dismissal for a worse one.
+	 *
+	 * Capture, beside outsideTap and torn down beside it, so it is heard
+	 * before anything in the editor can stop it. No realm check is possible
+	 * or needed: this reads the key, never the target.
+	 *
+	 * Split view is why "a pop was open" is not enough to consume. Every
+	 * pane has its own MobileTools and its own capture listener on the SAME
+	 * document, so one press reaches every strip in the window. A pop open
+	 * in pane A and Escape pressed while working in pane B must close A's
+	 * pop AND still let B's own Escape handling (its selection, its held
+	 * tip) see the key - if A consumed it, B's selection would never clear.
+	 * `stripEscapeVerdict` (`StripEscape.ts`, §5p) is what tells A apart
+	 * from B: ownership, `this.pane.contains(ev.target)`, decides who is
+	 * allowed to consume, not who happened to have something open.
+	 */
+	private readonly escapeKey = (ev: KeyboardEvent): void => {
+		const verdict = stripEscapeVerdict({
+			key: ev.key,
+			defaultPrevented: ev.defaultPrevented,
+			anyOpen: this.hasOpenPop(),
+			ownsTarget: this.pane.contains(ev.target as Node | null),
+		});
+		if (verdict === "ignore") return;
+		this.closeInkSliders();
+		if (verdict === "close-consume") {
+			ev.preventDefault();
+			ev.stopPropagation();
+		}
+	};
+
 	constructor(parent: HTMLElement, private host: MobileToolsHost) {
+		this.pane = parent;
 		// The collapsed form: one small pen button that brings the strip back.
 		this.pill = parent.createEl("button", {
 			cls: "handwriting-pen-pill",
@@ -267,6 +332,7 @@ export class MobileTools {
 			this.setCollapsed(false);
 		});
 		parent.ownerDocument.addEventListener("pointerdown", this.outsideTap, { capture: true });
+		parent.ownerDocument.addEventListener("keydown", this.escapeKey, { capture: true });
 		this.el = parent.createDiv({ cls: "handwriting-mobile-tools" });
 		// The recording indicator lives HERE, not the status bar: status
 		// bars get hidden by themes and snippets, and an indicator nobody
@@ -360,6 +426,19 @@ export class MobileTools {
 			});
 			b.addEventListener("click", (ev) => {
 				ev.preventDefault();
+				// A button drawn as unavailable must BE unavailable. Delete,
+				// copy, paste, undo and redo dim to 0.35 when their predicate
+				// says no, but nothing used to stop the click: the command ran
+				// and answered with a toast saying what the dimming had
+				// already said - "lasso some ink first" on a button greyed out
+				// precisely because there is no selection. Worse, the press
+				// animation is suppressed for a dimmed button, so it felt dead
+				// and then scolded you.
+				//
+				// Guarded here rather than with pointer-events: none, which
+				// would also take the tooltip away. A disabled control that
+				// still explains itself on hover is the more useful one.
+				if (!(spec.isEnabled?.(this.host) ?? true)) return;
 				// The GoodNotes pattern: tapping the tool you are already
 				// holding opens its options instead of re-picking it.
 				const nib =
@@ -560,7 +639,14 @@ export class MobileTools {
 			// came back when the nib touched the editor (glass, 2026-08-31).
 			// The mouse is just a pen here; pointer type is not state.
 			el.classList.toggle("is-active", spec.isActive?.(this.host) ?? false);
-			el.classList.toggle("is-disabled", !(spec.isEnabled?.(this.host) ?? true));
+			const enabled = spec.isEnabled?.(this.host) ?? true;
+			el.classList.toggle("is-disabled", !enabled);
+			// The dimming is for eyes only; this is the same fact for anything
+			// that cannot see it. aria-disabled rather than the disabled
+			// property on purpose: a disabled button is skipped by the
+			// keyboard and stops firing hover, and the tooltip explaining WHY
+			// it is unavailable is the part worth keeping.
+			el.setAttribute("aria-disabled", enabled ? "false" : "true");
 			// The palette button answers "which color" by BEING it.
 			if (spec.commandId === "handwriting:ink-color-cycle") {
 				const hex = this.host.activeColor();
@@ -575,8 +661,44 @@ export class MobileTools {
 				if (el.dataset.tipLabel !== label) {
 					el.dataset.tipLabel = label;
 					const sr = el.querySelector(".handwriting-sr-only");
-					if (sr instanceof HTMLElement) sr.setText(label);
+					if (sr) sr.textContent = label;
 				}
+			}
+		}
+		// The collapsed pill wears the tool in hand.
+		//
+		// It used to be a pen, set once when the strip was built and never
+		// touched again, labelled "Pen tools" forever. The pill is what is on
+		// screen WHILE YOU WRITE - the strip is collapsed precisely then - so
+		// the one moment the active tool matters most was the one moment
+		// nothing said what it was, while the open strip goes to real trouble
+		// to show it (the palette button is tinted with the live color and
+		// names it on hover).
+		//
+		// Taken from the button that reports itself active rather than from a
+		// second switch on the modes: one source of truth, and a tool added to
+		// BUTTONS later is carried here without anyone remembering to.
+		{
+			const active = this.buttons.find(({ spec }) => spec.isActive?.(this.host));
+			const icon = active?.spec.icon ?? "pen";
+			const label = active ? `${active.spec.label} tools` : "Pen tools";
+			if (this.pill.dataset.icon !== icon) {
+				this.pill.dataset.icon = icon;
+				// setIcon replaces the button's children, which takes the
+				// sr-only name attachTip left there with it. Put it back in
+				// the same move, or the pill goes quiet for a screen reader
+				// the first time the tool changes.
+				setIcon(this.pill, icon);
+				if (!this.pill.querySelector("svg")) this.pill.setText(active?.spec.glyph ?? "P");
+				this.pill.createSpan({ cls: "handwriting-sr-only", text: label });
+			}
+			// The tooltip reads this, not aria-label: ownName moves the name
+			// off the attribute so the tip and the screen reader do not say it
+			// twice.
+			if (this.pill.dataset.tipLabel !== label) {
+				this.pill.dataset.tipLabel = label;
+				const sr = this.pill.querySelector(".handwriting-sr-only");
+				if (sr) sr.textContent = label;
 			}
 		}
 		// Hang a drop-down under its button, measured live so it survives
@@ -672,11 +794,13 @@ export class MobileTools {
 	}
 
 	/** Writing started: nib-size drop-downs get out of the way. */
-	closeInkSliders(): void {
-		if (this.openInkSlider === null && !this.colorsOpen) return;
+	/** Returns whether anything was actually open; Escape needs to know. */
+	closeInkSliders(): boolean {
+		if (!this.hasOpenPop()) return false;
 		this.openInkSlider = null;
 		this.colorsOpen = false;
 		this.refresh();
+		return true;
 	}
 
 	/**
@@ -802,6 +926,7 @@ export class MobileTools {
 	destroy(): void {
 		this.cancelSliderClose();
 		this.el.ownerDocument.removeEventListener("pointerdown", this.outsideTap, { capture: true });
+		this.el.ownerDocument.removeEventListener("keydown", this.escapeKey, { capture: true });
 		this.el.remove();
 		this.pill.remove();
 		this.buttons = [];

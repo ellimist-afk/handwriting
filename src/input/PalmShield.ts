@@ -29,14 +29,22 @@
  */
 
 /**
- * Contact radius, in css px, at and above which a touch is a palm.
+ * Contact radius, in css px, at and above which a touch is swallowed at
+ * capture (before the browser's gesture recognizer or the viewer's own
+ * handlers see it).
  *
  * A fingertip on the hardware here reports 2-10px; a palm heel 20-40. The
  * threshold sits well clear of fingers rather than close to palms: a missed
  * palm zooms one document once, a swallowed finger breaks scrolling in a way
- * nobody can diagnose from the outside.
+ * nobody can diagnose from the outside. That asymmetry - a false swallow
+ * here eats a real touch outright, at capture, before anything downstream
+ * gets a chance to recover it - is why this number is the aggressive,
+ * evidence-backed Boox one. Compare `PALM_RADIUS_KEYBOARD_PX` in
+ * `src/inline/StylusTouch.ts`, which is deliberately much higher because
+ * its false-positive cost is smaller (a suppressed keyboard pop, not a
+ * dropped touch).
  */
-export const PALM_RADIUS_PX = 16;
+export const PALM_RADIUS_SWALLOW_PX = 16;
 
 /**
  * Whether this platform's contact radii mean what the threshold assumes.
@@ -84,7 +92,7 @@ export interface TouchLike {
 }
 
 export function isPalmTouch(t: TouchLike): boolean {
-	return Math.max(t.radiusX ?? 0, t.radiusY ?? 0) >= PALM_RADIUS_PX;
+	return Math.max(t.radiusX ?? 0, t.radiusY ?? 0) >= PALM_RADIUS_SWALLOW_PX;
 }
 
 /**

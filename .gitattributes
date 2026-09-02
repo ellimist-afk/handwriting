@@ -1,0 +1,6 @@
+# docs/demo.js is an esbuild output (scripts/build-site.mjs), always LF from the
+# same esbuild-on-Linux path that CI's check:site diffs it against byte-for-byte
+# (audit-fixes-design.md 5e F1). core.autocrlf=true on this machine otherwise
+# hands checkout back with a CRLF tail (13565 -> 13566 bytes), which makes
+# check:site fail locally even though the committed blob is correct.
+docs/demo.js -text

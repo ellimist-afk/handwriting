@@ -632,6 +632,10 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	border-radius: 10px;
 	box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.15));
 	opacity: 0.92;
+	/* Same reason as the slider inside it: a contact landing on the pop's
+	   padding and sliding onto the track must not spend the first few
+	   millimetres being considered as a scroll. */
+	touch-action: none;
 }
 
 /* In a bottom corner the strip sits at the screen edge, so anything hung
@@ -686,7 +690,21 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	width: 96px;
 	margin: 0;
 	transform: translate(-50%, -50%) rotate(-90deg);
-	touch-action: manipulation;
+	/*
+	 * none, not manipulation. `manipulation` drops the double-tap-zoom wait
+	 * but still PERMITS panning, so on a control you drag, the compositor has
+	 * to watch the contact move far enough to decide it is not a scroll
+	 * before it hands the gesture to the input. On a tap target that costs
+	 * nothing - there is no drag to disambiguate - but on a slider it is a
+	 * visible stall between putting the pen down somewhere new and the thumb
+	 * arriving (alan, hardware, 2026-09-01: "when i touch in a new area with
+	 * pen, it takes a second to respond correctly").
+	 *
+	 * A range input never wants to scroll: every drag on it is a value
+	 * change, so there is nothing to arbitrate and nothing is given up.
+	 * The buttons keep `manipulation` on purpose - they are taps.
+	 */
+	touch-action: none;
 }
 
 /* Stroke | Reticle chips at the top of the eraser's pop. */

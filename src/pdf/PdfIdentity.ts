@@ -121,6 +121,18 @@ export async function pdfInkId(bytes: ArrayBuffer | Uint8Array, crypto?: Crypto)
 const INSTANCE = /^(pdf-[0-9a-f]+)(?:-(\d+))?$/;
 
 /** The content family an instance id belongs to: its `pdf-<hash>` prefix. */
+/**
+ * Is this a PDF ink id?
+ *
+ * The one place that shape is decided, so callers on the note side can tell
+ * a sidecar that belongs to a document from one that belongs to a note. A
+ * note's frontmatter is free text and can name ANY id - a copied property,
+ * a hand edit - and the id alone is what the note surface acts on.
+ */
+export function isPdfInkId(id: string): boolean {
+	return INSTANCE.test(id);
+}
+
 export function familyOf(id: string): string {
 	const m = INSTANCE.exec(id);
 	return m ? m[1]! : id;

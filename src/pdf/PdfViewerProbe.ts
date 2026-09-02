@@ -256,7 +256,12 @@ export function probeViewer(root: HTMLElement, win: Window): ProbedViewer | null
 			// that border, straight from the DOM.
 			topPx: el.offsetTop + el.clientTop,
 			leftPx: el.offsetLeft + el.clientLeft,
-			hasCanvas: el.querySelector("canvas") !== null,
+			// Our OWN overlay is a canvas inside the page div, so a bare
+			// "canvas" query answers true for a page pdf.js has evicted as
+			// soon as we have drawn on it - and hasCanvas is what livePages
+			// reads to decide the page is still rendered. Same exclusion
+			// viewerCanvasOf already makes, for the same reason.
+			hasCanvas: el.querySelector("canvas:not(.handwriting-pdf-ink)") !== null,
 			canvasBox: canvasBoxOf(el),
 		})),
 	};

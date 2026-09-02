@@ -50,9 +50,14 @@ export function stylusOnlyTouches(touches: ArrayLike<TouchLike>): boolean {
  * keyboard rises, which is exactly today's behaviour. So the threshold is set
  * where only a clearly hand-sized contact crosses it, and the failure mode is
  * the one we already live with. A fingertip on iPadOS reports a radius in the
- * low tens; a resting palm reports several times that.
+ * low tens; a resting palm reports several times that. Compare
+ * `PALM_RADIUS_SWALLOW_PX` in `src/input/PalmShield.ts`, which is much lower
+ * because it protects a different, costlier failure: a false swallow there
+ * eats a real touch at capture, while a false suppress here only eats a
+ * keyboard pop-up over the editor - so this threshold can afford to sit
+ * high.
  */
-export const PALM_RADIUS_PX = 40;
+export const PALM_RADIUS_KEYBOARD_PX = 40;
 
 interface SizedTouch {
 	touchType?: string;
@@ -71,9 +76,10 @@ interface SizedTouch {
  * signal available at that moment.
  *
  * Mixed events pass, same reasoning as the stylus rule: eating a batch that
- * contains a real finger would take the finger with it. Touches that report
- * no radius at all (every non-WebKit engine) never match, so this is inert
- * off iPadOS.
+ * contains a real finger would take the finger with it. Android Chromium
+ * reports honest contact ellipses too (see `palmRadiusTrustworthy` in
+ * `src/input/PalmShield.ts`), so this is not iPadOS-only - the threshold
+ * here is simply set higher than PalmShield's, for the reason above.
  */
 export function palmSizedTouches(touches: ArrayLike<SizedTouch>): boolean {
 	if (touches.length === 0) return false;
@@ -84,7 +90,7 @@ export function palmSizedTouches(touches: ArrayLike<SizedTouch>): boolean {
 		const ry = touch.radiusY;
 		if (typeof rx !== "number" || typeof ry !== "number") return false;
 		if (!Number.isFinite(rx) || !Number.isFinite(ry)) return false;
-		if (Math.max(rx, ry) < PALM_RADIUS_PX) return false;
+		if (Math.max(rx, ry) < PALM_RADIUS_KEYBOARD_PX) return false;
 	}
 	return true;
 }

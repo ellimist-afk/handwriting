@@ -44,6 +44,14 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"house cleaning",
 		"bug fixes",
 	],
+	"1.4.5": [
+		"pen latency fix",
+		"pdf fixes",
+		"performance fix",
+		"data fixes",
+		"ui fixes",
+		"bug fixes",
+	],
 };
 
 /** Show the notes, or don't - and either way, the version to remember. */
@@ -76,9 +84,56 @@ export function decideWhatsNew(
 	// this version's notes late.
 	if (fresh) return { show: false, record: current };
 	if (seen === current) return { show: false, record: current };
-	const lines = notes[current];
-	if (!lines || lines.length === 0) return { show: false, record: current };
+	const lines = notesSince(current, seen, notes);
+	if (lines.length === 0) return { show: false, record: current };
 	return { show: true, record: current, version: current, notes: lines };
+}
+
+/** Ascending order for dotted versions; a non-numeric part sorts as 0. */
+function compareVersions(a: string, b: string): number {
+	const pa = a.split(".");
+	const pb = b.split(".");
+	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+		const d = (Number(pa[i]) || 0) - (Number(pb[i]) || 0);
+		if (d !== 0) return d;
+	}
+	return 0;
+}
+
+/**
+ * Everything worth saying about landing on `current`.
+ *
+ * Notes used to be looked up under the landed version and nowhere else, so a
+ * release with no entry of its own said nothing at all - and a vault jumping
+ * several versions heard only about the last one. 1.4.3 has no entry, so
+ * everyone arriving there from 1.3.x was told nothing about the PDF release
+ * they had just installed. The standing workaround was to copy a headline
+ * forward into the next version's list by hand, which is a note that has to
+ * be remembered every time.
+ *
+ * With a known `seen`, this is every version's notes in (seen, current].
+ * With none - a build older than the key itself - it is the most recent
+ * version at or below current that has any, rather than the whole changelog
+ * at someone who has been away one release.
+ *
+ * Deduplicated, because that copy-forward workaround is still in the data and
+ * nobody wants the pdf headline twice.
+ */
+function notesSince(
+	current: string,
+	seen: string | null,
+	notes: Record<string, string[]>
+): string[] {
+	const eligible = Object.keys(notes)
+		.filter((v) => (notes[v] ?? []).length > 0 && compareVersions(v, current) <= 0)
+		.filter((v) => seen === null || compareVersions(v, seen) > 0)
+		.sort(compareVersions);
+	const chosen = seen === null ? eligible.slice(-1) : eligible;
+	const out: string[] = [];
+	for (const v of chosen) {
+		for (const line of notes[v] ?? []) if (!out.includes(line)) out.push(line);
+	}
+	return out;
 }
 
 /**

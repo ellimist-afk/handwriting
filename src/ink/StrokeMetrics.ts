@@ -73,6 +73,8 @@ export interface StrokeSummary {
 	// ---- prediction experiment (v0.1.3) ----
 	predMode: string;
 	predApi: string;
+	/** Horizon ceiling the caps allowed, ms. Adapts per machine; see adaptiveCaps. */
+	predCapMs: number;
 	predTails: number;
 	predSuppressed: number;
 	predPointsPerTail: StatSummary;
@@ -103,6 +105,7 @@ export class StrokeMetrics {
 
 	private predMode = "off";
 	private predApi = "unknown";
+	private predCapMs = 0;
 	private predTails = 0;
 	private predSuppressed = 0;
 	private predPoints = new Stat();
@@ -123,6 +126,7 @@ export class StrokeMetrics {
 		// (alan, hardware, 2026-08-30).
 		this.predMode = "off";
 		this.predApi = "unknown";
+		this.predCapMs = 0;
 		this.predTails = 0;
 		this.predSuppressed = 0;
 		this.predPoints.reset();
@@ -193,9 +197,10 @@ export class StrokeMetrics {
 		if (this.active && depth > this.queueMax) this.queueMax = depth;
 	}
 
-	setPrediction(mode: string, api: string): void {
+	setPrediction(mode: string, api: string, capMs = 0): void {
 		this.predMode = mode;
 		this.predApi = api;
+		this.predCapMs = capMs;
 	}
 
 	recordTail(pointCount: number, horizonMs: number, tipDistPx: number): void {
@@ -237,6 +242,7 @@ export class StrokeMetrics {
 			queueDepthMax: this.queueMax,
 			predMode: this.predMode,
 			predApi: this.predApi,
+			predCapMs: round2(this.predCapMs),
 			predTails: this.predTails,
 			predSuppressed: this.predSuppressed,
 			predPointsPerTail: this.predPoints.summary(),
@@ -270,7 +276,7 @@ export class StrokeMetrics {
 		];
 		if (s.predMode !== "off") {
 			lines.push(
-				`pred ${s.predMode} (api ${s.predApi})  tails ${s.predTails} suppressed ${s.predSuppressed}`,
+				`pred ${s.predMode} (api ${s.predApi})  cap ${s.predCapMs}ms  tails ${s.predTails} suppressed ${s.predSuppressed}`,
 				`  pts ${s.predPointsPerTail.avg}/${s.predPointsPerTail.max}  horizon ${s.predHorizonMs.avg}/${s.predHorizonMs.max}ms` +
 					`  tip ${s.predTipDistPx.avg}/${s.predTipDistPx.max}px  err ${s.predCorrectionPx.avg}/${s.predCorrectionPx.max}px`
 			);

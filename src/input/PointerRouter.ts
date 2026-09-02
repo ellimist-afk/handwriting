@@ -148,6 +148,21 @@ export class PointerRouter {
 
 	/** Set false when ink comes from pointerrawupdate: skips per-move sample building. */
 	deliverMoveSamples = true;
+
+	/**
+	 * Does this engine deliver `pointerrawupdate` at all?
+	 *
+	 * It is Chromium-only. WebKit has never fired it, so a surface that inks
+	 * ONLY from onPenRaw - which the canvas page view does - received
+	 * pointerdown, nothing, pointerup on iOS and iPadOS, and drew a dot per
+	 * stroke. A capability test rather than a per-stroke "have we seen one
+	 * yet": raw updates are dispatched ahead of the pointermove they belong
+	 * to, so a stroke-local latch would still let the first move through on
+	 * Chromium and feed the same samples twice.
+	 */
+	static rawUpdatesSupported(win: Window = window): boolean {
+		return "onpointerrawupdate" in win;
+	}
 	/** Set true only while the prediction experiment wants Chromium's predicted events. */
 	wantPredicted = false;
 
@@ -160,6 +175,8 @@ export class PointerRouter {
 	silentLiftEnds = 0;
 
 	private winEndFn: ((e: Event) => void) | null = null;
+	/** The window the backstop is armed on; see armEndBackstop. */
+	private winEndWin: Window | null = null;
 	private tapCandidates = new Map<number, TapCandidate>();
 
 	constructor(root: HTMLElement, camera: Camera, callbacks: RouterCallbacks) {
@@ -522,17 +539,59 @@ export class PointerRouter {
 		const fn = (ev: Event) => {
 			const pe = ev as PointerEvent;
 			if (pe.pointerType !== "pen") return;
-			this.endPenStroke(pe, true);
+			// Whether this lift was ACTUALLY missed by the root listeners, and
+			// not merely seen here first. This is a window listener in the
+			// CAPTURE phase, so it runs ahead of the root's own pointerup on
+			// every ordinary lift and ends the stroke before that handler is
+			// reached - which made fallbackEnds and router.penUp.backstop
+			// count 100% of pen-ups and tell the diagnostics view nothing.
+			//
+			// The event's path answers it exactly: if the root is on it, the
+			// root's handler would have run. Capture is kept rather than moved
+			// to the bubble phase, because a backstop that any intervening
+			// stopPropagation can silence is not a backstop.
+			this.endPenStroke(pe, !this.pathIncludesRoot(ev));
 		};
 		this.winEndFn = fn;
-		window.addEventListener("pointerup", fn, { capture: true });
-		window.addEventListener("pointercancel", fn, { capture: true });
+		// The ROOT's window, not the module-global one. A popout editor is a
+		// separate window, so a backstop armed on the app window never saw a
+		// single event from it - the one surface where a stroke end going
+		// missing is most likely was the one with no backstop at all. Kept on
+		// the instance because disarm has to reach the same window even if
+		// the element has since been detached.
+		const win = this.backstopWin();
+		this.winEndWin = win;
+		win.addEventListener("pointerup", fn, { capture: true });
+		win.addEventListener("pointercancel", fn, { capture: true });
+	}
+
+	/**
+	 * Is the root element on this event's dispatch path?
+	 *
+	 * composedPath() is the whole route the event will take, so it answers
+	 * for a lift anywhere - including one over an element the pen captured
+	 * outside the root. Falls back to a containment test on engines or stubs
+	 * without it, which is the same answer for every case but shadow DOM.
+	 */
+	private pathIncludesRoot(ev: Event): boolean {
+		if (typeof ev.composedPath === "function") {
+			return ev.composedPath().includes(this.root);
+		}
+		const target = ev.target as Node | null;
+		return target !== null && this.root.contains(target);
+	}
+
+	/** The window this router's element actually lives in. */
+	private backstopWin(): Window {
+		return this.root.ownerDocument.defaultView ?? window;
 	}
 
 	private disarmEndBackstop(): void {
 		if (!this.winEndFn) return;
-		window.removeEventListener("pointerup", this.winEndFn, { capture: true });
-		window.removeEventListener("pointercancel", this.winEndFn, { capture: true });
+		const win = this.winEndWin ?? this.backstopWin();
+		win.removeEventListener("pointerup", this.winEndFn, { capture: true });
+		win.removeEventListener("pointercancel", this.winEndFn, { capture: true });
+		this.winEndWin = null;
 		this.winEndFn = null;
 	}
 

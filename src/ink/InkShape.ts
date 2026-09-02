@@ -140,6 +140,19 @@ export function applyEndTaper(
 	}
 	const total = arc[n - 1]!;
 	if (total < 1e-9) return;
+	// A TAP is not a short line, and tapering one destroys it.
+	//
+	// The taper zone is capped at a share of the stroke, so on a tap it is a
+	// share of almost nothing - and a stroke that short flattens to a ribbon
+	// of two points, both of which are ends. Both then get multiplied to the
+	// tip floor and the dot renders at 12% of the nib: measured 0.132 against
+	// a 1.1 half-width, which is the near-invisible sliver reported on canvas,
+	// SVG and PDF alike (all three flatten through here).
+	//
+	// Below one nib width of travel there is no direction to taper ALONG, so
+	// the honest shape is the nib itself. Real short strokes are unaffected:
+	// the existing 5-unit case is more than twice this bound.
+	if (total < style.baseWidth) return;
 	const taperLen = Math.min(params.taperWidths * style.baseWidth, total * params.taperMaxShare);
 	if (taperLen < 1e-9) return;
 	for (let i = 0; i < n; i++) {

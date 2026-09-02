@@ -323,6 +323,11 @@ export function appendInkToPdf(original: Uint8Array, strokes: readonly InkStroke
 	// leaves the file without the one field that says which document this is
 	// across its own revisions.
 	const id = doc.trailerId === null ? "" : `/ID ${doc.trailerId} `;
+	// Same reasoning as /ID: PDF 32000-1 s7.5.6 says an incremental update's
+	// trailer carries forward the previous trailer's keys, and /Info is the
+	// document's title, author and dates - dropped from every flattened copy
+	// until now (audit-fixes-design.md s3 A2, 2026-09-02).
+	const info = doc.infoRef === null ? "" : `/Info ${doc.infoRef} `;
 
 	if (doc.streamed) {
 		// The table is an object here, so it needs a number and an offset of
@@ -347,7 +352,7 @@ export function appendInkToPdf(original: Uint8Array, strokes: readonly InkStroke
 		}
 		tail +=
 			`${self} 0 obj\n<< /Type /XRef /Size ${self + 1} ` +
-			`/Root ${doc.rootNum} 0 R ${id}/Prev ${doc.startxref} /W [1 4 2] ` +
+			`/Root ${doc.rootNum} 0 R ${id}${info}/Prev ${doc.startxref} /W [1 4 2] ` +
 			`/Index [${index(rows)}] /Length ${table.length} >>\n` +
 			`stream\n${table}\nendstream\nendobj\n`;
 	} else {
@@ -358,7 +363,7 @@ export function appendInkToPdf(original: Uint8Array, strokes: readonly InkStroke
 			for (const n of run) tail += `${String(offsets.get(n)!).padStart(10, "0")} 00000 n \n`;
 		}
 		tail +=
-			`trailer\n<< /Size ${size} /Root ${doc.rootNum} 0 R ${id}` +
+			`trailer\n<< /Size ${size} /Root ${doc.rootNum} 0 R ${id}${info}` +
 			`/Prev ${doc.startxref} >>\n`;
 	}
 	tail += `startxref\n${startxref}\n%%EOF\n`;

@@ -10,7 +10,7 @@ import { DIAG_OFF_NOTE, diagnosticsEnabled } from "../diag/DiagSwitch";
 import { VelocitySample, flingStep, releaseVelocity } from "../input/Fling";
 import { armGuardStyle, disarmGuardStyle } from "./GuardStyle";
 import { isPenCompatMouseMove } from "./PenCursor";
-import { pinchEngaged, pinchRatio, pinchSpread } from "./PinchScale";
+import { pinchEngaged, pinchMidpoint, pinchRatio, pinchSpread } from "./PinchScale";
 import { InkFeedArbiter } from "./InkFeed";
 import {
 	palmSizedTouches,
@@ -736,7 +736,7 @@ export class InlinePenRouter {
 						const id = te.changedTouches[i]?.identifier;
 						if (typeof id === "number") this.liveTouchIds.add(id);
 					}
-				} else if (te.type === "touchend") {
+				} else if (te.type === "touchend" || te.type === "touchcancel") {
 					for (let i = 0; i < te.changedTouches.length; i++) {
 						const id = te.changedTouches[i]?.identifier;
 						if (typeof id === "number") this.liveTouchIds.delete(id);
@@ -823,7 +823,15 @@ export class InlinePenRouter {
 			// Nothing widens except reach: the target check above confines
 			// every decision to our own scroller, so touches anywhere else in
 			// the app never meet this code at all.
-			for (const type of ["touchstart", "touchmove", "touchend"]) {
+			// touchcancel included, and it is the reason this list is not
+			// just the three "normal" ones. The browser sends it instead of
+			// touchend whenever it takes a gesture over - a system swipe, a
+			// palm the OS rejects - and without it the contact's id was
+			// never removed from liveTouchIds. The set is what
+			// touchesAtStrokeStart is snapshotted from, so one cancelled
+			// touch made every later stroke believe a finger had been down
+			// since before it started, and stopped eating it.
+			for (const type of ["touchstart", "touchmove", "touchend", "touchcancel"]) {
 				this.winRef.addEventListener(type, eatStylus, {
 					capture: true,
 					passive: false,
@@ -1050,7 +1058,7 @@ export class InlinePenRouter {
 	private pinchCentroid(): { x: number; y: number } {
 		const pts = [...this.touchPos.values()];
 		if (pts.length !== 2) return { x: 0, y: 0 };
-		return { x: (pts[0]!.x + pts[1]!.x) / 2, y: (pts[0]!.y + pts[1]!.y) / 2 };
+		return pinchMidpoint(pts[0]!, pts[1]!);
 	}
 
 	/** Returns true when the pinch owned this move. */
@@ -1068,11 +1076,20 @@ export class InlinePenRouter {
 		return true;
 	}
 
-	/** Any lift ends the pinch; the remaining finger does not resume panning. */
-	private endPinch(e: PointerEvent): void {
+	/**
+	 * Any lift ends the pinch; the remaining finger does not resume panning.
+	 *
+	 * `centroid`, when given, is the release-path caller's own reading of
+	 * `pinchCentroid()` taken BEFORE it removed the lifted contact from
+	 * `touchPos` - by the time this runs that contact is already gone, so
+	 * `pinchCentroid()` here would see one touch and report {0,0}
+	 * (audit-fixes-design.md 5i I2). Callers that still have both contacts
+	 * live when they call this (none do today) can omit it.
+	 */
+	private endPinch(e: PointerEvent, centroid?: { x: number; y: number }): void {
 		if (!this.pinchLive) return;
 		this.pinchLive = false;
-		this.cb.onPinch("end", 1, this.pinchCentroid());
+		this.cb.onPinch("end", 1, centroid ?? this.pinchCentroid());
 		tr("guard", e, "pinch released");
 	}
 
@@ -1564,7 +1581,16 @@ export class InlinePenRouter {
 			// This row IS the webkit stream's record: on the iPad no raw ever
 			// arrives, so without it a capture holds no geometry at all for
 			// the events that carried the ink.
-			tr("pointermove", e, `move-fed coalesced=${events.length}`, csOf(events));
+			//
+			// Gated, like the raw path below and for the reason stated there:
+			// tr() returns early with the switch off, but the ARGUMENTS are
+			// built first, so csOf allocated a TraceSample per coalesced
+			// sample - up to four - plus a template string, on every move of
+			// every stroke. This is the WebKit ink hot path; it is the one
+			// call site that never got the RC4 rule.
+			if (diagnosticsEnabled()) {
+				tr("pointermove", e, `move-fed coalesced=${events.length}`, csOf(events));
+			}
 			const fed = this.inkFeed.feed(events.map((ce) => ce.timeStamp));
 			const samples: PenSample[] = [];
 			for (const i of fed) {
@@ -1685,7 +1711,15 @@ export class InlinePenRouter {
 				e.stopPropagation();
 				return;
 			}
-			if (this.touchPos.delete(e.pointerId)) this.endPinch(e);
+			if (this.touchPos.has(e.pointerId)) {
+				// Read the centroid while BOTH contacts are still in touchPos -
+				// deleting first (the old order) left only the remaining
+				// contact, so pinchCentroid() always reported {0,0} for an
+				// ordinary pinch end (audit-fixes-design.md 5i I2).
+				const centroid = this.pinchCentroid();
+				this.touchPos.delete(e.pointerId);
+				this.endPinch(e, centroid);
+			}
 			const wasAssistPan = this.endAssist(e);
 			const duringStroke = this.activePenId !== null && this.guardTouches.has(e.pointerId);
 			if (this.guardTouches.delete(e.pointerId)) {

@@ -68,4 +68,16 @@ describe("TipMode", () => {
 		toggleTipMode("pan", true);
 		expect(seen).not.toHaveBeenCalled();
 	});
+
+	it("fires on a change to the nib, same as any other mode", () => {
+		// §5o: InkOverlay's listener has to see a switch BACK to the plain
+		// pen too, since that is the tool change that must dissolve a
+		// selection - not just a switch into eraser/pan/space.
+		toggleTipMode("lasso", true);
+		const seen = vi.fn();
+		setTipModeListener(seen);
+		setTipMode("nib");
+		expect(seen).toHaveBeenCalledTimes(1);
+		expect(tipMode()).toBe("nib");
+	});
 });

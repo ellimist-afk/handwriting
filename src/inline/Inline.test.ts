@@ -119,6 +119,45 @@ describe("claimMarkdown (identity rule: the only Markdown write)", () => {
 	});
 });
 
+describe("claimMarkdown preserves the note's own line ending (5i I5)", () => {
+	// Before this, claiming always reassembled with a hardcoded "\n", so a
+	// Windows-authored (CRLF) note came back with every line ending
+	// rewritten to LF for the sake of one added frontmatter line - a
+	// whole-file diff for a one-line change.
+	it("a CRLF note claims to CRLF, with exactly one line added", () => {
+		const md = "---\r\ntags: x\r\n---\r\n\r\nBody.\r\n";
+		const r = claimMarkdown(md, "pid-crlf");
+		expect(r.changed).toBe(true);
+		// No bare \n slipped in anywhere - every line ending is \r\n.
+		expect(r.content.replace(/\r\n/g, "").includes("\n")).toBe(false);
+		expect(r.content.split("\r\n").length).toBe(md.split("\r\n").length + 1);
+		expect(parseMarkdownPage(r.content).eol).toBe("\r\n");
+	});
+
+	it("an LF note stays LF", () => {
+		const md = "---\ntags: x\n---\n\nBody.\n";
+		const r = claimMarkdown(md, "pid-lf");
+		expect(r.changed).toBe(true);
+		expect(r.content.includes("\r\n")).toBe(false);
+		expect(r.content.split("\n").length).toBe(md.split("\n").length + 1);
+		expect(parseMarkdownPage(r.content).eol).toBe("\n");
+	});
+
+	it("a mixed note normalizes to CRLF - documented rule, not a per-line preservation", () => {
+		// splitLines collapses every \r\n to \n before anything is split, so
+		// the exact position of each original line ending is not recoverable
+		// on rejoin regardless of how eol is chosen; a genuinely mixed file
+		// is normalized to ONE convention. CRLF wins the tie: it is the
+		// deliberately-added one in a mostly-LF file (pasted from Windows, or
+		// one line touched by a CRLF-only tool), and guessing LF would undo
+		// that on the very next save.
+		const md = "---\ntags: x\n---\n\r\nBody.\n"; // one CRLF line, rest LF
+		expect(parseMarkdownPage(md).eol).toBe("\r\n");
+		const r = claimMarkdown(md, "pid-mixed");
+		expect(r.content.replace(/\r\n/g, "").includes("\n")).toBe(false);
+	});
+});
+
 describe("reassignMarkdown (duplicate resolution: the copy's new identity)", () => {
 	it("changes exactly the id line; everything else is byte-identical", () => {
 		const md = "---\ntags: [lecture]\nhandwriting-page-id: shared\n---\n\n# Notes\n\nBody.\n";

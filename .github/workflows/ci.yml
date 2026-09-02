@@ -16,6 +16,12 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # A push to a branch in this repo and the pull_request GitHub opens for
+    # that same branch are the same commit; without this a same-repo PR ran
+    # the whole matrix twice. pull_request still runs for a fork PR, which
+    # has no matching push event here. K2, audit-fixes-design.md 5k.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       # Both majors that matter. Node 21 added a global `navigator`, so
@@ -44,21 +50,32 @@ jobs:
       - name: versions agree
         run: node scripts/check-versions.mjs
 
+      # docs/demo.js is committed and served straight from docs/ - nothing
+      # rebuilt or checked it before this, and it was 21 bytes stale on
+      # 2026-09-02 (audit doc §5e/F1), the site quietly drawing with an
+      # older ink path than the one users install.
+      - name: site bundle is current
+        run: npm run check:site
+
       - name: typecheck
         run: npx tsc -noEmit
 
       - name: tests
         run: npm test
 
-      # Runs tsc again and then esbuild, which is what Obsidian's scanner
-      # selects. Proves the release build works from a clean checkout.
+      # esbuild directly, not `npm run build` (which is `tsc -noEmit &&
+      # esbuild...`): the typecheck step above already ran tsc over the same
+      # commit, so this just proves the bundle esbuild produces - what
+      # Obsidian's scanner selects - builds clean from a clean checkout.
+      # `npm run build` is left as-is so a local build still typechecks.
       - name: production build
-        run: npm run build
+        run: node esbuild.config.mjs production
 
   provenance:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     needs: check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write

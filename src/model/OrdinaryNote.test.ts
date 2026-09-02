@@ -279,3 +279,38 @@ describe("no frontmatter is invented", () => {
 		expect(out).toContain("- bread");
 	});
 });
+
+describe("parseMarkdownPage detects the file's own line ending (5i I5)", () => {
+	// Before this, rawBody and composeMarkdownPage always rejoined with "\n",
+	// so a page id claimed on a CRLF note rewrote every line ending in the
+	// file - a whole-file diff for a one-line frontmatter insert.
+	it("an all-LF file reports \\n", () => {
+		expect(parseMarkdownPage(ORDINARY).eol).toBe("\n");
+	});
+
+	it("an all-CRLF file reports \\r\\n", () => {
+		const crlf = ORDINARY.replace(/\n/g, "\r\n");
+		expect(parseMarkdownPage(crlf).eol).toBe("\r\n");
+	});
+
+	it("claiming identity on a CRLF note adds one line and stays CRLF", () => {
+		const crlf = ORDINARY.replace(/\n/g, "\r\n");
+		const doc = open(crlf);
+		doc.claimIdentity();
+		const out = doc.compose();
+		expect(out.replace(/\r\n/g, "").includes("\n")).toBe(false);
+		expect(out.split("\r\n").length).toBe(crlf.split("\r\n").length + 1);
+		expect(parseMarkdownPage(out).pageId).toBe(doc.pageId);
+	});
+
+	it("a mixed file (one CRLF line, rest LF) is normalized to CRLF, not left mixed", () => {
+		// Decision recorded here because the doc left it open: splitLines
+		// collapses \r\n to \n before splitting, so a rejoin cannot restore
+		// each original line's own ending. A mixed file is therefore
+		// normalized to ONE convention on reassembly, and CRLF - the
+		// deliberately-added one in an otherwise-LF file - is what wins,
+		// so a later save does not silently strip out someone's edit.
+		const mixed = ORDINARY.replace("# Lecture notes", "# Lecture notes\r");
+		expect(parseMarkdownPage(mixed).eol).toBe("\r\n");
+	});
+});

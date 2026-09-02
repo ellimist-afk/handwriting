@@ -107,6 +107,22 @@ describe("the file around the ink", () => {
 		expect(out.slice(src.length)).toContain("/ID [<89ab> <cdef>]");
 	});
 
+	it("repeats the /Info the document already carried", () => {
+		// PDF 32000-1 s7.5.6: an incremental update's trailer carries forward
+		// the previous trailer's keys. Without this, /Info - the title, author
+		// and dates - is lost from every flattened copy (audit-fixes-design.md
+		// s3 A2).
+		const src = document(1).replace("/Root 1 0 R ", "/Root 1 0 R /Info 9 0 R ");
+		const out = latin1(appended(src, [stroke(1)]));
+		expect(out.slice(src.length)).toContain("/Info 9 0 R");
+	});
+
+	it("does not invent an /Info the document never had", () => {
+		const src = document(1);
+		const out = latin1(appended(src, [stroke(1)]));
+		expect(out.slice(src.length)).not.toContain("/Info");
+	});
+
 	it("refuses ink for a page the document does not have", () => {
 		const r = appendInkToPdf(bytes(document(2)), [stroke(3)]);
 		expect(r.ok).toBe(false);

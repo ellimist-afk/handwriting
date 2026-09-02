@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { setInkShaping, inkShapingEnabled } from "./InkShape";
-import { strokeOutline } from "./StrokeOutline";
+import { setInkShaping, inkShapingEnabled, flattenStrokeShaped } from "./InkShape";
+import { flattenStroke, RibbonPt } from "./Ribbon";
+import { PenStyle } from "./PenStyle";
 import { InkStroke } from "./Stroke";
 
 /**
@@ -13,7 +14,27 @@ import { InkStroke } from "./Stroke";
  * asserts the GEOMETRY differs, which settles it either way - if the numbers
  * come out equal the switch is inert, and if they differ the effect is real
  * and merely gentle on slow, even handwriting.
+ *
+ * Measured through the on-screen ribbon (StrokeRenderer.drawStroke's own
+ * selection, reproduced below), not through StrokeOutline: exports stopped
+ * reading this toggle entirely (§5n, Alan, 2026-09-02 - exports are always
+ * shaped), so export geometry no longer varies with it and cannot be used to
+ * prove the switch does anything. The screen is the only surface left where
+ * it does.
  */
+
+function screenRibbon(stroke: InkStroke): RibbonPt[] {
+	const flat = stroke.tool === "highlighter";
+	const style: PenStyle = {
+		color: stroke.color,
+		baseWidth: stroke.width,
+		minWidthFactor: flat ? 0.9 : 0.35,
+		gamma: flat ? 1 : 0.75,
+	};
+	return !flat && stroke.device !== "mouse" && inkShapingEnabled()
+		? flattenStrokeShaped(stroke.points, style, 1)
+		: flattenStroke(stroke.points, style, 1);
+}
 
 function stroke(pts: Array<[number, number, number]>): InkStroke {
 	const xs = pts.map((p) => p[0]);
@@ -58,14 +79,14 @@ describe("the ink smoothing switch", () => {
 		expect(inkShapingEnabled()).toBe(true);
 	});
 
-	it("changes the outline geometry of a stroke", () => {
+	it("changes the on-screen ribbon geometry of a stroke", () => {
 		const s = acceleratingStroke();
 
 		setInkShaping(true);
-		const shaped = strokeOutline(s);
+		const shaped = screenRibbon(s);
 
 		setInkShaping(false);
-		const plain = strokeOutline(s);
+		const plain = screenRibbon(s);
 
 		// Same stroke, same zoom: if the switch does nothing these are equal.
 		expect(JSON.stringify(shaped)).not.toBe(JSON.stringify(plain));
@@ -74,16 +95,11 @@ describe("the ink smoothing switch", () => {
 	it("the shaped stroke varies in width where the plain one does not", () => {
 		const s = acceleratingStroke();
 
-		// left[i] and right[i] are the two sides at the same sample, so their
-		// separation is the local width. How much that RANGES along the stroke
-		// is the whole visible effect of shaping.
+		// hw is the half-width at each sample. How much that RANGES along the
+		// stroke is the whole visible effect of shaping.
 		const widthRange = (): number => {
-			const o = strokeOutline(s);
-			if (!o) throw new Error("no outline");
-			const w = o.left.map((a, i) => {
-				const b = o.right[i]!;
-				return Math.hypot(a.x - b.x, a.y - b.y);
-			});
+			const ribbon = screenRibbon(s);
+			const w = ribbon.map((p) => p.hw);
 			return Math.max(...w) - Math.min(...w);
 		};
 

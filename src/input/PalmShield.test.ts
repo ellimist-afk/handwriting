@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { PALM_RADIUS_PX, isPalmTouch, palmRadiusTrustworthy, palmVerdict } from "./PalmShield";
+import { PALM_RADIUS_SWALLOW_PX, isPalmTouch, palmRadiusTrustworthy, palmVerdict } from "./PalmShield";
 
 const finger = (id: number, r = 5) => ({ identifier: id, radiusX: r, radiusY: r });
 const palm = (id: number, r = 24) => ({ identifier: id, radiusX: r, radiusY: r });
@@ -17,7 +17,7 @@ describe("what counts as a palm", () => {
 	});
 
 	it("one long axis is enough - the heel lands as an ellipse", () => {
-		expect(isPalmTouch({ identifier: 1, radiusX: 4, radiusY: PALM_RADIUS_PX })).toBe(true);
+		expect(isPalmTouch({ identifier: 1, radiusX: 4, radiusY: PALM_RADIUS_SWALLOW_PX })).toBe(true);
 	});
 
 	it("hardware that reports no radius makes the shield inert, not jumpy", () => {

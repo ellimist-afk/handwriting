@@ -12,7 +12,7 @@
  * overlaps its own output, and a stored block with no Huffman coding at all.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MAX_INFLATE, inflate, unpredict } from "./Flate";
 
 function from64(b64: string): Uint8Array {
@@ -132,5 +132,37 @@ describe("the row filters", () => {
 		for (let i = 0; i < row; i++) data[2 + row + i] = 1;
 		const got = unpredict(data, 15, 3, 8, 4)!;
 		expect([...got.subarray(row)]).toEqual(Array.from({ length: row }, (_, i) => i + 1));
+	});
+});
+
+describe("inflate never allocates past its limit", () => {
+	// The initial guess is 5x the compressed length, and it was taken BEFORE
+	// the limit was consulted. A stream that merely CLAIMS to be large - a
+	// malformed or hostile PDF - therefore made this allocate five times that
+	// much on the spot, whatever the caller's limit said.
+	it("caps the first allocation at the limit, not 5x the input", () => {
+		// Not a real deflate stream; it does not need to be. What is under
+		// test is the allocation taken before a single bit is read.
+		const big = new Uint8Array(1_000_000);
+		const sizes: number[] = [];
+		const RealU8 = Uint8Array;
+		const spy = function (this: unknown, arg: number | ArrayBuffer) {
+			if (typeof arg === "number") sizes.push(arg);
+			return new RealU8(arg as number);
+		} as unknown as Uint8ArrayConstructor;
+		vi.stubGlobal("Uint8Array", spy);
+		try {
+			inflate(big, 4096);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		// 5x a megabyte would be five megabytes; nothing may exceed the limit.
+		expect(sizes.length).toBeGreaterThan(0);
+		expect(Math.max(...sizes)).toBeLessThanOrEqual(4096);
+	});
+
+	it("still decompresses normally when the limit is generous", () => {
+		const got = inflate(from64("eNpLTBwFo2AUDHcAAPnYevg="));
+		expect(got).not.toBeNull();
 	});
 });

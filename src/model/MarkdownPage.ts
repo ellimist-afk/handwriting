@@ -63,13 +63,34 @@ export interface ParsedMarkdownPage {
 	/** Body content outside any handwriting block, preserved verbatim. */
 	extra: string;
 	/**
-	 * Everything after the frontmatter, verbatim (LF-normalized). This is the
-	 * ONLY answer to "where does the body begin". A second implementation of
+	 * Everything after the frontmatter, verbatim past line-ending normalization
+	 * (rejoined with `eol`, not necessarily the file's original `\n`). This is
+	 * the ONLY answer to "where does the body begin". A second implementation of
 	 * that question corrupted notes with malformed fences the moment the page
 	 * id was first written, because the two parsers disagreed about which lines
 	 * were frontmatter (audit v0.8.0 #3).
 	 */
 	rawBody: string;
+	/**
+	 * The file's own line ending, detected once from the raw text and reused
+	 * everywhere this parse gets reassembled. Before this, `rawBody` and
+	 * `composeMarkdownPage` always rejoined with `\n`, so a Windows-authored
+	 * (CRLF) note that gained a page id came back with every line ending
+	 * rewritten - a whole-file diff in git and a whole-file change to sync,
+	 * for a one-line frontmatter insert (audit-fixes-design.md 5i I5).
+	 *
+	 * Detection is file-wide, not per-line: a single `\r\n` anywhere in the
+	 * text is enough to call the whole file CRLF. A genuinely mixed file
+	 * (both conventions present) is therefore normalized to CRLF on
+	 * reassembly rather than preserved line-for-line - `splitLines` already
+	 * collapses every `\r\n` to `\n` before anything is split, so the exact
+	 * position of each original line ending is not something a later rejoin
+	 * could recover anyway. CRLF is the one that wins a mixed file because it
+	 * is the less common case in this codebase's actual notes: guessing LF
+	 * for a file that has deliberately-added CRLF lines would be the more
+	 * surprising rewrite of the two.
+	 */
+	eol: "\r\n" | "\n";
 }
 
 function splitLines(text: string): string[] {
@@ -116,6 +137,10 @@ function makeIdUniquifier(): (id: string) => string {
 }
 
 export function parseMarkdownPage(md: string): ParsedMarkdownPage {
+	// First occurrence wins: scanned once, before splitLines throws the
+	// distinction away. See the `eol` doc comment on ParsedMarkdownPage for
+	// the mixed-file rule this implies.
+	const eol: "\r\n" | "\n" = md.includes("\r\n") ? "\r\n" : "\n";
 	const lines = splitLines(md);
 	let i = 0;
 	const frontmatter: string[] = [];
@@ -138,7 +163,7 @@ export function parseMarkdownPage(md: string): ParsedMarkdownPage {
 			i = close + 1;
 		}
 	}
-	const rawBody = lines.slice(i).join("\n");
+	const rawBody = lines.slice(i).join(eol);
 
 	const blocks: MarkdownBlock[] = [];
 	const images: MarkdownImage[] = [];
@@ -192,6 +217,7 @@ export function parseMarkdownPage(md: string): ParsedMarkdownPage {
 		images,
 		extra: trimBlank(extraLines).join("\n"),
 		rawBody,
+		eol,
 	};
 }
 
@@ -248,9 +274,18 @@ export interface ComposeInput {
 	blocks: MarkdownBlock[];
 	images?: MarkdownImage[];
 	extra?: string;
+	/**
+	 * The line ending to rejoin with - a parse's own `eol`, when this compose
+	 * is reassembling a file that already existed. Defaults to `\n`: a brand
+	 * new page (`newPageMarkdown`) has no original EOL to honour, and every
+	 * other existing caller composed with `\n` before this field existed, so
+	 * the default keeps their output unchanged (5i I5).
+	 */
+	eol?: "\r\n" | "\n";
 }
 
 export function composeMarkdownPage(input: ComposeInput): string {
+	const eol = input.eol ?? "\n";
 	const fm = updateFrontmatter(input.frontmatter ?? [], input.pageId);
 	const parts: string[] = ["---", ...fm, "---", ""];
 	for (const block of input.blocks) {
@@ -268,7 +303,7 @@ export function composeMarkdownPage(input: ComposeInput): string {
 	}
 	const extra = (input.extra ?? "").trim();
 	if (extra.length > 0) parts.push(extra, "");
-	return parts.join("\n");
+	return parts.join(eol);
 }
 
 /**

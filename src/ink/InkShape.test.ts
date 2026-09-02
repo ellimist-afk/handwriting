@@ -105,6 +105,45 @@ describe("applyEndTaper — tips, not blunt caps", () => {
 		expect(pts[5]!.hw).toBeGreaterThan(pts[0]!.hw);
 	});
 
+	it("leaves a tap alone: a ribbon of two ends is not a line", () => {
+		// The taper zone is a share of the stroke, so on a tap it is a share
+		// of almost nothing - and a stroke that short flattens to just its two
+		// endpoints. Both are ends, both got multiplied to the tip floor, and
+		// the dot came out at 12% of the nib on canvas, SVG and PDF alike.
+		const pts = [
+			{ x: 0, y: 0, hw: 1.1 },
+			{ x: 0.8, y: 0, hw: 1.1 },
+		];
+		applyEndTaper(pts, DEFAULT_PEN, PEN_SHAPE);
+		expect(pts[0]!.hw).toBe(1.1);
+		expect(pts[1]!.hw).toBe(1.1);
+	});
+
+	it("leaves a tap alone whatever the ribbon resolution", () => {
+		// Three points made a lens - two sharp tips around a full-width middle
+		// - over less than a nib's width of travel. Also not a dot.
+		const pts = [
+			{ x: 0, y: 0, hw: 1.1 },
+			{ x: 0.4, y: 0, hw: 1.1 },
+			{ x: 0.8, y: 0, hw: 1.1 },
+		];
+		applyEndTaper(pts, DEFAULT_PEN, PEN_SHAPE);
+		expect(pts.map((p) => p.hw)).toEqual([1.1, 1.1, 1.1]);
+	});
+
+	it("still tapers as soon as the stroke is longer than the nib is wide", () => {
+		// The boundary is one nib width (2.2 for the default pen), and just
+		// past it the taper is back - a short flick is a line, not a dot.
+		const pts = [
+			{ x: 0, y: 0, hw: 1.1 },
+			{ x: 1.5, y: 0, hw: 1.1 },
+			{ x: 3, y: 0, hw: 1.1 },
+		];
+		applyEndTaper(pts, DEFAULT_PEN, PEN_SHAPE);
+		expect(pts[0]!.hw).toBeLessThan(1.1);
+		expect(pts[2]!.hw).toBeLessThan(1.1);
+	});
+
 	it("leaves a dot (single point) untouched", () => {
 		const pts = [{ x: 0, y: 0, hw: 2 }];
 		applyEndTaper(pts, DEFAULT_PEN, PEN_SHAPE);

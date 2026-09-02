@@ -16,8 +16,14 @@
  *
  * The router drives it from requestAnimationFrame (a finite, self-ending
  * chain, not a recurring timer) and cancels it instantly on ANY new
- * input: pen signal (pen always wins), a new finger (takes over), a wheel
- * event's scroll, or disposal. Pure math here; DOM and rAF in the router.
+ * input: pen signal (pen always wins), a new finger (takes over), or
+ * disposal. Pure math here; DOM and rAF in the router.
+ *
+ * A wheel/touchpad scroll does NOT cancel a fling: InlinePenRouter
+ * registers no "wheel" listener, so there is nothing here to wire it to.
+ * Acceptable because a touch fling and a trackpad wheel scroll landing on
+ * the same device at the same moment is rare (audit-fixes-design.md §5m
+ * M1; retracts the wheel promise from Slice K3's un-skipped seam).
  */
 
 /** Exponential decay time-constant, ms. */

@@ -8,6 +8,7 @@ import {
 } from "./input/PenDiagnosticsView";
 import { HANDWRITING_PEN_LAB_VIEW_TYPE, PenLabView } from "./view/PenLabView";
 import {
+	addStripSurface,
 	copyInlineInkMetrics,
 	copyInlineZoomReport,
 	copyPresentationReport,
@@ -69,7 +70,11 @@ import {
 	setInkColorHex,
 	setPersistInkColor,
 } from "./ink/InkColor";
-import { diagnosticsEnabled, setDiagnosticsEnabled } from "./diag/DiagSwitch";
+import {
+	diagnosticsEnabled,
+	setDiagnosticsChangedListener,
+	setDiagnosticsEnabled,
+} from "./diag/DiagSwitch";
 import { mouseInkEnabled, setMouseInk, setPersistMouseInk } from "./inline/MouseInk";
 import { setPrediction, setPredictionEink } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
@@ -82,6 +87,7 @@ import { clipboardSize } from "./inline/InkClipboard";
 import {
 	attachEmbedInk,
 	disarmPrintSwaps,
+	teardownEmbedInk,
 	embedInkChanged,
 	embedInkRoot,
 	initEmbedInkRefresh,
@@ -101,15 +107,16 @@ import { pdfInkReport } from "./pdf/PdfInkReport";
 import { PdfInkController } from "./pdf/PdfInkController";
 import { calibrationStrokes } from "./pdf/PdfCalibration";
 import { PdfInkStore } from "./pdf/PdfInkStore";
-import { InstanceClaim, chooseInstance, familyOf, pdfInkId } from "./pdf/PdfIdentity";
+import { InstanceClaim, chooseInstance, familyOf, isPdfInkId, pdfInkId } from "./pdf/PdfIdentity";
 import { applyOp } from "./pdf/PdfInkHistory";
-import { newPageId } from "./model/PageData";
-import { PageIdIndex } from "./model/PageIdIndex";
+import { isSafePageId, newPageId } from "./model/PageData";
+import { PageIdIndex, RegisterVerdict } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
 import { decideWhatsNew, whatsNewFragment, WHATS_NEW_MS } from "./update/WhatsNew";
 import {
+	adoptInkFolder,
 	changeFolder,
 	DEFAULT_INK_FOLDER,
 	inkFolderSyncs,
@@ -134,20 +141,36 @@ import {
  * Where "Upload to developer" sends a replay recording. Empty string means
  * the button does not exist - recording and Copy/Save work entirely offline,
  * which keeps the no-required-network rule intact. The receiving end is
- * scripts/trace-upload-worker.mjs on Cloudflare; nothing runs anywhere
+ * scripts/trace-worker/worker.mjs, deployed to Cloudflare with
+ * `npx wrangler deploy` from that directory; nothing runs anywhere
  * between uploads.
  */
 const TRACE_UPLOAD_URL: string = "https://handwriting-traces.trace-worker.workers.dev";
 
+/**
+ * How long a deleted note has to come back before its ink is recycled.
+ *
+ * Sync tools and git express a rename or a branch switch as delete+create,
+ * and the pair can be seconds apart on a slow vault. Long enough to cover
+ * that; short enough that a real delete's ink reaches the trash while the
+ * user still remembers deleting it. Nothing is destroyed either way - the
+ * recycle is a move into .handwriting/trash.
+ */
+const RECYCLE_GRACE_MS = 10_000;
+
+/**
+ * How long a note's page id may be unreadable before we believe it is gone.
+ *
+ * Long enough to cover a frontmatter block being edited - Obsidian re-parses
+ * on every keystroke and an unfinished property reports no frontmatter at all
+ * - and short enough that a genuine removal frees the id while the user is
+ * still doing whatever prompted it.
+ */
+const DECLAIM_GRACE_MS = 2_000;
+
 interface HandwritingSettings {
 	/** Per-page camera, kept out of the synced note on purpose (§22). */
 	cameras: Record<string, CameraState>;
-	/**
-	 * Smoothed rendering geometry (live raw head + retrospectively smoothed
-	 * tail). On by default as of the geometry checkpoint. The scheduling and
-	 * pressure pipeline underneath is unchanged and frozen.
-	 */
-	smoothInk: boolean;
 	/** Nib size multipliers per tool (v0.13.6): 0.6 fine · 1 medium · 1.8 bold. */
 	inkSizes: { pen: number; highlighter: number };
 	/**
@@ -203,7 +226,6 @@ interface HandwritingSettings {
 
 const DEFAULT_SETTINGS: HandwritingSettings = {
 	cameras: {},
-	smoothInk: true,
 	inkSizes: { pen: 1, highlighter: 1 },
 	pressureSensitivity: true,
 	inkSmoothing: true,
@@ -257,6 +279,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	private freshInstall = false;
 	private settingsDirty = false;
 	private settingsTimer: number | null = null;
+	/** persistSettings' one-deep latch: another write wanted once this one lands. */
+	private settingsWriteAgain = false;
+	/** persistSettings' in-flight write, or null when nothing is writing. */
+	private settingsWriting: Promise<void> | null = null;
 	/** Files we are mid-swap on, so layout events don't fight each other. */
 	private swapping = new Set<string>();
 
@@ -305,7 +331,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				// dropping a stroke is wrong and storing it under a guessed id
 				// is worse.
 				() => this.pdfIds.get(root) ?? null,
-				(op) => {
+				// The whole document, in store order. This is the list the sink
+				// below applies every op against, so it is the list the op's
+				// indices have to be positions in. The page-filtered source
+				// above is for hit-testing and painting only.
+				() => {
+					if (this.pdfCalibration) return [];
+					const id = this.pdfIds.get(root);
+					return id ? this.pdfStore.strokes(id) : [];
+				},
+				(op, mode) => {
 					// The op's OWN document, never the pane's current one. An
 					// undo pressed after this pane opened a different PDF must
 					// act on the document the ink lives in; using whatever is on
@@ -316,7 +351,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					// changed, applyOp works out the resulting stroke list, and
 					// the store writes it. Undo is then just the inverse op
 					// arriving through the same door.
-					this.pdfStore.replaceAll(id, applyOp(this.pdfStore.strokes(id), op));
+					const next = applyOp(this.pdfStore.strokes(id), op);
+					// "live" means the gesture is still running: the screen
+					// needs the new list, the disk does not. The controller
+					// writes once at pen-up through the persist callback below.
+					if (mode === "live") this.pdfStore.replaceAllLive(id, next);
+					else this.pdfStore.replaceAll(id, next);
 				},
 				// `commands` is not on the public App type, so it is reached
 				// the way the note surface reaches it: a narrow cast behind a
@@ -334,7 +374,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				// test. Saying things is the plugin's job.
 				(message) => {
 					new Notice(message);
-				}
+				},
+				// The one write at the end of a gesture whose ops were applied
+				// live. The controller decides when; the store decides how.
+				(id) => this.pdfStore.save(id)
 			);
 			controller.mount();
 			this.pdfInk.set(root, controller);
@@ -655,6 +698,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	/** Collisions with no safe owner: id → the paths locked over it. */
 	private ambiguousIds = new Map<string, string[]>();
 	private pageIdWatchReady = false;
+	/** Deleted pages waiting out the delete+create window. See scheduleRecycle. */
+	private pendingRecycle = new Map<string, number>();
+	/** Notes whose id went missing, waiting to be confirmed. See declaimLater. */
+	private declaimTimers = new Map<string, number>();
+	/** Notes already warned about an unusable page id; see warnUnusablePageId. */
+	private badPageIds = new Set<string>();
 	private resolvingDuplicates = new Set<string>();
 	/** Paths the user deliberately opened on the canvas (host contract). */
 	canvasIntent = new Set<string>();
@@ -731,7 +780,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				if (!(file instanceof TFile)) return null;
 				const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
 				const id = fm?.["handwriting-page-id"] as unknown;
-				return typeof id === "string" && id.length > 0 ? id : null;
+				// Frontmatter is text a person or a sync peer typed, and this
+				// id goes straight into a sidecar path. Anything outside
+				// isSafePageId is not "a page with an odd name": the note
+				// counts as unclaimed, so the next stroke mints a fresh id
+				// and the ink lands in the ink folder like everyone else's.
+				if (typeof id === "string" && id.length > 0 && !isSafePageId(id)) {
+					this.warnUnusablePageId(path);
+					return null;
+				}
+				return isSafePageId(id) ? id : null;
 			},
 			claimId: async (path, proposedId) => {
 				const file = this.app.vault.getAbstractFileByPath(path);
@@ -855,6 +913,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 							// costs nothing and a swap mid-stroke costs the
 							// stroke.
 							if (!controller.idle) continue;
+							// And a stroke that LANDED in that gap has queued a
+							// write holding a pre-reload snapshot. Reloading
+							// now refreshes the known mtime, which disarms the
+							// write-path conflict guard, and that stale
+							// snapshot then goes over the other device's ink
+							// with no conflict copy. Skip the tick instead: the
+							// write lands, and the next poll reloads cleanly.
+							if (this.store.hasQueuedWrite(id)) continue;
 							if (await this.pdfStore.reloadExternal(id)) {
 								controller.refresh();
 								changed = true;
@@ -874,8 +940,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 								// The quiet check above is a tick old and the stat
 								// awaited: a pen can have landed meanwhile. This
 								// recheck runs in the same microtask as the
-								// record drop, so no gesture can interleave.
+								// adopt, so no gesture can interleave.
 								if (!inlineReloadCandidates().includes(path)) continue;
+								// Same gap, the other half: a stroke that
+								// FINISHED in it left a queued write carrying a
+								// pre-reload snapshot, and reloading refreshes
+								// the known mtime so the write-path conflict
+								// guard no longer sees a reason to preserve
+								// anything. Let the write land; the next poll
+								// reloads against a mtime that matches it.
+								if (this.store.hasQueuedWrite(id)) continue;
 								if (await inlineInk.reloadExternal(path)) {
 									inkExternallyReloaded(path);
 									notifyInkChanged(path);
@@ -930,7 +1004,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const on = !mouseInkEnabled();
 				setMouseInk(on);
 				this.settings.mouseInk = on;
-				runDetached(this.saveData(this.settings), "save the mouse ink setting");
+				runDetached(this.persistSettings(), "save the mouse ink setting");
 				// Turning mouse ink on IS declaring yourself a pen person: the
 				// strip appears without waiting for hardware that never comes.
 				if (on) {
@@ -961,7 +1035,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const next = nextPenToolsMode(getPenToolsMode());
 				setPenToolsMode(next);
 				this.settings.penTools = next;
-				runDetached(this.saveData(this.settings), "save the pen tools mode");
+				runDetached(this.persistSettings(), "save the pen tools mode");
 				refreshPenToolsAll();
 				new Notice(`Handwriting: pen tools ${next}`);
 			},
@@ -981,7 +1055,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const next = nextPaperStyle(this.settings.paperStyle);
 				this.settings.paperStyle = next;
 				this.applyPaper(next);
-				runDetached(this.saveData(this.settings), "save the paper style");
+				runDetached(this.persistSettings(), "save the paper style");
 				new Notice(`Handwriting: paper ${next}`);
 			},
 		});
@@ -1585,7 +1659,6 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					dpr: window.devicePixelRatio,
 					viewport: { w: window.innerWidth, h: window.innerHeight },
 					settings: {
-						smoothInk: this.settings.smoothInk,
 						inkSmoothing: this.settings.inkSmoothing,
 						strokePrediction: this.settings.strokePrediction,
 						booxMode: this.settings.booxMode,
@@ -1886,8 +1959,23 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			);
 		});
 
-		// Sidecar upkeep (§21): the sidecar is keyed by page id, so renames are
-		// harmless. Deletes should not leave orphans behind, though.
+		// Two unrelated lifecycles share this stretch of vault events; an
+		// earlier version of this comment described only the first and, read
+		// against the handlers below it, implied the second needed no work.
+		//
+		// Below (delete): onFileDeleted recycles a deleted note's page-id-
+		// keyed ink (§21). The sidecar needs no matching rename handler - its
+		// path is <pageId>.json, derived from the id in the note's own
+		// frontmatter rather than from the note's path, so a rename never
+		// touches it.
+		//
+		// Next (rename, then its own delete): inline session records, the
+		// canvas-intent set and a PDF's path claim are keyed by the note's
+		// PATH instead, so unlike the sidecar they must move when the file
+		// moves and drop when the file is gone, or the next file landing on
+		// that path inherits state that was never its own.
+		//
+		// K4, audit-fixes-design.md 5k.
 		this.registerEvent(
 			this.app.vault.on("delete", (file) =>
 				runDetached(this.onFileDeleted(file), "preserve ink for a deleted note")
@@ -1958,6 +2046,27 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			this.pdfInk.clear();
 		});
 		syncPdfInk();
+		// Every way the recording switch flips, not just the command: showing
+		// a report also ends the capture, and that path left "recording pen"
+		// in the status bar with nothing recording.
+		setDiagnosticsChangedListener(() => this.syncRecordingBadge());
+		this.register(() => setDiagnosticsChangedListener(null));
+		// Open PDFs carry a strip too, and the settings fan-outs only ever
+		// walked the editor overlays - so changing the toolbar corner, or the
+		// tip mode, moved every note's strip and left every open PDF's where
+		// it was until something else happened to refresh it.
+		this.register(
+			addStripSurface(
+				() => {
+					for (const c of this.pdfInk.values()) c.refreshStrip();
+				},
+				// §5o: a tool switch away from lasso dissolves every open PDF's
+				// selection too - Alan's device finding 2026-09-02.
+				() => {
+					for (const c of this.pdfInk.values()) c.dissolveSelection();
+				}
+			)
+		);
 		this.registerEvent(this.app.workspace.on("file-open", updateStatusBarClass));
 		// The claim on a note's FIRST stroke changes its metadata. That is the
 		// moment an ordinary note becomes a Handwriting page under the cursor.
@@ -2068,7 +2177,57 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		if (!(file instanceof TFile)) return;
 		const id = this.recentPageIdFor(file);
 		if (!id) {
-			// The id line is gone (duplicate resolution by hand, or an
+			// NOT immediately. See declaimLater: an id that has merely gone
+			// unreadable for a keystroke must not take the note's ink off
+			// the screen.
+			this.declaimLater(path);
+			return;
+		}
+		// It is back, or it never went: cancel anything waiting to declaim.
+		const pending = this.declaimTimers.get(path);
+		if (pending !== undefined) {
+			window.clearTimeout(pending);
+			this.declaimTimers.delete(path);
+		}
+		const v = this.pageIds.register(path, id);
+		if (v.kind === "registered") {
+			this.persistOwners();
+			return;
+		}
+		if (v.kind === "same") return;
+		this.resolveIdentityCollision(path, id, v);
+	}
+
+	/**
+	 * Give up a note's identity, but only once it stays given up.
+	 *
+	 * `handwriting-page-id` lives in YAML frontmatter, and Obsidian re-parses
+	 * that on every keystroke. Adding a property, or fixing a typo, makes the
+	 * block momentarily invalid - and an unparseable block reports NO
+	 * frontmatter, which is indistinguishable here from "the id line was
+	 * deleted". Acting on it dropped the session record, so the note's ink
+	 * vanished mid-edit and did not come back until it was reopened.
+	 *
+	 * A real declaim is not urgent: nothing is lost by confirming it a moment
+	 * later, and the confirmation is just asking again.
+	 */
+	private declaimLater(path: string): void {
+		if (this.declaimTimers.has(path)) return;
+		this.declaimTimers.set(
+			path,
+			window.setTimeout(() => {
+				this.declaimTimers.delete(path);
+				const file = this.app.vault.getAbstractFileByPath(path);
+				if (!(file instanceof TFile)) return;
+				if (this.recentPageIdFor(file)) return; // it came back
+				this.declaimNow(path);
+			}, DECLAIM_GRACE_MS)
+		);
+	}
+
+	private declaimNow(path: string): void {
+		{
+			// The id line really is gone (duplicate resolution by hand, or an
 			// external edit). Free anything this path owned, drop its stale
 			// session record, and re-check collisions it participated in.
 			const freed = this.pageIds.handleDelete(path);
@@ -2086,12 +2245,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			if (freed.length > 0) this.persistOwners();
 			return;
 		}
-		const v = this.pageIds.register(path, id);
-		if (v.kind === "registered") {
-			this.persistOwners();
-			return;
-		}
-		if (v.kind === "same") return;
+	}
+
+	private resolveIdentityCollision(
+		path: string,
+		id: string,
+		v: Extract<RegisterVerdict, { kind: "duplicate" }>
+	): void {
 		// Duplicate sighting. Verify the recorded owner still exists and
 		// still carries the id. If not, ownership transfers instead.
 		const ownerFile = this.app.vault.getAbstractFileByPath(v.ownerPath);
@@ -2223,7 +2383,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.settings.pressureSensitivity = on;
 		// Render-time law: a repaint restyles every committed stroke.
 		repaintAllInkOverlays();
-		await this.saveData(this.settings);
+		await this.persistSettings();
 		new Notice(
 			on ? "Handwriting: pressure sensitivity on" : "Handwriting: pressure sensitivity off"
 		);
@@ -2245,9 +2405,32 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		setInlinePanMode(false);
 	}
 
+	/**
+	 * The COMMAND path for choosing a color. The strip's swatches take a
+	 * different one (pickStripColor), and the two have to agree about the
+	 * strip.
+	 *
+	 * They did not. pickStripColor ends in refreshAllStrips(); this ended in
+	 * a save, so the palette button kept its old tint and the ring in the
+	 * swatch pop stayed on the old color until something else happened to
+	 * rebuild it. Opening the pop from the palette button rebuilds it, which
+	 * is exactly the workaround the report describes: change the color, see
+	 * nothing move, open the palette from the ink color icon, and the ring is
+	 * suddenly right (StellarRaccoon, issue #5).
+	 *
+	 * "Ink color: next" made it worse. It calls pickUpNib first, which
+	 * refreshes, and only then lands here to change the color - so the one
+	 * refresh in the sequence ran against the value being replaced.
+	 *
+	 * Refresh BEFORE the save, and do not wait on it: the indicator answers
+	 * for session state, which setInkColorHex has already changed, and it has
+	 * no reason to wait on a disk write. If the save then fails the caller's
+	 * handler says so, and the strip was not lying in the meantime.
+	 */
 	private async setInkColor(tool: InkTool, hex: string, name: string): Promise<void> {
 		this.settings.inkColors[tool] = setInkColorHex(tool, hex);
-		await this.saveData(this.settings);
+		refreshAllStrips();
+		await this.persistSettings();
 		new Notice(`Handwriting: ${tool} ${name}`);
 	}
 
@@ -2255,14 +2438,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		const tool = getInlineTool();
 		setInkSizeMult(tool, mult);
 		this.settings.inkSizes[tool] = clampInkSize(mult);
-		await this.saveData(this.settings);
+		await this.persistSettings();
 		new Notice(`Handwriting: ${tool} size ${name}`);
 	}
 
 	private async setEraserSize(radiusPx: number, name: string): Promise<void> {
 		setEraserRadiusPx(radiusPx);
 		this.settings.eraserRadiusPx = clampEraserRadius(radiusPx);
-		await this.saveData(this.settings);
+		await this.persistSettings();
 		new Notice(`Handwriting: eraser ${name}`);
 	}
 
@@ -2350,20 +2533,41 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		if (mouseInkEnabled() || penSeenThisSession()) return false;
 		setMouseInk(true);
 		this.settings.mouseInk = true;
-		runDetached(this.saveData(this.settings), "save the mouse ink setting");
+		runDetached(this.persistSettings(), "save the mouse ink setting");
 		markPenSeen();
 		refreshPenToolsAll();
 		return true;
 	}
 	onunload(): void {
+		// Pending recycles are DROPPED, never run early. A sidecar left in
+		// place is an orphan somebody can delete; ink recycled for a note
+		// that was about to come back is the failure this delay exists to
+		// prevent, and unload is exactly when a sync is most likely still
+		// mid-pair. The next session's delete will schedule it again.
+		for (const timer of this.pendingRecycle.values()) window.clearTimeout(timer);
+		this.pendingRecycle.clear();
+		// Same reasoning for pending declaims: not confirming one leaves a
+		// note holding an id it may no longer carry, which the next session's
+		// census resolves. Confirming one at unload could free an id from a
+		// note whose frontmatter was mid-edit when the plugin went down.
+		for (const timer of this.declaimTimers.values()) window.clearTimeout(timer);
+		this.declaimTimers.clear();
 		this.applyPaper("none");
 		document.body.classList.remove("handwriting-active-page");
 		document.body.classList.remove("handwriting-boox");
+		// loadSettings adds this on Android; a disabled plugin must not leave
+		// the Android toolbar clearance CSS armed.
+		document.body.classList.remove("handwriting-android");
 		destroyProbeMarkers();
 		// The print swap arms itself once per window and the guard is a WeakSet
 		// in module scope, which a reload replaces - leaving the previous pair
 		// on the window, calling into the old module on every print.
 		disarmPrintSwaps();
+		// And take the layers themselves back out. They live in rendered
+		// views, hover previews and exported panes - someone else's DOM,
+		// which Obsidian does not clean up for us - so without this a
+		// disabled plugin kept showing ink until each section re-rendered.
+		teardownEmbedInk();
 		setHitProbeEnabled(false);
 		// Obsidian's lifecycle contract is `onunload(): void`; it does not
 		// wait for asynchronous cleanup. This is best effort, not crash
@@ -2393,7 +2597,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		}
 		if (d.record !== this.settings.lastSeenVersion) {
 			this.settings.lastSeenVersion = d.record;
-			runDetached(this.saveData(this.settings), "remember the version whose notes were shown");
+			runDetached(this.persistSettings(), "remember the version whose notes were shown");
 		}
 	}
 
@@ -2558,6 +2762,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		const freed = this.pageIds.handleDelete(file.path);
 		const pageId = this.recentPageIdFor(file) ?? freed[0];
 		if (!pageId) return;
+		// A note's frontmatter is free text and can name ANY id. One naming a
+		// PDF's - a copied property, a hand edit, a template - meant deleting
+		// that NOTE recycled the PDF's ink, taking a document's annotations
+		// with a note that never owned them. A note never legitimately holds
+		// a pdf id, so this is a refusal, not a heuristic.
+		if (isPdfInkId(pageId)) return;
 		// Duplicate guard: if ANOTHER note still carries this id (an
 		// unresolved duplicate pair), the sidecar still belongs to a living
 		// note. Recycling it now would take that note's ink with this one.
@@ -2570,6 +2780,46 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			return;
 		}
 		this.ambiguousIds.delete(pageId);
+		this.scheduleRecycle(pageId);
+	}
+
+	/**
+	 * Recycle a deleted note's ink, but not yet.
+	 *
+	 * Obsidian Sync, git and every folder-syncing tool express a rename, a
+	 * branch switch or a conflict resolution as DELETE followed by CREATE.
+	 * Recycling on the delete therefore took the ink out from under a note
+	 * that was about to come straight back - on every device at once, since
+	 * every device sees the same pair. The note returns with its page id
+	 * intact, finds no sidecar, and opens blank.
+	 *
+	 * A real delete is still a delete: the ink goes to the trash a few
+	 * seconds later. Waiting costs nothing (the sidecar is not in anyone's
+	 * way meanwhile) and the failure it prevents is silent.
+	 */
+	private scheduleRecycle(pageId: string): void {
+		const existing = this.pendingRecycle.get(pageId);
+		if (existing !== undefined) window.clearTimeout(existing);
+		this.pendingRecycle.set(
+			pageId,
+			window.setTimeout(() => {
+				this.pendingRecycle.delete(pageId);
+				runDetached(this.recycleIfStillGone(pageId), `recycle ink for ${pageId}`);
+			}, RECYCLE_GRACE_MS)
+		);
+	}
+
+	/**
+	 * The grace period is over: recycle only if the note really is gone.
+	 *
+	 * Asked by ID, not by path, because the create half of a sync's
+	 * delete+create can land at a DIFFERENT name - that is exactly what a
+	 * rename arriving over sync looks like from here.
+	 */
+	private async recycleIfStillGone(pageId: string): Promise<void> {
+		// No path is excluded from the search - the deleted one is gone, and
+		// any file carrying this id now is the note come back.
+		if (this.findOtherCarrier(pageId, "") !== null) return;
 		await this.store.remove(pageId);
 		delete this.settings.cameras[pageId];
 		delete this.settings.pageOwners[pageId];
@@ -2586,7 +2836,26 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		const cache = this.app.metadataCache.getCache(file.path);
 		const fm = cache?.frontmatter;
 		const id: unknown = fm?.["handwriting-page-id"];
-		return typeof id === "string" ? id : undefined;
+		// The other frontmatter ingress, and the one the ownership ledger,
+		// the duplicate check and sidecar deletion all read through. An id
+		// that cannot be a path name is not an identity here either; see
+		// isSafePageId.
+		return isSafePageId(id) ? id : undefined;
+	}
+
+	/**
+	 * Say once, per note, that its `handwriting-page-id` cannot be used.
+	 *
+	 * Once, because readPageId runs on every attach and every frontmatter
+	 * change: a notice per call would be a wall. The note is otherwise
+	 * untouched - nothing is rewritten until the user actually draws.
+	 */
+	private warnUnusablePageId(path: string): void {
+		if (this.badPageIds.has(path)) return;
+		this.badPageIds.add(path);
+		new Notice(
+			`Handwriting: the handwriting-page-id in ${path} is not a usable id, so this note counts as having no ink yet. Drawing on it will assign a new one.`
+		);
 	}
 
 	// ---- settings -----------------------------------------------------------
@@ -2626,7 +2895,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		const next = normalizeInkFolder(raw);
 		const outcome = await changeFolder(
 			{
-				settle: () => inlineInk.settle(),
+				// The inline store's claims AND the sidecar store's own queue.
+				// Only the first was settled, so a debounced save could still
+				// be sitting in its timer when the move began - and land in
+				// the folder migrateInkFolder had just finished emptying,
+				// where nothing would ever read it again.
+				settle: async () => {
+					if (!(await inlineInk.settle())) return false;
+					await this.store.flush();
+					return !this.store.busy;
+				},
 				migrate: (from, to) => migrateInkFolder(this.app.vault.adapter, from, to),
 				repoint: (to) => this.store.useInkFolder(to),
 				persist: async (to) => {
@@ -2663,7 +2941,6 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.freshInstall = raw === null;
 		this.settings = {
 			cameras: raw?.cameras && typeof raw.cameras === "object" ? raw.cameras : {},
-			smoothInk: raw?.smoothInk !== false,
 			inkSizes: {
 				pen: clampInkSize(raw?.inkSizes?.pen ?? 1),
 				highlighter: clampInkSize(raw?.inkSizes?.highlighter ?? 1),
@@ -2711,6 +2988,15 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// must NOT apply on ios, where the same 8px is correct and a shifted
 		// toolbar would be a regression for everyone already using it.
 		if (Platform.isAndroidApp) document.body.classList.add("handwriting-android");
+		// No data.json means the folder choice is gone, not that the ink is.
+		// A vault synced in compatibility mode carries `handwriting/` and not
+		// this file, so a second device would start on `.handwriting`, read
+		// nothing, and fork a second sidecar per page. Adopt the folder the
+		// vault is visibly already using. Only when there is nothing to ask:
+		// a stored choice, including the default, is always obeyed.
+		if (this.freshInstall) {
+			this.settings.inkFolder = await adoptInkFolder(this.app.vault.adapter);
+		}
 		setPenToolsMode(this.settings.penTools);
 		setToolbarCorner(this.settings.toolbarCorner);
 		// The store is constructed before settings are read, so it starts on
@@ -2720,23 +3006,23 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// The strip's eraser slider persists through here on release.
 		setPersistEraserRadius((px) => {
 			this.settings.eraserRadiusPx = px;
-			runDetached(this.saveData(this.settings), "save the eraser size");
+			runDetached(this.persistSettings(), "save the eraser size");
 		});
 		setPersistEraserMode((on) => {
 			this.settings.eraserMode = on ? "stroke" : "reticle";
-			runDetached(this.saveData(this.settings), "save the eraser mode");
+			runDetached(this.persistSettings(), "save the eraser mode");
 		});
 		setPersistMouseInk((on) => {
 			this.settings.mouseInk = on;
-			runDetached(this.saveData(this.settings), "save the mouse ink setting");
+			runDetached(this.persistSettings(), "save the mouse ink setting");
 		});
 		setPersistInkColor((tool, hex) => {
 			this.settings.inkColors[tool] = hex;
-			runDetached(this.saveData(this.settings), "save the ink color");
+			runDetached(this.persistSettings(), "save the ink color");
 		});
 		setPersistInkSize((tool, mult) => {
 			this.settings.inkSizes[tool] = clampInkSize(mult);
-			runDetached(this.saveData(this.settings), "save the ink size");
+			runDetached(this.persistSettings(), "save the ink size");
 		});
 		// The pdf store writes through the same PageStore as notes: same
 		// debounce, same conflict guard, same trash, same ink folder. Only the
@@ -2785,7 +3071,67 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	}
 
 	saveSettingsNow(): void {
-		runDetached(this.saveData(this.settings), "save settings");
+		runDetached(this.persistSettings(), "save settings");
+	}
+
+	/**
+	 * The one path to data.json. Until 2026-09-02 two paths wrote it: a
+	 * debounced one (settingsDirty + settingsTimer -> flushSettings,
+	 * awaiting one write at a time) and a direct one - fourteen call sites
+	 * doing `runDetached(this.saveData(...), ...)` or a bare
+	 * `await this.saveData(...)` on the settings object - that touched
+	 * neither the dirty flag nor the timer. A direct write while a flush
+	 * was pending raced it on the same data.json, and a direct write never
+	 * cleared settingsDirty, so the flush that followed was a redundant
+	 * third write of the same object. Obsidian's saveData is not
+	 * documented atomic; overlapping writes of data.json is how the file
+	 * gets truncated. See audit-fixes-design.md section 5d (E1), verified
+	 * 2026-09-02.
+	 *
+	 * Every write goes through here now, serialized by a one-deep "write
+	 * again after" latch rather than a queue: the payload passed to the
+	 * adapter is always `this.settings`, the whole object, so whatever is
+	 * current when a write finishes is the right thing to write next -
+	 * there is nothing to queue.
+	 *
+	 * THE FREEZE RULE, same lesson as PageStore.flushDispatch (Slice B,
+	 * commit fc08583): iOS and Android can freeze the webview on
+	 * backgrounding with no further JS, so the write that has to beat the
+	 * freeze is the one dispatched synchronously, with no await in front
+	 * of it anywhere in the call path from flushOnHide down to here. The
+	 * latch check below is synchronous and falls straight through to the
+	 * adapter call with nothing awaited first; only the "write again
+	 * after" continuation, chained with `.then`, awaits.
+	 */
+	private persistSettings(): Promise<void> {
+		if (this.settingsTimer !== null) {
+			window.clearTimeout(this.settingsTimer);
+			this.settingsTimer = null;
+		}
+		this.settingsDirty = false;
+		if (this.settingsWriting) {
+			this.settingsWriteAgain = true;
+			return this.settingsWriting;
+		}
+		const write = (): Promise<void> =>
+			this.saveData(this.settings).then(
+				() => {
+					if (!this.settingsWriteAgain) {
+						this.settingsWriting = null;
+						return;
+					}
+					this.settingsWriteAgain = false;
+					this.settingsWriting = write();
+					return this.settingsWriting;
+				},
+				(err: unknown) => {
+					this.settingsWriting = null;
+					this.settingsWriteAgain = false;
+					throw err;
+				}
+			);
+		this.settingsWriting = write();
+		return this.settingsWriting;
 	}
 
 	private async flushSettings(): Promise<void> {
@@ -2794,12 +3140,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			this.settingsTimer = null;
 		}
 		if (!this.settingsDirty) return;
-		this.settingsDirty = false;
-		try {
-			await this.saveData(this.settings);
-		} catch (err) {
-			console.error("[handwriting] settings save failed", err);
-		}
+		return this.persistSettings();
 	}
 }
 
@@ -2931,13 +3272,13 @@ class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Shape snap",
-						desc: "Hold the pen still after drawing a shape. Default on.",
+						desc: "Hold the pen still at the end of a stroke to snap your drawing into a shape. Default on.",
 						control: { type: "toggle", key: "shapeSnap" },
 					},
 					{
-						name: "A command per colour and size",
+						name: "A command per color and size",
 						desc:
-							"Adds one command for every ink colour and nib size, for hotkeys. " +
+							"Adds one command for every ink color and nib size, for hotkeys. " +
 							"The palette button and the cycle commands already cover both. " +
 							"Takes effect after the plugin reloads.",
 						control: { type: "toggle", key: "colorSizeCommands" },
@@ -2971,7 +3312,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Pen toolbar",
-						desc: "Determines when the toolbar appears. Default auto.",
+						desc: "Auto-hides the toolbar when the pen is away. Default auto.",
 						control: {
 							type: "dropdown",
 							key: "penTools",
@@ -2999,8 +3340,8 @@ class HandwritingSettingTab extends PluginSettingTab {
 				heading: "Storage",
 				items: [
 					{
-						name: "Compatibility with Obsidian Sync",
-						aliases: ["ink folder", "hidden folder", "sync"],
+						name: "Compatibility with Obsidian Sync, iCloud and Dropbox",
+						aliases: ["ink folder", "hidden folder", "sync", "obsidian sync", "icloud", "dropbox"],
 						render: (setting) => this.renderSyncButton(setting),
 					},
 				],
@@ -3157,7 +3498,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 	// the README, where someone goes when they want the reason.
 	private renderSyncButton(setting: Setting): void {
 		const label = (): string => (inkFolderSyncs(this.plugin.settings.inkFolder) ? "Turn off" : "Turn on");
-		setting.setName("Compatibility with Obsidian Sync").addButton((btn) =>
+		setting.setName("Compatibility with Obsidian Sync, iCloud and Dropbox").addButton((btn) =>
 			btn
 				.setButtonText(label())
 				.setCta()

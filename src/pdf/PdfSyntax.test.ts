@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+	MAX_XREF_ROWS,
 	asRef,
 	bytesOf,
 	dictEntries,
@@ -152,6 +153,67 @@ describe("the cross-reference table", () => {
 		const r = readPdf(src.replace("/Root 1 0 R ", `/Root 1 0 R /Prev ${at} `));
 		expect(r.ok).toBe(false);
 		expect(r.ok || r.reason).toContain("itself");
+	});
+});
+
+/**
+ * A cross-reference STREAM with `/W [1 0 0]` - a one-byte-per-row table,
+ * type 1 throughout - so its data is exactly `n` bytes and a two-million-row
+ * fixture is a couple of megabytes rather than the tens the real widths
+ * (`/W [1 4 2]`) would need.
+ */
+function bigStreamXref(n: number): string {
+	const data = "\x01".repeat(n);
+	let out = "%PDF-1.5\n";
+	const startxref = out.length;
+	out +=
+		`1 0 obj\n<< /Type /XRef /Size ${n} /Root 1 0 R /W [1 0 0] ` +
+		`/Index [0 ${n}] /Length ${data.length} >>\nstream\n${data}\nendstream\nendobj\n`;
+	return out + `startxref\n${startxref}\n%%EOF\n`;
+}
+
+/** A classic table declaring `0 <n>`, every entry the same 20-byte shape. */
+function bigClassicXref(n: number): string {
+	let out = "%PDF-1.7\n";
+	out += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+	const startxref = out.length;
+	out += `xref\n0 ${n}\n` + "0000000000 00000 n \n".repeat(n);
+	out += `trailer\n<< /Size ${n} /Root 1 0 R >>\nstartxref\n${startxref}\n%%EOF\n`;
+	return out;
+}
+
+describe("the cross-reference row cap", () => {
+	// audit-fixes-design.md s3 A1: neither reader capped rows before this -
+	// grep for MAX/cap/limit in this file found only WINDOW. A /W [1 0 0]
+	// stream turns a small compressed input into millions of Map entries.
+	// Building the two-million-row fixture is the point of the test (~2.9s
+	// here); vitest's 5s default flaked once on a loaded machine, so it must
+	// not fail for being slow (audit-fixes-design.md s5m M2).
+	it(
+		"refuses a cross-reference stream one row past the cap, fast",
+		() => {
+			const start = Date.now();
+			const r = readPdf(bigStreamXref(MAX_XREF_ROWS + 1));
+			expect(r.ok).toBe(false);
+			expect(r.ok || r.reason).toContain(`more than ${MAX_XREF_ROWS} rows`);
+			expect(Date.now() - start).toBeLessThan(1000);
+		},
+		20_000,
+	);
+
+	it(
+		"reads a cross-reference stream exactly at the cap",
+		() => {
+			const r = readPdf(bigStreamXref(MAX_XREF_ROWS));
+			expect(r.ok).toBe(true);
+		},
+		20_000,
+	);
+
+	it("refuses a classic table one row past the cap", () => {
+		const r = readPdf(bigClassicXref(MAX_XREF_ROWS + 1));
+		expect(r.ok).toBe(false);
+		expect(r.ok || r.reason).toContain(`more than ${MAX_XREF_ROWS} rows`);
 	});
 });
 

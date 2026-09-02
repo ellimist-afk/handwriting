@@ -15,5 +15,5 @@
 		"noEmit": true,
 		"lib": ["DOM", "ES2022"]
 	},
-	"include": ["src/**/*.ts"]
+	"include": ["src/**/*.ts", "test/**/*.ts"]
 }

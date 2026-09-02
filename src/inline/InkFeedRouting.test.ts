@@ -20,11 +20,13 @@ import { markPenSeen, resetPenToolsForTest } from "./PenToolsMode";
 // trace replay - one element fake on purpose, so the two suites cannot
 // drift apart and disagree about what the router saw.
 import {
+	cancelledRafIds,
 	fakeEl,
 	fedTimestamps,
 	harness,
 	installFakeWindow,
 	penEvent,
+	rafCallbacks,
 } from "../../test/routerHarness";
 
 let uninstallWindow: () => void = () => {};

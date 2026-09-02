@@ -24,6 +24,15 @@ export type Handler = (ev: Event) => void;
 export const winHandlers = new Map<string, Handler>();
 
 /**
+ * requestAnimationFrame stub state (§5l L3, for the fling rAF chain). Ids are
+ * never reused across a test file's run, same as winHandlers is never reset -
+ * callers read `rafCallbacks.size` / `cancelledRafIds` rather than diffing.
+ */
+export const rafCallbacks = new Map<number, FrameRequestCallback>();
+export const cancelledRafIds: number[] = [];
+let nextRafId = 1;
+
+/**
  * Install the window stub when the environment has none. Returns the undo.
  * Callers run this in beforeAll and the undo in afterAll; the flag protects
  * a real window (jsdom or browser) from being clobbered.
@@ -36,6 +45,15 @@ export function installFakeWindow(): () => void {
 			removeEventListener: () => {},
 			setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
 			clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
+			requestAnimationFrame: (cb: FrameRequestCallback) => {
+				const id = nextRafId++;
+				rafCallbacks.set(id, cb);
+				return id;
+			},
+			cancelAnimationFrame: (id: number) => {
+				rafCallbacks.delete(id);
+				cancelledRafIds.push(id);
+			},
 		};
 	}
 	return () => {
@@ -156,6 +174,22 @@ export function penEvent(type: string, ts: number, opts: PenOpts = {}): PointerE
 	return ev as unknown as PointerEvent;
 }
 
+/**
+ * A wheel/touchpad scroll. Minimal on purpose: the router only reads
+ * deltaX/deltaY plus the Event surface every injector here already fakes
+ * (§5l L3 - `grep -n wheel test/routerHarness.ts` found nothing before this).
+ */
+export function wheelEvent(deltaX: number, deltaY: number, ts = performance.now()): WheelEvent {
+	return {
+		type: "wheel",
+		deltaX,
+		deltaY,
+		timeStamp: ts,
+		preventDefault: () => {},
+		stopPropagation: () => {},
+	} as unknown as WheelEvent;
+}
+
 // ---- recorder --------------------------------------------------------------
 
 export function recorder() {
@@ -203,7 +237,17 @@ export function harness() {
 		if (!h) throw new Error(`router registered no window handler for ${ev.type}`);
 		h(ev);
 	};
-	return { router, rec, fire, fireWin, el };
+	/**
+	 * Inject a wheel/touchpad scroll on the same element pointer events fire
+	 * on (§5l L3). Throws if the router has registered no "wheel" handler
+	 * there yet - true of this worktree until Slice K lands.
+	 */
+	const wheel = (deltaX: number, deltaY: number) => {
+		const h = el.handlers.get("wheel");
+		if (!h) throw new Error("router registered no handler for wheel");
+		h(wheelEvent(deltaX, deltaY) as unknown as Event);
+	};
+	return { router, rec, fire, fireWin, wheel, el };
 }
 
 /** Flatten every fed sample's timestamp, across calls, in delivery order. */

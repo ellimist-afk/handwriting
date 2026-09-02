@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { PALM_RADIUS_PX, palmSizedTouches, stylusOnlyTouches, touchesPredateStroke } from "./StylusTouch";
+import { PALM_RADIUS_KEYBOARD_PX, palmSizedTouches, stylusOnlyTouches, touchesPredateStroke } from "./StylusTouch";
 
 describe("stylusOnlyTouches", () => {
 	it("matches a lone stylus touch", () => {
@@ -61,7 +61,7 @@ describe("palmSizedTouches (palm lands before the pen, iPad)", () => {
 	});
 
 	it("matches on the larger axis, since a palm lands oblong", () => {
-		expect(palmSizedTouches([{ radiusX: 12, radiusY: PALM_RADIUS_PX }])).toBe(true);
+		expect(palmSizedTouches([{ radiusX: 12, radiusY: PALM_RADIUS_KEYBOARD_PX }])).toBe(true);
 	});
 
 	it("an empty batch is not a palm", () => {

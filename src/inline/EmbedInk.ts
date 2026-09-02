@@ -255,6 +255,33 @@ export function disarmPrintSwaps(): void {
 	for (const d of printDisarms.splice(0)) d();
 }
 
+/**
+ * Take the ink layers back out of the rendered DOM.
+ *
+ * Everything this module adds lives in someone else's tree - reading views,
+ * hover previews, exported panes - and none of it is Obsidian's to clean up.
+ * Disabling the plugin therefore left canvases, the marker attribute and the
+ * `position: relative` patch behind on every rendered embed, showing ink from
+ * a plugin that is no longer running, until each of those sections happened
+ * to re-render.
+ *
+ * The position patch is only reverted where WE set it: a root that was
+ * already positioned keeps whatever it had, because that was the theme's or
+ * Obsidian's and removing it would move somebody else's layout.
+ */
+export function teardownEmbedInk(): void {
+	for (const root of [...layers.keys()]) {
+		if (!root.isConnected) continue;
+		root.querySelector(":scope > canvas.handwriting-embed-ink")?.remove();
+		root.querySelector(":scope > svg.handwriting-embed-ink")?.remove();
+		root.removeAttribute(MARKER_ATTR);
+		if (root.style.position === "relative") root.style.removeProperty("position");
+	}
+	layers.clear();
+	revisions.clear();
+	strokesFor = null;
+}
+
 function usePrintVector(on: boolean): void {
 	if (on) printSwaps++;
 	sweepDisconnected();

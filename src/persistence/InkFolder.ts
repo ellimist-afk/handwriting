@@ -47,6 +47,30 @@ export function normalizeInkFolder(raw: unknown): string {
 }
 
 /**
+ * Which folder to start on when there is no `data.json` to ask.
+ *
+ * The folder choice lives ONLY in `data.json`, and Obsidian Sync does not
+ * carry that file unless plugin settings are switched on. So the second
+ * device in a sync-compatibility vault - or the first one after a settings
+ * file is lost, a vault is copied, or the plugin is reinstalled - starts on
+ * `.handwriting` while every sidecar sits in `handwriting/` beside it. It
+ * reads nothing, and then writes a SECOND sidecar for every page id it is
+ * asked to save. `PageStore.readPath` keeps the existing ink visible; this
+ * is what stops the fork, by pointing writes at the folder the vault is
+ * plainly already using.
+ *
+ * `.handwriting` wins when both exist. Two populated folders is a state
+ * somebody has to look at, and picking the default keeps that decision
+ * where the settings tab can make it - the read fallback means neither
+ * folder's ink is hidden meanwhile.
+ */
+export async function adoptInkFolder(adapter: Pick<MigrationAdapter, "exists">): Promise<string> {
+	if (await adapter.exists(DEFAULT_INK_FOLDER)) return DEFAULT_INK_FOLDER;
+	if (await adapter.exists(SYNCED_INK_FOLDER)) return SYNCED_INK_FOLDER;
+	return DEFAULT_INK_FOLDER;
+}
+
+/**
  * Will a folder of this name reach other devices? Dot-folders do not: that
  * is the whole reason this setting exists, and the settings tab says so
  * rather than making people find out by losing a week of notes.
@@ -65,11 +89,14 @@ export function inkFolderSyncs(folder: string): boolean {
  * orphan them in a hidden directory the user believes they moved out of.
  */
 export function isSidecarFile(name: string): boolean {
-	return (
-		name.endsWith(".json") ||
-		name.endsWith(".json.tmp") ||
-		/\.(damaged|conflict)-\d+$/.test(name)
-	);
+	// A damaged or conflict copy is named `<id>.damaged-<mtime>.json` or
+	// `<id>.conflict-<mtime>[-<n>].json` (PageStore.ts freeDamagedPath,
+	// freeConflictPath) - always ending in ".json", so the first clause
+	// already accepts it. There is no separate case to match here; a
+	// `/\.(damaged|conflict)-\d+$/` clause (no trailing ".json") could never
+	// have matched a name the store actually produces (audit-fixes-design.md
+	// 5i I3).
+	return name.endsWith(".json") || name.endsWith(".json.tmp");
 }
 
 /**

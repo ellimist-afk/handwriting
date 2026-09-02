@@ -30,8 +30,25 @@ export function diagnosticsEnabled(): boolean {
 	return enabled;
 }
 
+/**
+ * Told whenever the switch flips, however it flipped.
+ *
+ * There are two ways recording stops - the command, and showing a report -
+ * and only the command refreshed the status-bar badge. So filing a report
+ * left "recording pen" sitting in the status bar with nothing recording,
+ * which is exactly the confusion the badge was added to prevent. A listener
+ * here means every path reports itself and no future one can forget.
+ */
+let onChanged: (() => void) | null = null;
+
+export function setDiagnosticsChangedListener(fn: (() => void) | null): void {
+	onChanged = fn;
+}
+
 export function setDiagnosticsEnabled(on: boolean): void {
+	if (enabled === on) return;
 	enabled = on;
+	onChanged?.();
 }
 
 /**
@@ -47,6 +64,7 @@ export function setDiagnosticsEnabled(on: boolean): void {
 export function endRecordingForReport(): boolean {
 	if (!enabled) return false;
 	enabled = false;
+	onChanged?.();
 	return true;
 }
 

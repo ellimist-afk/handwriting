@@ -98,13 +98,25 @@ export interface RasterReport {
 	offenders: string[];
 }
 
-function scaleOfTransform(value: string): number {
+/**
+ * matrix(a, b, c, d, e, f) transforms the basis vector (1, 0) to (a, b), so
+ * Math.hypot(a, b) is that vector's new length: the horizontal scale, in any
+ * rotation. `a` alone is only the horizontal scale when there is no rotation
+ * - a layer scaled by 2 and rotated 90° has a=0, b=2, and reading `a` alone
+ * reports scale 0 (audit-fixes-design.md §5l L2, 2026-09-02).
+ * matrix3d(...) is not parsed: past the XY plane there is no single
+ * "horizontal scale" this formula still answers correctly, so it falls
+ * through to the untransformed default instead of reporting a wrong number.
+ */
+export function scaleOfTransform(value: string): number {
 	if (!value || value === "none") return 1;
-	// matrix(a, b, c, d, e, f); a is the horizontal scale.
-	const m = /^matrix\(([^,]+),/.exec(value) ?? /^matrix3d\(([^,]+),/.exec(value);
-	if (!m || !m[1]) return 1;
+	const m = /^matrix\(([^,]+),([^,]+),/.exec(value);
+	if (!m || m[1] === undefined || m[2] === undefined) return 1;
 	const a = Number.parseFloat(m[1]);
-	return Number.isFinite(a) && a !== 0 ? Math.abs(a) : 1;
+	const b = Number.parseFloat(m[2]);
+	if (!Number.isFinite(a) || !Number.isFinite(b)) return 1;
+	const scale = Math.hypot(a, b);
+	return scale !== 0 ? scale : 1;
 }
 
 function describe(el: Element): string {

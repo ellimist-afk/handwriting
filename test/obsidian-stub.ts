@@ -26,11 +26,23 @@ export class TFile {}
 export class TAbstractFile {}
 export class WorkspaceLeaf {}
 
+// Flags shipped code reads (audit-fixes-design.md s3 A3, 2026-09-02): grep
+// for Platform.is\w+ under src/ gives isAndroidApp isDesktopApp isIosApp
+// isLinux isMacOS isMobileApp isPhone isTablet isWin, plus isMobile/isDesktop
+// which predate that grep and something still reads. Set to match the
+// machine tests actually run on - desktop Windows - not a real device.
 export const Platform = {
 	isMobile: false,
 	isDesktop: true,
 	isIosApp: false,
 	isAndroidApp: false,
+	isDesktopApp: true,
+	isMobileApp: false,
+	isPhone: false,
+	isTablet: false,
+	isMacOS: false,
+	isLinux: false,
+	isWin: true,
 };
 
 export const apiVersion = "0.0.0-test";

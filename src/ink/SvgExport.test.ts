@@ -5,8 +5,9 @@
  * covered by the ribbon suites.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { InkStroke, computeBBox } from "./Stroke";
+import { setInkShaping } from "./InkShape";
 import { inkSvgBody, inkSvgLayers, inkToSvg, strokeToSvg } from "./SvgExport";
 
 function stroke(tool: "pen" | "highlighter", xs: number[], y: number): InkStroke {
@@ -38,6 +39,42 @@ describe("strokeToSvg", () => {
 
 	it("empty strokes emit nothing", () => {
 		expect(strokeToSvg(stroke("pen", [], 0))).toBe("");
+	});
+});
+
+describe("export shaping (§5n: SVG export is always shaped)", () => {
+	// Same decision as InkPdf.test.ts's block of this name: StrokeOutline's
+	// ribbonOf stopped reading inkShapingEnabled() for exports (Alan,
+	// 2026-09-02), so the exported SVG is now byte-identical whichever way
+	// the toggle sits for a pen stroke, and a mouse/highlighter stroke - never
+	// shaped - was already unaffected by it.
+	afterEach(() => setInkShaping(true));
+
+	it("a pen stroke's svg is unaffected by the ink-shaping toggle", () => {
+		const s = stroke("pen", [10, 20, 40, 60, 90], 100);
+		setInkShaping(true);
+		const shapedOn = inkToSvg([s]);
+		setInkShaping(false);
+		const shapedOff = inkToSvg([s]);
+		expect(shapedOff).toBe(shapedOn);
+	});
+
+	it("a mouse stroke's svg is unaffected by the toggle (it was never shaped)", () => {
+		const s: InkStroke = { ...stroke("pen", [10, 20, 40, 60, 90], 100), device: "mouse" };
+		setInkShaping(true);
+		const shapedOn = inkToSvg([s]);
+		setInkShaping(false);
+		const shapedOff = inkToSvg([s]);
+		expect(shapedOff).toBe(shapedOn);
+	});
+
+	it("a highlighter stroke's svg is unaffected by the toggle (it was never shaped)", () => {
+		const s = stroke("highlighter", [10, 20, 40, 60, 90], 100);
+		setInkShaping(true);
+		const shapedOn = inkToSvg([s]);
+		setInkShaping(false);
+		const shapedOff = inkToSvg([s]);
+		expect(shapedOff).toBe(shapedOn);
 	});
 });
 

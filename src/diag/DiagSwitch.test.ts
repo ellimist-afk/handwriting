@@ -3,6 +3,7 @@ import {
 	DIAG_OFF_NOTE,
 	diagnosticsEnabled,
 	endRecordingForReport,
+	setDiagnosticsChangedListener,
 	setDiagnosticsEnabled,
 } from "./DiagSwitch";
 import {
@@ -64,5 +65,39 @@ describe("endRecordingForReport (showing a report ends the capture)", () => {
 		setDiagnosticsEnabled(true);
 		endRecordingForReport();
 		expect(endRecordingForReport()).toBe(false);
+	});
+});
+
+describe("every way the switch flips reports itself", () => {
+	// Two stop paths - the command, and showing a report - and only the
+	// command refreshed the status-bar badge, so filing a report left
+	// "recording pen" sitting in the status bar with nothing recording.
+	afterEach(() => {
+		setDiagnosticsChangedListener(null);
+		setDiagnosticsEnabled(false);
+	});
+
+	it("fires for the command path", () => {
+		let flips = 0;
+		setDiagnosticsChangedListener(() => flips++);
+		setDiagnosticsEnabled(true);
+		setDiagnosticsEnabled(false);
+		expect(flips).toBe(2);
+	});
+
+	it("fires for the report path too", () => {
+		setDiagnosticsEnabled(true);
+		let flips = 0;
+		setDiagnosticsChangedListener(() => flips++);
+		expect(endRecordingForReport()).toBe(true);
+		expect(flips).toBe(1);
+	});
+
+	it("does not fire for a no-op", () => {
+		let flips = 0;
+		setDiagnosticsChangedListener(() => flips++);
+		setDiagnosticsEnabled(false); // already off
+		endRecordingForReport(); // nothing recording
+		expect(flips).toBe(0);
 	});
 });

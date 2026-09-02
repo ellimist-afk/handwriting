@@ -10,7 +10,8 @@ import { drawCommitted, drawStroke } from "../ink/StrokeRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { TailRenderer } from "../ink/TailRenderer";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
-import { DEFAULT_CAPS, EINK_CAPS, buildTail, correctionError } from "../ink/Prediction";
+import { EINK_CAPS, adaptiveCaps, buildTail, correctionError } from "../ink/Prediction";
+import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
 import { predictionEinkOn } from "../inline/StrokePrediction";
 import { strokesHitByCircle } from "../ink/Eraser";
 import { padBBox, pointInBBox } from "../objects/Selection";
@@ -22,7 +23,7 @@ import { TextLayer } from "../objects/TextLayer";
 import { ImageLayer } from "../objects/ImageLayer";
 import { ImageData, PageData, TextBoxData, newId } from "../model/PageData";
 import { MarkdownBlock, MarkdownImage } from "../model/MarkdownPage";
-import { PageDocument } from "../model/PageDocument";
+import { PageDocument, inkRefusal } from "../model/PageDocument";
 import { createMoveOp, moveObjects } from "../objects/ObjectOps";
 import { PageStore } from "../persistence/PageStore";
 import { computeCanvasSize, formatRaster, inspectRaster } from "../diag/Raster";
@@ -49,7 +50,7 @@ export interface HandwritingHost {
 	getCamera(pageId: string): CameraState | undefined;
 	setCamera(pageId: string, cam: CameraState): void;
 	/** Geometry smoothing verdict from the pen lab; false = approved pipeline. */
-	settings: { smoothInk: boolean };
+	settings: { inkSmoothing: boolean };
 	/**
 	 * Paths deliberately sent to the canvas (the open-on-canvas command).
 	 * Everything else that lands in a live canvas view bounces back to
@@ -145,6 +146,16 @@ export class HandwritingPageView extends TextFileView {
 	private loadToken = 0;
 	/** False until the sidecar for the current file has been read. */
 	private loaded = false;
+	/** The last ink refusal announced, so one cause speaks once. See inkRefusal. */
+	private inkRefusalSaid: string | null = null;
+	/**
+	 * Whether this engine fires pointerrawupdate at all. See penMove.
+	 *
+	 * Read off the app window rather than this view's: it is a property of
+	 * the ENGINE, identical in every popout, and a field initializer runs
+	 * before the constructor has a root element to ask.
+	 */
+	private readonly rawUpdates = PointerRouter.rawUpdatesSupported(window);
 	/**
 	 * True once the page id is known to be ON DISK in the Markdown. Distinct
 	 * from doc.identityClaimed (which means "the next compose will include the
@@ -223,8 +234,8 @@ export class HandwritingPageView extends TextFileView {
 		// layer; the pipeline is unchanged, only the canvas it draws into differs.
 		this.wetInk = new WetInkRenderer(this.wetCanvas, false);
 		this.wetHighlight = new WetInkRenderer(this.wetHighlightCanvas, false);
-		this.wetInk.smooth = this.host.settings.smoothInk;
-		this.wetHighlight.smooth = this.host.settings.smoothInk;
+		this.wetInk.smooth = this.host.settings.inkSmoothing;
+		this.wetHighlight.smooth = this.host.settings.inkSmoothing;
 		this.tail = new TailRenderer(this.tailCanvas);
 
 		this.router = new PointerRouter(this.rootEl, this.camera, {
@@ -239,6 +250,14 @@ export class HandwritingPageView extends TextFileView {
 				/* HUD is debug-only now; nothing on the hot path. */
 			},
 		});
+		// Chromium (this.rawUpdates true) inks from onPenRaw / pointerrawupdate
+		// and penMove returns immediately without touching its samples (see
+		// penMove below); building a coalesced PenSample[] on every pointermove
+		// there was pure waste. WebKit has no pointerrawupdate, so penMove is
+		// where its ink comes from and the samples are load-bearing. Same line
+		// as PenLabView.ts:129, which is unconditionally false because that
+		// view has no WebKit fallback to serve (audit-fixes-design.md 5i I4).
+		this.router.deliverMoveSamples = !this.rawUpdates;
 
 		this.detachCamera = this.camera.onChange(() => {
 			this.router?.refreshRect();
@@ -752,10 +771,34 @@ export class HandwritingPageView extends TextFileView {
 		return this.tool === "highlighter" ? this.highlighterStyle : this.penStyle;
 	}
 
+	/** See inkRefusal in PageDocument: the rule saveSpatial already enforces. */
+	private inkRefusal(): string | null {
+		return inkRefusal({
+			loaded: this.loaded,
+			spatialFutureVersion: this.doc.spatialFutureVersion,
+			spatialDamaged: this.doc.spatialDamaged,
+		});
+	}
+
 	private penDown(sample: PenSample, ev: PointerEvent): void {
 		telemetry.bump("view.strokeBegin");
 		this.clearCaret();
 		if (this.textLayer.isEditing) this.textLayer.endEdit();
+
+		// Every pen path below ends in a write: draw, erase, and lasso (which
+		// leads to move and delete). None of them can land while the page is
+		// in a state saveSpatial refuses, so none of them start.
+		const refusal = this.inkRefusal();
+		if (refusal !== null) {
+			// Tracked by MESSAGE, not a boolean: the loading refusal must not
+			// silence a later read-only one, and a page that finishes loading
+			// into a damaged verdict has two different things to say.
+			if (this.inkRefusalSaid !== refusal) {
+				this.inkRefusalSaid = refusal;
+				new Notice(refusal);
+			}
+			return;
+		}
 
 		// Eraser end reports as bit 5 of `buttons` (§25). The test pen never
 		// showed it in diagnostics, so the toolbar tool is the fallback path
@@ -803,7 +846,18 @@ export class HandwritingPageView extends TextFileView {
 
 	private penMove(samples: PenSample[], ev: PointerEvent, coalescedCount: number): void {
 		this.metrics.recordEvent("move", coalescedCount, performance.now() - ev.timeStamp, false);
-		void samples;
+		// This surface inks from onPenRaw, and pointerrawupdate is
+		// Chromium-only. On WebKit - every iPad and iPhone - it never fires,
+		// so a stroke was pointerdown, nothing, pointerup: one point, drawn
+		// as a dot. Where the engine has no raw updates, the coalesced move
+		// samples ARE the input stream, and they go down the same pipe.
+		//
+		// Gated on the engine, not on "have we seen a raw update this
+		// stroke": raw updates are dispatched ahead of the pointermove they
+		// belong to, so a per-stroke latch would still let the first move
+		// through on Chromium and feed those samples twice.
+		if (this.rawUpdates) return;
+		this.penRaw(samples, ev, []);
 	}
 
 	private penRaw(samples: PenSample[], ev: PointerEvent, predicted: PenSample[]): void {
@@ -886,7 +940,7 @@ export class HandwritingPageView extends TextFileView {
 			this.penHistory,
 			predicted,
 			predicted.length > 0 ? "chromium" : "extrap",
-			predictionEinkOn() ? EINK_CAPS : DEFAULT_CAPS
+			predictionEinkOn() ? EINK_CAPS : adaptiveCaps(presentLagMs())
 		);
 		if (result.points.length === 0) return;
 		const last = this.penHistory[this.penHistory.length - 1]!;
@@ -901,7 +955,9 @@ export class HandwritingPageView extends TextFileView {
 		this.presentProbePending = true;
 		window.requestAnimationFrame(() => {
 			this.presentProbePending = false;
-			this.metrics.recordPresent(performance.now() - newestTs);
+			const presentAge = performance.now() - newestTs;
+			recordPresentAge(presentAge);
+			this.metrics.recordPresent(presentAge);
 		});
 	}
 

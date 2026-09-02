@@ -164,12 +164,23 @@ export class PdfInkStore {
 			// The parser reports a newer schema rather than making us compare
 			// version numbers ourselves, and it is authoritative about it.
 			if (result.futureVersion !== undefined) {
+				// Locked, and still rendered. Returning here showed no ink at
+				// all for a document whose sidecar came from a newer build,
+				// which reads as loss; the parser has already migrated what
+				// this build understands and persist() refuses for a
+				// future-locked record, so the ink can be shown safely. Same
+				// change as the inline surface, same reason.
 				rec.futureLocked = true;
 				this.noteOnce(
 					rec,
 					"Handwriting: this PDF's ink was written by a newer version of Handwriting. Ink drawn on it is not saved."
 				);
-				return false;
+				// Zero strokes out of a schema we do not fully understand is
+				// ambiguous - erased, or written in a form we cannot decode -
+				// and adopting on the second reading would blank the document.
+				// What is on screen stays. See the inline surface for the
+				// longer version of this.
+				if (result.data.strokes.length === 0) return false;
 			}
 			rec.basePage = result.data;
 			// Claims made before the read landed survive it: the disk's paths
@@ -208,6 +219,24 @@ export class PdfInkStore {
 		const rec = this.record(id);
 		rec.strokes = [...strokes];
 		this.persist(id, rec);
+	}
+
+	/**
+	 * Replace the stroke set WITHOUT writing: the live half of a gesture.
+	 *
+	 * The eraser, the lasso drag and insert-space each apply an op per
+	 * pointer sample, and every one of those went through replaceAll - a
+	 * scheduled sidecar write per sample, on top of the copies applyOp and
+	 * replaceAll each make of the whole document. The screen has to keep up
+	 * with the pen; the disk does not. `save` is the single write at pen-up.
+	 */
+	replaceAllLive(id: string, strokes: readonly InkStroke[]): void {
+		this.record(id).strokes = [...strokes];
+	}
+
+	/** Write the current state now: the end of a live gesture. */
+	save(id: string): void {
+		this.persist(id, this.record(id));
 	}
 
 	/**

@@ -252,15 +252,32 @@ export class InlineInkStore {
 			);
 			return false;
 		}
-		if (result.futureVersion !== undefined) {
-			rec.futureLocked = true;
-			return false;
-		}
 		if (result.data.surface !== "inline") {
 			// A legacy canvas page. Its geometry means nothing over the editor
 			// and our writes would destroy it. Hands off in both directions.
+			// Checked BEFORE the version, because this one really is
+			// unrenderable here whatever schema wrote it.
 			rec.legacyLocked = true;
 			return false;
+		}
+		if (result.futureVersion !== undefined) {
+			// Read-only, not invisible. This used to return here, so a note
+			// whose sidecar came from a newer build showed NO ink at all -
+			// which reads as the data loss the lock exists to prevent. The
+			// canvas view has always rendered what it recognises while
+			// refusing to write ("it opens read-only so nothing is lost"),
+			// and parsePage has already migrated exactly that much. persist()
+			// refuses outright for a future-locked record, so putting the ink
+			// on screen cannot lead to writing it back.
+			rec.futureLocked = true;
+			// One exception, and it is the whole reason this is not simply a
+			// deleted `return`: decoding ZERO strokes out of a schema we do
+			// not fully understand is ambiguous. The newer build may have
+			// erased everything, or may have written the strokes in a form
+			// this build cannot read, and nothing here can tell those apart.
+			// Adopting would blank the note on the second reading, so
+			// whatever is already on screen stays.
+			if (result.data.strokes.length === 0) return false;
 		}
 		rec.basePage = result.data;
 		if (result.data.strokes.length === 0) return false;
@@ -277,6 +294,21 @@ export class InlineInkStore {
 	/** The page id the session knows for this note (post-load/claim), if any. */
 	pageIdOf(path: string): string | null {
 		return this.byPath.get(path)?.pageId ?? null;
+	}
+
+	/**
+	 * Where the note carrying this page id lives NOW, or null.
+	 *
+	 * The inverse of pageIdOf, and the reason ops carry an identity: a rename
+	 * re-keys this map, so an op recorded before it names a path nothing
+	 * lives at. A scan, because renames and undos are not hot paths and the
+	 * map holds only notes this session has touched.
+	 */
+	pathForPageId(pageId: string): string | null {
+		for (const [path, rec] of this.byPath) {
+			if (rec.pageId === pageId) return path;
+		}
+		return null;
 	}
 
 	/** Fail-closed flag: the persisted payload was unreadable (see NoteRecord). */
@@ -317,6 +349,30 @@ export class InlineInkStore {
 	/** Insert strokes (idempotent by id; indices restore z-order on un-erase). */
 	applyAdd(path: string, strokes: readonly InkStroke[], indices?: readonly number[]): void {
 		const rec = this.record(path);
+		this.insert(rec, strokes, indices);
+		this.persist(path, rec);
+	}
+
+	/**
+	 * Live-erase reinsertion: the same splice, NO persistence. The partner to
+	 * takeLive, and the reason it exists.
+	 *
+	 * A partial erase takes each covered stroke out and puts its survivors
+	 * back at the same index, once per pointer sample. Going through applyAdd
+	 * meant every sample scheduled a write - a serialize of the whole page
+	 * behind a debounce, at input rate, during the one gesture that is
+	 * already doing splitting and repainting. The eraser's pen-up already
+	 * calls save() and says so in a comment; this is what makes that true.
+	 */
+	applyAddLive(path: string, strokes: readonly InkStroke[], indices?: readonly number[]): void {
+		this.insert(this.record(path), strokes, indices);
+	}
+
+	private insert(
+		rec: NoteRecord,
+		strokes: readonly InkStroke[],
+		indices?: readonly number[]
+	): void {
 		const present = new Set(rec.strokes.map((s) => s.id));
 		strokes.forEach((stroke, i) => {
 			if (present.has(stroke.id)) return;
@@ -327,7 +383,6 @@ export class InlineInkStore {
 				rec.strokes.push(stroke);
 			}
 		});
-		this.persist(path, rec);
 	}
 
 	/** Remove strokes by id. Returns what was removed, with original indices. */
@@ -413,8 +468,28 @@ export class InlineInkStore {
 		// The fingerprint covers ids and positions, so erase, add, paste
 		// and move all repaint, and identical content never does.
 		const before = inkFingerprint(rec.strokes);
-		this.byPath.delete(path);
+		// The record is KEPT, because clearing first is only safe if the
+		// re-read succeeds. A sidecar being written by a sync client at this
+		// moment reads as damaged, and the poll picks exactly those moments:
+		// it fires BECAUSE the file just changed. Dropping the record there
+		// emptied the note on screen and, since the fresh record has no page
+		// id until the next claim, disabled saving until the note was
+		// reopened - and if the file had gone rather than merely being
+		// unreadable, that session copy was the only ink left.
+		// PdfInkStore.reloadExternal has guarded this since it was written;
+		// this is the same guard, on the same evidence.
+		const kept = rec.strokes;
+		rec.load = "no";
+		rec.strokes = [];
+		rec.basePage = null;
 		await this.ensureLoaded(path);
+		if (rec.basePage === null) {
+			// Nothing was read: damaged, locked, or the file is gone. Put the
+			// session back. A lock leaves the file untouched; if it vanished,
+			// the next save rewrites it from what is still on screen.
+			rec.strokes = kept;
+			return false;
+		}
 		return inkFingerprint(this.strokes(path)) !== before;
 	}
 

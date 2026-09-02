@@ -127,6 +127,17 @@ export function pinchSpread(a: PinchPoint, b: PinchPoint): number {
 }
 
 /**
+ * Midpoint of the two contacts, in client px. Pulled out of the router so the
+ * one piece of "the pinch-end centroid" that is pure math has a seam a test
+ * can reach directly - the router's own release-path ordering (which contact
+ * is still live WHEN this is called) is stateful and has to be reasoned about
+ * against the router itself (audit-fixes-design.md 5i I2).
+ */
+export function pinchMidpoint(a: PinchPoint, b: PinchPoint): PinchPoint {
+	return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+/**
  * Has the gesture moved far enough to be a deliberate pinch? Measured against
  * the spread at first contact, so a pinch that starts wide and closes counts
  * the same as one that starts narrow and opens.

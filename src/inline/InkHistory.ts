@@ -33,30 +33,47 @@ import { InkStroke } from "../ink/Stroke";
  * is therefore by construction, not by guesswork.
  */
 
+/**
+ * The note an op belongs to, by IDENTITY rather than by location.
+ *
+ * `path` is where the note was when the op was recorded, and an op outlives
+ * that: the editor keeps its history across a rename, so an undo pressed
+ * afterwards named a path nothing lives at any more. The ink was not
+ * restored on the real note, and a note later created at the old name
+ * inherited it. The page id does not move when the file does.
+ *
+ * Optional because an unclaimed note has no id yet, and because ops recorded
+ * by an older build are still in the editor's history after an update; both
+ * fall back to `path`, which is what they always used.
+ */
+export interface InkOpIdentity {
+	pageId?: string;
+}
+
 export type InkOp =
-	| {
+	| ({
 			type: "add";
 			path: string;
 			strokes: InkStroke[];
 			/** Insert positions for z-order restore; omitted = append. */
 			indices?: number[];
-	  }
-	| { type: "remove"; path: string; strokes: InkStroke[]; indices: number[] }
-	| { type: "move"; path: string; strokeIds: string[]; dx: number; dy: number }
+	  } & InkOpIdentity)
+	| ({ type: "remove"; path: string; strokes: InkStroke[]; indices: number[] } & InkOpIdentity)
+	| ({ type: "move"; path: string; strokeIds: string[]; dx: number; dy: number } & InkOpIdentity)
 	/**
 	 * Partial erase (v0.13.13): strokes came out and their surviving pieces
 	 * went in, as ONE step. Undo has to put the original back and take the
 	 * pieces away together, which neither add nor remove can express alone.
 	 * Symmetric by construction: the inverse just swaps the two halves.
 	 */
-	| {
+	| ({
 			type: "replace";
 			path: string;
 			removed: InkStroke[];
 			removedAt: number[];
 			inserted: InkStroke[];
 			insertedAt: number[];
-	  };
+	  } & InkOpIdentity);
 
 /**
  * The history a shape snap leaves behind: TWO steps, not one.
@@ -97,21 +114,57 @@ export const inkEffect = StateEffect.define<InkOp>();
 /** Marks a dispatch whose change is already in the store (the live gesture). */
 export const inkApplied = Annotation.define<boolean>();
 
+/**
+ * Where the strokes an erase gesture removed sat BEFORE it started.
+ *
+ * The eraser takes strokes out one pointer sample at a time, and each removal
+ * reports the position the stroke held in whatever the list contained at that
+ * instant. Those numbers do not share a frame of reference: the second stroke
+ * a drag crossed was recorded against a list already short by the first, so
+ * undoing a multi-stroke erase put the ink back at the wrong depth - and the
+ * more a single drag erased, the further out it got.
+ *
+ * A `replace` op's indices have to name ONE list, and the only one that means
+ * anything when the op is applied or inverted is the list as the gesture
+ * found it. A stroke missing from that list keeps the index its removal
+ * reported, which is what this always used.
+ */
+export function eraseRemovalIndices(
+	before: readonly InkStroke[],
+	erased: ReadonlyArray<{ stroke: InkStroke; index: number }>
+): number[] {
+	return erased.map((e) => {
+		const at = before.indexOf(e.stroke);
+		return at >= 0 ? at : e.index;
+	});
+}
+
 export function invertInkOp(op: InkOp): InkOp {
 	switch (op.type) {
+		// pageId travels through every inverse: an op that loses it on the
+		// way to the undo stack is one rename away from the bug it exists to
+		// prevent, and redo would be the leg that got it wrong.
 		case "add":
 			return {
 				type: "remove",
 				path: op.path,
+				pageId: op.pageId,
 				strokes: op.strokes,
 				indices: op.indices ?? [],
 			};
 		case "remove":
-			return { type: "add", path: op.path, strokes: op.strokes, indices: op.indices };
+			return {
+				type: "add",
+				path: op.path,
+				pageId: op.pageId,
+				strokes: op.strokes,
+				indices: op.indices,
+			};
 		case "move":
 			return {
 				type: "move",
 				path: op.path,
+				pageId: op.pageId,
 				strokeIds: op.strokeIds,
 				dx: -op.dx,
 				dy: -op.dy,
@@ -120,6 +173,7 @@ export function invertInkOp(op: InkOp): InkOp {
 			return {
 				type: "replace",
 				path: op.path,
+				pageId: op.pageId,
 				removed: op.inserted,
 				removedAt: op.insertedAt,
 				inserted: op.removed,

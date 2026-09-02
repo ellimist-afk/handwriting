@@ -26,24 +26,29 @@ import { replayTrace } from "../../test/replayTrace";
 import chromiumStream from "../../test/traces/synthetic-chromium-stream.json";
 import webkitStream from "../../test/traces/synthetic-webkit-stream.json";
 import hoverOnly from "../../test/traces/synthetic-hover-only.json";
+import surfacePenFirstReal from "../../test/traces/surface-pen-first-real.json";
 
 const FIXTURE_MAP: Record<string, unknown> = {
 	"synthetic-chromium-stream.json": chromiumStream,
 	"synthetic-webkit-stream.json": webkitStream,
 	"synthetic-hover-only.json": hoverOnly,
+	"surface-pen-first-real.json": surfacePenFirstReal,
 };
 // Through JSON.parse(JSON.stringify()) so a test mutating a fixture cannot
 // leak into its neighbor - imports are shared module objects.
 const fixture = (name: string): TraceCapture =>
 	JSON.parse(JSON.stringify(FIXTURE_MAP[name])) as TraceCapture;
 
+// replayTrace() now flips DiagSwitch itself (test/replayTrace.ts, audit doc
+// §5j/J3), so the describes below that go through it no longer need the
+// switch set here. The capture-fidelity describe still calls
+// captureInlinePenTrace() directly, without a replay, so it keeps its own
+// scoped on/off beside the tests that need it.
 let uninstallWindow: () => void = () => {};
 beforeAll(() => {
 	uninstallWindow = installFakeWindow();
-	setDiagnosticsEnabled(true);
 });
 afterAll(() => {
-	setDiagnosticsEnabled(false);
 	uninstallWindow();
 });
 afterEach(() => {
@@ -56,6 +61,12 @@ afterEach(() => {
 // ---- capture fidelity -------------------------------------------------------
 
 describe("capture: the trace records what the ink consumed", () => {
+	// These call captureInlinePenTrace() directly, not through replayTrace(),
+	// so they still need the switch on themselves - trace rows are only
+	// pushed while diagnosticsEnabled() (InlinePenRouter's tr()).
+	beforeAll(() => setDiagnosticsEnabled(true));
+	afterAll(() => setDiagnosticsEnabled(false));
+
 	it("keeps fractional coordinates - the ink path uses them unrounded", () => {
 		const h = harness();
 		h.fire(penEvent("pointerdown", 100, { x: 400.6, y: 300.4 }));
@@ -108,7 +119,14 @@ describe("capture: the trace records what the ink consumed", () => {
 
 // ---- replay invariants ------------------------------------------------------
 
-const FIXTURES = ["synthetic-chromium-stream.json", "synthetic-webkit-stream.json"];
+// surface-pen-first-real.json is the one real device capture in the repo
+// (a Surface pen, Obsidian 1.12.7 / Chromium) - the other three are
+// synthetic. It gets the same invariants below, plus its own explicit case.
+const FIXTURES = [
+	"synthetic-chromium-stream.json",
+	"synthetic-webkit-stream.json",
+	"surface-pen-first-real.json",
+];
 
 describe("replay invariants, every fixture", () => {
 	for (const name of FIXTURES) {
@@ -158,5 +176,16 @@ describe("goldens: counts and rounded bboxes, never full point arrays", () => {
 		const r = replayTrace(fixture("synthetic-webkit-stream.json"));
 		expect(r.strokes.length).toBe(1);
 		expect(r.strokes[0]!.points.length).toBe(6);
+	});
+
+	it("surface pen, real device capture: one claimed stroke, densely sampled", () => {
+		// 370 events, one pointerdown/up pair, 185 pointerrawupdate rows - the
+		// point count depends on prediction and coalescing tuning that legitimately
+		// drifts, so this asserts "densely sampled" (> 100) rather than an exact
+		// count. Audit doc §5j/J3.
+		const r = replayTrace(fixture("surface-pen-first-real.json"));
+		expect(r.counts.claimed).toBe(1);
+		expect(r.strokes.length).toBe(1);
+		expect(r.strokes[0]!.points.length).toBeGreaterThan(100);
 	});
 });

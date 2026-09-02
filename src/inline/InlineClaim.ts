@@ -50,7 +50,8 @@ export function reassignMarkdown(content: string, newId: string): ClaimResult {
 	}
 	const fm = updateFrontmatter(parsed.frontmatter, newId, { version: false });
 	const body = parsed.rawBody;
-	const next = `---\n${fm.join("\n")}\n---\n${body.startsWith("\n") ? "" : "\n"}${body}`;
+	const eol = parsed.eol;
+	const next = `---${eol}${fm.join(eol)}${eol}---${eol}${body.startsWith(eol) ? "" : eol}${body}`;
 	return { content: next, pageId: newId, changed: true };
 }
 
@@ -67,6 +68,11 @@ export function claimMarkdown(content: string, pageId: string): ClaimResult {
 	// writes, so the claim is the id line and nothing else.
 	const fm = updateFrontmatter(parsed.frontmatter, pageId, { version: false });
 	const body = parsed.rawBody;
-	const next = `---\n${fm.join("\n")}\n---\n${body.startsWith("\n") ? "" : "\n"}${body}`;
+	// Reassemble with the note's OWN line ending (parsed.eol), not a
+	// hardcoded "\n" - a CRLF note used to come back with every line ending
+	// rewritten to LF for the sake of one added frontmatter line
+	// (audit-fixes-design.md 5i I5).
+	const eol = parsed.eol;
+	const next = `---${eol}${fm.join(eol)}${eol}---${eol}${body.startsWith(eol) ? "" : eol}${body}`;
 	return { content: next, pageId, changed: true };
 }

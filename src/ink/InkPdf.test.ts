@@ -7,9 +7,10 @@
  * export shares, and is already covered by the ribbon suites.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { InkStroke, computeBBox } from "./Stroke";
 import { strokeOutline } from "./StrokeOutline";
+import { setInkShaping } from "./InkShape";
 import {
 	PX_TO_PT,
 	discOps,
@@ -123,6 +124,44 @@ describe("the fill", () => {
 	it("leaves the paper outside the stroke alone", () => {
 		const s = stroke("pen", [0, 20, 40], 100);
 		expect(windingAt(strokePdfOps(s), -500, -500)).toBe(0);
+	});
+});
+
+describe("export shaping (§5n: PDF export is always shaped)", () => {
+	// StrokeOutline stopped reading inkShapingEnabled() for exports (Alan,
+	// 2026-09-02): a Boox user's on-screen shaping-off setting was leaking
+	// into every exported PDF for a screen-performance reason that has
+	// nothing to do with paper. These pin that the PDF is now byte-identical
+	// whichever way the toggle sits, for a pen stroke, and that a mouse
+	// stroke and a highlighter stroke - never shaped in the first place -
+	// were already unaffected by it.
+	afterEach(() => setInkShaping(true));
+
+	it("a pen stroke's pdf is unaffected by the ink-shaping toggle", () => {
+		const s = stroke("pen", [10, 20, 40, 60, 90], 100);
+		setInkShaping(true);
+		const shapedOn = inkToPdf([s]);
+		setInkShaping(false);
+		const shapedOff = inkToPdf([s]);
+		expect(shapedOff).toBe(shapedOn);
+	});
+
+	it("a mouse stroke's pdf is unaffected by the toggle (it was never shaped)", () => {
+		const s: InkStroke = { ...stroke("pen", [10, 20, 40, 60, 90], 100), device: "mouse" };
+		setInkShaping(true);
+		const shapedOn = inkToPdf([s]);
+		setInkShaping(false);
+		const shapedOff = inkToPdf([s]);
+		expect(shapedOff).toBe(shapedOn);
+	});
+
+	it("a highlighter stroke's pdf is unaffected by the toggle (it was never shaped)", () => {
+		const s = stroke("highlighter", [10, 20, 40, 60, 90], 100);
+		setInkShaping(true);
+		const shapedOn = inkToPdf([s]);
+		setInkShaping(false);
+		const shapedOff = inkToPdf([s]);
+		expect(shapedOff).toBe(shapedOn);
 	});
 });
 

@@ -39,7 +39,8 @@ import { TailRenderer } from "../ink/TailRenderer";
 import { PalmShield, isAppleTouchPlatform, palmRadiusTrustworthy } from "../input/PalmShield";
 import { PinchBridge } from "./PinchBridge";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
-import { DEFAULT_CAPS, EINK_CAPS, buildTail, correctionError } from "../ink/Prediction";
+import { EINK_CAPS, adaptiveCaps, buildTail, correctionError } from "../ink/Prediction";
+import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
 import { predictionEinkOn, predictionEnabled } from "../inline/StrokePrediction";
 import { rowsOf, snapLine, strokeIdsBelow } from "../inline/InsertSpace";
 import { copyInk, pasteInk } from "../inline/InkClipboard";
@@ -77,6 +78,27 @@ import { findScaleFactor, ProbedViewer, probeViewer, viewerCanvasOf } from "./Pd
 const OVERLAY_CLASS = "handwriting-pdf-ink";
 /** Put on the COMMITTED canvas while a highlighter is wet. See `dressWet`. */
 const INK_OVER_CLASS = "handwriting-pdf-ink-over";
+/**
+ * Classes that mark an element as ours, for `isOwnMutation`. Audit doc
+ * §5b/D1: the root's own MutationObserver watched everything under it,
+ * including the writes this controller makes to its own reticle and hover
+ * class, so a hovering pen defeated its own probe cache every time it moved.
+ */
+const OWN_CLASSES = [OVERLAY_CLASS, INK_OVER_CLASS, "handwriting-pdf-cursor"];
+
+/**
+ * Is this event aimed at somewhere the user is typing?
+ *
+ * Duck-typed rather than `instanceof`: a popout window's elements belong to
+ * another realm, where `instanceof HTMLInputElement` is false for a real
+ * input.
+ */
+function isTypingTarget(target: EventTarget | null): boolean {
+	const el = target as { tagName?: unknown; isContentEditable?: unknown } | null;
+	if (!el || typeof el.tagName !== "string") return false;
+	const tag = el.tagName.toLowerCase();
+	return tag === "input" || tag === "textarea" || el.isContentEditable === true;
+}
 
 /** Device pixels one page overlay may hold, mirroring the note layer's bound. */
 const MAX_OVERLAY_PX = 4_000_000;
@@ -140,37 +162,78 @@ export type StrokeSource = (pageNumber: number) => readonly InkStroke[];
  * Emitting ops means drawing, erasing and undoing all leave by the same door,
  * and the caller applies them the same way.
  */
-export type OpSink = (op: InkOp) => void;
+/**
+ * How an op should reach the store.
+ *
+ * "live" = apply it to the session, do not write. The eraser, the lasso drag
+ * and insert-space each emit one op per pointer sample, and a write per
+ * sample is a serialize of the whole document behind a debounce, at input
+ * rate, during a gesture already doing hit-testing and repainting. The single
+ * write is the `persist` callback at pen-up.
+ */
+export type OpMode = "live" | "commit";
+
+export type OpSink = (op: InkOp, mode?: OpMode) => void;
 
 interface Attached {
+	/**
+	 * The committed ink for this page, and the only canvas that is per page:
+	 * it holds THIS page's stored strokes. The wet and head layers used to
+	 * live here too, one pair per live page, and only ever one of them could
+	 * be drawn on - see `WetPair` (audit doc §5h/H1).
+	 */
 	canvas: HTMLCanvasElement;
-	/**
-	 * The live stroke's own canvas, above the committed one.
-	 *
-	 * Separate because the wet stroke is redrawn constantly and the committed
-	 * ink is not; sharing one canvas means either clearing the committed ink
-	 * every frame or never clearing the wet trail. The note surface splits
-	 * them for the same reason.
-	 */
-	wetCanvas: HTMLCanvasElement;
-	wet: WetInkRenderer;
-	/**
-	 * The head: the raw stub from the settled curve to the nib, on a layer of
-	 * its own because it is erased and redrawn on every event and the wet
-	 * canvas is append-only. The note surface has had this split since the
-	 * smoothing landed; without it the line here only advanced when the NEXT
-	 * sample settled a segment - one visible straight jump per sample, which
-	 * at mouse rates reads as jagged (alan, 2026-08-30).
-	 */
-	headCanvas: HTMLCanvasElement;
-	tail: TailRenderer;
 	/** What this canvas was last painted for, so an unchanged page is skipped. */
 	paintedScale: number;
 	paintedCount: number;
 }
 
+/**
+ * The live stroke's own canvases, above the committed one - ONE pair for the
+ * whole surface, owned by the controller and parented into whichever page the
+ * current gesture is on.
+ *
+ * Separate from the committed canvas because the wet stroke is redrawn
+ * constantly and the committed ink is not; sharing one canvas means either
+ * clearing the committed ink every frame or never clearing the wet trail. The
+ * note surface splits them for the same reason.
+ *
+ * Only ONE page can host a gesture at a time (`strokePageNumber`), so a pair
+ * per live page was 2N-2 full-page backing stores allocated, resized on every
+ * zoom and never drawn to: on a tablet at 3x dpr, ~5 MB each, ~100 MB across
+ * ten live pages (audit doc §5h/H1, 2026-09-02).
+ *
+ * `headCanvas` is the head: the raw stub from the settled curve to the nib, on
+ * a layer of its own because it is erased and redrawn on every event and the
+ * wet canvas is append-only. The note surface has had this split since the
+ * smoothing landed; without it the line here only advanced when the NEXT
+ * sample settled a segment - one visible straight jump per sample, which at
+ * mouse rates reads as jagged (alan, 2026-08-30).
+ */
+interface WetPair {
+	wetCanvas: HTMLCanvasElement;
+	wet: WetInkRenderer;
+	headCanvas: HTMLCanvasElement;
+	tail: TailRenderer;
+}
+
 export class PdfInkController {
 	private overlays = new Map<number, Attached>();
+	/**
+	 * The one wet/head pair, built on first use and kept for the life of the
+	 * controller. Two panes on one pdf are two controllers, so nothing here is
+	 * shared across panes.
+	 */
+	private pair: WetPair | null = null;
+	/**
+	 * The page the pair is parented into right now, 0 when it is nowhere.
+	 *
+	 * Read by `wetOn`, which is what every wet/head site asks instead of the
+	 * per-page overlay it used to ask: a wet operation aimed at a page the
+	 * pair is not on is the no-op it always was, because that page used to
+	 * have its own blank wet canvas.
+	 */
+	private wetHostPage = 0;
 	/** Whether the stroke on the wet layer right now is a highlighter. */
 	private wetHighlighter = false;
 	/**
@@ -328,6 +391,8 @@ export class PdfInkController {
 	private dragTotal = { dx: 0, dy: 0 };
 	/** The hover reticle, and the timer that hides it when the pen is gone. */
 	private cursorEl: HTMLElement | null = null;
+	/** Whether the reticle's single teardown is already registered. */
+	private cursorDisposed = false;
 	private cursorTimer: ReturnType<Window["setTimeout"]> | null = null;
 	/** The floating pen strip, once this view has seen a pen. */
 	private tools: MobileTools | null = null;
@@ -342,12 +407,31 @@ export class PdfInkController {
 	 * against the result at pen-up.
 	 */
 	private eraseFrom: InkStroke[] | null = null;
+	/**
+	 * Between mount() and unmount(). Gates the sync path, which is the only
+	 * thing here that can BIND: a queued frame or a late refresh() must not
+	 * rebuild a router and its capture listeners on a dead controller.
+	 */
+	private mounted = false;
+	/** A live op has been applied and not yet written. See OpMode. */
+	private liveDirty = false;
 
 	constructor(
 		private root: HTMLElement,
 		private win: Window,
 		private strokes: StrokeSource,
 		private documentId: () => string | null = () => null,
+		/**
+		 * Every stroke in the document, in the order the store holds them.
+		 *
+		 * The op indices MUST be positions in this list, because that is the
+		 * list applyOp splices into (the store applies every op against the
+		 * whole document). `strokes` is page-filtered, so indices taken from
+		 * it were page-local and only ever right on page one - undo an erase
+		 * on page five and the pieces came back at whatever depth those
+		 * numbers happened to name among the document's strokes.
+		 */
+		private allStrokes: () => readonly InkStroke[] = () => [],
 		private onOp: OpSink = () => {},
 		/** Runs an Obsidian command by id, for the toolbar's buttons. */
 		private exec: (commandId: string) => void = () => {},
@@ -356,7 +440,12 @@ export class PdfInkController {
 		 * for the same reason `exec` is: this file observes the DOM and does
 		 * nothing else, which is what lets it be built in a test.
 		 */
-		private notify: (message: string) => void = () => {}
+		private notify: (message: string) => void = () => {},
+		/**
+		 * Write this document now. Called once at the end of a gesture whose
+		 * ops were applied live; see OpMode.
+		 */
+		private persist: (id: string) => void = () => {}
 	) {}
 
 	/**
@@ -466,6 +555,7 @@ export class PdfInkController {
 	private history = new PdfInkHistory();
 
 	mount(): void {
+		this.mounted = true;
 		// No probe gate here. The viewer is not necessarily built when the leaf
 		// appears, and a controller that returned early here stayed inert for
 		// the life of the pane with nothing to say for itself - the same silent
@@ -489,7 +579,13 @@ export class PdfInkController {
 		// between noticing the swap and never syncing another frame. The root
 		// contains the scroller, so every signal the old placement saw still
 		// arrives here.
-		const mo = new MutationObserver(() => {
+		const mo = new MutationObserver((mutations) => {
+			// Audit doc §5b/D1: filter our own writes before anything else
+			// runs, so a hovering pen - which only ever touches the reticle
+			// and the scroller's hover class - stops re-invalidating the
+			// probe cache it just filled. See `isOwnMutation`.
+			const records = mutations.filter((m) => !this.isOwnMutation(m));
+			if (records.length === 0) return;
 			this.invalidateProbe();
 			// A zoom that lands MID-GESTURE breaks the frozen frame's whole
 			// contract: the wet preview keeps drawing in pre-zoom geometry on
@@ -509,7 +605,11 @@ export class PdfInkController {
 					this.penUp();
 				}
 			}
-			this.schedule();
+			// Throttled, which is what scheduleThrottled was written for and
+			// never actually got: this fires on every viewer reflow, and each
+			// sync probes every page div. A zoom or a fast scroll produced
+			// sixty of them a second.
+			this.scheduleThrottled();
 		});
 		mo.observe(this.root, {
 			childList: true,
@@ -530,6 +630,12 @@ export class PdfInkController {
 		// stack owns Ctrl+Z everywhere else, and a global binding would fight
 		// it in every editor in the vault.
 		const keys = (ev: KeyboardEvent): void => {
+			// A PDF pane still contains places to type: the viewer's find
+			// bar, and form fields in the document itself. This listener runs
+			// ahead of them, so Backspace in a search box deleted the ink
+			// selection and never reached the box. Undo is the same story -
+			// Ctrl+Z in a text field belongs to the field.
+			if (isTypingTarget(ev.target)) return;
 			// Escape puts a selection away; Delete takes it. Both ahead of the
 			// modifier check, because neither uses one.
 			if (ev.key === "Escape" && this.selected.length > 0) {
@@ -626,6 +732,17 @@ export class PdfInkController {
 	}
 
 	unmount(): void {
+		// A gesture interrupted by the pane closing has applied live ops that
+		// nothing has written yet. Before this batching existed every sample
+		// wrote, so an interrupted erase was already durable; it has to stay
+		// that way.
+		this.persistLive();
+		// Before anything else: a sync already queued for the next frame,
+		// or a refresh() arriving from the store after the pane closed,
+		// would otherwise reach bindTo and install capture listeners and a
+		// router on a controller that is gone - the leak unmount exists to
+		// prevent, rebuilt one frame later.
+		this.mounted = false;
 		this.palmShield.dispose();
 		this.pinchBridge.dispose();
 		// A trailing sync outlives the controller otherwise, and fires into a
@@ -884,16 +1001,30 @@ export class PdfInkController {
 		if (!probed || probed.scaleFactor === null) return;
 		markPenSeen();
 		this.ensureTools();
-		if (!this.cursorEl) {
+		// Re-created whenever it is not in the CURRENT scroller. It lives in
+		// that scroller's subtree, so a viewer rebuild took it away and left
+		// this field holding a detached div - and because the old test was
+		// "is the field null", the reticle then never came back in that pane
+		// for the rest of the session. pdf.js rebuilds its viewer often
+		// enough that this is an ordinary Tuesday, not an edge case.
+		if (this.cursorEl?.parentElement !== probed.scroller) {
+			this.cursorEl?.remove();
 			if (this.win.getComputedStyle(probed.scroller).position === "static") {
 				probed.scroller.setCssStyles({ position: "relative" });
 			}
 			this.cursorEl = probed.scroller.createDiv({ cls: "handwriting-pdf-cursor" });
 			this.cursorEl.setAttribute("aria-hidden", "true");
-			this.disposers.push(() => {
-				this.cursorEl?.remove();
-				probed.scroller.classList.remove("handwriting-pdf-hover");
-			});
+			// One disposer for the life of the controller, not one per
+			// rebuild: it cleans up whatever the current element and scroller
+			// are, so re-creating cannot pile up closures over dead ones.
+			if (!this.cursorDisposed) {
+				this.cursorDisposed = true;
+				this.disposers.push(() => {
+					this.cursorEl?.remove();
+					this.cursorEl = null;
+					this.boundScroller?.classList.remove("handwriting-pdf-hover");
+				});
+			}
 		}
 		const content = this.toContent(sample, probed.scroller);
 		const cx = content.x;
@@ -1038,6 +1169,11 @@ export class PdfInkController {
 		this.frame = { boxes, scale, scroller };
 		this.recordDown(ev, sample, box, scale, scroller, content);
 		this.strokePageNumber = box.pageNumber;
+		// The one wet/head pair moves onto this page before any branch below
+		// can draw on it: the lasso's loop and the space divider both return
+		// early and both live on the wet layer (§5h/H1).
+		const strokePageEl = this.pageElement(scroller, box.pageNumber);
+		if (strokePageEl) this.attachPair(strokePageEl, box.pageNumber);
 		this.mouseStroke = ev?.pointerType === "mouse";
 		// Under a pen the dot comes off at contact: the hand is at the nib
 		// and a dot under it reads as a smudge. Under a mouse the dot IS the
@@ -1098,7 +1234,7 @@ export class PdfInkController {
 		// forgotten was picked up.
 		this.clearSelection();
 		if (this.erasing) {
-			this.eraseFrom = [...this.strokes(box.pageNumber)];
+			this.eraseFrom = [...this.opList(box.pageNumber)];
 			this.metrics.begin("pdf-erase", performance.now());
 			this.metricsLive = true;
 			this.startFrameTicker();
@@ -1133,10 +1269,10 @@ export class PdfInkController {
 		this.wetFrom = null;
 		// Before the first sample, so a clean page has a canvas to draw on.
 		this.ensureOverlay(box.pageNumber);
-		const attached = this.overlays.get(box.pageNumber);
-		if (attached) attached.wet.clear(box.widthPx, box.heightPx);
+		const pair = this.wetOn(box.pageNumber);
+		if (pair) pair.wet.clear(box.widthPx, box.heightPx);
 		this.wetHighlighter = tool === "highlighter";
-		if (attached) this.dressWet(attached);
+		this.dressWet(this.overlays.get(box.pageNumber));
 		// With its event, so the down sample's delivery is stamped like every
 		// other's - without it the summary counted one more acceptance than it
 		// had samples and printed dedup -1.
@@ -1190,7 +1326,8 @@ export class PdfInkController {
 				if (id) {
 					this.apply(
 						{ type: "move", path: id, strokeIds: this.spaceIds, dx: 0, dy },
-						this.strokePageNumber
+						this.strokePageNumber,
+						"live"
 					);
 				}
 			}
@@ -1257,7 +1394,9 @@ export class PdfInkController {
 			this.presentProbePending = true;
 			this.win.requestAnimationFrame(() => {
 				this.presentProbePending = false;
-				this.metrics.recordPresent(performance.now() - newestTs);
+				const presentAge = performance.now() - newestTs;
+				recordPresentAge(presentAge);
+				this.metrics.recordPresent(presentAge);
 			});
 		}
 	}
@@ -1282,10 +1421,10 @@ export class PdfInkController {
 	 * `predLastTail` is overwritten that comparison is gone.
 	 */
 	private drawPredictedTail(ev: PointerEvent, box: PageBox, scale: number, scroller: HTMLElement): void {
-		const attached = this.overlays.get(box.pageNumber);
+		const pair = this.wetOn(box.pageNumber);
 		const cam = this.cameraFor(box);
 		const newest = this.predReal[this.predReal.length - 1];
-		if (!attached || !cam || !newest) return;
+		if (!pair || !cam || !newest) return;
 		const toScreen = (s: PenSample): PenSample => ({ ...s, x: s.x * scale, y: s.y * scale });
 		if (this.predLastTail.length > 0) {
 			const err = correctionError(this.predLastTail.map(toScreen), toScreen(newest));
@@ -1306,13 +1445,14 @@ export class PdfInkController {
 		// Boox mode's e-ink horizon applies HERE too - writing on pdfs is
 		// the headline use, and the caps switch must not be an inline-only
 		// courtesy.
+		const caps = predictionEinkOn() ? EINK_CAPS : adaptiveCaps(presentLagMs());
 		const result = buildTail(
 			this.predReal.map(toScreen),
 			predicted,
 			predicted.length > 0 ? "chromium" : "extrap",
-			predictionEinkOn() ? EINK_CAPS : DEFAULT_CAPS
+			caps
 		);
-		this.metrics.setPrediction("on", result.source);
+		this.metrics.setPrediction("on", result.source, caps.maxHorizonMs);
 		// Page units for SCORING only - the next event compares in screen
 		// space after mapping back through toScreen. The DRAW takes screen
 		// px directly: TailRenderer.draw has no camera (drawHead converts
@@ -1325,12 +1465,12 @@ export class PdfInkController {
 			return;
 		}
 		this.metrics.recordTail(result.points.length, result.horizonMs, result.tipDistPx);
-		attached.tail.draw(
+		pair.tail.draw(
 			newest.x * scale,
 			newest.y * scale,
 			result.points,
 			this.strokeStyle.color,
-			attached.wet.liveWidthPx(cam, this.strokeStyle, newest.pressure)
+			pair.wet.liveWidthPx(cam, this.strokeStyle, newest.pressure)
 		);
 	}
 
@@ -1401,21 +1541,21 @@ export class PdfInkController {
 	 * the pen. Cleared and redrawn whole each time - it is a few dozen
 	 * pixels, and TailRenderer clears only the last draw's bounding box.
 	 */
-	private drawHead(attached: Attached, cam: CameraState): void {
-		const head = attached.wet.head();
-		attached.tail.clear();
+	private drawHead(pair: WetPair, cam: CameraState): void {
+		const head = pair.wet.head();
+		pair.tail.clear();
 		if (head) {
-			attached.tail.drawHead(cam, this.strokeStyle, head.from, head.to, head.pressure);
+			pair.tail.drawHead(cam, this.strokeStyle, head.from, head.to, head.pressure);
 		}
 	}
 
 	/** Extend the live stroke, drawn exactly as it will be once committed. */
 	private drawWet(box: PageBox, point: InkPoint): void {
-		const attached = this.overlays.get(box.pageNumber);
+		const pair = this.wetOn(box.pageNumber);
 		const cam = this.cameraFor(box);
-		if (!attached || !cam) return;
-		attached.wet.appendPoint(cam, this.strokeStyle, point);
-		this.drawHead(attached, cam);
+		if (!pair || !cam) return;
+		pair.wet.appendPoint(cam, this.strokeStyle, point);
+		this.drawHead(pair, cam);
 	}
 
 	/**
@@ -1430,24 +1570,40 @@ export class PdfInkController {
 	 * - **Stroke** (whole): the whole stroke goes, indices kept so undo puts
 	 *   it back at its original depth rather than on top of everything.
 	 */
+	/**
+	 * The list op indices are measured against. See `allStrokes`.
+	 *
+	 * Falls back to the page list only when the document list is EMPTY, which
+	 * is a document with no ink at all - nothing to index, so the fallback is
+	 * unreachable in practice. It exists so a harness that supplies only a
+	 * page source still behaves as it did.
+	 */
+	private opList(page: number): readonly InkStroke[] {
+		const all = this.allStrokes();
+		return all.length > 0 ? all : this.strokes(page);
+	}
+
 	private eraseAt(box: PageBox, scale: number, sample: PenSample, scroller: HTMLElement): void {
 		const id = this.documentId();
 		if (!id) return;
 		const content = this.toContent(sample, scroller);
 		const p = toPagePoint(box, scale, content.x, content.y);
 		if (!p) return;
-		const all = [...this.strokes(box.pageNumber)];
+		// Hit-tested against the PAGE (the nib can only reach what is on it),
+		// but indexed against the document. Two different lists on purpose.
+		const onPage = [...this.strokes(box.pageNumber)];
+		const all = this.opList(box.pageNumber);
 		// The radius is screen px; page units are screen px divided by scale,
 		// so the nib covers the same physical area at any zoom.
 		const r = getEraserRadiusPx() / scale;
-		const hitIds = new Set(strokesHitByCircle(all, p.x, p.y, r));
+		const hitIds = new Set(strokesHitByCircle(onPage, p.x, p.y, r));
 		if (hitIds.size === 0) return;
 		const removed: InkStroke[] = [];
 		const removedAt: number[] = [];
 		const inserted: InkStroke[] = [];
 		const insertedAt: number[] = [];
 		const whole = getEraserWholeStrokes();
-		for (const stroke of all.filter((s) => hitIds.has(s.id))) {
+		for (const stroke of onPage.filter((s) => hitIds.has(s.id))) {
 			const at = all.indexOf(stroke);
 			removed.push(stroke);
 			removedAt.push(at);
@@ -1461,14 +1617,17 @@ export class PdfInkController {
 		// pen-up from the snapshot taken when it started.
 		this.apply(
 			{ type: "replace", path: id, removed, removedAt, inserted, insertedAt },
-			box.pageNumber
+			box.pageNumber,
+			"live"
 		);
 	}
 
 	/** One history entry for a whole erase gesture, or none if nothing went. */
 	private recordErase(id: string, page: number): void {
+		// Both snapshots are of the DOCUMENT list, or the indices in this op
+		// would not name positions applyOp can splice at. See allStrokes.
 		const before = this.eraseFrom ?? [];
-		const after = this.strokes(page);
+		const after = this.opList(page);
 		const afterIds = new Set(after.map((s) => s.id));
 		const beforeIds = new Set(before.map((s) => s.id));
 		const removed = before.filter((s) => !afterIds.has(s.id));
@@ -1529,7 +1688,8 @@ export class PdfInkController {
 			if (id) {
 				this.apply(
 					{ type: "move", path: id, strokeIds: this.selected, dx, dy },
-					this.selectionPage
+					this.selectionPage,
+					"live"
 				);
 			}
 			// The outline travels with the ink. Left until pen-up, it would sit
@@ -1659,9 +1819,20 @@ export class PdfInkController {
 		this.selected = [];
 		this.lassoPts = [];
 		this.selectionPage = 0;
-		const attached = this.overlays.get(page);
+		const pair = this.wetOn(page);
 		const box = this.frameBox(page);
-		if (attached && box) attached.wet.clear(box.widthPx, box.heightPx);
+		if (pair && box) pair.wet.clear(box.widthPx, box.heightPx);
+	}
+
+	/**
+	 * A TOOL change puts a selection away too, not just the next contact.
+	 * Design §5o: leaving a lasso outline live after the strip's tool
+	 * changed read as "the lasso selector remains" (Alan, device finding
+	 * 2026-09-02) - only the next non-lasso pen contact cleared it before.
+	 */
+	dissolveSelection(): void {
+		this.clearSelection();
+		this.refreshStrip();
 	}
 
 	/**
@@ -1670,10 +1841,10 @@ export class PdfInkController {
 	 * gesture, so the layer is free.
 	 */
 	private drawSpaceLine(box: PageBox): void {
-		const attached = this.overlays.get(box.pageNumber);
+		const pair = this.wetOn(box.pageNumber);
 		const cam = this.cameraFor(box);
-		if (!attached || !cam || this.spaceLineY === null) return;
-		const ctx = attached.wetCanvas.getContext("2d");
+		if (!pair || !cam || this.spaceLineY === null) return;
+		const ctx = pair.wetCanvas.getContext("2d");
 		if (!ctx) return;
 		ctx.clearRect(0, 0, box.widthPx, box.heightPx);
 		ctx.save();
@@ -1690,10 +1861,10 @@ export class PdfInkController {
 
 	/** The loop being drawn, and the box around what it has caught. */
 	private drawLasso(box: PageBox): void {
-		const attached = this.overlays.get(box.pageNumber);
+		const pair = this.wetOn(box.pageNumber);
 		const cam = this.cameraFor(box);
-		if (!attached || !cam) return;
-		const ctx = attached.wetCanvas.getContext("2d");
+		if (!pair || !cam) return;
+		const ctx = pair.wetCanvas.getContext("2d");
 		if (!ctx) return;
 		ctx.clearRect(0, 0, box.widthPx, box.heightPx);
 		ctx.save();
@@ -1728,7 +1899,7 @@ export class PdfInkController {
 		const id = this.documentId();
 		const page = this.selectionPage;
 		if (!id || this.selected.length === 0) return false;
-		const all = this.strokes(page);
+		const all = this.opList(page);
 		const picked = new Set(this.selected);
 		const strokes = all.filter((s) => picked.has(s.id));
 		if (strokes.length === 0) return false;
@@ -1774,9 +1945,10 @@ export class PdfInkController {
 			}
 			this.spaceLineY = null;
 			this.spaceIds = [];
+			this.persistLive();
 			const spaceBox = this.frameBox(this.strokePageNumber);
-			const attached = this.overlays.get(this.strokePageNumber);
-			if (attached && spaceBox) attached.wet.clear(spaceBox.widthPx, spaceBox.heightPx);
+			const spacePair = this.wetOn(this.strokePageNumber);
+			if (spacePair && spaceBox) spacePair.wet.clear(spaceBox.widthPx, spaceBox.heightPx);
 			return;
 		}
 		// The lift itself. `pointerup` carries a position that never arrives
@@ -1801,6 +1973,7 @@ export class PdfInkController {
 			if (id && (dx !== 0 || dy !== 0) && this.selected.length > 0) {
 				this.history.record({ type: "move", path: id, strokeIds: this.selected, dx, dy });
 			}
+			this.persistLive();
 			const box = this.frameBox(page);
 			if (box) this.drawLasso(box);
 			return;
@@ -1812,6 +1985,8 @@ export class PdfInkController {
 		if (wasErasing) {
 			if (id && page > 0) this.recordErase(id, page);
 			this.eraseFrom = null;
+			// The gesture's ops were applied live; this is its one write.
+			this.persistLive();
 			return;
 		}
 		if (!builder || page <= 0 || !id) return;
@@ -1820,15 +1995,16 @@ export class PdfInkController {
 		// after `emit` below would leave both drawn for a frame; done here, the
 		// repaint that emit triggers puts the committed stroke straight back.
 		const attached = this.overlays.get(page);
+		const pair = this.wetOn(page);
 		const box = this.frameBox(page);
 		if (!stroke) {
-			if (attached && box) {
+			if (pair && box) {
 				if (predictionEinkOn()) {
-					attached.wet.clearStroke(box.widthPx, box.heightPx);
-					attached.tail.clear();
+					pair.wet.clearStroke(box.widthPx, box.heightPx);
+					pair.tail.clear();
 				} else {
-					attached.wet.clear(box.widthPx, box.heightPx);
-					attached.tail.clearAll(box.widthPx, box.heightPx);
+					pair.wet.clear(box.widthPx, box.heightPx);
+					pair.tail.clearAll(box.widthPx, box.heightPx);
 				}
 			}
 			this.undressWet(attached);
@@ -1851,15 +2027,15 @@ export class PdfInkController {
 		// the wet element out of the composite in the same frame keeps the
 		// handoff atomic without the double paint, which is what the note
 		// surface does (InkOverlay, drawCommitted).
-		if (attached && this.wetHighlighter) attached.wetCanvas.setCssProps({ opacity: "0" });
+		if (pair && this.wetHighlighter) pair.wetCanvas.setCssProps({ opacity: "0" });
 		this.sync();
-		if (attached && box) {
+		if (pair && box) {
 			if (predictionEinkOn()) {
-				attached.wet.clearStroke(box.widthPx, box.heightPx);
-				attached.tail.clear();
+				pair.wet.clearStroke(box.widthPx, box.heightPx);
+				pair.tail.clear();
 			} else {
-				attached.wet.clear(box.widthPx, box.heightPx);
-				attached.tail.clearAll(box.widthPx, box.heightPx);
+				pair.wet.clear(box.widthPx, box.heightPx);
+				pair.tail.clearAll(box.widthPx, box.heightPx);
 			}
 		}
 		this.undressWet(attached);
@@ -1881,13 +2057,18 @@ export class PdfInkController {
 	 * moving ours DOWN is the move that can put ink behind the page; moving
 	 * ours up cannot.
 	 */
-	private dressWet(attached: Attached): void {
+	private dressWet(attached: Attached | undefined): void {
 		const alpha = this.wetHighlighter ? String(HIGHLIGHTER_ALPHA) : "1";
-		attached.wetCanvas.setCssProps({ opacity: alpha });
-		// The head is the same stroke, one segment further on - it wears the
-		// same wash or a highlighter's tip runs darker than its trail.
-		attached.headCanvas.setCssProps({ opacity: alpha });
-		attached.canvas.toggleClass(INK_OVER_CLASS, this.wetHighlighter);
+		if (this.pair) {
+			this.pair.wetCanvas.setCssProps({ opacity: alpha });
+			// The head is the same stroke, one segment further on - it wears
+			// the same wash or a highlighter's tip runs darker than its trail.
+			this.pair.headCanvas.setCssProps({ opacity: alpha });
+		}
+		// The raise is the COMMITTED canvas's, so it is per page and stays
+		// with the overlay; the pair being shared changes nothing about which
+		// page's ink has to come up over the wash (§5h/H1).
+		attached?.canvas.toggleClass(INK_OVER_CLASS, this.wetHighlighter);
 	}
 
 	/**
@@ -1899,7 +2080,7 @@ export class PdfInkController {
 	 */
 	private undressWet(attached: Attached | undefined): void {
 		this.wetHighlighter = false;
-		if (attached) this.dressWet(attached);
+		this.dressWet(attached);
 	}
 
 	/**
@@ -1935,8 +2116,8 @@ export class PdfInkController {
 		// Close the smoothed curve out to the final sample, so the wet stroke
 		// reaches the nib before the committed one replaces it.
 		const cam = this.cameraFor(box);
-		const attached = this.overlays.get(box.pageNumber);
-		if (cam && attached) attached.wet.finishStroke(cam, this.strokeStyle);
+		const pair = this.wetOn(box.pageNumber);
+		if (cam && pair) pair.wet.finishStroke(cam, this.strokeStyle);
 	}
 
 	/**
@@ -1947,10 +2128,25 @@ export class PdfInkController {
 	 * - the whole window of canvases the viewer is holding - when the only
 	 * page whose ink can have changed is the one under the nib.
 	 */
-	private apply(op: InkOp, onlyPage?: number): void {
-		this.onOp(op);
+	private apply(op: InkOp, onlyPage?: number, mode: OpMode = "commit"): void {
+		this.onOp(op, mode);
+		if (mode === "live") this.liveDirty = true;
 		if (onlyPage === undefined) this.refresh();
 		else this.refreshPage(onlyPage);
+	}
+
+	/**
+	 * The single write at the end of a live gesture. See OpMode.
+	 *
+	 * Idempotent and cheap, so every gesture end can call it without first
+	 * proving something changed - but it does nothing when no live op ran,
+	 * which keeps a gesture that moved nothing from touching the file.
+	 */
+	private persistLive(): void {
+		if (!this.liveDirty) return;
+		this.liveDirty = false;
+		const id = this.documentId();
+		if (id) this.persist(id);
 	}
 
 	/**
@@ -2039,6 +2235,42 @@ export class PdfInkController {
 	}
 
 	/**
+	 * Is this mutation record one of OUR writes inside `this.root`, not the
+	 * viewer's?
+	 *
+	 * Audit doc §5b/D1: the observer's `attributeFilter` includes `class`
+	 * and `style`, and this controller writes both on every hover move (the
+	 * cursor reticle's transform, the scroller's hover class) - each one
+	 * landing back in the same observer it is bound to and invalidating a
+	 * probe cache that was still correct. Exact match, not a heuristic: the
+	 * target is `this.cursorEl` (everything we ever write on it, including
+	 * `style`, is ours); or the target is an Element carrying one of
+	 * `OWN_CLASSES` (the overlay canvases, the wet/head canvases, the
+	 * cursor div itself - all created by us, so nothing else can carry
+	 * those classes); or the record is an `attributes` record on the bound
+	 * scroller with `attributeName === "class"` (the hover class we
+	 * toggle). The scroller's OWN `style` writes (`position: relative`) are
+	 * deliberately excluded - that attribute is not one of ours to own, and
+	 * a viewer restyle there must still invalidate.
+	 */
+	private isOwnMutation(record: MutationRecord): boolean {
+		if (record.target === this.cursorEl) return true;
+		if (record.target instanceof Element) {
+			for (const cls of OWN_CLASSES) {
+				if (record.target.classList.contains(cls)) return true;
+			}
+		}
+		if (
+			record.type === "attributes" &&
+			record.attributeName === "class" &&
+			record.target === this.boundScroller
+		) {
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * The next read must go to the DOM: something restyled or resized.
 	 *
 	 * Called from the two observers, which is where a zoom, a re-render or a
@@ -2052,12 +2284,12 @@ export class PdfInkController {
 
 	/** Forget every page overlay, removing the canvases we can still reach. */
 	private dropOverlays(): void {
-		for (const { canvas, wetCanvas, headCanvas } of this.overlays.values()) {
-			canvas.remove();
-			wetCanvas.remove();
-			headCanvas.remove();
-		}
+		for (const { canvas } of this.overlays.values()) canvas.remove();
 		this.overlays.clear();
+		// The pair goes with them. Both callers - unmount and a viewer that
+		// was rebuilt under us - mean every element we were holding is gone or
+		// going, and a renderer bound to an orphaned canvas is not reusable.
+		this.dropPair();
 	}
 
 
@@ -2092,7 +2324,7 @@ export class PdfInkController {
 		}, SYNC_MIN_GAP_MS - since);
 	}
 	private schedule(): void {
-		if (this.syncQueued) return;
+		if (!this.mounted || this.syncQueued) return;
 		this.syncQueued = true;
 		this.win.requestAnimationFrame(() => {
 			this.syncQueued = false;
@@ -2101,6 +2333,13 @@ export class PdfInkController {
 	}
 
 	private sync(): void {
+		if (!this.mounted) return;
+		// Stamped here, not in scheduleThrottled: the floor is between syncs
+		// that actually ran, and this is the work being spaced out. Without
+		// it `lastSyncAt` stayed 0 forever, every gap measured as "longer
+		// ago than the floor", and the throttle passed everything straight
+		// through even once it was being called.
+		this.lastSyncAt = Date.now();
 		const probed = this.probe();
 		if (!probed) return;
 		// The viewer was rebuilt under us. Rebind the pen before anything else,
@@ -2136,8 +2375,7 @@ export class PdfInkController {
 		for (const [pageNumber, a] of [...this.overlays]) {
 			if (!liveNumbers.has(pageNumber)) {
 				a.canvas.remove();
-				a.wetCanvas.remove();
-				a.headCanvas.remove();
+				this.detachPairFrom(pageNumber);
 				this.overlays.delete(pageNumber);
 			}
 		}
@@ -2237,48 +2475,67 @@ export class PdfInkController {
 		return scroller.querySelector(`div.page[data-page-number="${pageNumber}"]`);
 	}
 
-	private paint(pageEl: HTMLElement, box: PageBox, scale: number, zoomed: boolean): void {
-		const strokes = this.strokes(box.pageNumber);
-		let attached = this.overlays.get(box.pageNumber);
-		if (strokes.length === 0 && !this.owns(box.pageNumber)) {
-			// Nothing to draw: drop the canvas rather than keep an empty one.
-			// Unless a gesture is on this page - the FIRST stroke on a clean
-			// page has nothing stored yet, and dropping its canvas would leave
-			// the wet ink with nowhere to go until pen-up.
-			if (attached) {
-				attached.canvas.remove();
-				attached.wetCanvas.remove();
-			attached.headCanvas.remove();
-				this.overlays.delete(box.pageNumber);
-			}
-			return;
-		}
-		// We are a guest inside someone else's element, and the host rewrites
-		// it. On re-render the viewer can replace a page's children - taking
-		// our canvas with them - and it can rewrite the page div's style
-		// attribute, dropping the `position: relative` that our absolutely
-		// positioned overlay resolves against. Either one leaves us believing
-		// we are attached while we are detached, or positioned against some
-		// ancestor far away. That is why the marks survived one zoom and then
-		// went for good (hardware).
-		//
-		// So neither is assumed once. Both are re-checked every paint: the
-		// page is re-positioned if it lost it, and an overlay that is no
-		// longer OUR page's child is discarded and rebuilt rather than
-		// painted into invisibly.
-		if (this.win.getComputedStyle(pageEl).position === "static") {
-			pageEl.setCssStyles({ position: "relative" });
-		}
-		if (attached && attached.canvas.parentElement !== pageEl) {
-			attached.canvas.remove();
-			attached.wetCanvas.remove();
-			attached.headCanvas.remove();
-			this.overlays.delete(box.pageNumber);
-			attached = undefined;
-		}
-		if (!attached) {
-			const canvas = pageEl.createEl("canvas", { cls: OVERLAY_CLASS });
-			canvas.setAttribute("aria-hidden", "true");
+	/**
+	 * The pair, but only while it is parented into this page.
+	 *
+	 * The same reading the per-page fields gave: a page's wet canvas was
+	 * drawable iff that page had an overlay, and only the gesture's page was
+	 * ever drawn on. Asking for the wet layer of a page the pair has left
+	 * answers nothing, exactly as a blank per-page canvas answered nothing.
+	 */
+	private wetOn(pageNumber: number): WetPair | null {
+		return this.pair !== null && this.wetHostPage === pageNumber ? this.pair : null;
+	}
+
+	/**
+	 * Backing-store size for a canvas stretched over this page element.
+	 *
+	 * One law, two callers: the committed canvas in `paint` and the shared
+	 * pair in `attachPair`. Both must agree or the wet stroke is drawn at a
+	 * different resolution from the committed one that replaces it. The css
+	 * size is read from the element, never written into it - see `paint`.
+	 */
+	private backingFor(
+		pageEl: HTMLElement
+	): { wPx: number; hPx: number; w: number; h: number; backing: number } | null {
+		const wPx = pageEl.clientWidth;
+		const hPx = pageEl.clientHeight;
+		if (wPx <= 0 || hPx <= 0) return null;
+		const dpr = this.win.devicePixelRatio || 1;
+		const px = wPx * hPx;
+		const backing = px * dpr * dpr <= MAX_OVERLAY_PX ? dpr : Math.sqrt(MAX_OVERLAY_PX / px);
+		return {
+			wPx,
+			hPx,
+			w: Math.max(1, Math.round(wPx * backing)),
+			h: Math.max(1, Math.round(hPx * backing)),
+			backing,
+		};
+	}
+
+	/**
+	 * Put the one pair on the page this gesture is on, sized to it.
+	 *
+	 * Called at every pen-down, and the parentage is checked against the DOM
+	 * rather than against `wetHostPage`: a gesture that never got its pen-up
+	 * (pointercancel, a viewer re-render) leaves the pair on the old page, and
+	 * bookkeeping that believed otherwise would strand the wet ink there. The
+	 * re-append is skipped only when the DOM already says the pair is this
+	 * page's last two children - which is the same DOM, not a belief about it.
+	 * Skipping it matters: moving a node is a childList mutation on the page
+	 * div, which our own observer cannot tell from the viewer's writes, so an
+	 * unconditional move would invalidate the probe and schedule a full sync
+	 * at the start of every stroke.
+	 *
+	 * Last two children on purpose. All three canvases share `z-index: 2`
+	 * (styles.css), so DOM order is what puts the wet ink above the committed
+	 * ink.
+	 */
+	private attachPair(pageEl: HTMLElement, pageNumber: number): WetPair | null {
+		const size = this.backingFor(pageEl);
+		if (!size) return this.pair;
+		let pair = this.pair;
+		if (!pair) {
 			const wetCanvas = pageEl.createEl("canvas", { cls: OVERLAY_CLASS });
 			wetCanvas.setAttribute("aria-hidden", "true");
 			const headCanvas = pageEl.createEl("canvas", { cls: OVERLAY_CLASS });
@@ -2306,8 +2563,105 @@ export class PdfInkController {
 			// and the ends visibly pull back as the taper appears (hardware,
 			// 2026-08-29).
 			wet.shape = true;
-			attached = { canvas, wetCanvas, headCanvas, tail, wet, paintedScale: 0, paintedCount: -1 };
+			pair = { wetCanvas, headCanvas, wet, tail };
+			this.pair = pair;
+		} else if (pair.wetCanvas.parentElement !== pageEl || pageEl.lastElementChild !== pair.headCanvas) {
+			pageEl.appendChild(pair.wetCanvas);
+			pageEl.appendChild(pair.headCanvas);
+		}
+		if (pair.wetCanvas.width !== size.w || pair.wetCanvas.height !== size.h) {
+			pair.wetCanvas.width = size.w;
+			pair.wetCanvas.height = size.h;
+			pair.headCanvas.width = size.w;
+			pair.headCanvas.height = size.h;
+			pair.wet.applyDpr(size.backing);
+			pair.tail.applyDpr(size.backing);
+		}
+		// A different page is a different, blank canvas as far as anything on
+		// screen is concerned - that is what a pair per page gave for free.
+		// The same page keeps its pixels: the lasso's outline lives on the wet
+		// layer between gestures, and grabbing a selection must not blink it
+		// off before the first move redraws it.
+		if (this.wetHostPage !== pageNumber) {
+			pair.wet.clear(size.wPx, size.hPx);
+			pair.tail.clearAll(size.wPx, size.hPx);
+		}
+		this.wetHostPage = pageNumber;
+		return pair;
+	}
+
+	/**
+	 * Take the pair off a page that is going away - an eviction, or an overlay
+	 * being rebuilt because the viewer replaced the page's children. The
+	 * renderers and their backing stores survive; only the parentage goes, and
+	 * the next pen-down re-parents.
+	 */
+	private detachPairFrom(pageNumber: number): void {
+		if (this.wetHostPage !== pageNumber) return;
+		this.pair?.wetCanvas.remove();
+		this.pair?.headCanvas.remove();
+		this.wetHostPage = 0;
+	}
+
+	/** Destroy the pair: unmount, or a viewer rebuild that took our subtree. */
+	private dropPair(): void {
+		this.pair?.wetCanvas.remove();
+		this.pair?.headCanvas.remove();
+		this.pair = null;
+		this.wetHostPage = 0;
+	}
+
+	private paint(pageEl: HTMLElement, box: PageBox, scale: number, zoomed: boolean): void {
+		const strokes = this.strokes(box.pageNumber);
+		let attached = this.overlays.get(box.pageNumber);
+		if (strokes.length === 0 && !this.owns(box.pageNumber)) {
+			// Nothing to draw: drop the canvas rather than keep an empty one.
+			// Unless a gesture is on this page - the FIRST stroke on a clean
+			// page has nothing stored yet, and dropping its canvas would leave
+			// the wet ink with nowhere to go until pen-up.
+			if (attached) {
+				attached.canvas.remove();
+				this.detachPairFrom(box.pageNumber);
+				this.overlays.delete(box.pageNumber);
+			}
+			return;
+		}
+		// We are a guest inside someone else's element, and the host rewrites
+		// it. On re-render the viewer can replace a page's children - taking
+		// our canvas with them - and it can rewrite the page div's style
+		// attribute, dropping the `position: relative` that our absolutely
+		// positioned overlay resolves against. Either one leaves us believing
+		// we are attached while we are detached, or positioned against some
+		// ancestor far away. That is why the marks survived one zoom and then
+		// went for good (hardware).
+		//
+		// So neither is assumed once. Both are re-checked every paint: the
+		// page is re-positioned if it lost it, and an overlay that is no
+		// longer OUR page's child is discarded and rebuilt rather than
+		// painted into invisibly.
+		if (this.win.getComputedStyle(pageEl).position === "static") {
+			pageEl.setCssStyles({ position: "relative" });
+		}
+		if (attached && attached.canvas.parentElement !== pageEl) {
+			attached.canvas.remove();
+			this.detachPairFrom(box.pageNumber);
+			this.overlays.delete(box.pageNumber);
+			attached = undefined;
+		}
+		if (!attached) {
+			const canvas = pageEl.createEl("canvas", { cls: OVERLAY_CLASS });
+			canvas.setAttribute("aria-hidden", "true");
+			attached = { canvas, paintedScale: 0, paintedCount: -1 };
 			this.overlays.set(box.pageNumber, attached);
+			// The committed canvas was just appended, so it is on top of a
+			// pair that is already on this page - the first stroke on a clean
+			// page builds the overlay AFTER the pair went on. All three share
+			// one z-index, so putting the pair back last is what keeps the wet
+			// ink visible over the committed ink (§5h/H1).
+			if (this.wetHostPage === box.pageNumber && this.pair) {
+				pageEl.appendChild(this.pair.wetCanvas);
+				pageEl.appendChild(this.pair.headCanvas);
+			}
 		}
 		if (!zoomed && attached.paintedScale === scale && attached.paintedCount === strokes.length) {
 			return; // already correct; the commonest case while scrolling
@@ -2319,24 +2673,13 @@ export class PdfInkController {
 		// left/top/width/height was three separate bugs in one afternoon,
 		// every one of them a number going stale while the viewer re-rendered
 		// underneath us.
-		const wPx = pageEl.clientWidth;
-		const hPx = pageEl.clientHeight;
-		if (wPx <= 0 || hPx <= 0) return;
-		const dpr = this.win.devicePixelRatio || 1;
-		const px = wPx * hPx;
-		const backing = px * dpr * dpr <= MAX_OVERLAY_PX ? dpr : Math.sqrt(MAX_OVERLAY_PX / px);
-		const w = Math.max(1, Math.round(wPx * backing));
-		const h = Math.max(1, Math.round(hPx * backing));
+		const size = this.backingFor(pageEl);
+		if (!size) return;
+		const { wPx, hPx, w, h, backing } = size;
 		const canvas = attached.canvas;
 		if (canvas.width !== w || canvas.height !== h) {
 			canvas.width = w;
 			canvas.height = h;
-			attached.wetCanvas.width = w;
-			attached.wetCanvas.height = h;
-			attached.headCanvas.width = w;
-			attached.headCanvas.height = h;
-			attached.wet.applyDpr(backing);
-			attached.tail.applyDpr(backing);
 		}
 		const ctx = canvas.getContext("2d");
 		if (!ctx) return;

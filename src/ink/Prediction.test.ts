@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { PenSample } from "../input/PointerRouter";
 import {
 	DEFAULT_CAPS,
+	EINK_CAPS,
+	adaptiveCaps,
 	buildTail,
 	correctionError,
 	extrapolate,
@@ -183,5 +185,56 @@ describe("recentTurnDegrees (the turn guard's input)", () => {
 
 	it("is 0 with too little history to measure", () => {
 		expect(recentTurnDegrees([s(0, 0, 0), s(1, 0, 4)])).toBe(0);
+	});
+});
+
+describe("adaptiveCaps", () => {
+	it("keeps the shipped default while there is no measurement", () => {
+		expect(adaptiveCaps(undefined)).toEqual(DEFAULT_CAPS);
+		expect(adaptiveCaps(Number.NaN)).toEqual(DEFAULT_CAPS);
+	});
+
+	it("reproduces the desktop tuning on the machine it was tuned on", () => {
+		// age@present measured ~7ms on the surface DEFAULT_CAPS came from.
+		// The formula has to land exactly on the hand-tuned answer there, or
+		// it is not a generalization of it.
+		const caps = adaptiveCaps(7);
+		expect(caps.maxHorizonMs).toBe(DEFAULT_CAPS.maxHorizonMs);
+		expect(caps.maxDistPx).toBe(DEFAULT_CAPS.maxDistPx);
+	});
+
+	it("never reaches shorter than the shipped default", () => {
+		// A machine faster than the one this was tuned on gets the floor,
+		// not a horizon so short that prediction stops doing anything.
+		expect(adaptiveCaps(0).maxHorizonMs).toBe(DEFAULT_CAPS.maxHorizonMs);
+		expect(adaptiveCaps(1).maxHorizonMs).toBe(DEFAULT_CAPS.maxHorizonMs);
+	});
+
+	it("reaches the e-ink horizon on an e-ink-slow path, and no further", () => {
+		// The NoteAir trace measured a 58ms median delivery gap.
+		const caps = adaptiveCaps(58);
+		expect(caps.maxHorizonMs).toBe(EINK_CAPS.maxHorizonMs);
+		expect(caps.maxDistPx).toBe(EINK_CAPS.maxDistPx);
+		expect(adaptiveCaps(500).maxHorizonMs).toBe(EINK_CAPS.maxHorizonMs);
+	});
+
+	it("lengthens the reach in between, monotonically", () => {
+		const mid = adaptiveCaps(20);
+		expect(mid.maxHorizonMs).toBeGreaterThan(DEFAULT_CAPS.maxHorizonMs);
+		expect(mid.maxHorizonMs).toBeLessThan(EINK_CAPS.maxHorizonMs);
+		let prev = 0;
+		for (const lag of [0, 5, 10, 20, 30, 40, 50, 60]) {
+			const h = adaptiveCaps(lag).maxHorizonMs;
+			expect(h).toBeGreaterThanOrEqual(prev);
+			prev = h;
+		}
+	});
+
+	it("never loosens the guards that stop a wrong guess being drawn", () => {
+		for (const lag of [0, 7, 20, 45, 200]) {
+			const caps = adaptiveCaps(lag);
+			expect(caps.maxTurnDeg).toBe(DEFAULT_CAPS.maxTurnDeg);
+			expect(caps.minSpeedPxPerMs).toBe(DEFAULT_CAPS.minSpeedPxPerMs);
+		}
 	});
 });

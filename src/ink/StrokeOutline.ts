@@ -16,7 +16,7 @@
  */
 
 import { flattenStroke, ribbonSides, jointIndices, RibbonPt } from "./Ribbon";
-import { flattenStrokeShaped, inkShapingEnabled } from "./InkShape";
+import { flattenStrokeShaped } from "./InkShape";
 import { PenStyle } from "./PenStyle";
 import { InkStroke } from "./Stroke";
 
@@ -54,7 +54,14 @@ export function ribbonOf(stroke: InkStroke): RibbonPt[] {
 		minWidthFactor: flat ? 0.9 : 0.35,
 		gamma: flat ? 1 : 0.75,
 	};
-	return !flat && stroke.device !== "mouse" && inkShapingEnabled()
+	// Exports are always shaped (§5n, Alan, 2026-09-02): inkShapingEnabled()
+	// used to gate this too, so a Boox user - whose boox mode turns shaping
+	// off to save e-ink redraw cost on screen - was exporting rough geometry
+	// into every PDF and SVG for a reason that has nothing to do with paper.
+	// The toggle still governs the on-screen path (StrokeRenderer.drawStroke,
+	// WetInkRenderer) untouched; it never reaches here. The flat (highlighter)
+	// and mouse rules stay: those strokes were never shaped and must not start.
+	return !flat && stroke.device !== "mouse"
 		? flattenStrokeShaped(pts, style, EXPORT_PX_PER_WORLD)
 		: flattenStroke(pts, style, EXPORT_PX_PER_WORLD);
 }

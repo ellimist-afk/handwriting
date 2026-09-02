@@ -37,6 +37,13 @@ class FakeAdapter {
 	writeDelay: Promise<void> | null = null;
 	/** Writes that ENTERED the adapter, counted before any stall. */
 	writesStarted = 0;
+	/**
+	 * The PATH of every write that entered the adapter, recorded before any
+	 * stall. `log` records a write only once it COMPLETES, so a stalled
+	 * write - the freeze in miniature - never appears there; the background
+	 * flush is exactly about what reaches the platform before it completes.
+	 */
+	writeStarts: string[] = [];
 	log: string[] = [];
 
 	async exists(path: string): Promise<boolean> {
@@ -49,6 +56,7 @@ class FakeAdapter {
 	}
 	async write(path: string, data: string): Promise<void> {
 		this.writesStarted++;
+		this.writeStarts.push(path);
 		if (this.writeDelay) await this.writeDelay;
 		if (this.failWriteTimes > 0) {
 			this.failWriteTimes--;
@@ -76,6 +84,26 @@ class FakeAdapter {
 	}
 	async stat(path: string): Promise<{ mtime: number } | null> {
 		return this.files.has(path) ? { mtime: this.mtimes.get(path)! } : null;
+	}
+	/**
+	 * Obsidian's adapter throws for a folder that does not exist, and the
+	 * trash-restore path depends on that being the signal for "nothing has
+	 * ever been recycled here".
+	 */
+	async list(path: string): Promise<{ files: string[]; folders: string[] }> {
+		const prefix = path.endsWith("/") ? path : `${path}/`;
+		const files: string[] = [];
+		const folders = new Set<string>();
+		let seen = this.dirs.has(path);
+		for (const p of this.files.keys()) {
+			if (!p.startsWith(prefix)) continue;
+			seen = true;
+			const rest = p.slice(prefix.length);
+			if (rest.includes("/")) folders.add(prefix + rest.split("/")[0]);
+			else files.push(p);
+		}
+		if (!seen) throw new Error(`ENOENT ${path}`);
+		return { files, folders: [...folders] };
 	}
 	/** Simulate an external process/sync replacing a file. */
 	externalWrite(path: string, data: string): void {
@@ -367,7 +395,7 @@ describe("external revisions are preserved, not clobbered", () => {
 	// saved normally" — a claim about a write that had not been attempted and
 	// could still fail. These tests pin the ordering.
 
-	it("a FAILED save produces no conflict (success) callback at all", async () => {
+	it("a FAILED save produces no conflict callback, and moves nothing", async () => {
 		store.schedule("p1", pageWith("p1", "mine-v1"));
 		await settle();
 		fake.externalWrite(".handwriting/p1.json", serialize("p1", "THEIRS"));
@@ -381,12 +409,18 @@ describe("external revisions are preserved, not clobbered", () => {
 		await settle();
 		// No success notice was emitted, at any point.
 		expect(conflicts).toEqual([]);
-		// The failure WAS reported, and it names where the other version went —
-		// the live path is empty now, so this is the only pointer to it.
+		// The failure WAS reported.
 		expect(errors.length).toBe(1);
-		expect(errors[0]!.preservedAs).toBeDefined();
-		expect(fake.files.get(errors[0]!.preservedAs!)).toContain("THEIRS");
-		expect(fake.files.has(".handwriting/p1.json")).toBe(false);
+		// And THEIR revision is untouched, in the live path, where they left
+		// it. This assertion is the opposite of what it was: the tmp is now
+		// written before the aside-rename, so a save that cannot write never
+		// gets as far as moving anything. It used to move their file aside
+		// FIRST and then fail, which emptied the live path and left the only
+		// copy of their ink under a .conflict- name nobody had been told
+		// about - and if the process died there rather than merely erroring,
+		// nothing announced it at all.
+		expect(errors[0]!.preservedAs).toBeUndefined();
+		expect(fake.files.get(".handwriting/p1.json")).toContain("THEIRS");
 	});
 
 	it("the conflict callback fires only AFTER the final rename lands", async () => {
@@ -869,6 +903,19 @@ describe("round trips and deletion", () => {
 		expect(trashContents("p1")).toEqual([expect.stringContaining("keepme")]);
 	});
 
+	it("deleting a note within the debounce recycles the SCHEDULED stroke, not the stale disk copy", async () => {
+		// audit-fixes-design.md 5i I1: a stroke scheduled inside the 700ms
+		// debounce is the only copy of itself until the timer fires. remove()
+		// used to delete pending and clearTimers before ever looking at it,
+		// so that stroke was discarded outright instead of recycled.
+		store.schedule("p1", pageWith("p1", "keepme"));
+		await settle(); // "keepme" is now the stale disk copy
+		store.schedule("p1", pageWith("p1", "urgent")); // still inside the debounce
+		await store.remove("p1"); // no timer advance: the debounce never fires
+		expect(fake.files.has(".handwriting/p1.json")).toBe(false);
+		expect(trashContents("p1")).toEqual([expect.stringContaining("urgent")]);
+	});
+
 	it("a save already in flight cannot resurrect the sidecar after remove", async () => {
 		// The race: remove() runs while a write for the same page is mid
 		// tmp/rename dance. Unchained, the write would re-create the live
@@ -910,23 +957,414 @@ describe("round trips and deletion", () => {
 // ---- background flush (mobile freeze) --------------------------------------
 
 describe("flushDispatch: the background/freeze path", () => {
-	it("starts every pending write synchronously, without awaiting between them", async () => {
+	it("writes every pending page's .tmp synchronously, before any yield", async () => {
 		// On iOS and Android the webview freezes on background with no
 		// further JS. flush() awaits each write in turn, so under a freeze
-		// only the first write ever starts. The hidden-path dispatcher must
-		// START them all before yielding.
+		// only the first write ever starts - and until 2026-09-02 the
+		// dispatcher was no better: writePending -> chain -> writeNow, whose
+		// first statement was `await ensureFolder(...)`, so what reached the
+		// platform before the freeze was a FOLDER CHECK per page and not one
+		// byte of ink. See audit-fixes-design.md section 4 (B1).
 		store.schedule("p1", pageWith("p1", "s1"));
 		store.schedule("p2", pageWith("p2", "s2"));
 		expect(fake.files.size).toBe(0); // both debounced, nothing on disk
 
-		// A stalled first write is the freeze in miniature: flush()'s
-		// sequential awaits would never reach p2.
+		// A write that never resolves is the freeze in miniature: nothing
+		// chained behind it ever runs, and `log` (written on completion)
+		// stays empty. writeStarts records what ENTERED the adapter.
 		fake.writeDelay = new Promise<void>(() => {});
 		store.flushDispatch();
-		// One drained tick (fake timers rule this file). p1's write is
-		// stalled forever, so a sequential flush would sit at 1 here for
-		// good; the dispatcher must show both.
+		// NO await. This is the whole assertion: the tmp write for every
+		// dirty page has already been handed to the platform by the time
+		// flushDispatch returns, because after it returns there may be no
+		// more JS at all.
+		expect(fake.writeStarts).toEqual([".handwriting/p1.json.tmp", ".handwriting/p2.json.tmp"]);
+		expect(fake.log).toEqual([]); // nothing completed; the platform owns them now
+
+		// And still both, after a drained tick - nothing re-dispatches or
+		// duplicates behind the stall.
 		await vi.advanceTimersByTimeAsync(0);
 		expect(fake.writesStarted).toBe(2);
+	});
+
+	it("leaves a recoverable .tmp for every dirty page when the freeze lands", async () => {
+		// The failure matrix's first row: freeze immediately after the sweep.
+		// The adapter completes the writes it already has (writeDelay null,
+		// so the fake commits inside the synchronous call), and nothing else
+		// runs. Next launch must find the ink.
+		store.schedule("p1", pageWith("p1", "s1"));
+		store.schedule("p2", pageWith("p2", "s2"));
+		store.flushDispatch();
+		// The freeze: not one await between the sweep and here.
+		expect([...fake.files.keys()].sort()).toEqual([
+			".handwriting/p1.json.tmp",
+			".handwriting/p2.json.tmp",
+		]);
+
+		// Next launch, over the disk as the freeze left it: a fresh adapter
+		// so the frozen session's chained writes cannot run into it.
+		const disk = new FakeAdapter();
+		for (const [path, text] of fake.files) disk.files.set(path, text);
+		for (const [path, mtime] of fake.mtimes) disk.mtimes.set(path, mtime);
+		for (const dir of fake.dirs) disk.dirs.add(dir);
+		const next = new PageStore({ vault: { adapter: disk } }, ".handwriting", () => trashClock);
+		const pages: Array<[string, string]> = [
+			["p1", "s1"],
+			["p2", "s2"],
+		];
+		for (const [id, label] of pages) {
+			const r = await next.load(id);
+			expect(r?.damaged).toBeFalsy();
+			expect(r?.recovered).toBe(true);
+			expect(r?.data.strokes[0]?.id).toBe(label);
+			// Promoted, not left in the scratch file (2026-09-01).
+			expect(disk.files.has(`.handwriting/${id}.json`)).toBe(true);
+			expect(disk.files.has(`.handwriting/${id}.json.tmp`)).toBe(false);
+		}
+	});
+
+	it("a snapshot scheduled AFTER the sweep is the one that lands", async () => {
+		// The subtle row of the failure matrix. The sweep dispatches the tmp
+		// for the state it saw; the normal write chained behind it reads
+		// `pending` when it RUNS, so a newer snapshot scheduled in between is
+		// the one written. Disk state only moves forward.
+		store.schedule("p1", pageWith("p1", "old"));
+		store.flushDispatch();
+		store.schedule("p1", pageWith("p1", "new"));
+		await settle();
+		expect(fake.files.get(".handwriting/p1.json")).toContain('"new"');
+		expect(fake.files.get(".handwriting/p1.json")).not.toContain('"old"');
+		expect(fake.files.has(".handwriting/p1.json.tmp")).toBe(false);
+	});
+
+	it("without a freeze it ends exactly where a normal save would", async () => {
+		// Desktop visibilitychange: the JS keeps running, so the chained
+		// normal write renames each tmp into place and the end state is
+		// indistinguishable from a debounced save.
+		store.schedule("p1", pageWith("p1", "s1"));
+		store.schedule("p2", pageWith("p2", "s2"));
+		store.flushDispatch();
+		await settle();
+		expect(fake.files.get(".handwriting/p1.json")).toContain("s1");
+		expect(fake.files.get(".handwriting/p2.json")).toContain("s2");
+		expect([...fake.files.keys()].filter((p) => p.endsWith(".tmp"))).toEqual([]);
+		expect(store.busy).toBe(false);
+	});
+});
+
+describe("page ids are path components", () => {
+	// The last line of the audit-item-2 defence. isSafePageId runs at both
+	// frontmatter ingress points and inside parsePage, so an unsafe id
+	// reaching the store means one of those was bypassed - and the store
+	// must not be the thing that turns that bug into a write outside the
+	// ink folder.
+	it("refuses to build a path for an id that is not a name", () => {
+		for (const id of ["../../x", "sub/dir", ".hidden", ""]) {
+			expect(() => store.path(id)).toThrow(/refusing to build a sidecar path/);
+		}
+	});
+
+	it("still builds paths for every real id", () => {
+		expect(store.path("pdf-9f86d081-2")).toBe(".handwriting/pdf-9f86d081-2.json");
+	});
+
+	it("reports damage rather than throwing out of load()", async () => {
+		// load() builds a read path before it touches the disk. The assert
+		// belongs inside its try, or an unsafe id becomes an unhandled
+		// rejection somewhere up the attach path instead of a damaged page.
+		const r = await store.load("../../x");
+		expect(r?.damaged).toBe(true);
+	});
+
+	it("does not write anything for an unsafe id", async () => {
+		store.schedule("../../x", pageWith("../../x", "s1"));
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect([...fake.files.keys()]).toEqual([]);
+	});
+});
+
+describe("the ink folder fallback runs both ways", () => {
+	// A vault synced in compatibility mode carries `handwriting/` and not
+	// data.json. The second device therefore starts on `.handwriting`, and
+	// before this the fallback only ran the other way: it read nothing and
+	// then wrote a SECOND sidecar under the same page id. Forked ink is
+	// worse than missing ink, because nothing announces it.
+	it("reads ink from handwriting/ while configured for .handwriting", async () => {
+		fake.files.set("handwriting/p1.json", JSON.stringify(pageWith("p1", "s1")));
+		fake.mtimes.set("handwriting/p1.json", 42);
+		const r = await store.load("p1");
+		expect(r?.damaged).toBeFalsy();
+		expect(r?.data.strokes.map((s) => s.id)).toEqual(["s1"]);
+	});
+
+	it("still reads ink from .handwriting/ while configured for handwriting/", async () => {
+		store.useInkFolder("handwriting");
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "s1")));
+		fake.mtimes.set(".handwriting/p1.json", 42);
+		expect((await store.load("p1"))?.data.strokes.map((s) => s.id)).toEqual(["s1"]);
+	});
+
+	it("falls back to both well-known folders from a custom one", async () => {
+		store.useInkFolder("assets/ink");
+		fake.files.set("handwriting/p1.json", JSON.stringify(pageWith("p1", "s1")));
+		fake.mtimes.set("handwriting/p1.json", 42);
+		expect((await store.load("p1"))?.data.strokes.map((s) => s.id)).toEqual(["s1"]);
+	});
+
+	it("prefers the configured folder when the page is in both", async () => {
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "mine")));
+		fake.mtimes.set(".handwriting/p1.json", 42);
+		fake.files.set("handwriting/p1.json", JSON.stringify(pageWith("p1", "theirs")));
+		fake.mtimes.set("handwriting/p1.json", 43);
+		expect((await store.load("p1"))?.data.strokes.map((s) => s.id)).toEqual(["mine"]);
+	});
+
+	it("writes to the configured folder even when it read from the other one", async () => {
+		// The fallback is a READ fallback. A write that followed the read
+		// would migrate files by accident, one page at a time, with no
+		// record of it.
+		fake.files.set("handwriting/p1.json", JSON.stringify(pageWith("p1", "s1")));
+		fake.mtimes.set("handwriting/p1.json", 42);
+		await store.load("p1");
+		await store.saveNow("p1", pageWith("p1", "s2"));
+		expect(fake.files.has(".handwriting/p1.json")).toBe(true);
+		expect(fake.files.get("handwriting/p1.json")).toContain("s1");
+	});
+});
+
+describe("hasQueuedWrite (the reload race)", () => {
+	// externallyChanged stats the file, and the stat is awaited. A stroke
+	// finishing in that gap queues a write holding a PRE-reload snapshot. If
+	// the caller reloads anyway, the reload refreshes the known mtime, the
+	// write-path conflict guard then sees nothing wrong, and the stale
+	// snapshot goes over the other device's ink with no conflict copy and
+	// nothing said. The poll re-asks this, synchronously, right before it
+	// adopts.
+	it("is false for a quiet page", () => {
+		expect(store.hasQueuedWrite("p1")).toBe(false);
+	});
+
+	it("is true from the moment a save is scheduled until it lands", async () => {
+		store.schedule("p1", pageWith("p1", "s1"));
+		expect(store.hasQueuedWrite("p1")).toBe(true);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(store.hasQueuedWrite("p1")).toBe(false);
+	});
+
+	it("answers the same question externallyChanged asks", async () => {
+		// The one that matters: a queued write must make externallyChanged
+		// decline, and hasQueuedWrite is how the caller sees that same fact
+		// without paying for a stat.
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "s1")));
+		fake.mtimes.set(".handwriting/p1.json", 42);
+		await store.load("p1");
+		fake.externalWrite(".handwriting/p1.json", JSON.stringify(pageWith("p1", "remote")));
+		expect(await store.externallyChanged("p1")).toBe(true);
+
+		store.schedule("p1", pageWith("p1", "mine"));
+		expect(store.hasQueuedWrite("p1")).toBe(true);
+		expect(await store.externallyChanged("p1")).toBe(false);
+	});
+
+	it("goes true again for a write that failed and is waiting to retry", async () => {
+		// A failed write keeps its state queued for a bounded retry. That is
+		// still a pre-reload snapshot waiting to land, so it still has to
+		// block the reload.
+		fake.failWriteTimes = 1;
+		store.schedule("p1", pageWith("p1", "s1"));
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(store.hasQueuedWrite("p1")).toBe(true);
+	});
+});
+
+describe("a restored note gets its recycled ink back", () => {
+	// Deleting a note recycles its sidecar into .handwriting/trash. Nothing
+	// ever brought it back, so a note restored from Obsidian's .trash - or
+	// undeleted by a sync client - reopened EMPTY, and the next stroke began
+	// a second sidecar under the same id, diverging from the copy in the
+	// trash folder. The ink was recoverable only by hand, by someone who
+	// knew the folder existed.
+	it("restores the trashed generation when the live sidecar is gone", async () => {
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "s1")));
+		fake.mtimes.set(".handwriting/p1.json", 42);
+		await store.load("p1");
+		await store.remove("p1");
+		expect(fake.files.has(".handwriting/p1.json")).toBe(false);
+		expect(trashGenerations("p1").length).toBe(1);
+
+		const back = await store.load("p1");
+		expect(back?.data.strokes.map((s) => s.id)).toEqual(["s1"]);
+		// Moved, not copied: the live file is back and the trash is empty.
+		expect(fake.files.has(".handwriting/p1.json")).toBe(true);
+		expect(trashGenerations("p1")).toEqual([]);
+	});
+
+	it("takes the NEWEST generation when a page was deleted more than once", async () => {
+		for (const label of ["older", "newer"]) {
+			fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", label)));
+			fake.mtimes.set(".handwriting/p1.json", 42);
+			await store.load("p1");
+			await store.remove("p1");
+			trashClock += 1000;
+		}
+		expect(trashGenerations("p1").length).toBe(2);
+		expect((await store.load("p1"))?.data.strokes.map((s) => s.id)).toEqual(["newer"]);
+	});
+
+	it("does not take another page's generations", async () => {
+		// The pdf instance ids are `pdf-<hex>` and `pdf-<hex>-2`, so one
+		// page's trash prefix matches the other's names. The pageId INSIDE
+		// the file is what settles it.
+		fake.files.set(".handwriting/pdf-ab.json", JSON.stringify(pageWith("pdf-ab", "mine")));
+		fake.mtimes.set(".handwriting/pdf-ab.json", 42);
+		await store.load("pdf-ab");
+		await store.remove("pdf-ab");
+
+		// "pdf-ab-" is a prefix of the trashed "pdf-ab-<stamp>.json", and it
+		// is also the prefix a page called "pdf-ab" would scan for.
+		expect(await store.load("pdf-ab-2")).toBeNull();
+		expect(trashGenerations("pdf-ab").length).toBe(1);
+	});
+
+	it("leaves a damaged generation where it is", async () => {
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "s1")));
+		fake.mtimes.set(".handwriting/p1.json", 42);
+		await store.load("p1");
+		await store.remove("p1");
+		const [gen] = trashGenerations("p1");
+		fake.files.set(gen!, "{ not json");
+
+		// Not promoted: damaged bytes may still be recoverable by hand, and
+		// restoring them would turn an absent page into a locked one.
+		expect(await store.load("p1")).toBeNull();
+		expect(fake.files.has(gen!)).toBe(true);
+	});
+
+	it("says nothing and restores nothing when the trash is empty", async () => {
+		expect(await store.load("never-existed")).toBeNull();
+	});
+});
+
+describe("no instant of a conflicted save has nothing on disk", () => {
+	// The aside-rename moves the live file out of the way. Writing our
+	// replacement AFTER it meant a kill in between left no live file and no
+	// tmp: the page read as absent, and their revision sat under a
+	// .conflict- name nobody had been told about, because the announcement
+	// waits on the final rename. The tmp is written first now, so every
+	// instant has a complete copy where load() already looks.
+	it("leaves a recoverable tmp if the process dies after the aside-rename", async () => {
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "mine-v1")));
+		fake.mtimes.set(".handwriting/p1.json", 42);
+		await store.load("p1");
+		fake.externalWrite(".handwriting/p1.json", serialize("p1", "THEIRS"));
+
+		// Stall the sequence at the rename that follows the aside-rename:
+		// the tmp is on disk, the live path has been vacated. This is the
+		// exact instant the old order had nothing recoverable in it.
+		// The aside-rename is allowed; the tmp→final rename never lands, on
+		// this attempt or any retry. That is the process dying between the
+		// two, which a single throw would not model - the retry would simply
+		// finish the save.
+		const realRename = fake.rename.bind(fake);
+		fake.rename = async (from: string, to: string) => {
+			if (to === ".handwriting/p1.json") throw new Error("killed mid-save");
+			return realRename(from, to);
+		};
+		store.schedule("p1", pageWith("p1", "mine-v2"));
+		await settle();
+
+		// A tmp holding this session's ink survives...
+		expect(fake.files.has(".handwriting/p1.json.tmp")).toBe(true);
+		// ...and load() recovers from it rather than reporting a blank page.
+		const back = await store.load("p1");
+		expect(back?.data.strokes.map((s) => s.id)).toEqual(["mine-v2"]);
+		expect(back?.recovered).toBe(true);
+		// Their revision is still on disk under the conflict name.
+		const kept = [...fake.files.keys()].find((f) => f.includes(".conflict-"));
+		expect(kept).toBeDefined();
+		expect(fake.files.get(kept!)).toContain("THEIRS");
+	});
+});
+
+describe("every path finds the page, not just load()", () => {
+	// load() falls back between the two well-known ink folders. preserve,
+	// clone, remove and externallyChanged did not, so in a vault mid-migration
+	// - or on a device that lost data.json - the page rendered fine and every
+	// other operation on it quietly addressed a file that was not there.
+	const OTHER = "handwriting/p1.json";
+
+	beforeEach(() => {
+		fake.files.set(OTHER, JSON.stringify(pageWith("p1", "s1")));
+		fake.mtimes.set(OTHER, 42);
+	});
+
+	it("remove recycles the copy that exists, wherever it is", async () => {
+		await store.remove("p1");
+		expect(fake.files.has(OTHER)).toBe(false);
+		expect(trashContents("p1")[0]).toContain("s1");
+	});
+
+	it("preserve copies the page that exists, not an absent one", async () => {
+		const kept = await store.preserve("p1");
+		expect(kept).not.toBeNull();
+		expect(fake.files.get(kept!)).toContain("s1");
+	});
+
+	it("clone reads the page that exists and writes to the configured folder", async () => {
+		expect(await store.clone("p1", "p2")).toBe("cloned");
+		expect(fake.files.get(".handwriting/p2.json")).toContain("s1");
+		// The source is untouched, wherever it was.
+		expect(fake.files.has(OTHER)).toBe(true);
+	});
+
+	it("externallyChanged watches the file it would actually read", async () => {
+		await store.load("p1");
+		expect(await store.externallyChanged("p1")).toBe(false);
+		fake.externalWrite(OTHER, serialize("p1", "THEIRS"));
+		// Before, this watched .handwriting/p1.json - which does not exist -
+		// so live reload silently stopped for exactly the vaults the read
+		// fallback exists for.
+		expect(await store.externallyChanged("p1")).toBe(true);
+	});
+});
+
+describe("a bare .tmp recovery becomes a real sidecar", () => {
+	// Recovering the content and leaving it in the .tmp meant the only copy
+	// on disk was still the scratch file the next save writes to - so that
+	// save opened by overwriting the very bytes it had recovered from, and a
+	// failure mid-write took them with it.
+	it("promotes the tmp into the live path", async () => {
+		fake.files.set(".handwriting/p1.json.tmp", JSON.stringify(pageWith("p1", "interrupted")));
+		fake.mtimes.set(".handwriting/p1.json.tmp", 42);
+
+		const r = await store.load("p1");
+		expect(r?.recovered).toBe(true);
+		expect(r?.data.strokes.map((s) => s.id)).toEqual(["interrupted"]);
+		expect(fake.files.has(".handwriting/p1.json")).toBe(true);
+		expect(fake.files.has(".handwriting/p1.json.tmp")).toBe(false);
+	});
+
+	it("so the next save has something to fall back to", async () => {
+		fake.files.set(".handwriting/p1.json.tmp", JSON.stringify(pageWith("p1", "interrupted")));
+		fake.mtimes.set(".handwriting/p1.json.tmp", 42);
+		await store.load("p1");
+
+		// A save that never lands must not take the recovered page with it.
+		fake.failWriteTimes = 99;
+		store.schedule("p1", pageWith("p1", "next"));
+		await settle();
+		expect(fake.files.get(".handwriting/p1.json")).toContain("interrupted");
+	});
+
+	it("does not promote a tmp that will not parse", async () => {
+		// Damage may still be recoverable by hand, and a corrupt file in the
+		// live path is worse than one in a .tmp nobody reads.
+		fake.files.set(".handwriting/p1.json.tmp", "{ not json");
+		fake.mtimes.set(".handwriting/p1.json.tmp", 42);
+
+		const r = await store.load("p1");
+		expect(r?.damaged).toBe(true);
+		expect(fake.files.has(".handwriting/p1.json")).toBe(false);
+		expect(fake.files.has(".handwriting/p1.json.tmp")).toBe(true);
 	});
 });

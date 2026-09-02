@@ -63,7 +63,7 @@ import {
 import { getPenToolsMode, markPenSeen, penSeenThisSession, penToolsVisible } from "./PenToolsMode";
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
-import { splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
+import { eraserRect, splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
 import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
 import { clampInkSize } from "../ink/InkSize";
 import { applyInkColor, colorsFor, getInkColorHex } from "../ink/InkColor";
@@ -80,18 +80,27 @@ import { PenSample } from "../input/PointerRouter";
 import { padBBox, pointInBBox } from "../objects/Selection";
 import { SelectionModel } from "../objects/SelectionModel";
 import { runDetached } from "../util/Detached";
-import { InkOp, inkApplied, inkEffect, inkHistorySupport, snapHistoryOps } from "./InkHistory";
+import {
+	InkOp,
+	eraseRemovalIndices,
+	inkApplied,
+	inkEffect,
+	inkHistorySupport,
+	snapHistoryOps,
+} from "./InkHistory";
 import {
 	InlineSelectionDeleteKeys,
 	removeSelectedInlineStrokes,
 } from "./InlineSelectionDelete";
 import { StrokeFrame } from "./StrokeFrame";
 import { Band, BandViewport, bandFor, bandNeedsMove } from "./ScrollBand";
-import { DEFAULT_CAPS, EINK_CAPS, buildTail, correctionError } from "../ink/Prediction";
+import { EINK_CAPS, adaptiveCaps, buildTail, correctionError } from "../ink/Prediction";
+import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
 import { predictionEinkOn, predictionEnabled } from "./StrokePrediction";
 import {
 	clearMetadataVisibility,
 	frontmatterPropertyKeys,
+	isMetadataMutation,
 	updateMetadataVisibility,
 } from "./MetadataVisibility";
 import { handoffFinishedStroke } from "./StrokeHandoff";
@@ -101,7 +110,8 @@ import { PEN_HOVER_CLASS, penCursorLayout } from "./PenCursor";
 import { normalizeInlinePenPressure } from "./PenPressure";
 import { observeStrokeMax, strokeGain } from "../ink/PressureGain";
 import { embedInkLayerCount, embedInkPrintSwaps } from "./EmbedInk";
-import { notifyInkChanged } from "./InkEvents";
+import { notifyInkChanged, onInkChanged } from "./InkEvents";
+import { ExtentInputs, FrontierCache, sameExtentInputs } from "./FrontierCache";
 import { DamageLedger } from "../ink/DamageLedger";
 import { StrokeIndex } from "../ink/StrokeIndex";
 import { DWELL_MS, snapStroke } from "../ink/ShapeSnap";
@@ -265,6 +275,15 @@ export function setInlineTool(tool: InkTool): void {
  */
 setTipModeListener(() => {
 	for (const p of instances) p.refreshStrip();
+	refreshStripSurfaces();
+	// §5o: switching the tip to anything but lasso dissolves the selection
+	// on every surface, immediately - Alan's device finding 2026-09-02 ("the
+	// lasso selector remains" after a tool switch; before, only the NEXT
+	// non-lasso pen contact cleared it).
+	if (tipMode() !== "lasso") {
+		for (const p of instances) p.dissolveSelection();
+		for (const fn of tipModeSurfaces) fn();
+	}
 });
 
 export function getInlineEraserMode(): boolean {
@@ -353,10 +372,44 @@ export function getToolbarCorner(): ToolbarCorner {
 	return toolbarCorner;
 }
 
+/**
+ * Surfaces that carry a strip but are not inline overlays.
+ *
+ * The fan-outs below walk `instances`, which is the editor overlays and
+ * nothing else - so a corner change, or a tip-mode change, reached every open
+ * NOTE and no open PDF. The PDF controller has had its own refreshStrip all
+ * along; nothing ever called it. A callback rather than a second registry of
+ * controllers, because this module is already imported by the PDF surface and
+ * importing back would close the loop.
+ */
+const stripSurfaces = new Set<() => void>();
+
+/**
+ * §5o: the same non-editor surfaces also need to know when a tool change
+ * should put a selection away, kept in its own set so a surface can register
+ * a strip refresh without one, or vice versa.
+ */
+const tipModeSurfaces = new Set<() => void>();
+
+/** Register an extra strip to refresh with the editors. Returns the undo. */
+export function addStripSurface(refresh: () => void, onTipMode?: () => void): () => void {
+	stripSurfaces.add(refresh);
+	if (onTipMode) tipModeSurfaces.add(onTipMode);
+	return () => {
+		stripSurfaces.delete(refresh);
+		if (onTipMode) tipModeSurfaces.delete(onTipMode);
+	};
+}
+
+function refreshStripSurfaces(): void {
+	for (const refresh of stripSurfaces) refresh();
+}
+
 /** Settings changed the corner: every open editor's strip moves at once. */
 export function setToolbarCorner(corner: ToolbarCorner): void {
 	toolbarCorner = corner;
 	for (const p of instances) p.applyToolbarCorner();
+	refreshStripSurfaces();
 }
 
 let penReticleOn = true;
@@ -476,6 +529,7 @@ export function refreshPenToolsAll(): void {
  */
 export function refreshAllStrips(): void {
 	for (const p of instances) p.refreshStrip();
+	refreshStripSurfaces();
 }
 
 /** Repaint every open editor's committed ink (the shaping toggle uses this). */
@@ -637,6 +691,8 @@ export class InkOverlayPlugin {
 	 * second pass over a survivor must not record it as something lost.
 	 */
 	private erasePieces = new Set<string>();
+	/** The stroke list as the erase gesture found it. See the erase pen-down. */
+	private eraseFrom: InkStroke[] = [];
 	private eraseWhole = false;
 	// Damage-repaint state (renderer debt): the committed canvases are their
 	// own cache. The ledger says what changed; the index answers per-rect
@@ -689,10 +745,18 @@ export class InkOverlayPlugin {
 	private spacerLeft = Number.NaN;
 	private spacerTop = Number.NaN;
 	private axisGuard = new ScrollAxisGuard();
+	/** The ink frontier per note, so a scroll repaint stops re-walking it. §5g/G1. */
+	private frontierCache = new FrontierCache();
+	/** Unsubscribes the frontier cache from ink-changed events. */
+	private offInkChanged: (() => void) | null = null;
+	/** What updateExtent last acted on; equal inputs mean equal output. */
+	private lastExtentInputs: ExtentInputs | null = null;
 	/** The `.markdown-source-view` ancestor carrying the `handwriting-page` class. */
 	private pageClassHost: HTMLElement | null = null;
 	/** Keeps the page-id-only Properties block class in step with Obsidian's DOM. */
 	private metadataObserver: MutationObserver | null = null;
+	/** The one frame that observer owes, or null when it owes none. §5g/G2. */
+	private metadataFrame: number | null = null;
 	/** Base font size captured when a pinch began; null when no pinch is live. */
 	/** Live magnification of this editor. Session-local; never persisted. */
 	private pinchScaleNow = 1;
@@ -1083,6 +1147,10 @@ export class InkOverlayPlugin {
 			passive: true,
 		});
 		this.watchResolution();
+		// Every committed mutation that reaches an event drops the cached
+		// frontier for that note; the two that do not (erase, lasso move)
+		// invalidate by hand at their gesture end. §5g/G1.
+		this.offInkChanged = onInkChanged((p) => this.frontierCache.invalidate(p));
 		this.lastPath = this.filePath();
 		this.updateHandwritingPageClass();
 		this.loadInk(this.lastPath);
@@ -1143,9 +1211,18 @@ export class InkOverlayPlugin {
 			this.pageClassHost =
 				this.view.dom.closest(".markdown-source-view") ?? this.view.dom;
 			if (typeof MutationObserver !== "undefined") {
-				this.metadataObserver = new MutationObserver(() => {
-					if (this.pageClassHost)
-						updateMetadataVisibility(this.pageClassHost, this.headFrontmatterKeys);
+				this.metadataObserver = new MutationObserver((records) => {
+					// This root is the whole editor, and CodeMirror recycles
+					// line DOM, so most batches arriving here cannot have
+					// changed a Properties block: gate first, then coalesce
+					// the survivors into ONE frame's work. §5g/G2.
+					if (!records.some(isMetadataMutation)) return;
+					if (this.metadataFrame !== null) return;
+					this.metadataFrame = this.winRef.requestAnimationFrame(() => {
+						this.metadataFrame = null;
+						if (this.pageClassHost)
+							updateMetadataVisibility(this.pageClassHost, this.headFrontmatterKeys);
+					});
 				});
 				this.metadataObserver.observe(this.pageClassHost, {
 					childList: true,
@@ -1272,6 +1349,9 @@ export class InkOverlayPlugin {
 			this.wheelFn = null;
 		}
 		this.unwatchResolution();
+		this.offInkChanged?.();
+		this.offInkChanged = null;
+		this.lastExtentInputs = null;
 		setHitProbeContext(null);
 		this.spacer?.remove();
 		this.spacer = null;
@@ -1280,6 +1360,10 @@ export class InkOverlayPlugin {
 		this.view.scrollDOM.classList.remove("handwriting-hscroll");
 		this.metadataObserver?.disconnect();
 		this.metadataObserver = null;
+		if (this.metadataFrame !== null) {
+			this.winRef.cancelAnimationFrame(this.metadataFrame);
+			this.metadataFrame = null;
+		}
 		if (this.pageClassHost) clearMetadataVisibility(this.pageClassHost);
 		this.pageClassHost?.classList.remove("handwriting-page");
 		this.pageClassHost = null;
@@ -1391,7 +1475,16 @@ export class InkOverlayPlugin {
 			) {
 				this.handleResize();
 			}
-			this.scheduleRepaint();
+			// "scroll", not the default: the default marks the whole surface
+			// damaged and the index dirty, so every keystroke in a note with
+			// ink re-rasterized every visible stroke and rebuilt the index -
+			// for an edit that cannot move ink, by construction. "scroll"
+			// asks for a repaint without asserting damage, and repaint()
+			// already upgrades ANY camera motion to a full one, which is what
+			// a reflow actually produces. The paths that do move ink (the
+			// lasso drag, insert-space and its correction) mark their own
+			// damage and are unaffected.
+			this.scheduleRepaint("scroll");
 		}
 	}
 
@@ -1847,6 +1940,18 @@ export class InkOverlayPlugin {
 		if (eraser) {
 			this.mode = "erase";
 			this.erased = [];
+			// The list as it stands BEFORE the gesture. Indices for the undo
+			// op are taken against this at pen-up, not against the list as it
+			// is being emptied: takeLive reports each stroke's position in
+			// whatever the list held at that instant, so the second stroke a
+			// drag crossed recorded a position already short by the first,
+			// and undoing a multi-stroke erase put the ink back at the wrong
+			// depth. The op's indices have to name one stable list, and the
+			// only one that means anything to `replace` is the pre-gesture
+			// one. This is the note surface's version of what
+			// PdfInkController.recordErase does with eraseFrom.
+			const here = this.filePath();
+			this.eraseFrom = here ? [...inlineInk.strokes(here)] : [];
 			// Stroke or reticle is a property of the ERASER, whichever way
 			// it was reached (eraser end or the mode). The radius still
 			// decides what counts as touched either way.
@@ -2047,10 +2152,11 @@ export class InkOverlayPlugin {
 		}
 		const predicted = this.router?.predictedSamples(ev) ?? [];
 		const mode = predicted.length > 0 ? "chromium" : "extrap";
-		// Boox mode swaps in the e-ink horizon: same guards, longer reach,
-		// sized to the delivery delay e-ink webviews actually measured.
-		const result = buildTail(real, predicted, mode, predictionEinkOn() ? EINK_CAPS : DEFAULT_CAPS);
-		metrics.setPrediction("on", result.source);
+		// Boox mode keeps its fixed e-ink horizon; everyone else gets one
+		// sized from what this machine's own frames measured.
+		const caps = predictionEinkOn() ? EINK_CAPS : adaptiveCaps(presentLagMs());
+		const result = buildTail(real, predicted, mode, caps);
+		metrics.setPrediction("on", result.source, caps.maxHorizonMs);
 		this.predLastTail = result.points;
 		if (result.suppressed || result.points.length === 0) {
 			metrics.recordTailSuppressed();
@@ -2077,7 +2183,9 @@ export class InkOverlayPlugin {
 		this.presentProbePending = true;
 		this.winRef.requestAnimationFrame(() => {
 			this.presentProbePending = false;
-			metrics.recordPresent(performance.now() - newestTs);
+			const presentAge = performance.now() - newestTs;
+			recordPresentAge(presentAge);
+			metrics.recordPresent(presentAge);
 		});
 	}
 
@@ -2151,19 +2259,19 @@ export class InkOverlayPlugin {
 		if (this.mode === "pan") {
 			this.mode = "ink";
 			this.panLast = null;
-			this.updateExtent();
+			this.updateExtent(true);
 			return;
 		}
 		if (this.mode === "space") {
 			this.mode = "ink";
 			this.spaceUp();
-			this.updateExtent();
+			this.updateExtent(true);
 			return;
 		}
 		if (this.mode === "lasso") {
 			this.mode = "ink";
 			this.lassoUp();
-			this.updateExtent();
+			this.updateExtent(true);
 			return;
 		}
 		if (this.mode === "erase") {
@@ -2172,7 +2280,9 @@ export class InkOverlayPlugin {
 			this.stopFrameTicker();
 			this.hideEraserCursor();
 			const erased = this.erased;
+			const eraseFrom = this.eraseFrom;
 			this.erased = [];
+			this.eraseFrom = [];
 			const path = this.filePath();
 			if (erased.length === 0 || !path) return;
 			// One persist per gesture, at pen-up. Never on the erase hot path.
@@ -2187,14 +2297,21 @@ export class InkOverlayPlugin {
 				}
 			});
 			this.erasePieces.clear();
+			const removed = erased.map((e) => e.stroke);
+			const removedAt = eraseRemovalIndices(eraseFrom, erased);
 			this.dispatchInk({
 				type: "replace",
 				path,
-				removed: erased.map((e) => e.stroke),
-				removedAt: erased.map((e) => e.index),
+				removed,
+				removedAt,
 				inserted,
 				insertedAt,
 			});
+			// The gesture is over and the splices are in. Not per sample:
+			// mid-gesture the frontier can only shrink, and a stale LARGER
+			// frontier only over-grants a scroll range that never shrinks
+			// anyway. §5g/G1.
+			this.frontierCache.invalidate(path);
 			this.repaintPath(path);
 			return;
 		}
@@ -2341,7 +2458,7 @@ export class InkOverlayPlugin {
 		this.lastCommitAt = performance.now();
 		// A second pane on the same note shows the new ink too.
 		this.repaintPath(path);
-		this.updateExtent();
+		this.updateExtent(true);
 	}
 
 	/**
@@ -2904,12 +3021,36 @@ export class InkOverlayPlugin {
 		this.frameTicking = false;
 	}
 
+	/**
+	 * The strokes an eraser circle at world `w`, radius `r`, could touch
+	 * (design doc §5 C1, 2026-09-02).
+	 *
+	 * eraseAt used to hit-test `inlineInk.strokes(path)` - the whole note,
+	 * every stroke, on every pointer sample - and the erase paths marked the
+	 * index dirty after each sample, so a drag ALSO rebuilt the whole index
+	 * once per frame. Querying the index instead was not possible while it
+	 * was stale between samples: a piece made earlier in the same gesture
+	 * was missing from it, and a stroke taken earlier was still in it. It is
+	 * now kept exact by strokeIndex.remove/insertLike at the takeLive and
+	 * applyAddLive sites in eraseAt, so the only rebuild left is the one
+	 * that settles a load or a paste which dirtied the index since the last
+	 * repaint - at most once per gesture, at pen-down.
+	 */
+	private eraseCandidates(w: { x: number; y: number }, r: number): readonly InkStroke[] {
+		if (this.indexDirty) {
+			const path = this.filePath();
+			this.strokeIndex.rebuild(path ? inlineInk.strokes(path) : []);
+			this.indexDirty = false;
+		}
+		return this.strokeIndex.query(eraserRect(w.x, w.y, r));
+	}
+
 	private eraseAt(sample: PenSample): void {
 		const path = this.filePath();
 		if (!path) return;
 		const w = this.camera.screenToWorld(sample.x, sample.y);
 		const r = visualToNote(inlineEraserRadiusPx, this.scale);
-		const hits = strokesHitByCircle(inlineInk.strokes(path), w.x, w.y, r);
+		const hits = strokesHitByCircle(this.eraseCandidates(w, r), w.x, w.y, r);
 		if (hits.length === 0) return;
 		if (this.eraseWhole) {
 			// Contact deletes the stroke, no split - v0.13.12's behavior,
@@ -2919,8 +3060,8 @@ export class InkOverlayPlugin {
 					this.erased.push({ stroke, index });
 				}
 				this.damage.addRect(stroke.bbox);
+				this.strokeIndex.remove(stroke);
 			}
-			this.indexDirty = true;
 			this.scheduleRepaint("partial");
 			this.repaintPath(path);
 			return;
@@ -2930,23 +3071,25 @@ export class InkOverlayPlugin {
 		// the same position, so z-order holds.
 		for (const { stroke, index } of inlineInk.takeLive(path, hits)) {
 			this.damage.addRect(stroke.bbox);
+			this.strokeIndex.remove(stroke);
 			const pieces = splitStrokeByCircle(stroke, w.x, w.y, r, newStrokeId);
 			if (pieces.length === 1 && pieces[0] === stroke) {
 				// Hit by the bbox-then-segment test but the ring never crossed
 				// the line itself. Put it back exactly as it was.
-				inlineInk.applyAdd(path, [stroke], [index]);
+				inlineInk.applyAddLive(path, [stroke], [index]);
+				this.strokeIndex.insertLike(stroke, stroke);
 				continue;
 			}
 			if (!this.erasePieces.delete(stroke.id)) {
 				this.erased.push({ stroke, index });
 			}
 			if (pieces.length > 0) {
-				inlineInk.applyAdd(path, pieces, pieces.map((_, i) => index + i));
+				inlineInk.applyAddLive(path, pieces, pieces.map((_, i) => index + i));
 				for (const piece of pieces) this.erasePieces.add(piece.id);
+				for (const piece of pieces) this.strokeIndex.insertLike(piece, stroke);
 			}
 		}
 		// Batched to the next frame, exactly like the canvas eraser.
-		this.indexDirty = true;
 		this.scheduleRepaint("partial");
 		this.repaintPath(path);
 	}
@@ -3051,6 +3194,9 @@ export class InkOverlayPlugin {
 				const strokeIds = [...this.selection.strokeIds];
 				inlineInk.save(path);
 				this.dispatchInk({ type: "move", path, strokeIds, dx, dy });
+				// A move changes no stroke COUNT, so the cache's cheap guard
+				// cannot see it. §5g/G1.
+				this.frontierCache.invalidate(path);
 			}
 			this.redrawSelectionUI();
 			return;
@@ -3244,6 +3390,16 @@ export class InkOverlayPlugin {
 	/** The strip's active-tool marks are stale; recompute them. */
 	refreshStrip(): void {
 		this.mobileTools?.refresh();
+	}
+
+	/**
+	 * A TOOL change puts a selection away too, not just the next contact.
+	 * Design §5o: leaving a lasso outline live after the strip's tool
+	 * changed read as "the lasso selector remains" (Alan, device finding
+	 * 2026-09-02). Exact idiom as the pen-contact clear at `:1919-1920`.
+	 */
+	dissolveSelection(): void {
+		if (this.selection.clear()) this.redrawSelectionUI();
 	}
 
 	private redrawSelectionUI(): void {
@@ -3442,6 +3598,14 @@ export class InkOverlayPlugin {
 	 * each gesture its own undo step; strokes never merge into one entry.
 	 */
 	private dispatchInk(op: InkOp): void {
+		// Stamp the note's IDENTITY on the way into the editor's history. The
+		// op outlives the path it was recorded at: the view keeps its history
+		// across a rename, and an undo afterwards named a path nothing lives
+		// at any more. See InkOpIdentity.
+		if (op.pageId === undefined) {
+			const id = inlineInk.pageIdOf(op.path);
+			if (id) op = { ...op, pageId: id };
+		}
 		try {
 			this.view.dispatch({
 				effects: inkEffect.of(op),
@@ -3452,8 +3616,29 @@ export class InkOverlayPlugin {
 		}
 	}
 
+	/**
+	 * Where an op from the editor's history should land now.
+	 *
+	 * Not `op.path`: the view survives a rename with its history intact, so
+	 * an op recorded before one names the old location. Applying it there put
+	 * the ink into a record for a path nothing lives at - and a note later
+	 * created at that name inherited it. The page id is in the file and does
+	 * not move, so it answers correctly across any number of renames.
+	 *
+	 * Null means "do not apply": the op knows which note it belongs to and
+	 * that note is not open, so there is nothing to apply it to and guessing
+	 * by path is how the ink ends up somewhere else.
+	 */
+	private opPath(op: InkOp): string | null {
+		if (op.pageId === undefined) return op.path; // unclaimed, or recorded by an older build
+		return inlineInk.pathForPageId(op.pageId);
+	}
+
 	/** Undo/redo handed us an op: apply it to the store and persist. */
 	private applyInkOp(op: InkOp): void {
+		const path = this.opPath(op);
+		if (path === null) return;
+		if (path !== op.path) op = { ...op, path };
 		switch (op.type) {
 			case "add":
 				inlineInk.applyAdd(op.path, op.strokes, op.indices);
@@ -3682,10 +3867,30 @@ export class InkOverlayPlugin {
 	// suspect in the 2026-08 touchpad dead-zone investigation, which is why
 	// every mutation here is traced.
 
-	private updateExtent(): void {
+	private updateExtent(force = false): void {
 		if (!this.container || this.frame.locked) return;
 		const path = this.filePath();
 		if (!path) return;
+		// Repaint ends here, so this runs on every scrolled frame. Nothing
+		// below can grant a different extent while the ink frontier and the
+		// camera/zoom/viewport inputs all stand still, and everything below
+		// forces layout - two getBoundingClientRect, the origin, the spacer
+		// position. Skip it. Gesture ends pass force and never skip. §5g/G1.
+		const cam = this.camera.snapshot;
+		const inputs: ExtentInputs = {
+			path,
+			frontier: this.frontierCache.get(path, inlineInk.strokes(path)),
+			camX: cam.x,
+			camY: cam.y,
+			camZoom: cam.zoom,
+			fontZoom: this.fontZoom,
+			pinchScale: this.pinchScaleNow,
+			cssScale: this.cssScale,
+			cssWidth: this.cssWidth,
+			cssHeight: this.cssHeight,
+		};
+		if (!force && sameExtentInputs(this.lastExtentInputs, inputs)) return;
+		this.lastExtentInputs = inputs;
 		const scroller = this.view.scrollDOM;
 		// The origin is needed BEFORE growing now: the zoom frontier is
 		// origin-relative, and it joins the ink frontier in one grow so a
@@ -3701,7 +3906,7 @@ export class InkOverlayPlugin {
 			scrollTop: scroller.scrollTop,
 			scale: this.cssScale,
 		});
-		const ink = inkFrontier(inlineInk.strokes(path));
+		const ink = inputs.frontier;
 		const zoom = zoomFrontier({
 			clientWidth: scroller.clientWidth,
 			clientHeight: scroller.clientHeight,

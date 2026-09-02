@@ -119,6 +119,66 @@ describe("InlineInkStore.reloadExternal", () => {
 		expect(await bare.reloadExternal("note.md")).toBe(false);
 	});
 
+	// The poll fires BECAUSE the file just changed, so it lands on exactly
+	// the moments a sync client is part-way through writing one. Clearing
+	// the record before the re-read succeeded emptied the note on screen and
+	// left it unable to save until it was reopened. PdfInkStore has guarded
+	// this since it was written; these pin the same guard here.
+	it("a sidecar caught mid-sync leaves the ink on screen", async () => {
+		host.sidecars.set("p1", ok(pageWith("p1", "a", "b")));
+		await store.ensureLoaded("note.md");
+
+		const midWrite = ok(pageWith("p1"));
+		midWrite.damaged = true;
+		host.sidecars.set("p1", midWrite);
+		expect(await store.reloadExternal("note.md")).toBe(false);
+		expect(store.strokes("note.md").map((s) => s.id)).toEqual(["a", "b"]);
+	});
+
+	it("a sidecar that has gone leaves the only remaining copy alone", async () => {
+		host.sidecars.set("p1", ok(pageWith("p1", "a")));
+		await store.ensureLoaded("note.md");
+
+		host.sidecars.delete("p1");
+		expect(await store.reloadExternal("note.md")).toBe(false);
+		expect(store.strokes("note.md").map((s) => s.id)).toEqual(["a"]);
+		// And the note can still save, which is what rebuilding the record
+		// took away: the id was gone until the next claim.
+		expect(store.pageIdOf("note.md")).toBe("p1");
+		store.save("note.md");
+		expect(host.scheduled).toContain("p1");
+	});
+
+	it("a future-locked reload keeps the session ink too", async () => {
+		host.sidecars.set("p1", ok(pageWith("p1", "a")));
+		await store.ensureLoaded("note.md");
+
+		const future = ok(pageWith("p1"));
+		future.futureVersion = 99;
+		host.sidecars.set("p1", future);
+		expect(await store.reloadExternal("note.md")).toBe(false);
+		expect(store.strokes("note.md").map((s) => s.id)).toEqual(["a"]);
+	});
+
+	// Read-only, not invisible. A note whose sidecar came from a newer build
+	// used to show NO ink at all on this surface, while the canvas view had
+	// always rendered what it recognised and refused to write it. Showing
+	// nothing reads as exactly the data loss the lock exists to prevent.
+	it("renders what it can from a newer-schema sidecar, still locked", async () => {
+		const bare = new InlineInkStore();
+		const h = new FakeHost();
+		bare.attachHost(h);
+		const future = ok(pageWith("p1", "from-the-future"));
+		future.futureVersion = 99;
+		h.sidecars.set("p1", future);
+
+		await bare.ensureLoaded("note.md");
+		expect(bare.strokes("note.md").map((s) => s.id)).toEqual(["from-the-future"]);
+		// Rendered, and still not writable: a save must not reach the host.
+		bare.save("note.md");
+		expect(h.scheduled).toEqual([]);
+	});
+
 	it("a damaged remote sidecar locks the record instead of rendering junk", async () => {
 		host.sidecars.set("p1", ok(pageWith("p1", "a")));
 		await store.ensureLoaded("note.md");

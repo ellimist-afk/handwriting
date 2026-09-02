@@ -2,6 +2,16 @@ import { App, Modal, Notice, Platform } from "obsidian";
 import { endRecordingForReport } from "./DiagSwitch";
 
 /**
+ * How long an upload may hang before the button is handed back.
+ *
+ * The payload is a text blob and the endpoint is a small worker, so anything
+ * past this is a request that is not coming back - a captive portal, a dead
+ * tunnel, a device that went offline mid-tap. Generous enough not to cut off
+ * a slow mobile connection that is genuinely working.
+ */
+const UPLOAD_TIMEOUT_MS = 30_000;
+
+/**
  * A selectable diagnostics report, with two ways off the device.
  *
  * v0.13.12 and earlier said "the report is selected, press Ctrl+C" and relied
@@ -105,8 +115,30 @@ export class DiagnosticTextModal extends Modal {
 				if (this.uploadedId) return; // one recording, one upload
 				up.disabled = true;
 				up.setText("Uploading…");
+				// A hung request never settles, and this promise was the only
+				// thing that could re-enable the button - so an upload with no
+				// network on the other end left it disabled at "Uploading…"
+				// for the life of the modal, with the other two ways of
+				// getting the text out still sitting right there unusable in
+				// the user's mind. First outcome wins; a success arriving
+				// after the deadline is dropped, because the UI has already
+				// offered a retry and a second upload of a diagnostic blob
+				// costs nothing.
+				let settled = false;
+				const first = (run: () => void): void => {
+					if (settled) return;
+					settled = true;
+					window.clearTimeout(timer);
+					run();
+				};
+				const failed = (): void => {
+					up.disabled = false;
+					up.setText("Upload to developer");
+					new Notice("Handwriting: upload failed - Copy or Save to vault instead");
+				};
+				const timer = window.setTimeout(() => first(failed), UPLOAD_TIMEOUT_MS);
 				this.upload!(this.text)
-					.then((id) => {
+					.then((id) => first(() => {
 						this.uploadedId = id;
 						this.delivered();
 						up.setText("Uploaded");
@@ -118,12 +150,8 @@ export class DiagnosticTextModal extends Modal {
 						done.createSpan({ cls: "handwriting-upload-id", text: id });
 						summary?.setText("uploaded");
 						new Notice(`Handwriting: uploaded - id ${id}`, 10000);
-					})
-					.catch(() => {
-						up.disabled = false;
-						up.setText("Upload to developer");
-						new Notice("Handwriting: upload failed - Copy or Save to vault instead");
-					});
+					}))
+					.catch(() => first(failed));
 			});
 		}
 
@@ -192,7 +220,7 @@ export class DiagnosticTextModal extends Modal {
 		// No execCommand fallback: it is deprecated, the directory flags
 		// it, and both real platforms take the clipboard API path (verified
 		// on the ipads 2026-08-26). Anything left over has Save to vault.
-		new Notice("Could not copy. Use Save to vault instead.", 8000);
+		new Notice("Handwriting: could not copy. Use Save to vault instead.", 8000);
 	}
 
 	/**
@@ -209,10 +237,10 @@ export class DiagnosticTextModal extends Modal {
 				path = `${base}-${n++}.md`;
 			}
 			await this.app.vault.create(path, this.text);
-			new Notice(`Saved to ${path}`, 8000);
+			new Notice(`Handwriting: saved to ${path}`, 8000);
 			this.delivered();
 		} catch (err) {
-			new Notice(`Could not save the report: ${String(err)}`, 10000);
+			new Notice(`Handwriting: could not save the report: ${String(err)}`, 10000);
 		}
 	}
 

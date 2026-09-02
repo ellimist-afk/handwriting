@@ -28,6 +28,31 @@ export const SCHEMA_VERSION = 1;
  */
 export const READ_SCHEMA_VERSION = 2;
 
+/**
+ * Bound on any stored coordinate, in note-surface units.
+ *
+ * Finiteness was the only check a coordinate faced, and finite is not the
+ * same as survivable. The spatial index buckets a stroke by the AREA its
+ * bbox covers in 256-unit cells, so one point at 1e6 asks it to walk about
+ * sixteen million cells: the note freezes with no error and no console
+ * output, and larger values never finish (reproduced 2026-09-01). The same
+ * numbers flow into canvas transforms and the exporters.
+ *
+ * A page is a few thousand units tall, so 1e7 is four orders above anything
+ * a device can produce and still small enough to bucket instantly. Points
+ * outside it are dropped as unreadable rather than clamped: a clamped point
+ * is a silent lie about where the pen went, and a sidecar carrying one is
+ * damaged, not merely large.
+ */
+export const MAX_COORD = 1e7;
+
+/**
+ * Bound on a stroke's base width. It is padding on the bbox
+ * (`computeBBox(points, width * 2)`), so a hostile width explodes the same
+ * bucket walk MAX_COORD closes even when every point is sane.
+ */
+export const MAX_WIDTH = 1e3;
+
 export interface TextBoxData {
 	id: string;
 	/** World coordinates (§5). */
@@ -146,6 +171,35 @@ export function newPageId(): string {
 	}
 }
 
+/**
+ * Every character a page id may contain, and the only shape one may have.
+ *
+ * A page id is not a label: it is interpolated straight into a vault path
+ * (`PageStore.path`, and the tmp, trash, damaged and conflict names beside
+ * it). The id arrives from a note's `handwriting-page-id` frontmatter or
+ * from a sidecar's own `pageId` field, and both are user-editable text that
+ * sync hands us from other machines. A note carrying
+ * `handwriting-page-id: ../../x` read, and on the first stroke wrote, a
+ * `.json` outside the ink folder entirely.
+ *
+ * No separator, no leading dot, and a length a filesystem will take. Every
+ * id this plugin has ever minted passes: `crypto.randomUUID`,
+ * `page-<digits>-<base36>`, and the pdf `pdf-<hex>` / `pdf-<hex>-<n>`
+ * instance names.
+ */
+const SAFE_PAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Whether `id` may be interpolated into a sidecar path. See SAFE_PAGE_ID.
+ *
+ * The `..` test is redundant against the pattern above - a separator cannot
+ * survive it - and is kept anyway, because the pattern is the kind of line
+ * that gets widened later by someone adding one more allowed character.
+ */
+export function isSafePageId(id: unknown): id is string {
+	return typeof id === "string" && SAFE_PAGE_ID.test(id) && !id.includes("..");
+}
+
 export function emptyPage(pageId: string): PageData {
 	return {
 		schemaVersion: SCHEMA_VERSION,
@@ -153,8 +207,14 @@ export function emptyPage(pageId: string): PageData {
 		textBoxes: [],
 		images: [],
 		strokes: [],
-		unknownTop: {},
-		unknownByObject: {},
+		// Object.create(null): these are keyed by ids the sidecar controls, and
+		// a plain {} treats a key of literally "__proto__" as an assignment to
+		// its own prototype rather than a data property. Object.keys and
+		// JSON.stringify treat a null-prototype object exactly like a plain
+		// one; only prototype-chain lookups (nothing here relies on any) would
+		// differ. K1, audit-fixes-design.md 5k.
+		unknownTop: Object.create(null) as Record<string, unknown>,
+		unknownByObject: Object.create(null) as Record<string, Record<string, unknown>>,
 	};
 }
 
@@ -240,12 +300,20 @@ export function unpackPointsV2(flat: unknown): InkPoint[] {
 		const dy = num(flat[i + 1]);
 		const dp = num(flat[i + 2]);
 		const dt = num(flat[i + 3]);
-		if (dx === undefined || dy === undefined) continue;
-		x += dx;
-		y += dy;
+		// Every value here is a DELTA, so the running position has to advance
+		// even for a quadruple we refuse to emit. Skipping the accumulation
+		// (what this did before) shifted every later point in the stroke by
+		// the dropped delta, which reads as ink sliding off the words rather
+		// than as one missing sample.
+		x += dx ?? 0;
+		y += dy ?? 0;
 		pr += dp ?? 0;
 		t += dt ?? 0;
-		out.push({ x: x / 100, y: y / 100, pressure: pr / 1000, t });
+		if (dx === undefined || dy === undefined) continue;
+		const px = x / 100;
+		const py = y / 100;
+		if (px < -MAX_COORD || px > MAX_COORD || py < -MAX_COORD || py > MAX_COORD) continue;
+		out.push({ x: px, y: py, pressure: pr / 1000, t });
 	}
 	return out;
 }
@@ -254,8 +322,8 @@ function unpackPoints(flat: unknown): InkPoint[] {
 	if (!Array.isArray(flat)) return [];
 	const out: InkPoint[] = [];
 	for (let i = 0; i + 3 < flat.length; i += 4) {
-		const x = num(flat[i]);
-		const y = num(flat[i + 1]);
+		const x = coord(flat[i]);
+		const y = coord(flat[i + 1]);
 		const pressure = num(flat[i + 2]);
 		const t = num(flat[i + 3]);
 		if (x === undefined || y === undefined) continue;
@@ -276,6 +344,12 @@ function round(n: number, places: number): number {
 
 function num(v: unknown): number | undefined {
 	return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** A coordinate that is both finite and inside MAX_COORD; see that constant. */
+function coord(v: unknown): number | undefined {
+	const n = num(v);
+	return n !== undefined && n >= -MAX_COORD && n <= MAX_COORD ? n : undefined;
 }
 
 function str(v: unknown): string | undefined {
@@ -348,7 +422,10 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 	const page = emptyPage(fallbackPageId);
 	if (!raw || typeof raw !== "object") return page;
 	const o = raw as Record<string, unknown>;
-	page.pageId = str(o.pageId) ?? fallbackPageId;
+	// The sidecar's own id is as untrusted as the frontmatter's: it names
+	// the file we write back to. An unusable one falls back to the id the
+	// caller opened the page under, which is the one already checked.
+	page.pageId = isSafePageId(o.pageId) ? o.pageId : fallbackPageId;
 	if (o.surface === "inline") page.surface = "inline";
 	// The pdf surface is a separate coordinate world - page-local css px at
 	// scale 1 - and must never be confused with note-surface geometry. The
@@ -365,9 +442,15 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 		for (const item of o.textBoxes) {
 			if (!item || typeof item !== "object") continue;
 			const b = item as Record<string, unknown>;
-			const id = str(b.id);
-			const x = num(b.x);
-			const y = num(b.y);
+			// The id becomes a key of unknownByObject and, on the next save, is
+			// echoed straight back into the sidecar - the same shape check that
+			// guards a page id (isSafePageId/SAFE_PAGE_ID) guards an object id
+			// too, and for the same reason: "__proto__" as a plain-object key is
+			// a prototype write, not a data write. An id that fails is dropped
+			// with the object, same as a bad coordinate. K1, audit-fixes-design.md 5k.
+			const id = isSafePageId(b.id) ? b.id : undefined;
+			const x = coord(b.x);
+			const y = coord(b.y);
 			if (!id || x === undefined || y === undefined) continue;
 			page.textBoxes.push({
 				id,
@@ -385,9 +468,10 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 		for (const item of o.images) {
 			if (!item || typeof item !== "object") continue;
 			const im = item as Record<string, unknown>;
-			const id = str(im.id);
-			const x = num(im.x);
-			const y = num(im.y);
+			// See the textBoxes loop above: same id shape check, same reason.
+			const id = isSafePageId(im.id) ? im.id : undefined;
+			const x = coord(im.x);
+			const y = coord(im.y);
 			if (!id || x === undefined || y === undefined) continue;
 			page.images.push({
 				id,
@@ -406,7 +490,8 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 		for (const item of o.strokes) {
 			if (!item || typeof item !== "object") continue;
 			const s = item as Record<string, unknown>;
-			const id = str(s.id);
+			// See the textBoxes loop above: same id shape check, same reason.
+			const id = isSafePageId(s.id) ? s.id : undefined;
 			if (!id) continue;
 			// Accept every shape ever written: v2 deltas, v1 packed, and a
 			// raw points array, so a hand-edited or future-written sidecar
@@ -419,7 +504,13 @@ export function migratePageData(raw: unknown, fallbackPageId: string): PageData 
 						? unpackObjectPoints(s.points)
 						: [];
 			if (points.length === 0) continue;
-			const width = num(s.width) ?? 2.2;
+			// Width is bbox padding as well as a line thickness, so an absurd
+			// one reaches the index the same way an absurd coordinate does.
+			// Out of range falls back to the default instead of clamping: the
+			// stroke is still drawable, and the number was never a width.
+			const rawWidth = num(s.width);
+			const width =
+				rawWidth !== undefined && rawWidth > 0 && rawWidth <= MAX_WIDTH ? rawWidth : 2.2;
 			const tool: InkTool = s.tool === "highlighter" ? "highlighter" : "pen";
 			page.strokes.push({
 				id,
@@ -450,8 +541,8 @@ function unpackObjectPoints(arr: unknown[]): InkPoint[] {
 	for (const item of arr) {
 		if (!item || typeof item !== "object") continue;
 		const p = item as Record<string, unknown>;
-		const x = num(p.x);
-		const y = num(p.y);
+		const x = coord(p.x);
+		const y = coord(p.y);
 		if (x === undefined || y === undefined) continue;
 		out.push({ x, y, pressure: num(p.pressure) ?? 0.5, t: num(p.t) ?? 0 });
 	}
