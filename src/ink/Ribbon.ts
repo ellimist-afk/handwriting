@@ -129,16 +129,52 @@ export function flattenSegmentHw(
 	return out;
 }
 
-/** The whole stroke as ribbon points. Used for committed rendering. */
+/**
+ * The whole stroke as ribbon points. Used for committed rendering.
+ *
+ * `smooth` chooses the CENTERLINE, not the width law. With it on (the
+ * default, and everything this function did before 1.4.6) the centerline is
+ * the midpoint-quadratic curve: every sample becomes a control point, so the
+ * drawn line never passes through the sample itself and every corner comes
+ * out rounded. With it off the centerline is the raw polyline through the
+ * stored samples - one ribbon point per sample, in order, unmoved.
+ *
+ * Why off exists: the "Ink smoothing" setting only ever switched SHAPING (the
+ * width law in InkShape - pressure settling, velocity thinning, end taper).
+ * `smoothSegments` ran unconditionally underneath it, so a user who turned
+ * smoothing off still got rounded corners and no way to stop it - reported
+ * with a photo on r/Onyx_Boox (batendalyn, Boox Tab XC, 2026-09-02:
+ * "Stroke smoothing is still a little more aggressive for my taste", with
+ * smoothing, prediction and pressure all off).
+ *
+ * The raw path needs no subdivision. `subdivisionsFor` already returns 1 for
+ * a segment whose deviation from its chord is under the flatness tolerance,
+ * and a straight run has zero deviation, so the smoothed path emits exactly
+ * one point per straight segment too: the offsetter has never depended on
+ * intermediate points, only on each point's neighbours. `ribbonSides` takes
+ * its normal from a central difference, which at a sharp sample is the angle
+ * bisector; the outside of the bend is left short, and `fillRibbon` already
+ * covers that with the joint discs `jointIndices` finds (>= 12 degrees of
+ * turn). So a raw corner draws as a mitred joint, not a fold, with no corner
+ * treatment added here - the point of the setting is that nothing is added.
+ */
 export function flattenStroke(
 	points: readonly InkPoint[],
 	style: PenStyle,
-	pxPerWorld: number
+	pxPerWorld: number,
+	smooth = true
 ): RibbonPt[] {
 	if (points.length === 0) return [];
 	const first = points[0]!;
 	if (points.length === 1) {
 		return [{ x: first.x, y: first.y, hw: widthForPressure(style, first.pressure) / 2 }];
+	}
+	if (!smooth) {
+		return points.map((p) => ({
+			x: p.x,
+			y: p.y,
+			hw: widthForPressure(style, p.pressure) / 2,
+		}));
 	}
 	const segs = smoothSegments(points);
 	const out: RibbonPt[] = [

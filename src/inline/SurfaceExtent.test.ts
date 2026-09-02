@@ -13,6 +13,8 @@ import {
 	isScrollableOverflow,
 	spacerPosition,
 	surfaceOriginInScroller,
+	writeFrontier,
+	WRITE_FRONTIER_VIEWPORT_FRACTION,
 	zoomFrontier,
 } from "./SurfaceExtent";
 import { InkStroke } from "../ink/Stroke";
@@ -263,5 +265,60 @@ describe("zoomFrontier (the magnified note must be reachable)", () => {
 
 	it("holds still on junk scales", () => {
 		expect(zoomFrontier({ ...base, pinchScale: Number.NaN })).toEqual({ x: 0, y: 0 });
+	});
+});
+
+describe("writeFrontier (room to write at the top - 1.4.6 §5n)", () => {
+	// Phone-sized: a folding phone's inner display, per the user report.
+	const base = {
+		clientHeight: 700,
+		contentBottom: 400,
+		origin: { top: 0 },
+		fontZoom: 1,
+	};
+
+	it("reaches most of a phone viewport past the document bottom", () => {
+		const f = writeFrontier(base);
+		expect(f).toEqual({ x: 0, y: 400 + 700 * WRITE_FRONTIER_VIEWPORT_FRACTION });
+	});
+
+	it("scales down with font zoom, matching zoomFrontier's convention", () => {
+		const f = writeFrontier({ ...base, fontZoom: 2 });
+		expect(f.y).toBe((400 + 700 * WRITE_FRONTIER_VIEWPORT_FRACTION) / 2);
+	});
+
+	it("subtracts the origin before dividing by font zoom", () => {
+		const f = writeFrontier({ ...base, origin: { top: 200 } });
+		expect(f.y).toBe(400 + 700 * WRITE_FRONTIER_VIEWPORT_FRACTION - 200);
+	});
+
+	it("never returns a negative axis", () => {
+		const f = writeFrontier({ ...base, origin: { top: 5000 } });
+		expect(f).toEqual({ x: 0, y: 0 });
+	});
+
+	it("holds still on a junk font zoom, like zoomFrontier does on junk scale", () => {
+		expect(writeFrontier({ ...base, fontZoom: 0 })).toEqual({ x: 0, y: 0 });
+		expect(writeFrontier({ ...base, fontZoom: Number.NaN })).toEqual({ x: 0, y: 0 });
+	});
+
+	it("not written on: folding ZERO_EXTENT into the vertical max changes nothing", () => {
+		// `updateExtent` passes ZERO_EXTENT instead of calling writeFrontier
+		// when the surface has not been written on. inkFrontier/zoomFrontier
+		// both clamp to >= 0, so a 0 term never wins Math.max - the grant a
+		// typing-only note gets is exactly what it is today, byte-identical.
+		const ink = { x: 0, y: 340 };
+		const zoom = zoomFrontier({
+			clientWidth: 800,
+			clientHeight: 600,
+			contentBottom: 2000,
+			origin: { left: 0, top: 0 },
+			pinchScale: 1, // <= 1: zoom grants nothing, so it cannot mask the contrast below.
+			fontZoom: 1,
+		});
+		const todaysGrant = Math.max(ink.y, zoom.y);
+		expect(Math.max(ink.y, zoom.y, ZERO_EXTENT.y)).toBe(todaysGrant);
+		// Contrast: when written on, the frontier DOES move the grant.
+		expect(Math.max(ink.y, zoom.y, writeFrontier(base).y)).toBeGreaterThan(todaysGrant);
 	});
 });

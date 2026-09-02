@@ -292,7 +292,7 @@ footer {
 	<h2>what the pen does</h2>
 	<p>the tip inks. the eraser end erases. the side button lassos: hold it and circle some ink, then drag the selection to move it or press Delete to remove it.</p>
 	<p>two tools, pen and highlighter. each has a nib size slider and its own palette: eight pen inks, five highlighter colors.</p>
-	<p>ink stays glued to the text. it scales with Obsidian's zoom, moves with the text while you scroll, and Ctrl+Z undoes ink and text edits in the order they happened. draw past the last line or far off to the right and the note grows scroll room to reach it.</p>
+	<p>type above your ink and the strokes don't move. the insert space tool is the only thing that shifts them. ink scales with Obsidian's zoom and scrolls with the note, and Ctrl+Z undoes ink and text edits in the order they happened. draw past the last line or far off to the right and the note grows scroll room to reach it.</p>
 	<div class="cols">
 		<ul>
 			<li>pressure sensitivity</li>
@@ -330,6 +330,7 @@ footer {
 	<p>sidecar is a digital photography term that refers to a small file beside a main file, that holds information about the main file. this is a useful analogy</p>
 	<p>in this case, the sidecar stores your ink as coordinates - your note is linked to your ink by a single properties line in the properties field of your note. this link + the coordinates tells Obsidian where all the ink is</p>
 	<p>what this means practically is that no matter what happens to the ink, the text in your note will be safe, as the note itself is not modified (besides its frontmatter).</p>
+	<p><code>.handwriting/</code> is hidden, and about half of all sync tools don't carry hidden folders by default. Obsidian Sync, iCloud and Dropbox don't. if you use one of these, turn on Compatibility with Obsidian Sync in the settings panel to get your ink syncing across devices</p>
 
 	<h3>how the ink is stored</h3>
 	<p>ink is stored in note-surface coordinates. origin at the top-left of the text column, y absolute down the document. markdown reflows wherever it wants. your ink stays where you put it. editing text will never move ink except in the case of the insert space tool, by design</p>

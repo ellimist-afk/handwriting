@@ -52,12 +52,29 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"ui fixes",
 		"bug fixes",
 	],
+	"1.4.6": [
+		"pdf fixes",
+		"ink smoothing fixed",
+		"toolbar on mobile fixes",
+		"settings fixes",
+		"data reliability fixes",
+		"bug fixes",
+	],
 };
+
+/** One release's own notes, kept apart so the toast can label them honestly. */
+export type NotesGroup = { version: string; notes: string[] };
 
 /** Show the notes, or don't - and either way, the version to remember. */
 export type NotesDecision =
 	| { show: false; record: string }
-	| { show: true; record: string; version: string; notes: string[] };
+	| {
+			show: true;
+			record: string;
+			version: string;
+			notes: string[];
+			groups: NotesGroup[];
+	  };
 
 /**
  * Whether this launch has earned a what's-new notice.
@@ -84,9 +101,10 @@ export function decideWhatsNew(
 	// this version's notes late.
 	if (fresh) return { show: false, record: current };
 	if (seen === current) return { show: false, record: current };
-	const lines = notesSince(current, seen, notes);
+	const groups = notesSince(current, seen, notes);
+	const lines = groups.flatMap((g) => g.notes);
 	if (lines.length === 0) return { show: false, record: current };
-	return { show: true, record: current, version: current, notes: lines };
+	return { show: true, record: current, version: current, notes: lines, groups };
 }
 
 /** Ascending order for dotted versions; a non-numeric part sorts as 0. */
@@ -116,24 +134,37 @@ function compareVersions(a: string, b: string): number {
  * version at or below current that has any, rather than the whole changelog
  * at someone who has been away one release.
  *
- * Deduplicated, because that copy-forward workaround is still in the data and
- * nobody wants the pdf headline twice.
+ * Returned GROUPED, oldest first, one entry per version, so a caller that
+ * skipped several releases can label each release's notes instead of
+ * presenting them as one undifferentiated list under the version just
+ * installed (1.4.6, §5c). Deduplicated across the whole set, because that
+ * copy-forward workaround is still in the data and nobody wants the pdf
+ * headline twice - a repeated line keeps its FIRST (oldest) occurrence, so
+ * the repeat is dropped from the newer group, where the user would already
+ * have seen it had they been on that release.
  */
 function notesSince(
 	current: string,
 	seen: string | null,
 	notes: Record<string, string[]>
-): string[] {
+): NotesGroup[] {
 	const eligible = Object.keys(notes)
 		.filter((v) => (notes[v] ?? []).length > 0 && compareVersions(v, current) <= 0)
 		.filter((v) => seen === null || compareVersions(v, seen) > 0)
 		.sort(compareVersions);
 	const chosen = seen === null ? eligible.slice(-1) : eligible;
-	const out: string[] = [];
+	const seenLines = new Set<string>();
+	const groups: NotesGroup[] = [];
 	for (const v of chosen) {
-		for (const line of notes[v] ?? []) if (!out.includes(line)) out.push(line);
+		const lines: string[] = [];
+		for (const line of notes[v] ?? []) {
+			if (seenLines.has(line)) continue;
+			seenLines.add(line);
+			lines.push(line);
+		}
+		groups.push({ version: v, notes: lines });
 	}
-	return out;
+	return groups;
 }
 
 /**
@@ -142,14 +173,56 @@ function notesSince(
  * A corner toast, not a modal. A changelog is an aside - it should catch the
  * eye of someone who wants it and cost nothing to anyone who doesn't, and a
  * dialog in the middle of the screen demanding dismissal is neither.
+ *
+ * With `groups` (more than one release's worth), each group after the first
+ * gets its own version label ahead of its list, so a vault that skipped
+ * several releases reads five short honestly-labelled lists instead of one
+ * flat list that reads as if it all shipped in the version just installed
+ * (1.4.6, §5c). The first group carries no label of its own - the heading
+ * above already names the current version. With zero or one group (or no
+ * `groups` argument at all, for older callers) the output is exactly what
+ * this function always produced: one title, one list.
  */
-export function whatsNewFragment(version: string, notes: string[]): DocumentFragment {
+export function whatsNewFragment(
+	version: string,
+	notes: string[],
+	groups?: NotesGroup[]
+): DocumentFragment {
 	const frag = createFragment();
 	frag.createDiv({ cls: "handwriting-whats-new-title", text: `Handwriting ${version}` });
-	const list = frag.createEl("ul", { cls: "handwriting-whats-new-list" });
-	for (const line of notes) list.createEl("li", { text: line });
+	if (groups && groups.length > 1) {
+		groups.forEach((group, i) => {
+			if (i > 0) {
+				frag.createDiv({
+					cls: "handwriting-whats-new-version",
+					text: group.version,
+				});
+			}
+			const list = frag.createEl("ul", { cls: "handwriting-whats-new-list" });
+			for (const line of group.notes) list.createEl("li", { text: line });
+		});
+	} else {
+		const list = frag.createEl("ul", { cls: "handwriting-whats-new-list" });
+		for (const line of notes) list.createEl("li", { text: line });
+	}
 	return frag;
 }
 
 /** Long enough to read four short lines; a click dismisses it sooner. */
 export const WHATS_NEW_MS = 15000;
+
+/**
+ * How long the toast stays up, scaled to how much there is to read.
+ *
+ * `WHATS_NEW_MS` covers up to four short lines. Past that - a vault that
+ * skipped several releases can carry 20+ lines (measured against the
+ * shipped notes: 1.3.10 -> 1.4.5 is 23 lines across five versions, §5c) -
+ * a fixed 15s left the earliest release's lines scrolled off the
+ * bottom-anchored toast before anyone could read them. 1.5s per line past
+ * the base, capped at 45s so a very long history doesn't sit on screen
+ * indefinitely.
+ */
+export function whatsNewDurationMs(lineCount: number): number {
+	if (lineCount <= 4) return WHATS_NEW_MS;
+	return Math.min(45000, WHATS_NEW_MS + (lineCount - 4) * 1500);
+}

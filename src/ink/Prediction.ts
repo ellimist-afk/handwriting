@@ -89,21 +89,49 @@ const UNSEEN_LATENCY_MS = 5;
 /**
  * The band the adaptive horizon may move in.
  *
- * The floor is the shipped desktop horizon: adaptation may lengthen the reach
- * on a machine that needs it, never shorten it below what already ships.
- * The ceiling is the e-ink horizon, which was chosen against a real NoteAir
- * trace to stay under the median delivery gap; nothing measured has justified
- * predicting further than that, and past it a wrong guess gets big enough to
- * see being erased.
+ * The floor is the shipped desktop horizon: adaptation may lengthen the
+ * reach on a machine that needs it, never shorten it below what already
+ * ships.
+ *
+ * The ceiling used to be `EINK_CAPS.maxHorizonMs` (48ms). That was wrong:
+ * this function's only callers all gate `predictionEinkOn()` first -
+ * `predictionEinkOn() ? EINK_CAPS : adaptiveCaps(presentLagMs())` at
+ * InkOverlay.ts:2191, PdfInkController.ts:1594 and
+ * HandwritingPageView.ts:958, the only three call sites in the tree - so
+ * e-ink mode never reaches `adaptiveCaps` at all; it uses `EINK_CAPS`
+ * directly. The e-ink ceiling was bounding a function e-ink never calls.
+ *
+ * 48ms is a DESKTOP-unsafe number wearing an e-ink justification: it is
+ * only safe where the panel's own delivery gap (58-103ms on the NoteAir
+ * trace this project measured) hides a wrong guess before anyone sees it.
+ * On an LCD refreshing the tail ~200 times a second, nothing hides it.
+ * Both 12ms/10px and 48ms/24px were validated on real hardware, but
+ * interpolating between two validated points does not validate the line
+ * between them - every horizon strictly between them was assumed, and the
+ * assumption was wrong: measured with synthetic cursive, a machine at
+ * 35ms of present lag painted a same-coloured line up to 9px to one side
+ * on 86% of events, which the eye reads as a doubled line, not a whisker.
+ *
+ * 20ms is the new, desktop-only ceiling. It is not a guess at a smaller
+ * number: see the dist clamp below, which this ceiling makes collapse to
+ * a constant, so the desktop path never predicts further in PIXELS than
+ * the hand-tuned default that has always shipped - only the time horizon
+ * stretches, 12ms -> 20ms.
  */
 const MIN_ADAPTIVE_HORIZON_MS = DEFAULT_CAPS.maxHorizonMs;
-const MAX_ADAPTIVE_HORIZON_MS = EINK_CAPS.maxHorizonMs;
+const MAX_ADAPTIVE_HORIZON_MS = 20;
 
 /**
- * Distance ceiling as a function of the horizon. The two hand-tuned points
- * are 10px at 12ms and 24px at 48ms; 0.5px/ms clamped to that range passes
- * through both, so a machine at either end gets the caps that were actually
- * validated on hardware, and one in between gets the line joining them.
+ * Distance ceiling as a function of the horizon.
+ *
+ * 0.5px/ms is unchanged: it is what put the ORIGINAL formula through both
+ * hand-tuned points, 10px at 12ms and 24px at 48ms. Now that
+ * `MAX_ADAPTIVE_HORIZON_MS` is 20ms rather than 48ms, `horizon *
+ * DIST_PX_PER_MS` is only ever asked for a value in [6, 10]px, and the
+ * clamp's own lower bound is `DEFAULT_CAPS.maxDistPx` (10px) - so the
+ * clamp below collapses to that constant at every horizon this function
+ * can now reach. That collapse is the proof, not an accident: the desktop
+ * path's pixel reach is exactly the one that has always shipped.
  */
 const DIST_PX_PER_MS = 0.5;
 
@@ -125,7 +153,10 @@ export function adaptiveCaps(presentLagMs: number | undefined): PredictionCaps {
 		MIN_ADAPTIVE_HORIZON_MS,
 		MAX_ADAPTIVE_HORIZON_MS
 	);
-	const dist = clamp(horizon * DIST_PX_PER_MS, DEFAULT_CAPS.maxDistPx, EINK_CAPS.maxDistPx);
+	// Collapses to DEFAULT_CAPS.maxDistPx at every horizon this function can
+	// reach now (see the comment above DIST_PX_PER_MS) - kept as a clamp
+	// rather than a bare constant so the formula stays visible.
+	const dist = clamp(horizon * DIST_PX_PER_MS, DEFAULT_CAPS.maxDistPx, DEFAULT_CAPS.maxDistPx);
 	return {
 		maxHorizonMs: horizon,
 		maxDistPx: dist,

@@ -233,6 +233,12 @@ export class DiagnosticTextModal extends Modal {
 		try {
 			let path = `${base}.md`;
 			let n = 2;
+			// getFileByPath answers null for a FOLDER at this path, not just a
+			// free one - commit 56e981b's swap made this loop call a folder
+			// free and hand it to vault.create, which then throws (1.4.6-
+			// design.md 5m/AF3). This is a plain existence test, not "is
+			// there a file to read", so it needs the abstract getter, which
+			// answers non-null for either kind.
 			while (this.app.vault.getAbstractFileByPath(path)) {
 				path = `${base}-${n++}.md`;
 			}

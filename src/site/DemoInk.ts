@@ -188,7 +188,10 @@ class InkDemo {
 				createdAt: 0,
 			};
 			if (this.liveDevice) wet.device = this.liveDevice;
-			drawStroke(ctx, CAM, wet, undefined, true);
+			// Wet: a new object every frame over a growing point list, so it
+			// has no ribbon worth keeping. Opted out of StrokeRenderer's cache
+			// explicitly rather than by accident of object identity.
+			drawStroke(ctx, CAM, wet, undefined, true, false);
 		}
 	}
 }

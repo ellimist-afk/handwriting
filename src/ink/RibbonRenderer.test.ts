@@ -153,3 +153,148 @@ describe("signedArea", () => {
 		).toBe(0);
 	});
 });
+
+
+/**
+ * The raw centerline's own offsetter, added 2026-09-02.
+ *
+ * `ribbonSides` offsets along the normal to the central-difference tangent
+ * p[i-1] -> p[i+1], which equals the angle bisector only when the two
+ * adjacent segments are the same length. Subdivision makes that true on the
+ * smoothed path and pen speed makes it false on the samples themselves, so
+ * the shared normal skewed toward the longer segment and was wrong for both
+ * of its segments at once: one side pinched, the other bulged, and the
+ * outline serrated along the whole stroke. An antialiased serrated edge
+ * covers its boundary pixels only partly, which is the author's raw ink on a
+ * PDF reading "thinner, soft edged, lighter grey" rather than merely
+ * faceted (2026-09-02).
+ */
+
+/** Records the arcs' geometry too, which the winding pin above does not need. */
+function argRecordingCtx() {
+	const quads: Quad[] = [];
+	const arcs: Array<{ x: number; y: number; r: number; anticlockwise: boolean }> = [];
+	let current: Quad | null = null;
+	const ctx = {
+		fillStyle: "",
+		beginPath() {},
+		moveTo(x: number, y: number) {
+			current = [[x, y]];
+		},
+		lineTo(x: number, y: number) {
+			current?.push([x, y]);
+		},
+		closePath() {
+			if (current && current.length === 4) quads.push(current);
+			current = null;
+		},
+		arc(x: number, y: number, r: number, _a0: number, _a1: number, anticlockwise?: boolean) {
+			arcs.push({ x, y, r, anticlockwise: anticlockwise === true });
+		},
+		fill() {},
+	};
+	return { ctx: ctx as unknown as CanvasRenderingContext2D, quads, arcs };
+}
+
+/** The polygon an `arc(..., anticlockwise)` actually traces. */
+function polygoniseArc(
+	a: { x: number; y: number; r: number; anticlockwise: boolean },
+	steps = 64
+): Quad {
+	const out: Quad = [];
+	for (let k = 0; k < steps; k++) {
+		const t = ((k / steps) * Math.PI * 2) * (a.anticlockwise ? -1 : 1);
+		out.push([a.x + a.r * Math.cos(t), a.y + a.r * Math.sin(t)]);
+	}
+	return out;
+}
+
+/** Uneven spacing and a real turn: the shape a shared normal gets wrong. */
+function unevenCorner(): RibbonPt[] {
+	return [
+		{ x: 0, y: 0, hw: 2 },
+		{ x: 12, y: 0, hw: 2 },
+		{ x: 13, y: 6, hw: 2 },
+		{ x: 13, y: 20, hw: 2 },
+	];
+}
+
+describe("the raw path offsets per segment", () => {
+	it("a disc winds the same way as a normalised quad, so it can only add", () => {
+		// The permanent invariant behind every disc in this file: the sign
+		// `arc` integrates to must match the sign every quad is normalised
+		// to. Asserted on the traced polygon rather than on the reasoning.
+		const rec = argRecordingCtx();
+		fillRibbon(rec.ctx, CAM, unevenCorner(), "#000", true);
+		expect(rec.quads.length).toBeGreaterThan(0);
+		expect(rec.arcs.length).toBeGreaterThan(0);
+		const quadSign = Math.sign(signedArea(rec.quads[0]!));
+		expect(quadSign).toBe(-1);
+		for (const a of rec.arcs) {
+			expect(Math.sign(signedArea(polygoniseArc(a)))).toBe(quadSign);
+		}
+	});
+
+	it("each quad's sides are perpendicular to its OWN segment", () => {
+		const pts = unevenCorner();
+		const rec = argRecordingCtx();
+		fillRibbon(rec.ctx, CAM, pts, "#000", true);
+		expect(rec.quads).toHaveLength(pts.length - 1);
+		for (let i = 0; i < rec.quads.length; i++) {
+			const q = rec.quads[i]!;
+			const dx = pts[i + 1]!.x - pts[i]!.x;
+			const dy = pts[i + 1]!.y - pts[i]!.y;
+			const len = Math.hypot(dx, dy);
+			// The quad is [a+n, b+n, b-n, a-n] in some rotation after the
+			// winding normalisation, so test the offset at whichever corner
+			// sits over point a: both corners over a must be ±hw along the
+			// perpendicular, which is exactly "no component along d".
+			const offsets = q
+				.map(([x, y]) => [x - pts[i]!.x, y - pts[i]!.y] as const)
+				.filter(([ox, oy]) => Math.hypot(ox, oy) <= pts[i]!.hw + 1e-9);
+			expect(offsets).toHaveLength(2);
+			for (const [ox, oy] of offsets) {
+				expect((ox * dx + oy * dy) / len).toBeCloseTo(0, 9);
+				expect(Math.hypot(ox, oy)).toBeCloseTo(pts[i]!.hw, 9);
+			}
+		}
+	});
+
+	it("puts a disc at every join, at any zoom", () => {
+		// One arc per point: two caps and a disc at each interior vertex. The
+		// join disc is load-bearing on this path rather than a redundant cap -
+		// a per-segment quad ends square to its own segment, so dropping the
+		// disc leaves a wedge of depth hw on the outside of the join, not the
+		// sub-percent shortfall a shared normal leaves. Measured over a
+		// 300-sample handwriting stroke, skipping the sub-pixel joins took the
+		// painted width from 99.8% of intended at worst to 49%.
+		const pts: RibbonPt[] = [];
+		for (let i = 0; i < 40; i++) pts.push({ x: i * 0.15, y: (i % 3) * 0.05, hw: 1 });
+		for (const zoom of [0.05, 1, 4]) {
+			const rec = argRecordingCtx();
+			fillRibbon(rec.ctx, { x: 0, y: 0, zoom }, pts, "#000", true);
+			expect(rec.arcs).toHaveLength(pts.length);
+		}
+	});
+
+	it("leaves the smoothed path on the shared normal and the 12 degree threshold", () => {
+		const pts = unevenCorner();
+		const smoothed = argRecordingCtx();
+		fillRibbon(smoothed.ctx, CAM, pts, "#000");
+		const raw = argRecordingCtx();
+		fillRibbon(raw.ctx, CAM, pts, "#000", true);
+		// Same quad count, different corners: the shared normal is not the
+		// segment's own wherever the neighbours differ in length.
+		expect(smoothed.quads).toHaveLength(raw.quads.length);
+		expect(smoothed.quads).not.toEqual(raw.quads);
+		// And the smoothed path still discs only the hard turns.
+		expect(smoothed.arcs.length).toBeLessThan(raw.arcs.length);
+	});
+
+	it("keeps every raw quad negatively wound, degenerate points included", () => {
+		const rec = argRecordingCtx();
+		fillRibbon(rec.ctx, CAM, stationaryThenLoop(), "#000", true);
+		for (const q of rec.quads) expect(signedArea(q)).toBeLessThanOrEqual(EPS);
+		for (const a of rec.arcs) expect(a.anticlockwise).toBe(true);
+	});
+});

@@ -1,5 +1,6 @@
 import { Point2 } from "../ink/Smoothing";
 import { BBox, InkStroke } from "../ink/Stroke";
+import { bumpStrokeRev } from "../ink/StrokeRev";
 
 /**
  * Lasso selection geometry (handoff §26, §58, §78), all in world coordinates.
@@ -173,7 +174,19 @@ export function padBBox(b: BBox, pad: number): BBox {
 	return { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
 }
 
-/** Move a stroke in place, keeping its bbox consistent. */
+/**
+ * Move a stroke in place, keeping its bbox consistent.
+ *
+ * This is the ONLY in-place mutation of a committed stroke in the codebase
+ * (audited 2026-09-02: nothing else writes `.points`, `.bbox`, `.width` or
+ * `.color` on a stroke a store already holds; the eraser, the shape snap and
+ * every parse build new objects). Both callers - `InlineInkStore.moveStrokes`
+ * for the inline surface and `ObjectOps.moveObjects` for the page view, which
+ * between them carry the lasso drag, the insert-space drag and the undo/redo
+ * of both - come through here, so bumping the revision at this one spot is
+ * what keeps derived geometry (StrokeRenderer's ribbon cache) from rendering
+ * the ink where it WAS.
+ */
 export function translateStroke(stroke: InkStroke, dx: number, dy: number): void {
 	for (const p of stroke.points) {
 		p.x += dx;
@@ -185,4 +198,5 @@ export function translateStroke(stroke: InkStroke, dx: number, dy: number): void
 		width: stroke.bbox.width,
 		height: stroke.bbox.height,
 	};
+	bumpStrokeRev(stroke);
 }

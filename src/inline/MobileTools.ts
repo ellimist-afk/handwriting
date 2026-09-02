@@ -32,6 +32,8 @@ import {
 	toolbarCornerClass,
 } from "./ToolbarCorner";
 import { stripEscapeVerdict } from "./StripEscape";
+import { penSeenThisSession } from "./PenToolsMode";
+import { DEFAULT_PEN, HIGHLIGHTER_PEN } from "../ink/PenStyle";
 
 export interface MobileToolsHost {
 	/** Execute a command by its full id (e.g. "handwriting:inline-tool-pen"). */
@@ -88,6 +90,37 @@ export interface MobileToolsHost {
 const tipInks = (h: MobileToolsHost): boolean =>
 	!h.eraserOn() && !h.lassoOn() && !h.spaceOn() && !h.panOn();
 
+/**
+ * Whether a nib button's LIGHT (and the collapsed pill) should show it lit:
+ * the tip must nominally hold this tool AND the tip must actually ink with
+ * it - true once a pen has been seen this session, or for a mouse user only
+ * while mouse ink is armed. Pulled out as a pure function of (host, tool) -
+ * MobileTools has no test harness (DOM-heavy, cannot be constructed under
+ * the suite) but this needs only a fake MobileToolsHost, so MobileTools.test.ts
+ * pins it directly. See ButtonSpec.isLit for why this is a separate read
+ * from isActive, which the click chain still branches on.
+ */
+export const nibIsLit = (h: MobileToolsHost, tool: "pen" | "highlighter"): boolean =>
+	tipInks(h) && h.activeTool() === tool && (penSeenThisSession() || h.mouseInkOn());
+
+/**
+ * Pixel<->multiplier conversion for the nib sliders (Alan, 2026-09: "aligning
+ * the stroke width and eraser slider to either both be pixel or both be
+ * multiplier" - PIXELS, matching "Eraser size"). The STORED setting is
+ * unchanged: setInkSizeMult/getInkSizeMult (InkOverlay.ts) and
+ * this.settings.inkSizes (main.ts) still hold a multiplier, clamped there
+ * exactly as before by clampInkSize (InkSize.ts) - only what this control
+ * shows and drags in changes, converting at the edges. Rounded to 3dp:
+ * DEFAULT_PEN.baseWidth (2.2) is not an integer, so raw px/base division
+ * carries float noise (2.2 * 3 === 6.6000000000000005 in JS) that would
+ * otherwise leak into the stored multiplier and the slider's own bounds.
+ */
+const pxToMult = (px: number, base: number): number => Math.round((px / base) * 1000) / 1000;
+const multToPx = (mult: number, base: number): number => Math.round(mult * base * 1000) / 1000;
+/** Same formatter shape as the eraser's `${v}px` - rounded to 1dp so a
+ * sub-pixel base (the pen's) never prints a wall of decimals. */
+const pxLabel = (v: number): string => `${Math.round(v * 10) / 10}px`;
+
 interface ButtonSpec {
 	icon: string;
 	/** Two-char fallback shown when the icon set has no such glyph. */
@@ -96,6 +129,19 @@ interface ButtonSpec {
 	commandId: string;
 	/** Marks the button active from current state; omitted = never marked. */
 	isActive?: (host: MobileToolsHost) => boolean;
+	/**
+	 * What the LIGHT (and the collapsed pill) show; omitted = same as
+	 * isActive. Split from isActive because the click chain below branches
+	 * on isActive to disarm/re-arm mouse ink (:570-680-ish) - collapsing the
+	 * two into one predicate made the second click of "click the lit pen
+	 * button, click it again" land on a different branch with a different
+	 * toast than today (alan, 2026-09-02, traced by hand before this was
+	 * written). isActive keeps meaning "the nominal tool"; isLit answers
+	 * "does the tip actually ink with this right now" - the tip only inks
+	 * for a mouse user when mouse ink is armed, or for anyone once a pen has
+	 * been seen this session (penSeenThisSession, PenToolsMode.ts).
+	 */
+	isLit?: (host: MobileToolsHost) => boolean;
 	/** Dims the button when false; omitted = always enabled. */
 	isEnabled?: (host: MobileToolsHost) => boolean;
 	/**
@@ -120,6 +166,14 @@ const BUTTONS: ButtonSpec[] = [
 		label: "Pen",
 		commandId: "handwriting:inline-tool-pen",
 		isActive: (h) => tipInks(h) && h.activeTool() === "pen",
+		// alan, 2026-09-02: "can we make sure that the pen button unhilights
+		// when we click it with mouse and moes ink turns off?" A mouse click
+		// on the lit pen button turns mouse ink off (:570 below) and the
+		// mouse goes back to text; the light must follow that, not just the
+		// nominal tool. Pen/touch users always have penSeenThisSession()
+		// true from their first stroke, so this reduces to isActive for
+		// them - only a mouse-without-a-pen user ever sees it diverge.
+		isLit: (h) => nibIsLit(h, "pen"),
 	},
 	{
 		icon: "highlighter",
@@ -127,6 +181,7 @@ const BUTTONS: ButtonSpec[] = [
 		label: "Highlighter",
 		commandId: "handwriting:inline-tool-highlighter",
 		isActive: (h) => tipInks(h) && h.activeTool() === "highlighter",
+		isLit: (h) => nibIsLit(h, "highlighter"),
 	},
 	// The colour belongs with the nibs it changes; it used to sit four
 	// unrelated buttons away, between Paste and Undo.
@@ -223,6 +278,48 @@ export class MobileTools {
 	private reticleChip!: HTMLElement;
 	private colorPop!: HTMLElement;
 
+	/**
+	 * The eraser's size/behavior pop (`this.slider`, built at :561 by the
+	 * same `dropSlider` helper as the pen/highlighter pops) is a third
+	 * object Slice P never knew about: `hangUnder`'s call for it (refreshNow,
+	 * :768) shows it for as long as `eraserOn()` is true, full stop, so
+	 * Escape found nothing to consume while erasing (alan, 2026-09-02).
+	 * `closeInkSliders` sets this now, the same as every other pop it closes
+	 * - pen contact, an outside tap and Escape all put the eraser pop away
+	 * exactly like the size and colour pops (alan, 2026-09-02: "you eraser
+	 * pop should close when pen touches down... we did it for other tools
+	 * but never did it for eraser" - the "leave it alone for pen-down and
+	 * outside taps" reasoning this comment used to give was the omission he
+	 * meant, not a decision). It clears itself the next time the eraser is
+	 * switched ON - the false-to-true edge `refreshNow` watches below -
+	 * covering the strip button, the palette command and a hotkey alike,
+	 * since none of those paths run through this object's own click handler.
+	 * That edge was the only way back to the pop once contact closed it
+	 * until §5p (alan, 2026-09-02: "pressing the eraser while it is already
+	 * active should reopen its size pop, not switch the tool off" - a mouse
+	 * excepted, "mouse sould disable"): the click handler's eraser branch
+	 * now flips this bit directly too, the way the nib buttons' `isActive`
+	 * branches flip `openInkSlider` for pen and highlighter.
+	 */
+	private eraserPopClosed = false;
+
+	/** True when HOVER is what opened the eraser pop - mirrors
+	 * `sliderFromHover` above, kept as a separate bit rather than folded
+	 * into that field because the eraser was never a member of the union
+	 * it protects (`openInkSlider` is `"pen" | "highlighter" | null`); the
+	 * eraser's pop is driven by `eraserPopClosed` instead, so "don't
+	 * auto-close what a tap opened" needs a flag pointed at that bit
+	 * specifically (§5p AI CONFIRMED, item 1). Set only by the eraser's
+	 * mouse-only hover-open in the `pointerenter` handler below - see
+	 * there for why pen does not share this path - and consumed the same
+	 * way `sliderFromHover` is, in `scheduleSliderClose`. */
+	private eraserPopFromHover = false;
+
+	/** The `eraserOn()` seen on the last `refreshNow`, so the eraser pop's
+	 * OFF-to-ON edge can be told apart from "still on" - see
+	 * `eraserPopClosed`. */
+	private wasEraserOn = false;
+
 	private pill: HTMLElement;
 
 	/**
@@ -234,9 +331,21 @@ export class MobileTools {
 	 */
 	private readonly pane: HTMLElement;
 
+	/**
+	 * Whether the eraser's size/behavior pop is currently showing - the
+	 * SAME condition `refreshNow`'s `hangUnder` call uses to drive its
+	 * `is-showing` class (below), not a second copy of it: `eraserOn()`
+	 * gates the pop the way `openInkSlider`/`colorsOpen` gate the others,
+	 * and `eraserPopClosed` is the one bit this object adds to suppress it
+	 * without touching the tool.
+	 */
+	private eraserPopOpen(): boolean {
+		return this.host.eraserOn() && !this.colorsOpen && !this.eraserPopClosed;
+	}
+
 	/** Something open enough that Escape (or a stray tap) should close it. */
 	private hasOpenPop(): boolean {
-		return this.openInkSlider !== null || this.colorsOpen;
+		return this.openInkSlider !== null || this.colorsOpen || this.eraserPopOpen();
 	}
 
 	/** Closes open pops when a tap lands anywhere that is not the strip. */
@@ -293,6 +402,10 @@ export class MobileTools {
 			ownsTarget: this.pane.contains(ev.target as Node | null),
 		});
 		if (verdict === "ignore") return;
+		// closePops used to exist here because Escape alone took the eraser
+		// pop; now closeInkSliders takes every pop (pen contact and an
+		// outside tap included, alan, 2026-09-02), so Escape has nothing
+		// left to add and calls the same close everything else does.
 		this.closeInkSliders();
 		if (verdict === "close-consume") {
 			ev.preventDefault();
@@ -319,6 +432,17 @@ export class MobileTools {
 			el.addEventListener("pointerdown", (ev) => {
 				ev.preventDefault();
 				el.classList.add("is-pressed");
+				// A contact is a decision, not a hover preview: the diagnosis's
+				// probe found a direct-manipulation pen (no hover) fires
+				// pointerenter AT CONTACT, marking whatever pop that opened as
+				// hover-opened even though the pen has already landed. Clearing
+				// both flags here, rather than waiting for the click that
+				// normally does it (below), means the close timer armed by this
+				// same press's own pointerleave - or by a click that is late or
+				// never arrives at all (pointercancel from tap drift) - has
+				// nothing left to close.
+				this.sliderFromHover = false;
+				this.eraserPopFromHover = false;
 			});
 			const release = () => el.classList.remove("is-pressed");
 			el.addEventListener("pointerup", release);
@@ -408,16 +532,43 @@ export class MobileTools {
 						: spec.commandId === "handwriting:inline-tool-highlighter"
 							? "highlighter"
 							: null;
-				if (!hoverNib || !spec.isActive?.(this.host)) return;
-				// A hover is a preview, not a decision: crossing this button on
-				// the way to the palette must not close what a CLICK opened.
-				// While the palette is up, hover keeps its hands off entirely.
-				if (this.colorsOpen) return;
-				this.cancelSliderClose();
-				if (this.openInkSlider !== hoverNib) {
-					this.openInkSlider = hoverNib;
-					this.sliderFromHover = true;
-					this.refresh();
+				if (hoverNib && spec.isActive?.(this.host)) {
+					// A hover is a preview, not a decision: crossing this button on
+					// the way to the palette must not close what a CLICK opened.
+					// While the palette is up, hover keeps its hands off entirely.
+					if (this.colorsOpen) return;
+					this.cancelSliderClose();
+					if (this.openInkSlider !== hoverNib) {
+						this.openInkSlider = hoverNib;
+						this.sliderFromHover = true;
+						this.refresh();
+					}
+					return;
+				}
+				// The eraser has no slot in `hoverNib` - its pop rides
+				// `eraserPopClosed`, not `openInkSlider` - so it needs its own
+				// preview branch, and MOUSE ONLY (§5p AI CONFIRMED, item 1).
+				// Pen is not excluded above, only touch is, so a pen reaches
+				// this point too; it is turned away here on purpose. The
+				// eraser's tap branch below (already built, ptr !== "mouse")
+				// TOGGLES `eraserPopClosed` on every pen/touch press - unlike
+				// the nib case above, whose pen branch just confirms the
+				// slider open rather than toggling it. Letting pen hover open
+				// the pop first would make a real pen tap immediately toggle
+				// it straight back shut, silently breaking that already-
+				// confirmed pen behaviour.
+				if (
+					ev.pointerType === "mouse" &&
+					spec.commandId === "handwriting:inline-tool-eraser" &&
+					spec.isActive?.(this.host)
+				) {
+					if (this.colorsOpen) return;
+					this.cancelSliderClose();
+					if (this.eraserPopClosed) {
+						this.eraserPopClosed = false;
+						this.eraserPopFromHover = true;
+						this.refresh();
+					}
 				}
 			});
 			b.addEventListener("pointerleave", (ev) => {
@@ -464,6 +615,24 @@ export class MobileTools {
 					// only mean "give the mouse this tool". Clicking again hands
 					// the mouse back - the branch above. The toggle's own toast
 					// names the tool picked up.
+					//
+					// This pair is Alan's rule for every mouse-without-a-pen
+					// branch here, not just this one - the eraser's
+					// ptr !== "mouse" guard below reads the same way. His
+					// words, in order (alan, 2026-09-02): "yes tapping a tool
+					// should turn it off", then "yes for mouse users without
+					// a pen" - the second sentence scopes the first. Tapping
+					// an active tool turns it off for a mouse without a pen;
+					// pen and touch keep what they have. A mouse has nothing
+					// to put the tool DOWN to; a pen does - putting a tool
+					// down means picking the nib back up, and the nib buttons
+					// already do that, which is why re-tapping a nib was
+					// never allowed to deselect it (alan, 2026-08-31: "the
+					// nib buttons pick, they never put down"). Lasso,
+					// insert-space and pan need no branch of their own: for a
+					// mouse their command is still a plain toggle
+					// (toggleTipMode in TipMode.ts), so tapping the active
+					// one already lands on off.
 					this.host.setMouseInk(true);
 					this.openInkSlider = nib;
 					this.sliderFromHover = false;
@@ -484,6 +653,32 @@ export class MobileTools {
 					// was tried and unwanted (alan, 2026-08-31): the nib
 					// buttons pick, they never put down.
 					this.openInkSlider = nib;
+					this.colorsOpen = false;
+				} else if (
+					spec.commandId === "handwriting:inline-tool-eraser" &&
+					spec.isActive?.(this.host) &&
+					ptr !== "mouse"
+				) {
+					// Mirrors the nib branches above: pressing the tool you
+					// already hold reopens its pop instead of picking it again.
+					// The eraser command is a plain toggle in main.ts
+					// (on = !getInlineEraserMode()), so without this branch it
+					// fell to the generic exec() below on every press and the
+					// only way back to the pop once AH's pen-contact close had
+					// hidden it was two taps through the OFF->ON edge
+					// eraserPopClosed clears on, below (alan, 2026-09-02,
+					// design doc 5p). A mouse keeps switching the tool off
+					// instead ("mouse sould disable", alan, ~19:52): a mouse
+					// only draws because its owner has no pen, so for them the
+					// eraser button IS the mode, exactly the reasoning the
+					// nibs' ptr === "mouse" branches give above - it falls
+					// through to exec() untouched.
+					this.eraserPopClosed = this.eraserPopOpen();
+					// A tap is a decision, same as the nib branches' own
+					// `sliderFromHover = false`: whatever hover was previewing
+					// is settled now, so the leave timer must not later undo it.
+					this.eraserPopFromHover = false;
+					// One pop at a time, same reason as the nib branches.
 					this.colorsOpen = false;
 				} else if (spec.commandId === "handwriting:ink-color-cycle") {
 					// The palette button opens SWATCHES: picking a color you
@@ -584,18 +779,34 @@ export class MobileTools {
 			this.strokeChip = chip("Stroke", true);
 			this.reticleChip = chip("Reticle", false);
 		}
-		this.penSlider = dropSlider("Pen size", "0.3", "3", "0.05", (v) => `${v.toFixed(2)}x`, (v, c) =>
-			this.host.setInkSizeMult("pen", v, c)
+		// Bounds are the OLD slider's own multiplier range (0.3-3) times the
+		// pen's base width, so dragging to either end of this px slider
+		// produces exactly the multiplier the old slider produced at that
+		// same end - never a mult outside what clampInkSize already allows.
+		// Step 0.1px, not a mechanically converted 0.05 mult (0.11px): the
+		// pen's whole range is under 6px, where 0.1px is already a finer
+		// grain than the eye can place, and it reads as a round number.
+		this.penSlider = dropSlider(
+			"Pen size",
+			String(multToPx(0.3, DEFAULT_PEN.baseWidth)),
+			String(multToPx(3, DEFAULT_PEN.baseWidth)),
+			"0.1",
+			pxLabel,
+			(v, c) => this.host.setInkSizeMult("pen", pxToMult(v, DEFAULT_PEN.baseWidth), c)
 		);
 		// The highlighter runs a narrower range: its base is already wide,
 		// and past 1.5x it stops being a highlighter and starts being paint.
+		// Its OWN multiplier bounds (0.25-1.5), not the pen's (0.3-3) - each
+		// nib's pixel range is its own base times its own existing range,
+		// not one shared range. Step 1px, same grain as the eraser's own
+		// integer-px slider, over a 4-24px span wide enough to want it.
 		this.hlSlider = dropSlider(
 			"Highlighter size",
-			"0.25",
-			"1.5",
-			"0.05",
-			(v) => `${v.toFixed(2)}x`,
-			(v, c) => this.host.setInkSizeMult("highlighter", v, c)
+			String(multToPx(0.25, HIGHLIGHTER_PEN.baseWidth)),
+			String(multToPx(1.5, HIGHLIGHTER_PEN.baseWidth)),
+			"1",
+			pxLabel,
+			(v, c) => this.host.setInkSizeMult("highlighter", pxToMult(v, HIGHLIGHTER_PEN.baseWidth), c)
 		);
 		this.colorPop = this.el.createDiv({ cls: "handwriting-slider-pop handwriting-color-pop" });
 		for (const pop of [this.penSlider.pop, this.hlSlider.pop]) {
@@ -604,6 +815,16 @@ export class MobileTools {
 			});
 			pop.addEventListener("pointerleave", (ev: PointerEvent) => {
 				if (ev.pointerType !== "touch") this.scheduleSliderClose();
+			});
+			// Same rule as the button's `noFocus` pointerdown above: a contact
+			// on the pop itself - dragging the slider, tapping a mode chip - is
+			// a decision too. Without this, a hover-opened pop still died 300ms
+			// after the pen lifted OFF THE SLIDER: this pop's own pointerleave
+			// (above) re-armed the close timer, and nothing had told it the
+			// preview was over. The native pointerdown the range input needs
+			// for its own drag (see dropSlider's comment) bubbles here first.
+			pop.addEventListener("pointerdown", (ev: PointerEvent) => {
+				if (ev.pointerType !== "touch") this.sliderFromHover = false;
 			});
 		}
 		this.refreshNow();
@@ -637,8 +858,13 @@ export class MobileTools {
 			// - but hover events on a Surface arrive mouse-flavoured even
 			// from a pen, so the eraser's light died under a hovering pen and
 			// came back when the nib touched the editor (glass, 2026-08-31).
-			// The mouse is just a pen here; pointer type is not state.
-			el.classList.toggle("is-active", spec.isActive?.(this.host) ?? false);
+			// The mouse is just a pen here; pointer type is not state. isLit
+			// (falling back to isActive) rather than isActive alone: a mouse
+			// user who just clicked the lit pen button to hand the mouse back
+			// to text must see the light go out too (alan, 2026-09-02) - see
+			// isLit's doc comment on ButtonSpec for why this is a separate
+			// field from the one the click chain below still branches on.
+			el.classList.toggle("is-active", (spec.isLit ?? spec.isActive)?.(this.host) ?? false);
 			const enabled = spec.isEnabled?.(this.host) ?? true;
 			el.classList.toggle("is-disabled", !enabled);
 			// The dimming is for eyes only; this is the same fact for anything
@@ -679,7 +905,13 @@ export class MobileTools {
 		// second switch on the modes: one source of truth, and a tool added to
 		// BUTTONS later is carried here without anyone remembering to.
 		{
-			const active = this.buttons.find(({ spec }) => spec.isActive?.(this.host));
+			// Same isLit-falls-back-to-isActive read as the per-button light
+			// above (literally the same expression there, so it moves here
+			// too): the pill must not keep wearing "Pen" once a mouse click
+			// has handed the mouse back to text and no nib is actually
+			// inking - it falls through to the generic "Pen tools" default
+			// below, same as when eraser/lasso/space/pan all read false.
+			const active = this.buttons.find(({ spec }) => (spec.isLit ?? spec.isActive)?.(this.host));
 			const icon = active?.spec.icon ?? "pen";
 			const label = active ? `${active.spec.label} tools` : "Pen tools";
 			if (this.pill.dataset.icon !== icon) {
@@ -729,14 +961,35 @@ export class MobileTools {
 		const whole = this.host.eraserWholeStroke();
 		this.strokeChip.toggleClass("is-current", whole);
 		this.reticleChip.toggleClass("is-current", !whole);
+		// The strip button's own click handler now resets `eraserPopClosed`
+		// too (a re-tap while active toggles it, mirroring the nib
+		// branches), but that only covers the strip: the palette command and
+		// a hotkey both call `handwriting:inline-tool-eraser` directly
+		// (main.ts's `on = !getInlineEraserMode()`, the "inline-tool-eraser"
+		// command) without passing through this file at all. The OFF-to-ON
+		// edge watched here is what catches those two paths alike; the strip
+		// button's own click just gets there first.
+		const eraserOn = this.host.eraserOn();
+		if (eraserOn && !this.wasEraserOn) {
+			this.eraserPopClosed = false;
+			// A fresh activation opened this, not a hover in flight - a stale
+			// `true` here would let a leave timer from a previous session
+			// wrongly close the pop this edge just opened.
+			this.eraserPopFromHover = false;
+		}
+		this.wasEraserOn = eraserOn;
 		hangUnder(
 			this.slider,
 			"handwriting:inline-tool-eraser",
 			// The eraser slider rides the MODE, not a toggle, so it was still
 			// hanging there when the palette opened next to it. While the
 			// palette is up it steps aside; closing the palette brings it
-			// straight back, because the mode never changed.
-			this.host.eraserOn() && !this.colorsOpen,
+			// straight back, because the mode never changed. eraserPopOpen
+			// folds in the same eraserOn()/colorsOpen check plus the one bit
+			// closeInkSliders sets to suppress it without touching the mode
+			// (hasOpenPop, above; every caller of closeInkSliders - pen
+			// contact, an outside tap, Escape - sets it alike now).
+			this.eraserPopOpen(),
 			this.host.eraserRadiusPx(),
 			(v) => `${v}px`
 		);
@@ -745,15 +998,15 @@ export class MobileTools {
 			this.penSlider,
 			"handwriting:inline-tool-pen",
 			nib === "pen" && this.host.activeTool() === "pen",
-			this.host.inkSizeMult("pen"),
-			(v) => `${v.toFixed(2)}x`
+			multToPx(this.host.inkSizeMult("pen"), DEFAULT_PEN.baseWidth),
+			pxLabel
 		);
 		hangUnder(
 			this.hlSlider,
 			"handwriting:inline-tool-highlighter",
 			nib === "highlighter" && this.host.activeTool() === "highlighter",
-			this.host.inkSizeMult("highlighter"),
-			(v) => `${v.toFixed(2)}x`
+			multToPx(this.host.inkSizeMult("highlighter"), HIGHLIGHTER_PEN.baseWidth),
+			pxLabel
 		);
 		// Swatches: rebuilt per refresh (the palette is tiny), current color
 		// ringed, each executes the existing per-name color command.
@@ -794,11 +1047,30 @@ export class MobileTools {
 	}
 
 	/** Writing started: nib-size drop-downs get out of the way. */
-	/** Returns whether anything was actually open; Escape needs to know. */
+	/** Returns whether anything was actually open; Escape needs to know.
+	 * Closes every pop the strip can show, the eraser's included - pen-down,
+	 * outsideTap and Escape all route through here now (alan, 2026-09-02:
+	 * "you eraser pop should close when pen touches down... we did it for
+	 * other tools but never did it for eraser"). There used to be a second
+	 * method, `closePops`, that Escape alone called to also take the eraser
+	 * pop; once this closed it too, `closePops` had nothing left to add over
+	 * this and was removed. */
 	closeInkSliders(): boolean {
 		if (!this.hasOpenPop()) return false;
 		this.openInkSlider = null;
 		this.colorsOpen = false;
+		// The one bit `eraserPopOpen` checks (below) - set unconditionally,
+		// same as the two lines above, rather than gated on `eraserPopOpen()`
+		// first: harmless when the eraser pop was not showing, and it saves
+		// a second read of `eraserOn()` here for the common case where it
+		// was not the eraser that had anything open.
+		this.eraserPopClosed = true;
+		// The eraser pop has no timer of its own (see eraserPopOpen), but
+		// `sliderHoverTimer` is shared with the pen/highlighter pops this
+		// same call just closed; cancel it here too so a hover-away already
+		// in flight for one of them cannot reopen a pop this call just put
+		// away.
+		this.cancelSliderClose();
 		this.refresh();
 		return true;
 	}
@@ -856,10 +1128,22 @@ export class MobileTools {
 		this.cancelSliderClose();
 		this.sliderHoverTimer = window.setTimeout(() => {
 			this.sliderHoverTimer = null;
+			let changed = false;
 			if (this.openInkSlider !== null && this.sliderFromHover) {
 				this.openInkSlider = null;
-				this.refresh();
+				changed = true;
 			}
+			// Same protection, aimed at the eraser's own bit: only close it
+			// if it is still open AND hover is what opened it - a tap-opened
+			// pop (`eraserPopFromHover` false) is a decision, not a preview,
+			// and this timer leaves it alone exactly like it leaves a
+			// tap-opened nib slider alone above.
+			if (!this.eraserPopClosed && this.eraserPopFromHover) {
+				this.eraserPopFromHover = false;
+				this.eraserPopClosed = true;
+				changed = true;
+			}
+			if (changed) this.refresh();
 		}, 300);
 	}
 

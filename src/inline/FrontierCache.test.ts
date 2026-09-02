@@ -73,6 +73,7 @@ describe("FrontierCache", () => {
 const BASE: ExtentInputs = {
 	path: "a.md",
 	frontier: { x: 10, y: 20 },
+	writtenOn: false,
 	camX: 1,
 	camY: 2,
 	camZoom: 1,
@@ -99,6 +100,7 @@ describe("sameExtentInputs", () => {
 	it("is false when any single input moved", () => {
 		const moved: Array<Partial<ExtentInputs>> = [
 			{ path: "b.md" },
+			{ writtenOn: true },
 			{ camX: 0 },
 			{ camY: 0 },
 			{ camZoom: 2 },

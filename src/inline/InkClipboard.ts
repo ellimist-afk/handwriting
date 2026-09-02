@@ -97,6 +97,8 @@ export function pasteInk(intoPath: string): InkStroke[] {
 		const c = clone(s);
 		c.id = newStrokeId();
 		if (dx !== 0) {
+			// dx offsets BOTH axes on purpose: one stagger value moves each
+			// repeated paste diagonally instead of stacking pastes exactly.
 			for (const p of c.points) {
 				p.x += dx;
 				p.y += dx;

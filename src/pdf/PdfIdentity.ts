@@ -74,7 +74,12 @@ export function idFromDigest(digest: ArrayBuffer): string {
 }
 
 /**
- * A PDF's sidecar id.
+ * A PDF's sidecar id, from its head and its true length.
+ *
+ * Split out from `pdfInkId` (1.4.6) so the id can be computed from a head
+ * that was read on its own. Hashing the first 64 KiB never needed the other
+ * 200 MB in memory, but the vault API has no ranged read, so until now the
+ * whole document was read on every open just to reach this - see PdfHead.ts.
  *
  * `crypto.subtle` where the platform provides it; the shipped SHA-256 where
  * it does not. WKWebView contexts can lack SubtleCrypto entirely, and when
@@ -88,9 +93,17 @@ export function idFromDigest(digest: ArrayBuffer): string {
  * devices file one document's ink under different names and sync splits
  * silently.
  */
-export async function pdfInkId(bytes: ArrayBuffer | Uint8Array, crypto?: Crypto): Promise<string> {
-	const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-	const input = idInput(headOf(view), view.length);
+export async function pdfInkIdFromHead(
+	head: Uint8Array,
+	byteLength: number,
+	crypto?: Crypto
+): Promise<string> {
+	// Clamped again here, not trusted from the caller. This is the one place
+	// both ways of obtaining a head meet - a whole-file read on mobile, a
+	// ranged read of the first HEAD_BYTES on desktop (PdfHead.ts) - and a
+	// source that handed back one byte too many would give that platform a
+	// different id for the same document, which is a silent sync split.
+	const input = idInput(headOf(head), byteLength);
 	if (typeof crypto?.subtle?.digest === "function") {
 		try {
 			// A fresh copy: subtle.digest wants an ArrayBuffer, and a subarray
@@ -102,6 +115,17 @@ export async function pdfInkId(bytes: ArrayBuffer | Uint8Array, crypto?: Crypto)
 		}
 	}
 	return idFromDigest(sha256(input).buffer as ArrayBuffer);
+}
+
+/**
+ * The same id from a whole file, for callers that already hold every byte.
+ *
+ * Kept because the vault's `readBinary` returns the whole document and that
+ * is still the only read mobile has.
+ */
+export async function pdfInkId(bytes: ArrayBuffer | Uint8Array, crypto?: Crypto): Promise<string> {
+	const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+	return pdfInkIdFromHead(headOf(view), view.length, crypto);
 }
 
 // ---- instances (1.4.3) ------------------------------------------------------

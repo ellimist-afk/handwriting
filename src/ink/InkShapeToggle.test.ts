@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { setInkShaping, inkShapingEnabled, flattenStrokeShaped } from "./InkShape";
+import {
+	centerlineSmoothed,
+	flattenStrokeShaped,
+	inkShapingEnabled,
+	setInkShaping,
+} from "./InkShape";
 import { flattenStroke, RibbonPt } from "./Ribbon";
 import { PenStyle } from "./PenStyle";
 import { InkStroke } from "./Stroke";
@@ -31,9 +36,15 @@ function screenRibbon(stroke: InkStroke): RibbonPt[] {
 		minWidthFactor: flat ? 0.9 : 0.35,
 		gamma: flat ? 1 : 0.75,
 	};
+	// Both of drawStroke's decisions, not one. The unshaped branch used to be
+	// reached with `flattenStroke`'s smooth default, which pairs the raw width
+	// law with a SMOOTHED centerline - a combination drawStroke no longer makes
+	// when shaping is off, because the centerline follows the same switch
+	// (§5l/AE7). Left as it was, this reproduction would keep agreeing with
+	// itself while disagreeing with the screen.
 	return !flat && stroke.device !== "mouse" && inkShapingEnabled()
 		? flattenStrokeShaped(stroke.points, style, 1)
-		: flattenStroke(stroke.points, style, 1);
+		: flattenStroke(stroke.points, style, 1, centerlineSmoothed(flat));
 }
 
 function stroke(pts: Array<[number, number, number]>): InkStroke {

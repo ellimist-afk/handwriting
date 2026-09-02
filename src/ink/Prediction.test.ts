@@ -210,18 +210,38 @@ describe("adaptiveCaps", () => {
 		expect(adaptiveCaps(1).maxHorizonMs).toBe(DEFAULT_CAPS.maxHorizonMs);
 	});
 
-	it("reaches the e-ink horizon on an e-ink-slow path, and no further", () => {
-		// The NoteAir trace measured a 58ms median delivery gap.
+	it("reaches its own desktop ceiling on a slow path - never EINK_CAPS's", () => {
+		// adaptiveCaps is the non-e-ink path exclusively: every caller gates
+		// predictionEinkOn() first and uses EINK_CAPS directly when it's on
+		// (InkOverlay.ts:2191, PdfInkController.ts:1594,
+		// HandwritingPageView.ts:958), so this function must never reach the
+		// e-ink numbers, on any lag, however long.
+		const DESKTOP_CEILING_MS = 20;
 		const caps = adaptiveCaps(58);
-		expect(caps.maxHorizonMs).toBe(EINK_CAPS.maxHorizonMs);
-		expect(caps.maxDistPx).toBe(EINK_CAPS.maxDistPx);
-		expect(adaptiveCaps(500).maxHorizonMs).toBe(EINK_CAPS.maxHorizonMs);
+		expect(caps.maxHorizonMs).toBe(DESKTOP_CEILING_MS);
+		expect(caps.maxHorizonMs).toBeLessThan(EINK_CAPS.maxHorizonMs);
+		expect(caps.maxDistPx).toBe(DEFAULT_CAPS.maxDistPx);
+		expect(adaptiveCaps(500).maxHorizonMs).toBe(DESKTOP_CEILING_MS);
+		expect(adaptiveCaps(500).maxDistPx).toBe(DEFAULT_CAPS.maxDistPx);
+	});
+
+	it("EINK_CAPS itself is untouched by the desktop ceiling change", () => {
+		expect(EINK_CAPS.maxHorizonMs).toBe(48);
+		expect(EINK_CAPS.maxDistPx).toBe(24);
+	});
+
+	it("the dist clamp collapses to DEFAULT_CAPS.maxDistPx at every reachable horizon", () => {
+		for (const lag of [0, 7, 12, 15, 20, 30, 58, 500]) {
+			expect(adaptiveCaps(lag).maxDistPx).toBe(DEFAULT_CAPS.maxDistPx);
+		}
 	});
 
 	it("lengthens the reach in between, monotonically", () => {
-		const mid = adaptiveCaps(20);
+		// lag 10 -> horizon 15ms sits strictly between the 12ms floor and the
+		// new 20ms desktop ceiling.
+		const mid = adaptiveCaps(10);
 		expect(mid.maxHorizonMs).toBeGreaterThan(DEFAULT_CAPS.maxHorizonMs);
-		expect(mid.maxHorizonMs).toBeLessThan(EINK_CAPS.maxHorizonMs);
+		expect(mid.maxHorizonMs).toBeLessThan(20);
 		let prev = 0;
 		for (const lag of [0, 5, 10, 20, 30, 40, 50, 60]) {
 			const h = adaptiveCaps(lag).maxHorizonMs;

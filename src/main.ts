@@ -75,6 +75,7 @@ import {
 	setDiagnosticsChangedListener,
 	setDiagnosticsEnabled,
 } from "./diag/DiagSwitch";
+import { traceGuardVerdict } from "./diag/TraceGuard";
 import { mouseInkEnabled, setMouseInk, setPersistMouseInk } from "./inline/MouseInk";
 import { setPrediction, setPredictionEink } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
@@ -83,6 +84,7 @@ import { InkTool } from "./ink/Stroke";
 import { appendInkToPdf, flattenedPdfPath } from "./ink/InkPdfAppend";
 import { inkToPdf } from "./ink/InkPdf";
 import { bytesOf } from "./pdf/PdfSyntax";
+import { createFreshFile } from "./export/CreateFreshFile";
 import { clipboardSize } from "./inline/InkClipboard";
 import {
 	attachEmbedInk,
@@ -107,14 +109,21 @@ import { pdfInkReport } from "./pdf/PdfInkReport";
 import { PdfInkController } from "./pdf/PdfInkController";
 import { calibrationStrokes } from "./pdf/PdfCalibration";
 import { PdfInkStore } from "./pdf/PdfInkStore";
-import { InstanceClaim, chooseInstance, familyOf, isPdfInkId, pdfInkId } from "./pdf/PdfIdentity";
+import {
+	InstanceClaim,
+	chooseInstance,
+	familyOf,
+	isPdfInkId,
+	pdfInkIdFromHead,
+} from "./pdf/PdfIdentity";
+import { HeadSource, RangedHandle, readPdfHead } from "./pdf/PdfHead";
 import { applyOp } from "./pdf/PdfInkHistory";
 import { isSafePageId, newPageId } from "./model/PageData";
 import { PageIdIndex, RegisterVerdict } from "./model/PageIdIndex";
 import { newPageMarkdown } from "./model/MarkdownPage";
 import { PageStore } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
-import { decideWhatsNew, whatsNewFragment, WHATS_NEW_MS } from "./update/WhatsNew";
+import { decideWhatsNew, whatsNewDurationMs, whatsNewFragment } from "./update/WhatsNew";
 import {
 	adoptInkFolder,
 	changeFolder,
@@ -272,6 +281,46 @@ function reloadStride(quietTicks: number): number {
 	return Math.min(5, 1 + Math.floor(quietTicks / 5));
 }
 
+/** The slice of node's `fs` this needs, typed locally to avoid node typings. */
+interface NodeFileHandle {
+	read(
+		buffer: Uint8Array,
+		offset: number,
+		length: number,
+		position: number
+	): Promise<{ bytesRead: number }>;
+	stat(): Promise<{ size: number }>;
+	close(): Promise<void>;
+}
+
+/**
+ * Open a file on disk for the ranged head read (PdfHead.ts).
+ *
+ * Obsidian ships an Electron renderer whose preload exposes `require`, which
+ * is how PresentProbe.ts reaches @electron/remote (:180-191) and the pattern
+ * copied here. It must stay a GUARDED, runtime require: a top-level `import`
+ * from "fs" would be emitted into the bundle unconditionally and throw on
+ * mobile the moment the plugin loads, taking every surface down with it.
+ *
+ * Throwing is a supported outcome - readPdfHead catches anything from here
+ * and reads the whole file instead, which is what 1.4.5 always did.
+ */
+async function openRangedFile(fullPath: string): Promise<RangedHandle> {
+	const w = window as { require?: (mod: string) => unknown };
+	if (typeof w.require !== "function") throw new Error("no require: not an Electron renderer");
+	const fs = w.require("fs") as { promises: { open(p: string, flags: string): Promise<NodeFileHandle> } };
+	const handle = await fs.promises.open(fullPath, "r");
+	return {
+		read: async (into, at) => (await handle.read(into, 0, into.length, at)).bytesRead,
+		// The size from THIS handle, never `file.stat.size`: the vault's
+		// cached stat can lag an external write, and a length that disagrees
+		// with the bytes being hashed changes the id - which would point a
+		// document at a sidecar that does not exist.
+		size: async () => Number((await handle.stat()).size),
+		close: () => handle.close(),
+	};
+}
+
 export default class HandwritingPlugin extends Plugin implements HandwritingHost {
 	store!: PageStore;
 	settings: HandwritingSettings = { ...DEFAULT_SETTINGS };
@@ -306,7 +355,34 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			if (existing) {
 				// Same pane, different document: forget the old id and hash the
 				// new one before anything can be written under the wrong key.
-				if (this.pdfFiles.get(root) !== path) {
+				//
+				// An EMPTY path is "not known yet", never "a different
+				// document". `leaf.view.file` is momentarily undefined while
+				// the viewer re-renders, on a layout change, and as a leaf
+				// becomes active - all three of which run this sync - so a
+				// bare `!==` read that transient as a document switch and
+				// forgot the id, the history AND the selection under a user
+				// who had done nothing but lasso some ink: "lasso'd it,
+				// trashcan lit up, hit delete, trashcan and undo dimed, but
+				// nothing deleted" (Alan, 2026-09-02). forgetHistory is the
+				// only thing that empties the ring and the selection together,
+				// which is why both lights went out at once.
+				//
+				// `resolvePdfId` already reads empty the same way: it returns
+				// at `if (!file) return` rather than resolving an id for "",
+				// and its post-await guards compare against a path that is
+				// therefore always non-empty. Leaving the stored path alone
+				// here keeps an in-flight resolution matching its own document
+				// instead of aborting on a "" that was never a document.
+				//
+				// A pane whose PDF really closes is not lost by this: a leaf
+				// that stops being a pdf leaf is not in `seen`, so the sweep
+				// below unmounts it and drops both maps. A pdf leaf left
+				// EMPTY keeps its stale id, which nothing can write under
+				// while there is no document rendered to draw on, and the
+				// next real path - any file, including a different one -
+				// differs from the stored path and reclaims it.
+				if (path !== "" && this.pdfFiles.get(root) !== path) {
 					this.pdfFiles.set(root, path);
 					this.pdfIds.delete(root);
 					existing.forgetHistory();
@@ -355,8 +431,48 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					// "live" means the gesture is still running: the screen
 					// needs the new list, the disk does not. The controller
 					// writes once at pen-up through the persist callback below.
-					if (mode === "live") this.pdfStore.replaceAllLive(id, next);
-					else this.pdfStore.replaceAll(id, next);
+					if (mode === "live") {
+						this.pdfStore.replaceAllLive(id, next);
+						return;
+					}
+					this.pdfStore.replaceAll(id, next);
+					// Notes get this for free: InkOverlay's repaintPath fires at
+					// every one of its twelve call sites, including the stroke
+					// commit, and repaints every OTHER pane on the same note at
+					// once. The PDF surface had no equivalent, so a second pane
+					// on this document only learned ink had changed when the
+					// disk poll below noticed a changed mtime - and that poll's
+					// own backoff (reloadStride) stretches to five seconds once
+					// it has been quiet, which writing in the first pane is
+					// exactly what makes it. THE POLL IS NOT AT FAULT: it exists
+					// to notice another DEVICE's write, and its backoff is
+					// deliberate and argued in its own comment. The defect was
+					// leaning on it as an in-process event bus instead of
+					// telling the other pane directly, the way notes do.
+					//
+					// Mirrors repaintPath in the two places notes and PDFs
+					// differ: COMMIT only, never "live" (the early return
+					// above) - repaintPath also fires at gesture boundaries,
+					// and a per-sample fan-out would repaint the other pane's
+					// whole overlay dozens of times a second for a difference
+					// nobody can see. And keyed on the document ID, not the
+					// path - two panes can hold the same PDF under different
+					// leaves, and the id is what the store is keyed by.
+					//
+					// One thing repaintPath has no equivalent of: a pane can be
+					// mid-gesture. refresh() invalidates every overlay and
+					// reschedules, and swapping ink under a live lasso, drag or
+					// stroke tears it - the same reason the poll checks
+					// `controller.idle` before reloading. A non-idle pane is
+					// skipped here for the same reason and gets the same
+					// fallback it already had: the next poll tick notices the
+					// write, no worse off than before this fix existed.
+					for (const [otherRoot, other] of this.pdfInk) {
+						if (otherRoot === root) continue;
+						if (this.pdfIds.get(otherRoot) !== id) continue;
+						if (!other.idle) continue;
+						other.refresh();
+					}
 				},
 				// `commands` is not on the public App type, so it is reached
 				// the way the note surface reaches it: a narrow cast behind a
@@ -411,14 +527,19 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		const file = (leaf.view as unknown as { file?: TFile }).file;
 		if (!file) return;
 		const path = file.path;
-		const bytes = await this.app.vault.readBinary(file);
+		// The head and the file's length, which is all the id is made of.
+		// This used to be `readBinary(file)` - the whole document, so a
+		// 200 MB scan was read into memory on every open to hash its first
+		// 64 KiB. PdfHead reads just that much where the platform allows it
+		// and falls back to the whole read everywhere else.
+		const { head, byteLength } = await readPdfHead(this.pdfHeadSource(file));
 		// Several awaits, and the pane can change document across any of
 		// them. Checking only `isConnected` catches a closed view but not a
 		// switched one: two resolutions racing in the same pane could finish
 		// out of order and stamp the earlier document's id onto the later
 		// one - so the guard repeats after every await.
 		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
-		const family = await pdfInkId(bytes, window.crypto);
+		const family = await pdfInkIdFromHead(head, byteLength, window.crypto);
 		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
 		// Which INSTANCE of the content family this file is. Byte-identical
 		// copies are one family, but each vault file is its own instance -
@@ -435,15 +556,64 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			family,
 			path,
 			candidates,
-			(p) => this.app.vault.getAbstractFileByPath(p) !== null
+			(p) => this.app.vault.getFileByPath(p) !== null
 		);
 		this.pdfIds.set(root, choice.id);
 		await this.pdfStore.ensureLoaded(choice.id);
+		// The fourth await, and the guard the first three already carry: the
+		// pane can change document across this one too, and what follows is
+		// the durable half - claimPath writes this path into that sidecar, and
+		// the refresh paints its ink. Without the re-check a resolution that
+		// lost the race stamped the earlier document's path onto the later
+		// document's sidecar. The id set above is deliberately before the
+		// await - the controller must be able to ask for it the moment the
+		// choice is made - and a stale one is corrected by the next sync,
+		// which is what clears pdfIds when the pane's file changes.
+		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
 		// Always claimed: an adoption becomes durable at once, a fresh
 		// instance merely remembers until its first stroke, and a repeat
 		// claim is a no-op.
 		this.pdfStore.claimPath(choice.id, path);
 		controller.refresh();
+		// canPasteInk flips the moment documentId() stops being null, but
+		// nothing repaints the strip for it: refresh() above only repaints
+		// ink, and the only other PDF-wide refresh is the addStripSurface
+		// fan-out on setting changes (§5f). Without this the paste button
+		// worked as soon as identification finished but went on looking
+		// dimmed until something unrelated redrew the strip (1.4.6-design.md
+		// 5m/AF2).
+		controller.refreshStrip();
+	}
+
+	/**
+	 * Where this PDF's head can be read from, cheapest route first.
+	 *
+	 * `whole` is the vault read that has always worked and always will. The
+	 * ranged route is offered only on desktop, where Obsidian is Electron and
+	 * node `fs` exists, and only when the vault is on a real filesystem the
+	 * adapter can name - a `FileSystemAdapter`. Anything else (mobile, a
+	 * sandboxed build with no `require`, an adapter that keeps files
+	 * somewhere that is not a path) leaves `openRanged` undefined and the
+	 * read behaves exactly as it did in 1.4.5.
+	 *
+	 * Detected by the presence of `getFullPath` rather than `instanceof
+	 * FileSystemAdapter`: `test/obsidian-stub.ts` does not export that class
+	 * (nothing in the plugin needed it before), and an `instanceof` against
+	 * an undefined import throws at runtime, which would break every test
+	 * that loads this module rather than fail some check. Duck-typing also
+	 * happens to be the honest test here - what is needed is an absolute
+	 * path, not a class.
+	 */
+	private pdfHeadSource(file: TFile): HeadSource {
+		const whole = () => this.app.vault.readBinary(file);
+		if (!Platform.isDesktopApp) return { whole };
+		const adapter = this.app.vault.adapter as unknown as {
+			getFullPath?: (path: string) => string;
+		};
+		if (typeof adapter.getFullPath !== "function") return { whole };
+		const full = adapter.getFullPath(file.path);
+		if (typeof full !== "string" || full.length === 0) return { whole };
+		return { openRanged: () => openRangedFile(full), whole };
 	}
 
 	/**
@@ -520,12 +690,74 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	}
 
 	/**
+	 * Which surface the PALETTE and the hotkeys act on: the inline overlay for
+	 * the active note, or a PDF controller for the active PDF. Strip buttons
+	 * do NOT come through here - a button knows the controller it is mounted
+	 * on and asks it directly (PdfInkController.stripExec, audit doc §5k/AD1).
+	 *
+	 * Without this, `delete/copy/cut-selected-ink` and `paste-ink` only ever
+	 * asked `overlayForPath`, so a focused PDF hid them from the palette and
+	 * a hotkey learned on notes did nothing there - silently, the same
+	 * failure the PDF strip's `exec` interception was worked around.
+	 *
+	 * Three answers, in this order, because the same PDF can be open in
+	 * several panes and the first version took whichever pane the Map happened
+	 * to hold first (audit doc §5k/AD2: lasso in the second pane, palette
+	 * Delete, "lasso some ink first" with the lasso on screen):
+	 *
+	 * 1. The ACTIVE LEAF's own controller, the pane the user is looking at -
+	 *    the same leaf-to-root mapping `syncPdfControllers` keys everything by.
+	 * 2. Failing that, the controller holding a selection on this path, since
+	 *    a selection is unambiguous evidence of which pane is meant.
+	 * 3. Failing that, any controller on the path - a command with no
+	 *    selection anywhere (paste) has to land somewhere, and every pane on
+	 *    the path shows the same document's ink.
+	 *
+	 * Step 1 is checked first and returns before step 2 ever runs its own
+	 * selection search: an active pane with no selection of its own still
+	 * beats a background pane that happens to hold one. A selection is only
+	 * the tiebreaker among panes that are NOT the one on screen - never a
+	 * reason to reach past it. That is the design, not an oversight
+	 * (1.4.6-design.md 5m/AF7).
+	 */
+	private activeInkSurface(): { kind: "inline"; overlay: InkOverlayPlugin } | { kind: "pdf"; controller: PdfInkController } | null {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) return null;
+		if (file.extension.toLowerCase() === "pdf") {
+			const root = (this.app.workspace.activeLeaf?.view as unknown as { containerEl?: HTMLElement } | undefined)
+				?.containerEl;
+			if (root && this.pdfFiles.get(root) === file.path) {
+				const focused = this.pdfInk.get(root);
+				if (focused) return { kind: "pdf", controller: focused };
+			}
+			const holding = this.pdfControllerWithSelection(file.path);
+			if (holding) return { kind: "pdf", controller: holding };
+			for (const [anyRoot, at] of this.pdfFiles) {
+				if (at !== file.path) continue;
+				const controller = this.pdfInk.get(anyRoot);
+				if (controller) return { kind: "pdf", controller };
+			}
+			return null;
+		}
+		const overlay = overlayForPath(file.path);
+		return overlay ? { kind: "inline", overlay } : null;
+	}
+
+	/**
 	 * The first path in a numbered series that nothing occupies yet.
 	 * `candidate(1)` is the plain name; the count only shows once it must.
 	 *
 	 * Asked of the adapter rather than the vault index: a file another
 	 * device dropped in through sync exists on disk before the index has
 	 * seen it, and the index saying "free" would have this overwrite it.
+	 *
+	 * This alone does not close the gap between choosing a name and writing
+	 * it - two exports started close together can still land on the same
+	 * answer. Every write site calls this through `createFreshFile`
+	 * (src/export/CreateFreshFile.ts), which re-asks on a create failure
+	 * instead of trusting a single answer from here; the guarantee that a
+	 * second export does not overwrite the first lives there, not in this
+	 * function.
 	 */
 	private async firstFreePath(candidate: (n: number) => string): Promise<string> {
 		for (let n = 1; ; n++) {
@@ -661,10 +893,27 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// first (alan, 2026-08-30). The plain name goes first; the count only
 		// appears once it must.
 		const base = flattenedPdfPath(file.path).replace(/\.pdf$/, "");
-		const out = await this.firstFreePath((n) => (n === 1 ? `${base}.pdf` : `${base}-${n}.pdf`));
-		await this.app.vault.adapter.writeBinary(out, result.bytes.buffer as ArrayBuffer);
+		const { path: out } = await createFreshFile(
+			() => this.firstFreePath((n) => (n === 1 ? `${base}.pdf` : `${base}-${n}.pdf`)),
+			(path) => this.app.vault.createBinary(path, result.bytes.buffer as ArrayBuffer)
+		);
 		new Notice(`Handwriting: exported ${out}`);
 	}
+
+	/**
+	 * Has `onunload` run? Read by every callback deferred to `onLayoutReady`.
+	 *
+	 * `onLayoutReady` is not cancellable and it is not a registered event, so
+	 * Obsidian's teardown does not take these back the way it takes back
+	 * `registerEvent` handlers: a plugin disabled between onload and the
+	 * layout settling still gets its callbacks, into a vault that no longer
+	 * has the plugin. V2's `applyPaper` re-added the paper class right after
+	 * `onunload` removed it, updateStatusBarClass re-stamped the body, and
+	 * showWhatsNewIfDue would have spent the one-launch toast on a session
+	 * nobody saw (1.4.6-design.md §5k/AD6). One flag, checked at the top of
+	 * all three, rather than three different answers to the same question.
+	 */
+	private unloaded = false;
 
 	/** One ink controller per open PDF view, keyed by its root element. */
 	private pdfInk = new Map<HTMLElement, PdfInkController>();
@@ -776,8 +1025,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// and an untouched note costs one metadata lookup and zero writes.
 		inlineInk.attachHost({
 			readPageId: (path) => {
-				const file = this.app.vault.getAbstractFileByPath(path);
-				if (!(file instanceof TFile)) return null;
+				const file = this.app.vault.getFileByPath(path);
+				if (!file) return null;
 				const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
 				const id = fm?.["handwriting-page-id"] as unknown;
 				// Frontmatter is text a person or a sync peer typed, and this
@@ -792,8 +1041,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				return isSafePageId(id) ? id : null;
 			},
 			claimId: async (path, proposedId) => {
-				const file = this.app.vault.getAbstractFileByPath(path);
-				if (!(file instanceof TFile)) throw new Error(`Handwriting: no file at ${path}`);
+				const file = this.app.vault.getFileByPath(path);
+				if (!file) throw new Error(`Handwriting: no file at ${path}`);
 				let out: { pageId: string; futureVersion?: number } = { pageId: proposedId };
 				await this.app.vault.process(file, (data) => {
 					const r = claimMarkdown(data, proposedId);
@@ -1257,12 +1506,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					// attempts, and the second must not eat the first.
 					const svgBase = file.path.replace(/\.md$/, "") + ".ink";
 					runDetached(
-						this.firstFreePath((n) => (n === 1 ? `${svgBase}.svg` : `${svgBase}-${n}.svg`)).then(
-							async (out) => {
-								await this.app.vault.adapter.write(out, svg);
-								new Notice(`Handwriting: exported ${out}`);
-							}
-						),
+						createFreshFile(
+							() => this.firstFreePath((n) => (n === 1 ? `${svgBase}.svg` : `${svgBase}-${n}.svg`)),
+							(path) => this.app.vault.create(path, svg)
+						).then(({ path: out }) => {
+							new Notice(`Handwriting: exported ${out}`);
+						}),
 						"export ink as svg",
 						() => new Notice("Handwriting: the SVG export could not be written")
 					);
@@ -1299,12 +1548,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 					// other export now: the second must not eat the first.
 					const pdfBase = file.path.replace(/\.md$/, "") + ".ink";
 					runDetached(
-						this.firstFreePath((n) => (n === 1 ? `${pdfBase}.pdf` : `${pdfBase}-${n}.pdf`)).then(
-							async (out) => {
-								await this.app.vault.adapter.writeBinary(out, bytesOf(pdf).buffer as ArrayBuffer);
-								new Notice(`Handwriting: exported ${out}`);
-							}
-						),
+						createFreshFile(
+							() => this.firstFreePath((n) => (n === 1 ? `${pdfBase}.pdf` : `${pdfBase}-${n}.pdf`)),
+							(path) => this.app.vault.createBinary(path, bytesOf(pdf).buffer as ArrayBuffer)
+						).then(({ path: out }) => {
+							new Notice(`Handwriting: exported ${out}`);
+						}),
 						"export ink as pdf",
 						() => new Notice("Handwriting: the PDF export could not be written")
 					);
@@ -1434,12 +1683,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "delete-selected-ink",
 			name: "Delete selected ink",
 			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				const overlay = file ? overlayForPath(file.path) : null;
-				if (!overlay) return false;
+				const surface = this.activeInkSurface();
+				if (!surface) return false;
 				if (!checking) {
-					const n = overlay.deleteSelectedInk();
-					if (n === 0) new Notice("Handwriting: lasso some ink first");
+					if (surface.kind === "inline") {
+						if (surface.overlay.deleteSelectedInk() === 0) new Notice("Handwriting: lasso some ink first");
+					} else {
+						// Notifies itself: an unidentified PDF and an empty
+						// lasso both stop a delete, and only the controller
+						// knows which (audit doc §5k/AD4).
+						surface.controller.deleteSelectionCommand();
+					}
 				}
 				return true;
 			},
@@ -1448,12 +1702,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "copy-selected-ink",
 			name: "Copy selected ink",
 			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				const overlay = file ? overlayForPath(file.path) : null;
-				if (!overlay) return false;
+				const surface = this.activeInkSurface();
+				if (!surface) return false;
 				if (!checking) {
-					const n = overlay.copySelectedInk();
-					new Notice(n > 0 ? `Handwriting: copied ${n} stroke(s)` : "Handwriting: lasso some ink first");
+					if (surface.kind === "inline") {
+						const n = surface.overlay.copySelectedInk();
+						new Notice(n > 0 ? `Handwriting: copied ${n} stroke(s)` : "Handwriting: lasso some ink first");
+					} else {
+						// Notifies itself, all three outcomes.
+						surface.controller.copySelection();
+					}
 				}
 				return true;
 			},
@@ -1462,12 +1720,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "cut-selected-ink",
 			name: "Cut selected ink",
 			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				const overlay = file ? overlayForPath(file.path) : null;
-				if (!overlay) return false;
+				const surface = this.activeInkSurface();
+				if (!surface) return false;
 				if (!checking) {
-					const n = overlay.cutSelectedInk();
-					new Notice(n > 0 ? `Handwriting: cut ${n} stroke(s)` : "Handwriting: lasso some ink first");
+					if (surface.kind === "inline") {
+						const n = surface.overlay.cutSelectedInk();
+						new Notice(n > 0 ? `Handwriting: cut ${n} stroke(s)` : "Handwriting: lasso some ink first");
+					} else {
+						// Notifies itself, for the same reason delete does.
+						surface.controller.cutSelectionCommand();
+					}
 				}
 				return true;
 			},
@@ -1476,17 +1738,25 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "paste-ink",
 			name: "Paste ink",
 			checkCallback: (checking) => {
-				// Listed whenever a note is open: a paste hidden by an empty
-				// clipboard reads as broken, and the empty case can just say so.
-				const file = this.app.workspace.getActiveFile();
-				const overlay = file ? overlayForPath(file.path) : null;
-				if (!overlay) return false;
+				// Listed whenever a note or PDF is open: a paste hidden by an
+				// empty clipboard reads as broken, and the empty case can just
+				// say so.
+				const surface = this.activeInkSurface();
+				if (!surface) return false;
+				// Not offered until the document has an id, audit doc §5k/AD4:
+				// syncPdfControllers inserts the controller before resolvePdfId
+				// finishes, so the command listed itself in that window and
+				// then pasted nothing, in silence.
+				if (surface.kind === "pdf" && !surface.controller.identified) return false;
 				if (!checking) {
 					if (clipboardSize() === 0) {
 						new Notice("Handwriting: the ink clipboard is empty, copy selected ink first");
-					} else {
-						const n = overlay.pasteInkHere();
+					} else if (surface.kind === "inline") {
+						const n = surface.overlay.pasteInkHere();
 						new Notice(`Handwriting: pasted ${n} stroke(s)`);
+					} else {
+						// Notifies itself (success, or the note-ink-on-a-pdf refusal).
+						surface.controller.pasteFromClipboard();
 					}
 				}
 				return true;
@@ -1586,10 +1856,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "copy-inline-pen-trace",
 			name: "Bug report: show as text",
 			callback: () => {
-				// Read-only, like send: only Bug report: record starts and
-				// stops recording. This used to auto-stop - the right design
-				// when the text report WAS the end of the flow, an
-				// inconsistency once Upload became the end and kept recording.
+				if (this.guardEmptyTrace()) return;
+				// Viewing a report is the end of the capture: what you see
+				// is what you deliver, and recording stops here so nobody
+				// has to remember a toggle before they're done. Only Bug
+				// report: record starts it again (Alan, 2026-09-02: "yes
+				// viewing a bug report should stop recording" - "i dont
+				// want them to have to toggle recording off, that's an
+				// extra step no one will do").
 				setDiagnosticsEnabled(false);
 				this.syncRecordingBadge();
 				refreshAllStrips();
@@ -1621,28 +1895,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "copy-inline-pen-trace-json",
 			name: "Bug report: send",
 			callback: () => {
-				// An empty capture is an upload nobody can use: the user ran
-				// send without ever recording. Say so instead of opening a
-				// modal around nothing.
-				if (captureInlinePenTrace({}).events.length === 0) {
-					// Two different emptinesses: recording never started, or it
-					// is running and the bug has not been reproduced yet. One
-					// message for both sent a tester in circles.
-					new Notice(
-						diagnosticsEnabled()
-							? "Handwriting: recording is on - reproduce the bug with the pen, then send"
-							: "Handwriting: nothing recorded - run Bug report: record first"
-					);
-					return;
-				}
-				// Running ANY bug-report viewer closes the capture window:
-				// what you see is what you deliver. Record starts a fresh one.
+				if (this.guardEmptyTrace()) return;
+				// Viewing a report is the end of the capture: what you see
+				// is what you deliver, and recording stops here so nobody
+				// has to remember a toggle before they're done. Only Bug
+				// report: record starts it again (Alan, 2026-09-02: "yes
+				// viewing a bug report should stop recording" - "i dont
+				// want them to have to toggle recording off, that's an
+				// extra step no one will do").
 				setDiagnosticsEnabled(false);
 				this.syncRecordingBadge();
 				refreshAllStrips();
-				// Recording deliberately KEEPS RUNNING here - reproduce again
-				// or retry Upload without starting over. The text-trace
-				// command ends it because that one IS the end of a report.
 				const capture = captureInlinePenTrace({
 					// Host flags, not navigator.userAgent: the directory review
 					// reads a UA lookup as OS sniffing, and Platform answers the
@@ -2064,6 +2327,19 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				// selection too - Alan's device finding 2026-09-02.
 				() => {
 					for (const c of this.pdfInk.values()) c.dissolveSelection();
+				},
+				// And the render-time settings - Ink smoothing, pressure
+				// sensitivity, Boox mode - change committed GEOMETRY without
+				// touching a stroke, so a surface that is not an editor overlay
+				// keeps its old shape until something else repaints it (§5l/AE6).
+				() => {
+					for (const c of this.pdfInk.values()) c.refresh();
+					for (const leaf of this.app.workspace.getLeavesOfType(
+						HANDWRITING_PAGE_VIEW_TYPE
+					)) {
+						const view = leaf.view;
+						if (view instanceof HandwritingPageView) view.repaintInk();
+					}
 				}
 			)
 		);
@@ -2077,11 +2353,17 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				}
 			})
 		);
-		this.app.workspace.onLayoutReady(updateStatusBarClass);
+		this.app.workspace.onLayoutReady(() => {
+			if (this.unloaded) return;
+			updateStatusBarClass();
+		});
 
 		// After layout, not during onload: a modal that opens while the
 		// workspace is still assembling fights the app for the screen.
-		this.app.workspace.onLayoutReady(() => this.showWhatsNewIfDue());
+		this.app.workspace.onLayoutReady(() => {
+			if (this.unloaded) return;
+			this.showWhatsNewIfDue();
+		});
 
 		// ---- background/freeze flush ------------------------------------------
 		// On iOS and Android the webview is frozen or killed on background
@@ -2173,8 +2455,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 
 	/** A note's cached frontmatter changed: keep the ownership ledger true. */
 	private checkPageIdentity(path: string): void {
-		const file = this.app.vault.getAbstractFileByPath(path);
-		if (!(file instanceof TFile)) return;
+		const file = this.app.vault.getFileByPath(path);
+		if (!file) return;
 		const id = this.recentPageIdFor(file);
 		if (!id) {
 			// NOT immediately. See declaimLater: an id that has merely gone
@@ -2217,8 +2499,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			path,
 			window.setTimeout(() => {
 				this.declaimTimers.delete(path);
-				const file = this.app.vault.getAbstractFileByPath(path);
-				if (!(file instanceof TFile)) return;
+				const file = this.app.vault.getFileByPath(path);
+				if (!file) return;
 				if (this.recentPageIdFor(file)) return; // it came back
 				this.declaimNow(path);
 			}, DECLAIM_GRACE_MS)
@@ -2254,9 +2536,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	): void {
 		// Duplicate sighting. Verify the recorded owner still exists and
 		// still carries the id. If not, ownership transfers instead.
-		const ownerFile = this.app.vault.getAbstractFileByPath(v.ownerPath);
-		const ownerId =
-			ownerFile instanceof TFile ? this.recentPageIdFor(ownerFile) : null;
+		const ownerFile = this.app.vault.getFileByPath(v.ownerPath);
+		const ownerId = ownerFile ? this.recentPageIdFor(ownerFile) : null;
 		if (ownerId !== id) {
 			this.pageIds.transfer(id, path);
 			this.persistOwners();
@@ -2273,8 +2554,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		const paths = this.ambiguousIds.get(id);
 		if (!paths) return;
 		const carriers = paths.filter((p) => {
-			const f = this.app.vault.getAbstractFileByPath(p);
-			return f instanceof TFile && this.recentPageIdFor(f) === id;
+			const f = this.app.vault.getFileByPath(p);
+			return f !== null && this.recentPageIdFor(f) === id;
 		});
 		if (carriers.length === 1) {
 			this.ambiguousIds.delete(id);
@@ -2311,8 +2592,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		if (this.resolvingDuplicates.has(copyPath)) return;
 		this.resolvingDuplicates.add(copyPath);
 		try {
-			const file = this.app.vault.getAbstractFileByPath(copyPath);
-			if (!(file instanceof TFile)) return;
+			const file = this.app.vault.getFileByPath(copyPath);
+			if (!file) return;
 			const newId = newPageId();
 			let cloned: "cloned" | "none" | "unreadable" | "exists";
 			try {
@@ -2539,6 +2820,8 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		return true;
 	}
 	onunload(): void {
+		// First, so that anything still waiting on onLayoutReady finds it set.
+		this.unloaded = true;
 		// Pending recycles are DROPPED, never run early. A sidecar left in
 		// place is an orphan somebody can delete; ink recycled for a note
 		// that was about to come back is the failure this delay exists to
@@ -2585,7 +2868,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		);
 		if (d.show) {
 			try {
-				new Notice(whatsNewFragment(d.version, d.notes), WHATS_NEW_MS);
+				new Notice(
+					whatsNewFragment(d.version, d.notes, d.groups),
+					whatsNewDurationMs(d.notes.length)
+				);
 			} catch (err) {
 				// Recording first would spend the one chance this user gets.
 				// The notes appear on exactly ONE launch, so a popup that threw
@@ -2613,6 +2899,30 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		}
 		this.recordingBadge.setText(diagnosticsEnabled() ? "● recording pen" : "");
 		this.recordingBadge.toggleClass("is-recording", diagnosticsEnabled());
+	}
+
+	/**
+	 * FIRST call in both bug-report viewers, before any state change:
+	 * an empty capture is an upload (or a text report) nobody can use,
+	 * and stopping a still-running recording just to say so would end a
+	 * reproduction the tester has not started yet. "Bug report: send"
+	 * carried this guard alone; "Bug report: show as text" had none, so
+	 * opening it on an empty trace could silently end a live recording
+	 * (1.4.6-design.md §5g, Y1). Lifted here so both commands agree.
+	 *
+	 * Two different emptinesses get two different messages: recording
+	 * never started, or it is running and the bug has not been
+	 * reproduced yet. One message for both sent a tester in circles.
+	 */
+	private guardEmptyTrace(): boolean {
+		const verdict = traceGuardVerdict(captureInlinePenTrace({}).events.length, diagnosticsEnabled());
+		if (verdict === "proceed") return false;
+		new Notice(
+			verdict === "reproduce"
+				? "Handwriting: recording is on - reproduce the bug with the pen, then send"
+				: "Handwriting: nothing recorded - run Bug report: record first"
+		);
+		return true;
 	}
 
 	/** The background/freeze path: start every pending write, wait for none. */
@@ -3033,7 +3343,21 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			notice: (message) => void new Notice(message),
 		});
 		setMouseInk(this.settings.mouseInk);
-		this.applyPaper(this.settings.paperStyle);
+		// applyPaper's iterateAllLeaves walks the workspace's restored layout;
+		// called here, during onload before layout is restored, it would see
+		// none of the popouts a reload is about to bring back (Obsidian plugin
+		// guidelines: don't call iterateAllLeaves before onLayoutReady). The
+		// plugin already gates the equivalent case for maybeSwapView, whose
+		// own onLayoutReady registration sits beside the file-open handler, so
+		// mirror that: stamp the main document now - it must never sit bare
+		// while layout comes back - then run applyPaper in full once the
+		// layout is restored. (The first version of this comment cited line
+		// numbers for both, and both had moved by the time anyone read it.)
+		this.applyPaperTo(document, this.settings.paperStyle);
+		this.app.workspace.onLayoutReady(() => {
+			if (this.unloaded) return;
+			this.applyPaper(this.settings.paperStyle);
+		});
 		setInkSizeMult("pen", this.settings.inkSizes.pen);
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
 		setPressureSensitivity(this.settings.pressureSensitivity);
@@ -3068,6 +3392,10 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// The reticle is a dot repainted under the pen on every event: a
 		// second damaged region per frame, which e-ink pays for.
 		setPenReticle(this.settings.penReticle && !on);
+		// The settings tab's penReticle toggle routes through here, same as
+		// Boox mode - without this, a showing PDF dot cleared only via the
+		// 1s hide timer or the next unrelated fan-out (Z addendum).
+		refreshAllStrips();
 	}
 
 	saveSettingsNow(): void {
@@ -3228,7 +3556,7 @@ class HandwritingSettingTab extends PluginSettingTab {
 		return [
 			{
 				type: "group",
-				heading: "Ink",
+				heading: "Pen",
 				items: [
 					{
 						name: "Pressure sensitivity",
@@ -3245,9 +3573,14 @@ class HandwritingSettingTab extends PluginSettingTab {
 						// and told us nothing. Flicking past sharp corners is a real
 						// prediction artefact and stays.
 						desc:
-							"Draws a little ahead of the pen to hide latency. Default on. " +
-							"Turn it off if the line runs ahead of the nib or flicks past sharp corners.",
-						control: { type: "toggle", key: "strokePrediction" },
+							"Draws a little ahead of the pen to hide latency. " +
+							"Turn it off if the line runs ahead of the nib or flicks past sharp corners. " +
+							"Default on.",
+						control: {
+							type: "toggle",
+							key: "strokePrediction",
+							disabled: () => this.plugin.settings.booxMode,
+						},
 					},
 					{
 						// The smoothing users can actually feel. setInkShaping has been
@@ -3261,34 +3594,16 @@ class HandwritingSettingTab extends PluginSettingTab {
 						desc:
 							"Shapes the line: thinner when you move fast, tapered at each end. " +
 							"Off draws an unshaped stroke that follows the pen more literally. Default on.",
-						control: { type: "toggle", key: "inkSmoothing" },
-					},
-					{
-						name: "Boox mode",
-						desc:
-							"For e-ink. Pen prediction sized for e-ink delays; smoothing, the pen reticle and animations " +
-							"off - every redraw costs on e-ink. Your settings come back when it's off. Default off.",
-						control: { type: "toggle", key: "booxMode" },
+						control: {
+							type: "toggle",
+							key: "inkSmoothing",
+							disabled: () => this.plugin.settings.booxMode,
+						},
 					},
 					{
 						name: "Shape snap",
 						desc: "Hold the pen still at the end of a stroke to snap your drawing into a shape. Default on.",
 						control: { type: "toggle", key: "shapeSnap" },
-					},
-					{
-						name: "A command per color and size",
-						desc:
-							"Adds one command for every ink color and nib size, for hotkeys. " +
-							"The palette button and the cycle commands already cover both. " +
-							"Takes effect after the plugin reloads.",
-						control: { type: "toggle", key: "colorSizeCommands" },
-					},
-					{
-						name: "Developer diagnostics",
-						desc:
-							"Shows the developer diagnostics commands in the palette. " +
-							"Takes effect after the plugin reloads.",
-						control: { type: "toggle", key: "devDiagnostics" },
 					},
 					{
 						name: "Mouse ink",
@@ -3312,7 +3627,19 @@ class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Pen toolbar",
-						desc: "Auto-hides the toolbar when the pen is away. Default auto.",
+						// What this setting decides is whether the toolbar is
+						// THERE, which "auto-hides when the pen is away" did not
+						// say: auto shows it once a pen has been used this
+						// session and then keeps it, rather than hiding and
+						// showing as the pen comes and goes.
+						//
+						// The behaviour that wording described is real but is
+						// not this setting: the strip steps aside on pen contact
+						// and returns on pen-up, in EVERY mode, Show included
+						// (setInking, InkOverlay.ts:1912/2001/2262). Two
+						// behaviours, one of them configurable, and the
+						// description was quietly claiming the wrong one.
+						desc: "Shows the toolbar once you use a pen. Always on mobile. Default auto.",
 						control: {
 							type: "dropdown",
 							key: "penTools",
@@ -3331,7 +3658,26 @@ class HandwritingSettingTab extends PluginSettingTab {
 					{
 						name: "Pen reticle",
 						desc: "Shows a dot where the pen is. Default on.",
-						control: { type: "toggle", key: "penReticle" },
+						control: {
+							type: "toggle",
+							key: "penReticle",
+							disabled: () => this.plugin.settings.booxMode,
+						},
+					},
+					// movableTextBoxes lands here on 1.5.0: it is about how the
+					// note lays out rather than how the pen draws.
+				],
+			},
+			{
+				type: "group",
+				heading: "E-ink",
+				items: [
+					{
+						name: "Boox mode",
+						desc:
+							"For e-ink. Pen prediction sized for e-ink delays; smoothing, the pen reticle and animations " +
+							"off - every redraw costs on e-ink. Your settings come back when it's off. Default off.",
+						control: { type: "toggle", key: "booxMode" },
 					},
 				],
 			},
@@ -3346,21 +3692,113 @@ class HandwritingSettingTab extends PluginSettingTab {
 					},
 				],
 			},
-			// One line at the bottom, after every setting, because that is where
-			// someone who has been using the thing ends up - not where someone
-			// deciding whether to install it starts. It states a fact and links
-			// out; it does not ask twice, sit above the settings, or appear
-			// anywhere in the plugin's own surfaces.
 			{
-				name: SUPPORT_LINE,
-				searchable: false,
-				render: (setting) => this.renderSupport(setting),
+				type: "group",
+				heading: "Commands",
+				items: [
+					{
+						name: "Hotkeys for colors and sizes",
+						// The name this row carried until 1.4.6. Settings search
+						// indexes name, desc and aliases and nothing else, so a
+						// rename with no alias makes the old wording match
+						// nothing - and someone who updates, types what they
+						// remember and finds an empty list concludes the toggle
+						// was removed rather than renamed. The sync row below
+						// carries six aliases for the same reason.
+						aliases: ["A command per color and size", "command per color", "per color command"],
+						desc:
+							"Adds a separate command for every ink color and nib size, so each one can " +
+							"take its own hotkey. Off by default - the palette button and the cycle " +
+							"commands already reach both. Takes effect after the plugin reloads.",
+						control: { type: "toggle", key: "colorSizeCommands" },
+					},
+				],
+			},
+			// Last, because these are for reporting a bug or reading a trace
+			// rather than for writing: someone who wants them goes looking, and
+			// someone who does not meets them only after every setting they
+			// came for.
+			{
+				type: "group",
+				heading: "Developer",
+				items: [
+					{
+						name: "Developer diagnostics",
+						desc:
+							"Shows the developer diagnostics commands in the palette. " +
+							"Takes effect after the plugin reloads.",
+						control: { type: "toggle", key: "devDiagnostics" },
+					},
+					// INSIDE this group deliberately, and it is the last row of
+					// the last one, so it is still the final thing on the page -
+					// which is the whole point of it: someone who has been using
+					// the thing ends up here, not someone deciding whether to
+					// install it.
+					//
+					// Trailing the array instead put it in this section anyway on
+					// 1.12, where `paint()` has no way to close a group - a
+					// heading opens a run that only the next heading ends - while
+					// 1.13's own renderer floated it outside. Same file, two
+					// answers. Placing it here makes both renderers agree, and
+					// makes the placement a decision rather than a side effect
+					// (alan, 2026-09-02: "kofi support row can be in developer
+					// that's fine").
+					{
+						name: SUPPORT_LINE,
+						searchable: false,
+						render: (setting) => this.renderSupport(setting),
+					},
+				],
 			},
 		];
 	}
 
+	/**
+	 * Boox mode overrides three rows at runtime, without writing any of the
+	 * stored settings: ink smoothing and the pen reticle are forced OFF
+	 * (`applyBooxMode`'s `&& !on`), while prediction is forced ON
+	 * (`applyBooxMode`'s `on || settings.strokePrediction` - Boox EXTENDS
+	 * prediction rather than pausing it, see applyBooxMode). `applyBooxMode`
+	 * restores the stored preference the moment the mode goes off, which is
+	 * the promise its description makes ("Your settings come back when it's
+	 * off"). The rows were still reporting the STORED value, not the forced
+	 * one, so a Boox user saw toggles that disagreed with what was actually
+	 * happening, with no way to tell.
+	 *
+	 * So each row shows the value actually in force (this map, not an
+	 * assumed false), and the control beside it is disabled while something
+	 * else is deciding. The preference itself is untouched: turn Boox mode
+	 * off and every row reports the choice the user made, because that
+	 * choice was never overwritten (alan, 2026-09-02, on being asked whether
+	 * "toggle off" meant rewriting them: the reversible one).
+	 */
+	private readonly BOOX_OVERRIDES: Readonly<Partial<Record<SettingKey, boolean>>> = {
+		inkSmoothing: false,
+		penReticle: false,
+		strokePrediction: true,
+	};
+
+	private overriddenByBoox(key: string): boolean {
+		return this.plugin.settings.booxMode && key in this.BOOX_OVERRIDES;
+	}
+
 	getControlValue(key: string): unknown {
+		if (this.overriddenByBoox(key)) return this.BOOX_OVERRIDES[key as SettingKey];
 		return key in this.plugin.settings ? this.plugin.settings[key as SettingKey] : undefined;
+	}
+
+	/**
+	 * Draw the tab again after a change that alters OTHER rows.
+	 *
+	 * 1.13 keeps the definitions and re-evaluates them on `update()`. 1.12 has
+	 * no such hook, so the fallback redraws the list - cheap at this size, and
+	 * the same work `display()` already does every time the tab opens. Both
+	 * paths read `disabled` and `getControlValue` fresh, so both end up correct.
+	 */
+	private rerender(): void {
+		const self = this as unknown as { update?: () => void };
+		if (typeof self.update === "function") self.update();
+		else this.display();
 	}
 
 	/**
@@ -3391,6 +3829,18 @@ class HandwritingSettingTab extends PluginSettingTab {
 			case "booxMode":
 				s.booxMode = on;
 				this.plugin.applyBooxMode();
+				// Boox mode overrides Ink smoothing at runtime, and since §5i that
+				// setting decides committed GEOMETRY, not just the width law. The
+				// inkSmoothing case has always repainted; this one changes the same
+				// value and did not, so toggling the mode left ink on screen in its
+				// old shape until an unrelated repaint (§5l/AE6).
+				repaintAllInkOverlays();
+				// Two OTHER rows change what they report when this one moves.
+				// `disabled` and getControlValue are both read at render time,
+				// so nothing repaints them unless the tab is asked to render
+				// again - and a Boox user flipping this would otherwise watch
+				// two toggles keep insisting they were on.
+				this.rerender();
 				break;
 			case "shapeSnap":
 				s.shapeSnap = on;
@@ -3461,16 +3911,25 @@ class HandwritingSettingTab extends PluginSettingTab {
 			const setting = new Setting(el).setName(item.name);
 			if (item.desc !== undefined) setting.setDesc(item.desc);
 			if (item.render) {
-				// The rows rendered here never read the group argument, which
-				// 1.12 has no class for.
+				// The rows rendered here never read the second argument the
+				// newer renderer passes, so calling them with the Setting alone
+				// is safe. Not a version gap: SettingGroup has existed since
+				// 1.11.0. What differs is only who does the painting.
 				(item.render as (setting: Setting) => void)(setting);
 			} else if (item.control?.type === "toggle") {
-				const { key } = item.control;
-				setting.addToggle((t) =>
+				const { key, disabled } = item.control;
+				// `disabled` is honoured here too. The newer renderer applies it
+				// itself; this painter would otherwise leave a live toggle on a
+				// row whose value is being decided elsewhere - a control that
+				// looks available, moves when pressed, and changes nothing,
+				// which is worse than one that plainly cannot be pressed.
+				const off = typeof disabled === "function" ? disabled() : disabled === true;
+				setting.addToggle((t) => {
 					t.setValue(this.getControlValue(key) === true).onChange((v) => {
 						this.setControlValue(key, v);
-					})
-				);
+					});
+					if (off) t.setDisabled(true);
+				});
 			} else if (item.control?.type === "dropdown") {
 				const { key, options } = item.control;
 				setting.addDropdown((d) => {

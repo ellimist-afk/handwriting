@@ -44,10 +44,10 @@ import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
 import { predictionEinkOn, predictionEnabled } from "../inline/StrokePrediction";
 import { rowsOf, snapLine, strokeIdsBelow } from "../inline/InsertSpace";
 import { copyInk, pasteInk } from "../inline/InkClipboard";
-import { drawStroke } from "../ink/StrokeRenderer";
+import { drawStroke, ribbonCacheStats } from "../ink/StrokeRenderer";
 import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
 import { getInkColorHex } from "../ink/InkColor";
-import { getInkSizeMult, getInlineTool, pickStripColor } from "../inline/InkOverlay";
+import { getInkSizeMult, getInlineTool, penReticleEnabled, pickStripColor } from "../inline/InkOverlay";
 import { InlinePenRouter } from "../inline/InlinePenRouter";
 import { PenSample } from "../input/PointerRouter";
 import { InkOp } from "../inline/InkHistory";
@@ -68,6 +68,12 @@ import {
 } from "../inline/InkOverlay";
 import { armMouseInkQuietly, mouseInkEnabled } from "../inline/MouseInk";
 import { MobileTools } from "../inline/MobileTools";
+import {
+	armStripPenFocus,
+	stripPenDown,
+	stripPenFocus,
+	stripPenUp,
+} from "../inline/StripPenChrome";
 import { clipboardSize } from "../inline/InkClipboard";
 import { colorsFor } from "../ink/InkColor";
 import { tipMode } from "../inline/TipMode";
@@ -372,6 +378,24 @@ export class PdfInkController {
 	private frame: { boxes: PageBox[]; scale: number; scroller: HTMLElement } | null = null;
 	/** The last drawn point, in page units, for the wet segment. */
 	private wetFrom: { x: number; y: number; pressure: number } | null = null;
+	/**
+	 * Whether the wet layer has been told this stroke started.
+	 *
+	 * This surface never called `beginStroke` at all: pen-down cleared the
+	 * canvas and the first sample went straight to `appendPoint`, so the wet
+	 * renderer's per-stroke decisions were stuck at their initialisers - the
+	 * centerline smoothed forever while the commit followed the setting
+	 * (Alan, on a PDF with Ink smoothing off, 2026-09-02), and the shaped
+	 * width law it is dressed for never once ran.
+	 */
+	private wetBegun = false;
+	/**
+	 * The flatness of the tool the live stroke is drawn with, read at
+	 * pen-down. It cannot be read off the wet layer: ONE pair serves both
+	 * tools here (`dressWet` changes its opacity, not its renderer), so the
+	 * highlighter's exemption has to travel with the stroke.
+	 */
+	private wetFlat = false;
 	/** True for the whole of an erase gesture, decided once at pen-down. */
 	private erasing = false;
 	/** The lasso being drawn, in page units. Empty when not lassoing. */
@@ -481,33 +505,7 @@ export class PdfInkController {
 				if (mouseInkEnabled() !== on) this.exec("handwriting:mouse-ink-toggle");
 			},
 			armMouseInkQuietly: () => armMouseInkQuietly(),
-			// Delete is intercepted rather than forwarded. The command it would
-			// reach acts on note overlays, which know nothing about this
-			// selection, so the button would have looked alive and done
-			// nothing. Everything else falls through to the real command,
-			// because tools and colours are global and already work here.
-			// Intercepted rather than forwarded, each for the same reason as
-			// Delete: the global command acts on note overlays or the editor,
-			// neither of which exists here, so the button lit up from this
-			// view's own state and then did nothing when pressed. Everything
-			// NOT intercepted really is global (tools, colours) and falls
-			// through to the real command.
-			exec: (id) => {
-				if (id === "handwriting:delete-selected-ink" && this.deleteSelection()) return;
-				if (id === "editor:undo" || id === "editor:redo") {
-					this.historyStep(id === "editor:redo");
-					return;
-				}
-				if (id === "handwriting:copy-selected-ink") {
-					this.copySelection();
-					return;
-				}
-				if (id === "handwriting:paste-ink") {
-					this.pasteFromClipboard();
-					return;
-				}
-				this.exec(id);
-			},
+			exec: (id) => this.stripExec(id),
 			activeTool: () => getInlineTool(),
 			eraserOn: () => getInlineEraserMode(),
 			eraserWholeStroke: () => getEraserWholeStrokes(),
@@ -525,8 +523,22 @@ export class PdfInkController {
 			// CodeMirror here to ask.
 			canUndo: () => this.history.depth.done > 0,
 			canRedo: () => this.history.depth.undone > 0,
-			canPasteInk: () => clipboardSize() > 0,
-			hasInkSelection: () => this.selected.length > 0,
+			// The id gate as well as the clipboard, audit doc §5k/AD4: a paste
+			// offered while the document is still being hashed reached
+			// `pasteFromClipboard`'s `if (!id) return` and did nothing at all,
+			// with a lit button as the only account of it.
+			canPasteInk: () => clipboardSize() > 0 && this.documentId() !== null,
+			// The bounds, not the raw id list - the same question `hasSelection`
+			// answers, and for the reason its own comment gives: ids outlive a
+			// sidecar reload, so a selection whose strokes were deleted on
+			// another device is a list of ids that match nothing.
+			// `deleteSelection` resolves those ids against live strokes and
+			// returns false when none match, and `idle` is true while a
+			// completed selection is held, so the reload poll can run exactly
+			// then - leaving a lit trash button, a click that passed the
+			// enablement gate, and "lasso some ink first" over a visible
+			// lasso. One question, one answer.
+			hasInkSelection: () => this.hasSelection,
 			palette: () => colorsFor(getInlineTool()),
 			pickColor: (name, hex) => pickStripColor(name, hex),
 			inkSizeMult: (tool) => getInkSizeMult(tool as InkTool),
@@ -538,10 +550,59 @@ export class PdfInkController {
 		this.tools.setCorner(getToolbarCorner());
 	}
 
+	/**
+	 * What a button on THIS controller's strip does.
+	 *
+	 * editor:undo/redo are native keybindings rather than plugin commands, so
+	 * they were always answered here - this view has no CodeMirror to undo.
+	 *
+	 * The selection buttons are answered here too, audit doc §5k/AD1. Z moved
+	 * their dispatch out to the commands on the reasoning that one
+	 * implementation should have one caller; the implementation is shared (the
+	 * commands call these same methods), but the DISPATCH cannot be, because
+	 * the commands resolve a surface from the workspace and a strip button
+	 * never takes focus - MobileTools preventDefaults pointerdown so the pen
+	 * does not leave the page. Note left and active with a live lasso, PDF
+	 * right, lasso on the PDF, press the PDF strip's trash: the command
+	 * resolved the NOTE and deleted the note's strokes, and a paste put
+	 * page-stamped PDF strokes into a note. The button knows its controller;
+	 * the palette does not, so the palette keeps `activeInkSurface` and the
+	 * button asks the controller it is mounted on.
+	 */
+	private stripExec(id: string): void {
+		if (id === "editor:undo" || id === "editor:redo") {
+			this.historyStep(id === "editor:redo");
+			return;
+		}
+		if (id === "handwriting:delete-selected-ink") {
+			this.deleteSelectionCommand();
+			return;
+		}
+		if (id === "handwriting:copy-selected-ink") {
+			this.copySelection();
+			return;
+		}
+		if (id === "handwriting:cut-selected-ink") {
+			this.cutSelectionCommand();
+			return;
+		}
+		if (id === "handwriting:paste-ink") {
+			this.pasteFromClipboard();
+			return;
+		}
+		this.exec(id);
+	}
+
 	/** The strip's active-tool marks are stale; recompute them. */
 	refreshStrip(): void {
 		this.tools?.setCorner(getToolbarCorner());
 		this.tools?.refresh();
+		// Audit doc §5f: this is the fan-out that already runs on setting
+		// changes for PDFs (addStripSurface, main.ts). If "Pen reticle" (or
+		// Boox mode) turned off while the dot was showing - the pen held
+		// still, no further hover sample to hit the new gate in showCursor -
+		// the existing hide path is enough; no new plumbing needed.
+		if (!penReticleEnabled()) this.hideCursor();
 	}
 
 	/**
@@ -556,6 +617,11 @@ export class PdfInkController {
 
 	mount(): void {
 		this.mounted = true;
+		// The keydown listener below is bound to this root, so the root has to
+		// be able to hold focus at all before a claimed pen can hand it any
+		// (StripPenChrome.ts). Once, here, rather than at pen contact: it is an
+		// attribute on the pane, not part of a gesture.
+		armStripPenFocus(this.root);
 		// No probe gate here. The viewer is not necessarily built when the leaf
 		// appears, and a controller that returned early here stayed inert for
 		// the life of the pane with nothing to say for itself - the same silent
@@ -644,7 +710,45 @@ export class PdfInkController {
 				ev.preventDefault();
 				return;
 			}
-			if ((ev.key === "Delete" || ev.key === "Backspace") && this.deleteSelection()) {
+			// Audit doc §5r/§5s: this used to call `deleteSelection()` directly -
+			// a fourth dispatcher beside the strip button, the palette and the
+			// hotkey (Slice AD unified only those three onto the controller's
+			// command methods). `deleteSelection()` carries no id gate and no
+			// notice, so a Delete pressed with a live selection whose document
+			// id was still missing, or whose ids no longer matched a live
+			// stroke, did nothing and said nothing.
+			// §5s/AM-B, correcting this file's own first pass (9c17b12, which
+			// made `deleteSelectionCommand()` answer - and consume - every
+			// Delete/Backspace unconditionally): a toast is a fair answer to a
+			// deliberate press of a control labelled delete, and noise in
+			// answer to an ordinary Backspace that was never a request to
+			// delete ink. `this.selected` is the raw id list, the same field
+			// the Escape branch above already reads for the identical reason -
+			// non-empty means SOMETHING was lassoed, which is what makes the
+			// key a deliberate request, whether or not that request can still
+			// be honoured:
+			//  - empty: an ordinary Backspace. Do nothing, say nothing, do not
+			//    consume - `deleteSelectionCommand()` is not even called, so it
+			//    cannot notify.
+			//  - non-empty, refused (no document id yet, or the ids resolve to
+			//    no live stroke - the id gate and the empty-after-resolution
+			//    case `deleteSelection` itself covers): notify with the
+			//    existing wording and consume - the request was real and it
+			//    failed for a reason the user cannot see.
+			//  - non-empty, succeeds: delete silently and consume, as today.
+			// `deleteSelectionCommand()` returns whether it deleted (§5s/AM-A)
+			// for a future caller that needs to know; this branch does not
+			// need the value; only whether it was asked at all decides
+			// whether the key is consumed, and every path that IS asked
+			// consumes it, by construction of the gate above.
+			if (ev.key === "Delete" || ev.key === "Backspace") {
+				// §5u: `this.selected` is the raw id list and outlives a sidecar
+				// reload, so ids from a selection deleted on another device
+				// still pass a length check while resolving to nothing. `hasSelection`
+				// is the bounds-resolved question the strip's trash button (:541)
+				// already asks - one question, one answer, in this file.
+				if (!this.hasSelection) return;
+				this.deleteSelectionCommand();
 				ev.preventDefault();
 				return;
 			}
@@ -801,6 +905,7 @@ export class PdfInkController {
 		this.builder = null;
 		this.frame = null;
 		this.wetFrom = null;
+		this.wetBegun = false;
 		this.erasing = false;
 		this.eraseFrom = null;
 		this.dragFrom = null;
@@ -966,6 +1071,7 @@ export class PdfInkController {
 			`  pages refused as rotated: ${[...this.rotated].join(", ") || "(none)"}`,
 			`  palm touches shielded: ${this.palmShield.rejected}`,
 			`  pinches bridged: ${this.pinchBridge.bridged}`,
+			`  ribbon cache (all surfaces): ${ribbonCacheStats().hits} hit / ${ribbonCacheStats().misses} miss`,
 			`  ink metrics (${this.metrics.summaries.length} stroke(s) this session):` +
 				(this.metrics.summaries.length > 0
 					? "\n" +
@@ -997,9 +1103,32 @@ export class PdfInkController {
 	 * the eraser's reach is worse than no dot.
 	 */
 	private showCursor(sample: PenSample, pointerType?: string): void {
+		// A hover sample is proof of a pen only when it came from one -
+		// audit doc §5k/(d) put the mark ahead of the reticle gate below so
+		// turning "Pen reticle" off (or Boox mode, which turns it off for
+		// you) would not also stop the pen being noticed, but left it
+		// unconditional. This method also draws the dot for an actively
+		// drawing mouse (this file's wet-draw loop calls
+		// `showCursor(s, "mouse")`) and, via onPenHover, for a mouse that is
+		// merely hovering when mouse ink is armed (InlinePenRouter.ts's
+		// `mouseActsAsPen` gate lets it reach here) - so a mouse in the
+		// room, reticle off, raised the pen toolbar in auto mode for a
+		// pointer that was never a pen (1.4.6-design.md 5m/AF5). penDown
+		// marks it ahead of its own gates for the same reason as this line
+		// meant to, and is unaffected: it fires only on real pen contact.
+		if (pointerType === "pen") markPenSeen();
+		// Audit doc §5f: the note surface's reticle obeys the "Pen reticle"
+		// setting (InkOverlay.ts's own `penReticleOn`, gated at its
+		// showPenCursor); this surface consulted nothing, so turning the
+		// setting off - or Boox mode, whose description promises the reticle
+		// off because "every redraw costs on e-ink" - left the dot repainting
+		// under the pen on every PDF. Same flag, checked before any paint AND
+		// before the watchdog timer below is armed: an invisible dot that
+		// still costs a timer per move defeats the e-ink point as much as a
+		// visible one would.
+		if (!penReticleEnabled()) return;
 		const probed = this.probe();
 		if (!probed || probed.scaleFactor === null) return;
-		markPenSeen();
 		this.ensureTools();
 		// Re-created whenever it is not in the CURRENT scroller. It lives in
 		// that scroller's subtree, so a viewer rebuild took it away and left
@@ -1163,6 +1292,19 @@ export class PdfInkController {
 		const content = this.toContent(sample, scroller);
 		const box = pageAt(boxes, content.x, content.y);
 		if (!box || this.rotated.has(box.pageNumber)) return;
+		// A gesture is starting, whichever one: the strip steps aside and its
+		// drop-down chrome closes, the same as a note (StripPenChrome.ts,
+		// §5o) - this surface never called either half of that before.
+		stripPenDown(this.tools);
+		// And the keyboard comes with it: the router cancelled the mousedown
+		// that would have focused this pane, and Delete/Escape/undo here are a
+		// keydown listener on this root rather than commands, so without this
+		// the key went wherever focus already was (StripPenChrome.ts). Placed
+		// with the strip chrome, after every early return that can refuse the
+		// gesture: a pen on a pane with no viewer, no id or no page under the
+		// sample has not acted on anything, and taking the keyboard away from
+		// wherever it was would be a theft that bought nothing.
+		stripPenFocus(this.root);
 		// Frozen for the stroke, as it always was - but frozen from the box
 		// rather than from the viewer variable that lags behind it.
 		const scale = this.scaleFor(box, probed.scaleFactor);
@@ -1267,6 +1409,10 @@ export class PdfInkController {
 		this.metricsLive = true;
 		this.startFrameTicker();
 		this.wetFrom = null;
+		this.wetBegun = false;
+		// Read here and not off the wet layer: the pair is shared between the
+		// pen and the highlighter, so only the stroke knows which tool it is.
+		this.wetFlat = tool === "highlighter";
 		// Before the first sample, so a clean page has a canvas to draw on.
 		this.ensureOverlay(box.pageNumber);
 		const pair = this.wetOn(box.pageNumber);
@@ -1554,7 +1700,17 @@ export class PdfInkController {
 		const pair = this.wetOn(box.pageNumber);
 		const cam = this.cameraFor(box);
 		if (!pair || !cam) return;
-		pair.wet.appendPoint(cam, this.strokeStyle, point);
+		if (this.wetBegun) {
+			pair.wet.appendPoint(cam, this.strokeStyle, point);
+		} else {
+			// The first accepted sample of the stroke. `appendPoint` used to
+			// take it too, which drew nothing (it has no previous point) but
+			// also told the renderer nothing: the smoothed-centerline and
+			// shaped-width decisions are made here, per stroke, from the
+			// TOOL - never from the layer, which is one pair for both tools.
+			this.wetBegun = true;
+			pair.wet.beginStroke(point, this.strokeStyle, this.wetFlat);
+		}
 		this.drawHead(pair, cam);
 	}
 
@@ -1927,6 +2083,12 @@ export class PdfInkController {
 
 	private penUp(ev?: PointerEvent): void {
 		this.endMetrics();
+		// Whatever the gesture was, it is over: the strip returns, the same
+		// as a note (StripPenChrome.ts, §5o). The router funnels pointerup
+		// AND pointercancel here (InlinePenRouter.pointerUpOrCancel), and the
+		// two manual call sites below also route through this one method, so
+		// one call covers every teardown.
+		stripPenUp(this.tools);
 		if (this.panLast !== null) {
 			this.panLast = null;
 			return;
@@ -1963,6 +2125,7 @@ export class PdfInkController {
 		this.builder = null;
 		this.frame = null;
 		this.wetFrom = null;
+		this.wetBegun = false;
 		const wasErasing = this.erasing;
 		this.erasing = false;
 		if (this.dragFrom) {
@@ -2179,18 +2342,118 @@ export class PdfInkController {
 	}
 
 	/**
+	 * The lassoed strokes into the session clipboard, quietly - shared by
+	 * `copySelection` (which notifies) and `cutSelection` (which notifies
+	 * with "cut", not "copied", so it cannot call copySelection and would
+	 * double-notify if it did).
+	 */
+	private copyToClipboard(): number {
+		const id = this.documentId();
+		if (!id || this.selected.length === 0) return 0;
+		const chosen = new Set(this.selected);
+		const strokes = this.strokes(this.selectionPage).filter((st) => chosen.has(st.id));
+		return copyInk(strokes, id);
+	}
+
+	/**
 	 * The lassoed strokes into the session clipboard - the same clipboard
 	 * the note surface uses, under the document id, so pasting back into
 	 * this document staggers the copies the way pasting into a note does.
 	 */
-	private copySelection(): void {
-		const id = this.documentId();
-		if (!id || this.selected.length === 0) return;
-		const chosen = new Set(this.selected);
-		const strokes = this.strokes(this.selectionPage).filter((st) => chosen.has(st.id));
-		const n = copyInk(strokes, id);
-		this.notify(n === 1 ? "Handwriting: copied 1 stroke" : `Handwriting: copied ${n} strokes`);
+	copySelection(): void {
+		if (!this.identified) {
+			this.notifyUnidentified();
+			return;
+		}
+		const n = this.copyToClipboard();
+		// Audit doc §5k/AD3: an empty selection said "copied 0 strokes" and
+		// left the clipboard alone, so the next paste brought back an older
+		// copy and read as this one having gone somewhere. `copyToClipboard`
+		// returns before `copyInk` when there is nothing selected, so nothing
+		// to undo here - only something to say, in the sentence the note
+		// surface's command already says for the same state.
+		if (n === 0) {
+			this.notify("Handwriting: lasso some ink first");
+			return;
+		}
+		// 1.4.6-design.md 5m/AF6: this said "copied 1 stroke" / "copied N
+		// strokes", new prose next to cutSelectionCommand's "cut N
+		// stroke(s)" below - the wording the note command already uses.
+		// Reused verbatim, not recomposed.
+		this.notify(`Handwriting: copied ${n} stroke(s)`);
 		this.refreshStrip();
+	}
+
+	/**
+	 * Delete, said out loud - the command's half of `deleteSelection`, shared
+	 * with the strip button so both name the same cause. Returns whether ink
+	 * was actually removed (audit doc §5s/AM-A), so a caller that must not
+	 * treat a refusal the same as a success - the keydown handler's three-way
+	 * split, §5s/AM-B - can tell them apart without re-running the gates
+	 * here.
+	 *
+	 * The id is checked BEFORE the selection, audit doc §5k/AD4: a document
+	 * still being hashed has no id, `deleteSelection` returns false for that
+	 * reason as readily as for an empty lasso, and "lasso some ink first" told
+	 * somebody staring at their own lasso the one thing that was not wrong.
+	 *
+	 * Notifies on every refusal, unconditionally - the strip button and the
+	 * palette/hotkey command both reach this, and pressing either one is
+	 * itself the deliberate act (§5s/AM-B). The keydown handler's own
+	 * "nothing lassoed" case is filtered out before this is ever called, not
+	 * inside it, so that rule lives once, at the one caller that needs it.
+	 */
+	deleteSelectionCommand(): boolean {
+		if (!this.identified) {
+			this.notifyUnidentified();
+			return false;
+		}
+		const deleted = this.deleteSelection();
+		if (!deleted) this.notify("Handwriting: lasso some ink first");
+		return deleted;
+	}
+
+	/** Cut, said out loud, in the wording the note command already uses. */
+	cutSelectionCommand(): void {
+		if (!this.identified) {
+			this.notifyUnidentified();
+			return;
+		}
+		const n = this.cutSelection();
+		this.notify(n > 0 ? `Handwriting: cut ${n} stroke(s)` : "Handwriting: lasso some ink first");
+	}
+
+	/** Has this document been hashed yet? Nothing may touch ink until it has. */
+	get identified(): boolean {
+		return this.documentId() !== null;
+	}
+
+	/**
+	 * The wait, in the sentence the PDF commands in main.ts already use for
+	 * it. The pen's own refusal (penDown) says "ink starts in a moment"
+	 * because drawing resumes by itself; a palette or button action does not
+	 * resume by itself, so this is the one that asks for the retry.
+	 */
+	private notifyUnidentified(): void {
+		this.notify("Handwriting: still identifying this PDF - try again in a moment");
+	}
+
+	/**
+	 * Copy, then delete - the PDF side of InkOverlay.cutSelectedInk. Kept
+	 * quiet (no notify of its own, like deleteSelection) so the command in
+	 * main.ts owns the "cut N stroke(s)" / "lasso some ink first" wording,
+	 * the same text it already uses for the note surface.
+	 */
+	cutSelection(): number {
+		const n = this.copyToClipboard();
+		if (n > 0) this.deleteSelection();
+		// Its own refresh, audit doc §5k/(b): the strip was only ever correct
+		// here because `deleteSelection` refreshes on the way out, so a cut
+		// that copied nothing - or any future cut that stops short of the
+		// delete - left the trash and paste buttons lit from a selection that
+		// is gone.
+		this.refreshStrip();
+		return n;
 	}
 
 	/**
@@ -2200,9 +2463,17 @@ export class PdfInkController {
 	 * and scale - so it is refused with the reason instead of appearing tiny
 	 * in a corner nobody chose.
 	 */
-	private pasteFromClipboard(): void {
+	pasteFromClipboard(): void {
 		const id = this.documentId();
-		if (!id) return;
+		// Audit doc §5k/AD4: this returned in silence, and the button and the
+		// palette entry both offered the paste that reached it. The offer is
+		// withdrawn now (canPasteInk and the command's checkCallback both ask
+		// for an id), and if one is taken anyway the wait is said rather than
+		// swallowed.
+		if (!id) {
+			this.notifyUnidentified();
+			return;
+		}
 		if (clipboardSize() === 0) return;
 		const pasted = pasteInk(id);
 		if (pasted.some((st) => st.page === undefined)) {

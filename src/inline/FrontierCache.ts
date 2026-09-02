@@ -51,11 +51,15 @@ export class FrontierCache {
  * the zooms, which reflow the text with the camera standing still.
  * `cssWidth`/`cssHeight` cover a viewport resize: `zoomFrontier` reads the
  * scroller's client box, and `handleResize` writes these two from the same
- * box before anything reaches here.
+ * box before anything reaches here. `writtenOn` covers `writeFrontier`'s
+ * on/off state (1.4.6 §5n): it can flip true on pen contact alone, before
+ * any stroke lands in `frontier`, so it must be its own field or that
+ * flip is invisible to this comparison and the skip holds a stale extent.
  */
 export interface ExtentInputs {
 	readonly path: string;
 	readonly frontier: Extent;
+	readonly writtenOn: boolean;
 	readonly camX: number;
 	readonly camY: number;
 	readonly camZoom: number;
@@ -73,6 +77,7 @@ export function sameExtentInputs(a: ExtentInputs | null, b: ExtentInputs): boole
 		a.path === b.path &&
 		// Identity: FrontierCache hands back the same object until invalidated.
 		a.frontier === b.frontier &&
+		a.writtenOn === b.writtenOn &&
 		a.camX === b.camX &&
 		a.camY === b.camY &&
 		a.camZoom === b.camZoom &&

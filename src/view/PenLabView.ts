@@ -111,6 +111,11 @@ export class PenLabView extends ItemView {
 		// Frozen pipeline: synchronized canvas, sync draw in pointerrawupdate.
 		this.wetInk = new WetInkRenderer(this.wetCanvas, false);
 		this.wetInk.smooth = this.smooth;
+		// The lab's committed redraw shapes its strokes whenever the global
+		// switch is on (drawStroke: pen tool, no mouse device), so the wet layer
+		// has to as well. It set nothing, so the pair the lab exists to compare
+		// disagreed with itself (§5l/AE4).
+		this.wetInk.shape = true;
 		this.head = new TailRenderer(this.headCanvas);
 
 		this.router = new PointerRouter(this.rootEl, this.camera, {
@@ -211,7 +216,8 @@ export class PenLabView extends ItemView {
 			sample.tiltY
 		);
 		if (point) {
-			this.wetInk.beginStroke(point);
+			// Pen only here, so never flat; the style is what the shaper needs.
+			this.wetInk.beginStroke(point, this.penStyle, false);
 			this.strokeAcceptedSamples++;
 			this.acceptedSamples++;
 		}

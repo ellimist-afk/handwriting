@@ -36,6 +36,18 @@ export const HIGHLIGHTER_PEN: PenStyle = {
 	gamma: 1,
 };
 
+/**
+ * The two fields of a PenStyle that a stroke's tool alone decides:
+ * DEFAULT_PEN's for pen/eraser strokes, HIGHLIGHTER_PEN's for the flat wash.
+ * StrokeRenderer.drawStroke and StrokeOutline.ribbonOf both call this rather
+ * than each restating the four numbers, so a tuning change to either pen
+ * moves both the screen and every export in one place.
+ */
+export function shapeFor(flat: boolean): Pick<PenStyle, "minWidthFactor" | "gamma"> {
+	const pen = flat ? HIGHLIGHTER_PEN : DEFAULT_PEN;
+	return { minWidthFactor: pen.minWidthFactor, gamma: pen.gamma };
+}
+
 /** Layer opacity for highlighter ink. */
 export const HIGHLIGHTER_ALPHA = 0.35;
 

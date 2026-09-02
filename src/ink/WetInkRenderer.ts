@@ -4,7 +4,7 @@ import { PenStyle, widthForPressure } from "./PenStyle";
 import { InkPoint } from "./Stroke";
 import { IncrementalSmoother, Point2 } from "./Smoothing";
 import { RibbonPt, flattenSegment, flattenSegmentHw } from "./Ribbon";
-import { IncrementalShaper, inkShapingEnabled } from "./InkShape";
+import { IncrementalShaper, centerlineSmoothed, inkShapingEnabled } from "./InkShape";
 import { fillRibbon } from "./RibbonRenderer";
 import { drawSegment } from "./StrokeRenderer";
 
@@ -92,22 +92,52 @@ export class WetInkRenderer {
 	 */
 	smooth = false;
 	/**
-	 * Shaped width law (InkShape) for this layer's strokes. The overlay sets
-	 * it for pen wet layers only; the highlighter keeps its flat wash. The
-	 * global shaping switch is consulted per stroke at beginStroke.
+	 * Whether this layer's DEVICE may take the shaped width law (InkShape).
+	 * The overlay clears it for a mouse stroke, which is never shaped. It is
+	 * a device-and-layer fact and says nothing about the tool: the tool's
+	 * flatness arrives per stroke, as `beginStroke`'s `flat` argument, because
+	 * a surface may serve pen and highlighter from ONE wet layer (the PDF
+	 * does). The global shaping switch is consulted per stroke at beginStroke.
 	 */
 	shape = false;
 	private shaper = new IncrementalShaper();
 	private shapingThisStroke = false;
+	/**
+	 * Smoothed centerline for this stroke, decided once at pen-down from the
+	 * one source (InkShape.centerlineSmoothed) the committed renderer reads.
+	 *
+	 * The wet layer has to make the same choice as the commit or the slice is
+	 * pointless: draw the midpoint-quadratic here and the raw polyline there
+	 * and the stroke would visibly reshape at pen-up, which is the jump this
+	 * change exists to remove. Decided at pen-down rather than per sample so a
+	 * setting toggled mid-stroke cannot split one stroke into two geometries.
+	 */
+	private smoothThisStroke = true;
 	private lastMidHw: number | undefined;
 	private prevSampleHw = 0;
 
-	beginStroke(first: InkPoint, style?: PenStyle): void {
+	/**
+	 * Start a stroke. `flat` is the TOOL's flatness - true for the
+	 * highlighter, whose chisel wash is exempt from both the shaped width law
+	 * and the raw centerline - and it has to be passed rather than inferred.
+	 *
+	 * It used to be inferred as `!this.shape`, and `shape` is a
+	 * device-and-layer fact: false for a MOUSE stroke, whose ink was
+	 * therefore drawn smoothed while its commit followed the setting; and
+	 * permanently true on the PDF surface, whose single wet pair serves both
+	 * tools, so the same inference there would have handed the highlighter
+	 * the exact inverse of its exemption. The committed renderer reads the
+	 * tool (StrokeRenderer.drawStroke) and the two must agree at pen-up.
+	 */
+	beginStroke(first: InkPoint, style?: PenStyle, flat = false): void {
 		this.lastPoint = first;
 		this.smoother.reset(first);
 		this.lastRibbon = undefined;
 		this.dirty = null;
-		this.shapingThisStroke = this.shape && inkShapingEnabled();
+		// The committed rule, restated: shaped only for a non-flat tool on a
+		// device that shapes, with the switch on (drawStroke's `shaping`).
+		this.shapingThisStroke = this.shape && !flat && inkShapingEnabled();
+		this.smoothThisStroke = centerlineSmoothed(flat);
 		if (this.shapingThisStroke) {
 			this.shaper.reset(first, style);
 			this.prevSampleHw = this.shaper.last();
@@ -117,7 +147,25 @@ export class WetInkRenderer {
 
 	appendPoint(cam: CameraState, style: PenStyle, point: InkPoint): void {
 		if (this.lastPoint) {
-			if (this.smooth) {
+			if (this.smooth && !this.smoothThisStroke) {
+				// Raw centerline: the ribbon runs straight from the previous
+				// sample to this one, so it already reaches the nib and there
+				// is no settled/head split to make - no lag to hide, and
+				// nothing left over to close at pen-up. Same per-sample width
+				// law as the committed raw path (Ribbon.flattenStroke with
+				// smooth off), so the wet strip and the commit are the same
+				// geometry to the last point.
+				const prev = this.lastPoint;
+				const rp = (p: InkPoint): RibbonPt => ({
+					x: p.x,
+					y: p.y,
+					hw: widthForPressure(style, p.pressure) / 2,
+				});
+				const strip: RibbonPt[] = [this.lastRibbon ?? rp(prev), rp(point)];
+				fillRibbon(this.ctx, cam, strip, style.color);
+				this.growDirtyStrip(cam, strip);
+				this.lastRibbon = strip[strip.length - 1];
+			} else if (this.smooth) {
 				// Emits the segment that just became final, one sample behind
 				// the pen. The head covers the rest.
 				const sampleHw = this.shapingThisStroke
@@ -169,9 +217,13 @@ export class WetInkRenderer {
 		this.lastPoint = point;
 	}
 
-	/** The raw stub from the settled curve to the nib; undefined in raw mode. */
+	/**
+	 * The raw stub from the settled curve to the nib; undefined in raw mode.
+	 * A raw centerline has no settled/head split - the ribbon is already at
+	 * the newest sample - so there is no stub to draw over it either.
+	 */
 	head(): { from: Point2; to: Point2; pressure: number } | undefined {
-		return this.smooth ? this.smoother.head() : undefined;
+		return this.smooth && this.smoothThisStroke ? this.smoother.head() : undefined;
 	}
 
 	/**
@@ -198,6 +250,9 @@ export class WetInkRenderer {
 	 */
 	finishStroke(cam: CameraState, style: PenStyle): void {
 		if (!this.smooth) return;
+		// Nothing to close on a raw centerline: appendPoint already drew out
+		// to the final sample.
+		if (!this.smoothThisStroke) return;
 		const seg = this.smoother.finish();
 		if (!seg) return;
 		const flatSeg = this.shapingThisStroke

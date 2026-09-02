@@ -17,7 +17,7 @@
 
 import { flattenStroke, ribbonSides, jointIndices, RibbonPt } from "./Ribbon";
 import { flattenStrokeShaped } from "./InkShape";
-import { PenStyle } from "./PenStyle";
+import { PenStyle, shapeFor } from "./PenStyle";
 import { InkStroke } from "./Stroke";
 
 /** Density for curve flattening: world px are CSS px, 2 samples per px. */
@@ -51,8 +51,8 @@ export function ribbonOf(stroke: InkStroke): RibbonPt[] {
 	const style: PenStyle = {
 		color: stroke.color,
 		baseWidth: stroke.width,
-		minWidthFactor: flat ? 0.9 : 0.35,
-		gamma: flat ? 1 : 0.75,
+		minWidthFactor: shapeFor(flat).minWidthFactor,
+		gamma: shapeFor(flat).gamma,
 	};
 	// Exports are always shaped (§5n, Alan, 2026-09-02): inkShapingEnabled()
 	// used to gate this too, so a Boox user - whose boox mode turns shaping
@@ -61,6 +61,13 @@ export function ribbonOf(stroke: InkStroke): RibbonPt[] {
 	// The toggle still governs the on-screen path (StrokeRenderer.drawStroke,
 	// WetInkRenderer) untouched; it never reaches here. The flat (highlighter)
 	// and mouse rules stay: those strokes were never shaped and must not start.
+	//
+	// The unshaped call DEPENDS on `flattenStroke`'s `smooth = true` default,
+	// and does so deliberately. The two strokes that reach it are the
+	// highlighter and the mouse, and this is the export: a false default would
+	// have sent every one of them into every SVG and PDF as a raw polyline,
+	// following an on-screen setting that by rule never reaches here. Nothing
+	// but the default says so, so it is said here (§5l/AE7).
 	return !flat && stroke.device !== "mouse"
 		? flattenStrokeShaped(pts, style, EXPORT_PX_PER_WORLD)
 		: flattenStroke(pts, style, EXPORT_PX_PER_WORLD);

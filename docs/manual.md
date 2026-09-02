@@ -36,10 +36,11 @@ command palette and bindable to hotkeys. Worth binding: `Pen`, `Highlighter`,
 `Ink size: next`, `Ink color: next`. Size and color apply to whichever tool is
 active, and persist across sessions.
 
-Ink stays glued to the text while you scroll and scales with Obsidian's zoom
-(Ctrl +/-, Ctrl-scroll quick font size, pinch). Ctrl+Z undoes ink and
-text edits in the order they happened. Draw below the last line or far off to
-the right and the note grows scroll room to reach it.
+Markdown reflows wherever it wants. Your ink stays where you put it. Only the
+insert space tool moves it, by design. Ink scrolls with the note and scales with
+Obsidian's zoom (Ctrl +/-, Ctrl-scroll quick font size, pinch). Ctrl+Z undoes
+ink and text edits in the order they happened. Draw below the last line or far
+off to the right and the note grows scroll room to reach it.
 
 Ink prediction draws a little ahead of the pen to hide display latency. It
 is on by default; turn it off in settings if the line runs ahead of the nib
@@ -119,6 +120,11 @@ a backup can repair it.
 
 Back up the vault the way you already do, and confirm `.handwriting/` is in
 the backup.
+
+`.handwriting/` is hidden, and about half of all sync tools don't carry hidden
+folders by default. Obsidian Sync, iCloud and Dropbox don't. If you use one of
+these, turn on **Compatibility with Obsidian Sync** in the settings panel to get
+your ink syncing across devices.
 
 ## writing on PDFs
 

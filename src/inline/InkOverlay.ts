@@ -22,6 +22,7 @@ import {
 	sweptRect,
 } from "./InsertSpace";
 import { MobileTools } from "./MobileTools";
+import { stripPenDown, stripPenUp } from "./StripPenChrome";
 import {
 	clipboardSize,
 	copyInk,
@@ -72,7 +73,7 @@ import { BBox, InkStroke, InkTool, newStrokeId } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
 import { drawCommitted,
-	drawRegion, drawStroke } from "../ink/StrokeRenderer";
+	drawRegion, drawStroke, ribbonCacheStats } from "../ink/StrokeRenderer";
 import { snipViewport } from "../pdf/PageMap";
 import { TailRenderer } from "../ink/TailRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
@@ -131,7 +132,7 @@ import {
 import { InlinePenRouter, bandEraserIntent } from "./InlinePenRouter";
 import { armMouseInkQuietly, mouseInkEnabled } from "./MouseInk";
 import { describeEl, setHitProbeContext } from "./PenHitProbe";
-import { Extent, inkFrontier, isScrollableOverflow, ScrollAxisGuard, spacerPosition, surfaceExtents, surfaceOriginInScroller, ZERO_EXTENT, zoomFrontier } from "./SurfaceExtent";
+import { Extent, inkFrontier, isScrollableOverflow, ScrollAxisGuard, spacerPosition, surfaceExtents, surfaceOriginInScroller, writeFrontier, ZERO_EXTENT, zoomFrontier } from "./SurfaceExtent";
 import { ProbeBox, capturePresented, parseHexColor, regionCensus } from "./PresentProbe";
 import {
 	bboxVisibleInViewport,
@@ -391,13 +392,29 @@ const stripSurfaces = new Set<() => void>();
  */
 const tipModeSurfaces = new Set<() => void>();
 
+/**
+ * And the same surfaces need to know when a RENDER-TIME setting changed the
+ * committed geometry under them. `repaintAllInkOverlays` walked `instances`,
+ * which is the editor overlays and nothing else, so flipping Ink smoothing or
+ * pressure sensitivity left every open PDF and every page view showing ink in
+ * the old shape until something unrelated happened to repaint it - on the
+ * surface the plugin calls the headline use for writing.
+ */
+const repaintSurfaces = new Set<() => void>();
+
 /** Register an extra strip to refresh with the editors. Returns the undo. */
-export function addStripSurface(refresh: () => void, onTipMode?: () => void): () => void {
+export function addStripSurface(
+	refresh: () => void,
+	onTipMode?: () => void,
+	onRepaint?: () => void
+): () => void {
 	stripSurfaces.add(refresh);
 	if (onTipMode) tipModeSurfaces.add(onTipMode);
+	if (onRepaint) repaintSurfaces.add(onRepaint);
 	return () => {
 		stripSurfaces.delete(refresh);
 		if (onTipMode) tipModeSurfaces.delete(onTipMode);
+		if (onRepaint) repaintSurfaces.delete(onRepaint);
 	};
 }
 
@@ -422,6 +439,10 @@ export function setShapeSnap(on: boolean): void {
 
 export function setPenReticle(on: boolean): void {
 	penReticleOn = on;
+}
+
+export function penReticleEnabled(): boolean {
+	return penReticleOn;
 }
 
 export function setEraserWholeStrokes(on: boolean): void {
@@ -532,9 +553,14 @@ export function refreshAllStrips(): void {
 	refreshStripSurfaces();
 }
 
-/** Repaint every open editor's committed ink (the shaping toggle uses this). */
+/**
+ * Repaint every surface's committed ink: the shaping, smoothing and pressure
+ * toggles all change render-time geometry and none of them touches a stroke,
+ * so nothing else would.
+ */
 export function repaintAllInkOverlays(): void {
 	for (const p of instances) p.scheduleRepaint("shaping-toggle");
+	for (const repaint of repaintSurfaces) repaint();
 }
 
 /** Everything the A/B comparison against the canvas view needs, as text. */
@@ -560,6 +586,7 @@ export function copyInlineInkMetrics(): string {
 		`down/up/backstop/silent: ${downs}/${ups}/${backstops}/${silentLifts}  palms blocked: ${palms}`,
 		`session: up ${((Date.now() - sessionStartMs) / 60000).toFixed(0)} min  overlays ${instances.size}  embed layers ${embedInkLayerCount()}  print swaps ${embedInkPrintSwaps()}`,
 		`ink cache: ${cache.notes} note(s), ${cache.strokes} strokes, ${cache.points} points`,
+		`ribbon cache: ${ribbonCacheStats().hits} hit / ${ribbonCacheStats().misses} miss`,
 		// `desynchronized` is a hint, not a contract - a browser may refuse it
 		// without saying so. Report what was GRANTED, so "the tip is on the
 		// low-latency path" is something this panel can settle rather than
@@ -1903,9 +1930,9 @@ export class InkOverlayPlugin {
 		// drop-down chrome closes. This sat in the ink branch alone, so the
 		// toolbar stayed put under an eraser and covered the ink being
 		// rubbed out (alan, 2026-08-27). penUp restores it for every gesture
-		// already, so only the hide was one-sided.
-		this.mobileTools?.setInking(true);
-		this.mobileTools?.closeInkSliders();
+		// already, so only the hide was one-sided. Shared with the pdf
+		// surface (StripPenChrome.ts, §5o) so the two cannot diverge again.
+		stripPenDown(this.mobileTools);
 
 		// The pen decides what it is at contact (§52/§53, mode-free):
 		// eraser end erases, side button held lassos/moves, tip inks.
@@ -1993,7 +2020,10 @@ export class InkOverlayPlugin {
 		this.ensurePenTools();
 		// The strip stepped aside at contact, above; a strip only just created
 		// by ensurePenTools has not heard that yet, so tell it now.
-		this.mobileTools?.setInking(true);
+		// stripPenDown, not a bare setInking: closeInkSliders is a no-op on a
+		// strip that was just built (nothing on it can be open yet), so
+		// calling the pair again here is exactly today's behaviour.
+		stripPenDown(this.mobileTools);
 		this.activeWet = tool === "highlighter" ? this.highlightWet : this.wet;
 		// The wet layer's shaping follows the device per stroke: a mouse
 		// stroke draws flat live, exactly as it will commit.
@@ -2030,7 +2060,11 @@ export class InkOverlayPlugin {
 			sample.tiltY
 		);
 		if (point) {
-			this.activeWet.beginStroke(point, this.activeStyle);
+			// The tool's flatness travels with the stroke. Inferring it from
+			// the layer's `shape` made every MOUSE stroke look flat, so mouse
+			// ink drew smoothed and committed raw whenever the setting was
+			// off - the case the line above exists to protect.
+			this.activeWet.beginStroke(point, this.activeStyle, tool === "highlighter");
 			// A tap that never moves produces no rawupdate, so without this the
 			// dot only appears at pen-up. Draw the contact point immediately.
 			this.tail.clear();
@@ -2254,8 +2288,8 @@ export class InkOverlayPlugin {
 		// a fresh note, a working undo button kept wearing the disabled look
 		// that issue #1 was filed about. The microtask runs once penUp and
 		// all its dispatches have returned, whichever branch they took.
-		this.mobileTools?.setInking(false);
-		queueMicrotask(() => this.mobileTools?.refresh());
+		// Shared with the pdf surface (StripPenChrome.ts, §5o).
+		stripPenUp(this.mobileTools);
 		if (this.mode === "pan") {
 			this.mode = "ink";
 			this.panLast = null;
@@ -3877,9 +3911,18 @@ export class InkOverlayPlugin {
 		// forces layout - two getBoundingClientRect, the origin, the spacer
 		// position. Skip it. Gesture ends pass force and never skip. §5g/G1.
 		const cam = this.camera.snapshot;
+		// Written-on: ink present, or the pen has been seen this session (the
+		// same predicate the strip uses, InkOverlay.ts:1270 - PenToolsMode's
+		// flag can flip true on pen contact alone, before any stroke exists).
+		// Carried as its own ExtentInputs field, not folded into `frontier`:
+		// that flip changes no stroke count, so `frontier` would stay the same
+		// object and the G1 skip guard below would hold the pre-contact extent
+		// for a whole gesture (1.4.6 §5n).
+		const writtenOn = inlineInk.strokes(path).length > 0 || penSeenThisSession();
 		const inputs: ExtentInputs = {
 			path,
 			frontier: this.frontierCache.get(path, inlineInk.strokes(path)),
+			writtenOn,
 			camX: cam.x,
 			camY: cam.y,
 			camZoom: cam.zoom,
@@ -3907,17 +3950,31 @@ export class InkOverlayPlugin {
 			scale: this.cssScale,
 		});
 		const ink = inputs.frontier;
+		// Shared with writeFrontier below - both need the same document-bottom
+		// number and neither may re-read layout to get it.
+		const contentBottom = (contentRect.bottom - preRect.top) / this.cssScale + scroller.scrollTop;
 		const zoom = zoomFrontier({
 			clientWidth: scroller.clientWidth,
 			clientHeight: scroller.clientHeight,
-			contentBottom: (contentRect.bottom - preRect.top) / this.cssScale + scroller.scrollTop,
+			contentBottom,
 			origin,
 			pinchScale: this.pinchScaleNow,
 			fontZoom: this.fontZoom,
 		});
+		// Room to write at the top of the screen (1.4.6 §5n): only granted
+		// while the surface is being written on, so a typing-only note keeps a
+		// byte-identical extent.
+		const write = inputs.writtenOn
+			? writeFrontier({
+					clientHeight: scroller.clientHeight,
+					contentBottom,
+					origin,
+					fontZoom: this.fontZoom,
+				})
+			: ZERO_EXTENT;
 		const granted = surfaceExtents.grow(path, {
 			x: Math.max(ink.x, zoom.x),
-			y: Math.max(ink.y, zoom.y),
+			y: Math.max(ink.y, zoom.y, write.y),
 		});
 		if (!this.spacer && granted.x === 0 && granted.y === 0) return;
 		if (!this.spacer) {

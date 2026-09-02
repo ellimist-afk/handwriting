@@ -118,6 +118,65 @@ export function zoomFrontier(g: {
 	return { x: Math.max(0, x), y: Math.max(0, y) };
 }
 
+/**
+ * How much of a viewport's height `writeFrontier` grants past the document
+ * bottom, as a fraction of `clientHeight`.
+ *
+ * Phone-sized numbers (a folding phone's inner display, `clientHeight` ~700
+ * css px, per the user report in 1.4.6 §5n): at 0.75 the grant is ~525px, so
+ * once scrolled to the frontier the last written line sits roughly a quarter
+ * of the way down the viewport, leaving about three quarters of the screen
+ * blank below it to write in - enough that a hand no longer runs off the
+ * bottom edge. 1.0 would push the last line off the TOP of the viewport
+ * (the note looks empty); 0.5 only reaches mid-screen, which is close to
+ * what the report already described as "quite low."
+ */
+export const WRITE_FRONTIER_VIEWPORT_FRACTION = 0.75;
+
+/**
+ * The write frontier: while a surface is being WRITTEN on, the vertical
+ * extent must reach past the document bottom by most of a viewport, so the
+ * line under the nib can always be scrolled up to a comfortable height.
+ * Without this, vertical reach is `inkFrontier` alone (plus
+ * `EXTENT_HEADROOM`/`EXTENT_CHUNK`): a note with nothing written low on the
+ * page has no scroll reach below its text, so the only place left to write
+ * is wherever content already reaches - the bottom of the screen on a
+ * phone, which is where the hand falls off (1.4.6 §5n, the folding-phone
+ * report).
+ *
+ * Same shape and units as `zoomFrontier`'s y: `origin.top` and
+ * `contentBottom` are scroller-content px, the result is divided by
+ * `fontZoom` (the spacer scales it back up), and it never goes negative.
+ * `x` is always 0 - writing does not need extra horizontal reach.
+ *
+ * THE TRAP: `SurfaceExtents.grow` only ever takes the max of what it is
+ * given and never shrinks (`grownAxis`/`grownExtent` above), so an extent
+ * granted at one viewport size persists on that note's path for the rest of
+ * the session. Rotating a phone or widening a window ratchets the extent up
+ * and it stays up after rotating back or narrowing again. That is already
+ * true of `zoomFrontier` and is accepted here for the same reason: the cost
+ * is blank scroll range, not lost ink - but it must be written down rather
+ * than rediscovered.
+ *
+ * Callers must compute this ONLY when the surface is being written on (ink
+ * present, or the pen has been seen this session) and pass `ZERO_EXTENT`
+ * otherwise - a note nobody has inked and no pen has touched must keep a
+ * byte-identical extent, so a typing-only vault never gains phantom scroll.
+ */
+export function writeFrontier(g: {
+	clientHeight: number;
+	/** Document bottom in scroller-content px, same value zoomFrontier used. */
+	contentBottom: number;
+	origin: { top: number };
+	fontZoom: number;
+}): Extent {
+	if (!Number.isFinite(g.fontZoom) || g.fontZoom <= 0) return ZERO_EXTENT;
+	const y =
+		(g.contentBottom + g.clientHeight * WRITE_FRONTIER_VIEWPORT_FRACTION - g.origin.top) /
+		g.fontZoom;
+	return { x: 0, y: Math.max(0, y) };
+}
+
 /** Spacer style position: origin plus granted extent, whole px. */
 export function spacerPosition(
 	origin: { left: number; top: number },

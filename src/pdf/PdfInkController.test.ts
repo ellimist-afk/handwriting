@@ -12,12 +12,15 @@
  * The viewer probe is the only thing stubbed. The page geometry, the hit
  * test, the selection and the history are all the real code.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InkOp } from "../inline/InkHistory";
 import { InkStroke, computeBBox } from "../ink/Stroke";
 import { PenSample } from "../input/PointerRouter";
 import { resetTipModeForTest, setTipMode, setTipModeListener, tipMode } from "../inline/TipMode";
 import { DEFAULT_PEN } from "../ink/PenStyle";
+import { setInkShaping } from "../ink/InkShape";
+import { setInlineTool, setPenReticle } from "../inline/InkOverlay";
+import { clearInkClipboard, clipboardSize } from "../inline/InkClipboard";
 
 /**
  * The gesture path reaches sync, which rebinds, which constructs observers.
@@ -37,6 +40,7 @@ const probe = vi.hoisted(() => ({ current: null as unknown }));
 vi.mock("./PdfViewerProbe", () => ({ probeViewer: () => probe.current }));
 
 import { PdfInkController, pdfPenWidth, pointerScale } from "./PdfInkController";
+import { applyOp } from "./PdfInkHistory";
 
 /** css px per point, as `--scale-factor` reports it. */
 const SCALE = 2;
@@ -62,6 +66,8 @@ function inkAt(id: string): InkStroke {
 
 describe("PdfInkController lasso", () => {
 	let strokes: InkStroke[];
+	/** The one stroke the store starts with, kept because the store loses it. */
+	let s1: InkStroke;
 	let ops: InkOp[];
 	let controller: PdfInkController;
 	let pen: {
@@ -72,7 +78,8 @@ describe("PdfInkController lasso", () => {
 
 	beforeEach(() => {
 		resetTipModeForTest();
-		strokes = [inkAt("s1")];
+		s1 = inkAt("s1");
+		strokes = [s1];
 		ops = [];
 		const scroller = {
 			scrollLeft: 0,
@@ -107,10 +114,27 @@ describe("PdfInkController lasso", () => {
 			() => strokes,
 			() => "doc-1",
 			() => strokes,
-			(op) => ops.push(op)
+			// The sink main.ts installs, not a recorder. A sink that only
+			// pushes to an array leaves `deleteSelection`'s BOOLEAN as the
+			// whole assertion, and a delete that returns true while removing
+			// nothing passed every test in this block - which is how a bug
+			// that emptied the selection and deleted no ink got as far as a
+			// device. main.ts (`:430-435`) works the op out into a new stroke
+			// list and writes it back, so that is what the store does here;
+			// "live" decides only whether the sidecar is persisted, never
+			// whether the list changed.
+			(op) => {
+				ops.push(op);
+				strokes = applyOp(strokes, op);
+			}
 		);
 		pen = controller as unknown as typeof pen;
 	});
+
+	/** The ids the store holds now, which is the question that matters. */
+	function stored(): string[] {
+		return strokes.map((s) => s.id);
+	}
 
 	/** Trace a closed loop through the given scroller-relative corners. */
 	function lasso(corners: [number, number][]): void {
@@ -129,12 +153,40 @@ describe("PdfInkController lasso", () => {
 			[250, 250],
 			[150, 250],
 		]);
-		// deleteSelection is the public witness: true only if the lasso
-		// actually holds those stroke ids.
 		expect(controller.deleteSelection()).toBe(true);
-		expect(ops).toEqual([
-			{ type: "remove", path: "doc-1", strokes: [strokes[0]], indices: [0] },
+		expect(ops).toEqual([{ type: "remove", path: "doc-1", strokes: [s1], indices: [0] }]);
+		// The op is only half of it. What the report was about is the ink:
+		// "lasso'd it, trashcan lit up, hit delete, trashcan and undo dimed,
+		// but nothing deleted" - a true return with the stroke still there.
+		expect(stored()).toEqual([]);
+	});
+
+	it("cutSelection copies to the clipboard, then empties the selection", () => {
+		clearInkClipboard();
+		setTipMode("lasso");
+		lasso([
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
 		]);
+		expect(controller.cutSelection()).toBe(1);
+		expect(clipboardSize()).toBe(1);
+		// A cut is a copy and a delete, so the ink has to be GONE from the
+		// store as well as out of the selection.
+		expect(stored()).toEqual([]);
+		// deleteSelection is the public witness: false once the lasso holds
+		// nothing, which is what a cut's own delete leaves behind.
+		expect(controller.deleteSelection()).toBe(false);
+		expect(ops).toEqual([{ type: "remove", path: "doc-1", strokes: [s1], indices: [0] }]);
+	});
+
+	it("cutSelection is a no-op with nothing lassoed", () => {
+		clearInkClipboard();
+		expect(controller.cutSelection()).toBe(0);
+		expect(clipboardSize()).toBe(0);
+		expect(ops).toEqual([]);
+		expect(stored()).toEqual(["s1"]);
 	});
 
 	it("selects nothing when the loop encircles nothing", () => {
@@ -147,6 +199,7 @@ describe("PdfInkController lasso", () => {
 		]);
 		expect(controller.deleteSelection()).toBe(false);
 		expect(ops).toEqual([]);
+		expect(stored()).toEqual(["s1"]);
 	});
 
 	it("a second loop elsewhere drops the first selection", () => {
@@ -164,6 +217,7 @@ describe("PdfInkController lasso", () => {
 			[450, 550],
 		]);
 		expect(controller.deleteSelection()).toBe(false);
+		expect(stored()).toEqual(["s1"]);
 	});
 
 	it("dragging a selection moves it by the travel", () => {
@@ -187,6 +241,11 @@ describe("PdfInkController lasso", () => {
 		expect(dx).toBeCloseTo(10, 6);
 		expect(dy).toBeCloseTo(0, 6);
 		for (const op of moves) expect((op as { strokeIds: string[] }).strokeIds).toEqual(["s1"]);
+		// And the store moved with them: the live moves are applied sample by
+		// sample, exactly as main.ts applies them, so the stroke that started
+		// at page x=100 sits at 110.
+		expect(strokes[0]!.points.map((p) => p.x)).toEqual([110, 115, 120]);
+		expect(strokes[0]!.bbox.x).toBeCloseTo(s1.bbox.x + 10, 6);
 	});
 
 	it("a document switch mid-gesture leaves the pane able to sync again", () => {
@@ -215,6 +274,8 @@ describe("PdfInkController lasso", () => {
 		// deleteSelection is the public witness used elsewhere in this file:
 		// true only if the lasso still holds those stroke ids.
 		expect(controller.deleteSelection()).toBe(false);
+		// Dissolving a selection puts it away; it does not take the ink.
+		expect(stored()).toEqual(["s1"]);
 	});
 
 	/**
@@ -251,6 +312,7 @@ describe("PdfInkController lasso", () => {
 		});
 		setTipMode("nib");
 		expect(controller.deleteSelection()).toBe(false);
+		expect(stored()).toEqual(["s1"]);
 	});
 
 	it("switching to lasso after a fresh lasso does not clear it", () => {
@@ -266,6 +328,7 @@ describe("PdfInkController lasso", () => {
 		});
 		setTipMode("lasso");
 		expect(controller.deleteSelection()).toBe(true);
+		expect(stored()).toEqual([]);
 	});
 });
 
@@ -323,12 +386,13 @@ describe("PdfInkController, the rest of what went wrong", () => {
 			(op, mode) => {
 				ops.push(op);
 				modes.push(mode);
-				// A store that actually applies, so an erase can be measured
-				// against what it left behind.
-				if (op.type === "replace") {
-					const gone = new Set(op.removed.map((s) => s.id));
-					strokes = strokes.filter((s) => !gone.has(s.id)).concat(op.inserted);
-				}
+				// A store that actually applies, so an op can be measured
+				// against what it left behind. `applyOp` is the same function
+				// main.ts's sink calls (`:430-435`), rather than the erase-only
+				// approximation this used to carry: a hand-written `replace`
+				// answered erases and left every other op recorded but never
+				// applied, so a delete that removed nothing still passed.
+				strokes = applyOp(strokes, op);
 			},
 			() => {},
 			(message) => notices.push(message),
@@ -419,6 +483,10 @@ describe("PdfInkController, the rest of what went wrong", () => {
 		};
 		expect(remove.strokes.map((st) => st.id)).toEqual(["s3"]);
 		expect(remove.indices).toEqual([2]);
+		// The index is for undo's sake; the delete is for the ink's. Assert
+		// both, or a delete that indexes correctly and removes nothing reads
+		// as a pass.
+		expect(strokes.map((st) => st.id)).toEqual(["s1", "s2"]);
 	});
 
 	// One write per gesture, not one per sample. The eraser, the lasso drag
@@ -477,6 +545,58 @@ describe("PdfInkController, the rest of what went wrong", () => {
 		const ring = controller as unknown as { history: { depth: { done: number } } };
 		expect(ops.filter((op) => op.type === "replace").length).toBeGreaterThan(0);
 		expect(ring.history.depth.done).toBe(1);
+	});
+
+	/**
+	 * This surface never called `beginStroke`, so the wet renderer's per-stroke
+	 * decisions stayed at their initialisers: the centerline was smoothed
+	 * forever while the commit followed "Ink smoothing", and the stroke visibly
+	 * re-shaped at pen-up (Alan, on a PDF, 2026-09-02). The seam here is
+	 * `wetFlat`, the TOOL's flatness read at pen-down: the wet pair is shared
+	 * between the two tools, so the layer cannot work it out and must be told.
+	 * What the renderer then does with it is pinned in WetInkRenderer.test.ts;
+	 * a wet pair needs canvases, which this harness has none of.
+	 */
+	describe("the wet layer is told the stroke started, and with which tool", () => {
+		afterEach(() => {
+			setInlineTool("pen");
+			setInkShaping(true);
+		});
+
+		const wetState = () => controller as unknown as { wetBegun: boolean; wetFlat: boolean };
+
+		it("reads the tool again on every pen-down", () => {
+			// One field per stroke, not per layer: two strokes with different
+			// tools land on the same wet pair and must not inherit each other.
+			setInlineTool("highlighter");
+			pen.penDown(sample(200, 200));
+			pen.penUp();
+			expect(wetState().wetFlat).toBe(true);
+			setInlineTool("pen");
+			pen.penDown(sample(200, 200));
+			pen.penUp();
+			expect(wetState().wetFlat).toBe(false);
+		});
+
+		it("carries the pen's flatness, so the setting reaches the wet line", () => {
+			setInkShaping(false);
+			pen.penDown(sample(200, 200));
+			pen.penRaw([sample(230, 230)]);
+			expect(wetState().wetFlat).toBe(false);
+			pen.penUp();
+		});
+
+		it("carries the highlighter's flatness on the same shared pair", () => {
+			// The booby trap: `shape` is permanently true on this surface, so
+			// inferring flatness from it would hand the highlighter exactly the
+			// inverse of its exemption.
+			setInkShaping(false);
+			setInlineTool("highlighter");
+			pen.penDown(sample(200, 200));
+			pen.penRaw([sample(230, 230)]);
+			expect(wetState().wetFlat).toBe(true);
+			pen.penUp();
+		});
 	});
 });
 
@@ -658,5 +778,441 @@ describe("the scale a pointer sample is converted with", () => {
 	it("falls back rather than dividing by a box with no width", () => {
 		expect(pointerScale(0, 612, 1.87)).toBe(1.87);
 		expect(Number.isFinite(pointerScale(0, 0, 1.87))).toBe(true);
+	});
+});
+
+/**
+ * Audit doc §5f: the note surface's hover dot obeys the "Pen reticle"
+ * setting (and Boox mode, which turns it off for e-ink); this surface
+ * consulted nothing, so the dot kept repainting on the PDF regardless. The
+ * fix reads the same flag (InkOverlay's `penReticleOn`, via the new
+ * `penReticleEnabled` getter) at the same two points the note surface
+ * already gates: before painting the dot, and before arming the timer that
+ * repaints it - an invisible dot that still costs a timer per move defeats
+ * the e-ink point.
+ *
+ * `showCursor`/`hideCursor`/`refreshStrip` are private; reached the same way
+ * the lasso tests above reach `penDown`/`penRaw`/`penUp` - a cast, not a
+ * parallel public API grown just for a test.
+ */
+describe("PdfInkController pen reticle", () => {
+	let controller: PdfInkController;
+	let priv: {
+		showCursor(sample: PenSample, pointerType?: string): void;
+		hideCursor(): void;
+		refreshStrip(): void;
+	};
+	let cursorEl: {
+		setAttribute(): void;
+		remove(): void;
+		classList: { toggle(): void };
+		setCssStyles(styles: Record<string, unknown>): void;
+		parentElement: unknown;
+	} | null;
+	let cursorStyle: Record<string, unknown>;
+	let setTimeoutSpy: ReturnType<typeof vi.fn>;
+	let clearTimeoutSpy: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		resetTipModeForTest();
+		cursorEl = null;
+		cursorStyle = {};
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+			setCssStyles: () => {},
+			createDiv: () => {
+				cursorEl = {
+					setAttribute: () => {},
+					remove: () => {},
+					classList: { toggle: () => {} },
+					setCssStyles: (styles: Record<string, unknown>) => {
+						Object.assign(cursorStyle, styles);
+					},
+					parentElement: scroller,
+				};
+				return cursorEl;
+			},
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		setTimeoutSpy = vi.fn(() => 1);
+		clearTimeoutSpy = vi.fn();
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: clearTimeoutSpy,
+			setTimeout: setTimeoutSpy,
+			requestAnimationFrame: () => 0,
+			getComputedStyle: () => ({ position: "relative" }),
+		};
+		controller = new PdfInkController(
+			{} as HTMLElement,
+			win as unknown as Window,
+			() => [],
+			() => "doc-1",
+			() => [],
+			() => {}
+		);
+		priv = controller as unknown as typeof priv;
+	});
+
+	afterEach(() => {
+		setPenReticle(true);
+	});
+
+	it("flag off: a hover paints no cursor and arms no timer", () => {
+		setPenReticle(false);
+		priv.showCursor(sample(10, 10), "pen");
+		expect(cursorEl).toBeNull();
+		expect(setTimeoutSpy).not.toHaveBeenCalled();
+	});
+
+	it("flag on: a hover is unchanged - dot painted, hide timer armed", () => {
+		setPenReticle(true);
+		priv.showCursor(sample(10, 10), "pen");
+		expect(cursorEl).not.toBeNull();
+		expect(cursorStyle.display).toBe("block");
+		expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("flag turned off while a dot is showing: refreshStrip hides it", () => {
+		setPenReticle(true);
+		priv.showCursor(sample(10, 10), "pen");
+		expect(cursorStyle.display).toBe("block");
+		setPenReticle(false);
+		priv.refreshStrip();
+		expect(cursorStyle.display).toBe("none");
+		expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+/**
+ * The strip's buttons, and what the selection commands say when they refuse.
+ *
+ * Audit doc §5k/AD1: Z routed the strip's delete/copy/paste out to the
+ * commands, and the commands resolve a surface from the workspace - so on a
+ * split with a note active the PDF's own trash button deleted the NOTE's ink.
+ * These drive `stripExec` directly, which is the whole dispatch: a button acts
+ * on the controller it is mounted on, and the injected `exec` - the passthrough
+ * to Obsidian's command palette - must never be reached for those four ids.
+ */
+describe("PdfInkController strip dispatch", () => {
+	let strokes: InkStroke[];
+	let ops: InkOp[];
+	let notices: string[];
+	let execs: string[];
+	let docId: string | null;
+	let controller: PdfInkController;
+	let pen: { penDown(s: PenSample): void; penRaw(s: PenSample[]): void; penUp(): void };
+	let priv: { stripExec(id: string): void };
+
+	beforeEach(() => {
+		resetTipModeForTest();
+		clearInkClipboard();
+		strokes = [inkAt("s1")];
+		ops = [];
+		notices = [];
+		execs = [];
+		docId = "doc-1";
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: () => {},
+			setTimeout: () => 0,
+			requestAnimationFrame: () => 0,
+		};
+		controller = new PdfInkController(
+			{} as HTMLElement,
+			win as unknown as Window,
+			() => strokes,
+			() => docId,
+			() => strokes,
+			(op) => ops.push(op),
+			(id) => execs.push(id),
+			(message) => notices.push(message)
+		);
+		pen = controller as unknown as typeof pen;
+		priv = controller as unknown as typeof priv;
+	});
+
+	afterEach(() => {
+		clearInkClipboard();
+	});
+
+	/** Select s1, through the real lasso path. */
+	function select(): void {
+		setTipMode("lasso");
+		const corners: [number, number][] = [
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		];
+		pen.penDown(sample(corners[0]![0], corners[0]![1]));
+		for (const [x, y] of corners.slice(1)) pen.penRaw([sample(x, y)]);
+		pen.penRaw([sample(corners[0]![0], corners[0]![1])]);
+		pen.penUp();
+	}
+
+	it("the trash button deletes THIS controller's selection and calls no command", () => {
+		select();
+		priv.stripExec("handwriting:delete-selected-ink");
+		expect(ops).toEqual([
+			{ type: "remove", path: "doc-1", strokes: [strokes[0]], indices: [0] },
+		]);
+		expect(execs).toEqual([]);
+	});
+
+	it("the copy button copies THIS controller's selection and calls no command", () => {
+		select();
+		priv.stripExec("handwriting:copy-selected-ink");
+		expect(clipboardSize()).toBe(1);
+		expect(notices).toEqual(["Handwriting: copied 1 stroke(s)"]);
+		expect(execs).toEqual([]);
+	});
+
+	it("the paste button pastes into THIS controller and calls no command", () => {
+		select();
+		controller.copySelection();
+		notices.length = 0;
+		priv.stripExec("handwriting:paste-ink");
+		expect(ops.map((o) => o.type)).toEqual(["add"]);
+		expect(notices).toEqual(["Handwriting: pasted 1 stroke"]);
+		expect(execs).toEqual([]);
+	});
+
+	it("cut is routed here too, in the wording the note command uses", () => {
+		select();
+		priv.stripExec("handwriting:cut-selected-ink");
+		expect(clipboardSize()).toBe(1);
+		expect(ops.map((o) => o.type)).toEqual(["remove"]);
+		expect(notices).toEqual(["Handwriting: cut 1 stroke(s)"]);
+		expect(execs).toEqual([]);
+	});
+
+	it("every other command id still reaches the host's exec", () => {
+		priv.stripExec("handwriting:inline-tool-pen");
+		expect(execs).toEqual(["handwriting:inline-tool-pen"]);
+	});
+
+	it("undo stays on this view's own ring, not the editor's", () => {
+		select();
+		controller.deleteSelection();
+		priv.stripExec("editor:undo");
+		expect(ops.map((o) => o.type)).toEqual(["remove", "add"]);
+		expect(execs).toEqual([]);
+	});
+
+	it("copy with nothing lassoed says lasso first and leaves the clipboard alone", () => {
+		// Audit doc §5k/AD3: this said "copied 0 strokes", and the clipboard
+		// still held whatever was copied before - so the next paste brought
+		// back the older ink and read as this copy having gone astray.
+		select();
+		controller.copySelection();
+		notices.length = 0;
+		controller.dissolveSelection();
+		priv.stripExec("handwriting:copy-selected-ink");
+		expect(notices).toEqual(["Handwriting: lasso some ink first"]);
+		expect(clipboardSize()).toBe(1);
+	});
+
+	it("paste before the document is identified says so and changes nothing", () => {
+		select();
+		controller.copySelection();
+		notices.length = 0;
+		ops.length = 0;
+		docId = null;
+		priv.stripExec("handwriting:paste-ink");
+		expect(notices).toEqual(["Handwriting: still identifying this PDF - try again in a moment"]);
+		expect(ops).toEqual([]);
+	});
+
+	it("delete before the document is identified names the id, not the lasso", () => {
+		docId = null;
+		priv.stripExec("handwriting:delete-selected-ink");
+		expect(notices).toEqual(["Handwriting: still identifying this PDF - try again in a moment"]);
+		expect(ops).toEqual([]);
+	});
+
+	it("cut refreshes the strip itself, not only through deleteSelection", () => {
+		// Audit doc §5k/(b): a cut that copies nothing never reaches
+		// deleteSelection, and the strip kept the lights of a selection that
+		// had already gone.
+		const refreshStrip = vi.spyOn(controller, "refreshStrip");
+		expect(controller.cutSelection()).toBe(0);
+		expect(refreshStrip).toHaveBeenCalled();
+	});
+
+	it("a selection whose strokes are gone says lasso first and is not a selection", () => {
+		// Audit doc §5q/AK2. The ids survive a sidecar reload that took the
+		// strokes (deleted on another device); `deleteSelection` resolves them
+		// against live strokes and refuses, while the strip's enablement used
+		// to ask `selected.length` and light the trash anyway. This is that
+		// state: a real lasso, then the document emptied under it.
+		select();
+		strokes.length = 0;
+		expect(controller.hasSelection).toBe(false);
+		priv.stripExec("handwriting:delete-selected-ink");
+		expect(notices).toEqual(["Handwriting: lasso some ink first"]);
+		expect(ops).toEqual([]);
+	});
+});
+
+/**
+ * `deleteSelectionCommand()`, what the strip button, the palette/hotkey
+ * command and (since §5s) a Delete/Backspace key WITH A LIVE SELECTION all
+ * call. Audit doc §5r: the key used to call `deleteSelection()` directly, a
+ * fourth dispatcher beside those three that skipped the id gate and every
+ * notice. §5s/AM-B then drew the finer line: an ordinary Backspace with
+ * nothing lassoed is not a request to delete ink and must stay silent, so
+ * the keydown handler now checks `this.hasSelection` itself (§5u: the
+ * bounds-resolved question, not the raw id list, so a selection whose
+ * strokes were deleted on another device reads as "nothing lassoed" too)
+ * and never calls this method at all in that case - there is nothing to
+ * assert for
+ * that branch beyond "not called", which these tests do not exercise
+ * because they call the method directly. What every OTHER path shares -
+ * button, palette, and the key once something is actually lassoed - is this
+ * method, unchanged in its own notify contract (audit doc §5s/AM-B: "the
+ * strip and palette wrappers keep notifying on every refusal, because
+ * pressing those IS the deliberate act") and now returning whether it
+ * deleted (§5s/AM-A).
+ *
+ * The keydown handler itself is a local closure bound in `mount()`, not a
+ * class member, and `root` here is a plain object with no real
+ * `addEventListener` - so the closure and its `hasSelection` gate cannot
+ * be reached from this harness; this is the wrapper it deletes to,
+ * §5s/AM-A's part of the fix, driven directly. Uses the applying sink
+ * (§5r/AL2), never the collecting one, so a delete that returns/notifies
+ * correctly but leaves the store untouched would still fail here.
+ */
+describe("PdfInkController deleteSelectionCommand (what the strip, palette and a live-selection Delete/Backspace all call)", () => {
+	let strokes: InkStroke[];
+	let ops: InkOp[];
+	let notices: string[];
+	let docId: string | null;
+	let controller: PdfInkController;
+	let pen: { penDown(s: PenSample): void; penRaw(s: PenSample[]): void; penUp(): void };
+
+	beforeEach(() => {
+		resetTipModeForTest();
+		strokes = [inkAt("s1")];
+		ops = [];
+		notices = [];
+		docId = "doc-1";
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: () => {},
+			setTimeout: () => 0,
+			requestAnimationFrame: () => 0,
+		};
+		controller = new PdfInkController(
+			{} as HTMLElement,
+			win as unknown as Window,
+			() => strokes,
+			() => docId,
+			() => strokes,
+			(op) => {
+				ops.push(op);
+				strokes = applyOp(strokes, op);
+			},
+			() => {},
+			(message) => notices.push(message)
+		);
+		pen = controller as unknown as typeof pen;
+	});
+
+	/** Select s1, through the real lasso path. */
+	function select(): void {
+		setTipMode("lasso");
+		const corners: [number, number][] = [
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		];
+		pen.penDown(sample(corners[0]![0], corners[0]![1]));
+		for (const [x, y] of corners.slice(1)) pen.penRaw([sample(x, y)]);
+		pen.penRaw([sample(corners[0]![0], corners[0]![1])]);
+		pen.penUp();
+	}
+
+	it("no document id: notifies, removes nothing, and returns false (§5s/AM-A)", () => {
+		docId = null;
+		expect(controller.deleteSelectionCommand()).toBe(false);
+		expect(notices).toEqual(["Handwriting: still identifying this PDF - try again in a moment"]);
+		expect(ops).toEqual([]);
+		expect(strokes.map((s) => s.id)).toEqual(["s1"]);
+	});
+
+	it("identified, empty selection: notifies, removes nothing, and returns false", () => {
+		expect(controller.deleteSelectionCommand()).toBe(false);
+		expect(notices).toEqual(["Handwriting: lasso some ink first"]);
+		expect(ops).toEqual([]);
+		expect(strokes.map((s) => s.id)).toEqual(["s1"]);
+	});
+
+	it("identified, live selection: removes the strokes from the store and returns true, not merely a true return with nothing removed", () => {
+		select();
+		expect(controller.deleteSelectionCommand()).toBe(true);
+		expect(strokes.map((s) => s.id)).toEqual([]);
+		expect(ops).toEqual([
+			expect.objectContaining({
+				type: "remove",
+				path: "doc-1",
+				indices: [0],
+				strokes: [expect.objectContaining({ id: "s1" })],
+			}),
+		]);
+		expect(notices).toEqual([]);
+	});
+
+	it("selected ids resolve to no live stroke (deleted on another device, §5u): hasSelection reads false, the same wrapper removes nothing and returns false", () => {
+		select();
+		// Another device deleted s1 and the reload poll ran in the idle gap:
+		// `this.selected` still holds the id (a lasso capture, never
+		// invalidated by an external store change) but it resolves to
+		// nothing in the live store. This is the getter the keydown handler
+		// now gates on instead of `this.selected.length` (§5u).
+		strokes = [];
+		expect(controller.hasSelection).toBe(false);
+		expect(controller.deleteSelectionCommand()).toBe(false);
+		expect(ops).toEqual([]);
+		expect(strokes).toEqual([]);
 	});
 });

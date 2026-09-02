@@ -16,6 +16,7 @@ import {
 	idInput,
 	nextInstanceId,
 	pdfInkId,
+	pdfInkIdFromHead,
 	toHex,
 } from "./PdfIdentity";
 
@@ -112,6 +113,54 @@ describe("pdfInkId", () => {
 	it("accepts an ArrayBuffer, which is what readBinary returns", async () => {
 		const view = filled(1000);
 		expect(await pdfInkId(view.buffer as ArrayBuffer, subtle)).toBe(await pdfInkId(view, subtle));
+	});
+});
+
+describe("pdfInkIdFromHead", () => {
+	const subtle = globalThis.crypto as Crypto;
+
+	it("matches pdfInkId for a file larger than the window", async () => {
+		// The change 1.4.6 makes: the id from a head read on its own has to
+		// equal the id from the whole file, or a desktop and a phone file the
+		// same document's ink under two names.
+		const whole = filled(HEAD_BYTES * 3);
+		expect(await pdfInkIdFromHead(whole.subarray(0, HEAD_BYTES), whole.length, subtle)).toBe(
+			await pdfInkId(whole, subtle)
+		);
+	});
+
+	it("matches pdfInkId for a file smaller than the window", async () => {
+		const whole = filled(500);
+		expect(await pdfInkIdFromHead(whole, whole.length, subtle)).toBe(
+			await pdfInkId(whole, subtle)
+		);
+	});
+
+	it("clamps a head longer than the window rather than hashing it", async () => {
+		// A source that over-read by one byte would otherwise mint a second
+		// id for a document that already has one.
+		const whole = filled(HEAD_BYTES * 2);
+		expect(await pdfInkIdFromHead(whole, whole.length, subtle)).toBe(
+			await pdfInkId(whole, subtle)
+		);
+	});
+
+	it("takes the length from the argument, not from the head", async () => {
+		// Which is why a ranged read must report the file's real size: the
+		// same 64 KiB with two lengths is two documents.
+		const head = filled(HEAD_BYTES);
+		expect(await pdfInkIdFromHead(head, 1000, subtle)).not.toBe(
+			await pdfInkIdFromHead(head, 2000, subtle)
+		);
+	});
+
+	it("agrees between the platform digest and the shipped fallback", async () => {
+		// Same pin as pdfInkId's: WKWebView without SubtleCrypto must reach
+		// the identical id.
+		const head = filled(4096);
+		expect(await pdfInkIdFromHead(head, 99_999, subtle)).toBe(
+			await pdfInkIdFromHead(head, 99_999, undefined)
+		);
 	});
 });
 

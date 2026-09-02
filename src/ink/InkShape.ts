@@ -79,6 +79,34 @@ export function inkShapingEnabled(): boolean {
 	return shapingOn;
 }
 
+/**
+ * Does this stroke get the smoothed (midpoint-quadratic) centerline, or the
+ * raw polyline through its samples? The one source of that decision - the
+ * committed renderer and the wet layer both ask here, so what lands at pen-up
+ * is the geometry the user watched being drawn.
+ *
+ * Two things wore the name "smoothing" and only one of them had a switch. The
+ * setting drove `setInkShaping`, which is the WIDTH law only (pressure
+ * settling, velocity thinning, end taper - see this file's header). The
+ * geometric smoothing in Smoothing.ts ran on every committed stroke with no
+ * way to turn it off, which is why a Boox user with smoothing, prediction and
+ * pressure all off still photographed rounded corners (r/Onyx_Boox,
+ * 2026-09-02). Off now means off: the centerline is the samples.
+ *
+ * `flat` (the highlighter) is exempt and stays smoothed either way, the same
+ * exemption it already has from the shaped width law: a chisel tip's broad
+ * even wash is the tool, and faceting a wash that wide is visible in a way
+ * faceting a nib-width line is not.
+ *
+ * Boox mode forces the setting off at runtime (main.ts `applyBooxMode`), so
+ * Boox commits are raw by design - fewer geometry differences between the wet
+ * line and the commit means fewer e-ink redraws, which is the point of the
+ * mode, not a side effect of it.
+ */
+export function centerlineSmoothed(flat: boolean): boolean {
+	return flat || shapingOn;
+}
+
 // ---- per-sample width law ---------------------------------------------------
 
 /** Smoothstep eased from the tip floor up to 1. */

@@ -210,11 +210,19 @@ describe("the cross-reference row cap", () => {
 		20_000,
 	);
 
-	it("refuses a classic table one row past the cap", () => {
-		const r = readPdf(bigClassicXref(MAX_XREF_ROWS + 1));
-		expect(r.ok).toBe(false);
-		expect(r.ok || r.reason).toContain(`more than ${MAX_XREF_ROWS} rows`);
-	});
+	// Same fixture cost as the stream-xref pair above (bigClassicXref builds
+	// MAX_XREF_ROWS+1 rows too); this one lacked the 20_000 timeout and timed
+	// out at the default 5 s under load, 2026-09-02, three lanes running
+	// vitest at once.
+	it(
+		"refuses a classic table one row past the cap",
+		() => {
+			const r = readPdf(bigClassicXref(MAX_XREF_ROWS + 1));
+			expect(r.ok).toBe(false);
+			expect(r.ok || r.reason).toContain(`more than ${MAX_XREF_ROWS} rows`);
+		},
+		20_000,
+	);
 });
 
 describe("a table written as a stream", () => {

@@ -234,8 +234,20 @@ export class HandwritingPageView extends TextFileView {
 		// layer; the pipeline is unchanged, only the canvas it draws into differs.
 		this.wetInk = new WetInkRenderer(this.wetCanvas, false);
 		this.wetHighlight = new WetInkRenderer(this.wetHighlightCanvas, false);
-		this.wetInk.smooth = this.host.settings.inkSmoothing;
-		this.wetHighlight.smooth = this.host.settings.inkSmoothing;
+		// `smooth` selects the RENDERING - the one-fill ribbon outline against
+		// the legacy chain of separately stroked capsules - and never meant
+		// smoothing. Latching it to the Ink smoothing setting made this the one
+		// surface that drew its ink as capsules whenever the setting was off,
+		// and it latched at construction, so nothing reached an open page view
+		// when the setting moved. The centerline decision belongs to
+		// `centerlineSmoothed` and is read per stroke; the ribbon is what every
+		// other real surface draws (§5l/AE3).
+		this.wetInk.smooth = true;
+		this.wetHighlight.smooth = true;
+		// Pen ink takes the shaped width law, as the committed renderer gives
+		// it. This surface has no mouse stroke path, so the device axis is
+		// always "shapes". The highlighter's exemption arrives per stroke.
+		this.wetInk.shape = true;
 		this.tail = new TailRenderer(this.tailCanvas);
 
 		this.router = new PointerRouter(this.rootEl, this.camera, {
@@ -840,7 +852,10 @@ export class HandwritingPageView extends TextFileView {
 			sample.tiltX,
 			sample.tiltY
 		);
-		if (point) this.wet().beginStroke(point);
+		// The tool's flatness, not the layer's: the highlighter is exempt from
+		// the shaped width law and from the raw centerline, and the wet layer
+		// cannot work that out for itself.
+		if (point) this.wet().beginStroke(point, style, tool === "highlighter");
 		this.startTicker();
 	}
 
@@ -1037,7 +1052,7 @@ export class HandwritingPageView extends TextFileView {
 			this.camera.snapshot,
 			stroke,
 			undefined,
-			this.wetInk.smooth
+			true
 		);
 		this.history.push({ label: "Ink", apply, invert });
 		this.saveSpatial();
@@ -1473,10 +1488,14 @@ export class HandwritingPageView extends TextFileView {
 		this.updateStatus();
 	}
 
-	/** Applied live when the pen-lab verdict is toggled. */
-	setSmoothing(on: boolean): void {
-		this.wetInk.smooth = on;
-		this.wetHighlight.smooth = on;
+	/**
+ 	 * A render-time setting changed the committed geometry: repaint.
+ 	 *
+ 	 * Reached from `repaintAllInkOverlays` through the surface registry, the
+ 	 * same way an open PDF is. It replaces a `setSmoothing(on)` that nothing
+ 	 * ever called and that wrote the wrong axis anyway (§5l/AE3).
+ 	 */
+	repaintInk(): void {
 		this.redrawCommitted();
 	}
 
@@ -1576,7 +1595,7 @@ export class HandwritingPageView extends TextFileView {
 			this.page.strokes,
 			this.cssWidth,
 			this.cssHeight,
-			this.wetInk.smooth,
+			true,
 			"highlighter"
 		);
 		drawCommitted(
@@ -1585,7 +1604,7 @@ export class HandwritingPageView extends TextFileView {
 			this.page.strokes,
 			this.cssWidth,
 			this.cssHeight,
-			this.wetInk.smooth,
+			true,
 			"pen"
 		);
 		this.zoomLabelEl?.setText(`${Math.round(cam.zoom * 100)}%`);

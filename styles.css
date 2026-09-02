@@ -751,7 +751,13 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 
 .handwriting-color-pop.is-showing {
 	display: grid;
-	grid-template-columns: repeat(4, auto);
+	/* Fixed, not auto: an `auto` track's minimum is content-based, and an
+	   empty swatch button's content-based minimum is near zero, so a pop
+	   narrower than the row's preferred width squeezed the 22px swatches
+	   down to whatever width was left while their height held - ovals, not
+	   circles (batendalyn, Boox Tab XC, 2026-09-02). A fixed 22px track
+	   cannot be squeezed by anything short of an explicit resize. */
+	grid-template-columns: repeat(4, 22px);
 	justify-items: center;
 	align-items: center;
 	gap: 6px;
@@ -1152,6 +1158,11 @@ body.handwriting-active-page .status-bar {
 	margin: 4px 0 0;
 	padding-left: 18px;
 	line-height: 1.6;
+}
+.handwriting-whats-new-version {
+	margin-top: 8px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
 }
 
 /* Bug report modal: the id must outlive any toast, and the JSON steps back. */
