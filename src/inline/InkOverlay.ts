@@ -805,7 +805,6 @@ export class InkOverlayPlugin {
 	private metadataObserver: MutationObserver | null = null;
 	/** The one frame that observer owes, or null when it owes none. §5g/G2. */
 	private metadataFrame: number | null = null;
-	/** Base font size captured when a pinch began; null when no pinch is live. */
 	/** Live magnification of this editor. Session-local; never persisted. */
 	private pinchScaleNow = 1;
 	/** The scale this gesture started from, so a pinch never accumulates. */
@@ -833,13 +832,6 @@ export class InkOverlayPlugin {
 	/** The scale the ink raster currently reflects, so a settle that would
 	 * change nothing does not reallocate every canvas. */
 	private pinchRasterScale = 1;
-	/** Inner canvas layer the scroll-follow translate is applied to. */
-	/**
-	 * Scroll-follow state: the baseline the current translate is measured
-	 * from, and whether one is applied. Lives in its own object so the whole
-	 * cycle (scroll, scroll, repaint, scroll) is unit-testable; this file
-	 * cannot be instantiated without a live CodeMirror view.
-	 */
 	/** The ink band's box in scroller-content coordinates; see ScrollBand. */
 	private band: Band | null = null;
 	// Font-zoom tracking (quick font size / touchpad pinch; see ZoomScale).
@@ -1802,18 +1794,6 @@ export class InkOverlayPlugin {
 	}
 
 	/**
-	 * Pin the camera so world == note surface: the camera holds the surface
-	 * point currently at the overlay's top-left. `documentTop` is CM's public
-	 * "top of the document in screen coordinates", so this is two subtractions.
-	 * No scrollTop bookkeeping; padding is handled by CM.
-	 */
-	/**
-	 * The backing factor every canvas and every probe must agree on. One
-	 * accessor because five call sites computed it independently: if they
-	 * ever disagreed, ink would rasterise at one resolution and be drawn
-	 * through a transform built for another.
-	 */
-	/**
 	 * Where floating chrome hangs: OUTSIDE the element pinch zoom scales.
 	 *
 	 * The strip lived on `view.dom`, which is the element the zoom transform
@@ -1847,12 +1827,24 @@ export class InkOverlayPlugin {
 		return `canvas latency: wet [${this.wet.describe()}]  ${this.tail.describeLatency()}`;
 	}
 
+	/**
+	 * The backing factor every canvas and every probe must agree on. One
+	 * accessor because five call sites computed it independently: if they
+	 * ever disagreed, ink would rasterise at one resolution and be drawn
+	 * through a transform built for another.
+	 */
 	private backingNow(layoutW?: number, layoutH?: number): number {
 		const w = layoutW ?? this.container?.offsetWidth ?? 0;
 		const h = layoutH ?? this.container?.offsetHeight ?? 0;
 		return backingScale(this.dpr, this.cssScale, w, h);
 	}
 
+	/**
+	 * Pin the camera so world == note surface: the camera holds the surface
+	 * point currently at the overlay's top-left. `documentTop` is CM's public
+	 * "top of the document in screen coordinates", so this is two subtractions.
+	 * No scrollTop bookkeeping; padding is handled by CM.
+	 */
 	private syncCamera(): void {
 		if (!this.container) return;
 		// A stroke in flight owns its coordinate frame until it ends.
@@ -1971,7 +1963,15 @@ export class InkOverlayPlugin {
 		// grammar (alan, 2026-08-27): the side button selects, then either
 		// the tip or the held side button moves. Outside, the tip dissolves the
 		// selection and inks, same as always. Esc backs out without a move.
-		if (!this.selection.isEmpty) {
+		//
+		// BARE is the load-bearing word and the test below did not carry it:
+		// an eraser is not a bare tip, so it must not be swallowed here. Left
+		// out, the ink a user had just lassoed was the one ink on the page the
+		// eraser could not reach - it dragged the selection instead, on every
+		// contact, with no way out but dismissing the selection first. The
+		// rule was already written three lines down ("Tip and eraser return
+		// the pen to normal behavior"); only the code disagreed with it.
+		if (!eraser && !this.selection.isEmpty) {
 			const w = this.camera.screenToWorld(sample.x, sample.y);
 			const bounds = this.selectionBounds();
 			if (
@@ -2637,12 +2637,6 @@ export class InkOverlayPlugin {
 		].join("\n");
 	}
 
-	/**
-	 * The stroke's screen-space bbox (camera frame, CSS px), padded by the
-	 * pen width and clamped to the canvas. `clippedPct` is how much of the
-	 * padded bbox fell OUTSIDE the canvas, a direct measure of edge
-	 * clipping at the viewport boundary.
-	 */
 	/** Diagnostics-only (explicitly enabled): commit readback + COMMIT row. */
 	private recordCommitDiagnostics(
 		stroke: InkStroke,
@@ -2694,6 +2688,12 @@ export class InkOverlayPlugin {
 		});
 	}
 
+	/**
+	 * The stroke's screen-space bbox (camera frame, CSS px), padded by the
+	 * pen width and clamped to the canvas. `clippedPct` is how much of the
+	 * padded bbox fell OUTSIDE the canvas, a direct measure of edge
+	 * clipping at the viewport boundary.
+	 */
 	private strokeScreenSample(stroke: InkStroke): {
 		x: number;
 		y: number;
@@ -3575,10 +3575,6 @@ export class InkOverlayPlugin {
 	}
 
 	/**
-	 * Copy the lasso selection to the session ink clipboard (roadmap:
-	 * copy/paste ink). Returns how many strokes were copied; 0 = no selection.
-	 */
-	/**
 	 * The lassoed region as a PNG: ink on white, cropped to the selection
 	 * plus a little air. The pdf surface composites the page under its
 	 * strokes; a note's ground is live editor DOM, which is not honestly
@@ -3625,6 +3621,10 @@ export class InkOverlayPlugin {
 		return !this.selection.isEmpty;
 	}
 
+	/**
+	 * Copy the lasso selection to the session ink clipboard (roadmap:
+	 * copy/paste ink). Returns how many strokes were copied; 0 = no selection.
+	 */
 	copySelectedInk(): number {
 		const path = this.filePath();
 		if (!path || this.selection.isEmpty) return 0;

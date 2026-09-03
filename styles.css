@@ -417,39 +417,64 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 /* Toolbar corner (settings): the strip and its collapsed pill are the same
    control in two sizes, so one class positions both. Top-right is the default
    and the historical position - the writing palm owns the bottom of the glass,
-   which is why a bottom corner is a choice rather than the default. */
+   which is why a bottom corner is a choice rather than the default.
+
+   The 8px is measured from the SAFE area, not the screen edge. On a notched
+   iphone the raw top edge is behind the dynamic island and a top-corner
+   toolbar landed under it (alan, iphone, 2026-09-02: "it's behind the
+   notch"); the bottom edge is the home indicator's swipe strip. env() is
+   unconditional rather than platform-gated on purpose - it resolves to 0px
+   on every device that reports no inset, so this is a literal no-op on
+   desktop, on android tablets and on the non-notched ipads this was
+   originally measured on, and correct on the phones that do report one.
+
+   BOTH AXES, and the horizontal half is not decoration. A notched iphone in
+   LANDSCAPE puts the island on a SIDE: inset-top collapses to near zero and
+   inset-left/right become the large ones. Wrapping only the vertical offsets
+   would mean the protection rotates away exactly when it is needed, so the
+   toolbar would clear the island in portrait and park under it in landscape.
+   The android rules below re-declare `top` only, so they inherit these
+   horizontal values and are covered by the same reasoning for a display
+   cutout on that side. */
 .handwriting-mobile-tools.handwriting-corner-top-right,
 .handwriting-pen-pill.handwriting-corner-top-right {
-	top: 8px;
-	right: 8px;
+	top: calc(env(safe-area-inset-top, 0px) + 8px);
+	right: calc(env(safe-area-inset-right, 0px) + 8px);
 }
 
 .handwriting-mobile-tools.handwriting-corner-top-left,
 .handwriting-pen-pill.handwriting-corner-top-left {
-	top: 8px;
-	left: 8px;
+	top: calc(env(safe-area-inset-top, 0px) + 8px);
+	left: calc(env(safe-area-inset-left, 0px) + 8px);
 }
 
 .handwriting-mobile-tools.handwriting-corner-bottom-right,
 .handwriting-pen-pill.handwriting-corner-bottom-right {
-	bottom: 8px;
-	right: 8px;
+	bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+	right: calc(env(safe-area-inset-right, 0px) + 8px);
 }
 
 .handwriting-mobile-tools.handwriting-corner-bottom-left,
 .handwriting-pen-pill.handwriting-corner-bottom-left {
-	bottom: 8px;
-	left: 8px;
+	bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+	left: calc(env(safe-area-inset-left, 0px) + 8px);
 }
 
 /* Android pulls the notification shade from the very top edge, and that
    gesture beats anything drawn under it - a top-corner toolbar at 8px was
-   simply untappable (boox go 6, 2026-08-30). Clear the gesture strip, but
-   ONLY on android: the same 8px is right on ios and moving it there would
-   be a regression for people the toolbar already works for.
+   simply untappable (boox go 6, 2026-08-30). The 48px clears that gesture
+   strip and is android-ONLY, because a pullable shade is an android
+   interaction; it is NOT a safe-area allowance and ios must not inherit it.
 
-   env() covers devices that report an inset; the constant covers android,
-   where the shade is pullable whether or not an inset is reported. */
+   This block used to claim the plain 8px was "right on ios". It was not -
+   that held for the ipad it was checked on, which reports no top inset, and
+   was false on a notched iphone, where the same 8px put the toolbar behind
+   the dynamic island. The inset the phone needs is now unconditional on the
+   base rules above; what stays here is the shade constant alone.
+
+   Kept as a full override of `top` rather than an addition, so the base
+   rule's env() does not compound with this one - android gets exactly its
+   own inset plus 48px, unchanged. */
 .handwriting-android .handwriting-mobile-tools.handwriting-corner-top-right,
 .handwriting-android .handwriting-pen-pill.handwriting-corner-top-right,
 .handwriting-android .handwriting-mobile-tools.handwriting-corner-top-left,
@@ -463,38 +488,43 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
    itself is off center from the toolbar"). These offsets put the circle's
    centre exactly where the corner button's was - 11px against desktop's
    32px buttons, 15px against mobile's 40px, and the android top clears the
-   notification shade by the same concentric margin. */
+   notification shade by the same concentric margin.
+
+   These rules re-declare `top`/`bottom` outright, so they have to carry the
+   safe-area inset themselves or the phone fix above is lost the moment the
+   strip collapses to the pill. Same unconditional env(): 0px wherever no
+   inset is reported. */
 .handwriting-pen-pill.handwriting-corner-top-right {
-	top: 11px;
-	right: 11px;
+	top: calc(env(safe-area-inset-top, 0px) + 11px);
+	right: calc(env(safe-area-inset-right, 0px) + 11px);
 }
 .handwriting-pen-pill.handwriting-corner-top-left {
-	top: 11px;
-	left: 11px;
+	top: calc(env(safe-area-inset-top, 0px) + 11px);
+	left: calc(env(safe-area-inset-left, 0px) + 11px);
 }
 .handwriting-pen-pill.handwriting-corner-bottom-right {
-	bottom: 11px;
-	right: 11px;
+	bottom: calc(env(safe-area-inset-bottom, 0px) + 11px);
+	right: calc(env(safe-area-inset-right, 0px) + 11px);
 }
 .handwriting-pen-pill.handwriting-corner-bottom-left {
-	bottom: 11px;
-	left: 11px;
+	bottom: calc(env(safe-area-inset-bottom, 0px) + 11px);
+	left: calc(env(safe-area-inset-left, 0px) + 11px);
 }
 .is-mobile .handwriting-pen-pill.handwriting-corner-top-right {
-	top: 15px;
-	right: 15px;
+	top: calc(env(safe-area-inset-top, 0px) + 15px);
+	right: calc(env(safe-area-inset-right, 0px) + 15px);
 }
 .is-mobile .handwriting-pen-pill.handwriting-corner-top-left {
-	top: 15px;
-	left: 15px;
+	top: calc(env(safe-area-inset-top, 0px) + 15px);
+	left: calc(env(safe-area-inset-left, 0px) + 15px);
 }
 .is-mobile .handwriting-pen-pill.handwriting-corner-bottom-right {
-	bottom: 15px;
-	right: 15px;
+	bottom: calc(env(safe-area-inset-bottom, 0px) + 15px);
+	right: calc(env(safe-area-inset-right, 0px) + 15px);
 }
 .is-mobile .handwriting-pen-pill.handwriting-corner-bottom-left {
-	bottom: 15px;
-	left: 15px;
+	bottom: calc(env(safe-area-inset-bottom, 0px) + 15px);
+	left: calc(env(safe-area-inset-left, 0px) + 15px);
 }
 .handwriting-android .handwriting-pen-pill.handwriting-corner-top-right,
 .handwriting-android .handwriting-pen-pill.handwriting-corner-top-left {

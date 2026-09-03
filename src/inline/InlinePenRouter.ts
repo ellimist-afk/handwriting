@@ -52,8 +52,9 @@ import { penSeenThisSession } from "./PenToolsMode";
 
 export interface InlinePenCallbacks {
 	onPenDown(sample: PenSample, ev: PointerEvent): void;
-	/** Display-rate pen hover, outside an active contact. */
 	/**
+	 * Display-rate pen hover, outside an active contact.
+	 *
 	 * `pointerType` because a reticle serves two audiences: under a pen it is
 	 * a preview the nib will cover, under a mouse it is the POINTER, and the
 	 * two want different chrome. Optional so implementors that do not care
@@ -1231,12 +1232,6 @@ export class InlinePenRouter {
 	}
 
 	/**
-	 * Mouse-ink mode (roadmap: mouse input): while the switch is on, the
-	 * mouse's LEFT button is treated as a pen tip. Right and middle stay
-	 * native so the context menu and paste-click keep working; everything
-	 * downstream of the claim is the ordinary pen path.
-	 */
-	/**
 	 * The window this view's editor actually lives in. A popout is another
 	 * BrowserWindow: its events never reach the main window's listeners, so
 	 * the ownership guards and the end backstop must arm where the pen is.
@@ -1246,6 +1241,12 @@ export class InlinePenRouter {
 		return this.scrollEl.ownerDocument?.defaultView ?? window;
 	}
 
+	/**
+	 * Mouse-ink mode (roadmap: mouse input): while the switch is on, the
+	 * mouse's LEFT button is treated as a pen tip. Right and middle stay
+	 * native so the context menu and paste-click keep working; everything
+	 * downstream of the claim is the ordinary pen path.
+	 */
 	private mouseActsAsPen(e: PointerEvent): boolean {
 		return e.pointerType === "mouse" && mouseInkEnabled();
 	}

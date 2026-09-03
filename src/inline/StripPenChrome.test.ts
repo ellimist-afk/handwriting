@@ -55,6 +55,24 @@
  * beyond what the named allowlist below permits that file - three needles
  * across the whole tree, not two methods in two named files.
  *
+ * THE SIXTH DIVERGENCE needed a different sweep, and saying why is the point.
+ * `penToolsVisible` (PenToolsMode.ts) is the whole rule for whether a strip
+ * exists at all, and it is pure, factored and tested - and it had exactly ONE
+ * caller in the tree, on the note surface. `PdfInkController.ensureTools`
+ * built a MobileTools on the first pen contact and asked nothing, so "Pen
+ * toolbar → Hide" hid the strip on notes and left it floating over every PDF
+ * (alan, 2026-09-02). Counting `penToolsVisible(` the way the three needles
+ * above are counted would assert the OPPOSITE of what is wanted: an
+ * over-allowance sweep forbids a call, and here the call is the fix. So this
+ * needle is a PAIRING - a file that contains `new MobileTools(` must also
+ * contain `penToolsVisible(` - and it is still opt-out over the whole tree,
+ * still allowlisted by name, and still fails on the file rather than on a
+ * count. `new MobileTools(` is the trigger because constructing the strip is
+ * the act that needs a reason; the canvas view builds a different toolbar
+ * object entirely (5e-C.5) and is correctly not caught by it, which is the
+ * same reason the import assertion at the bottom of this file covers two
+ * surfaces rather than three.
+ *
  * `closeInkSliders(` has one legitimate direct call left, in InkOverlay's
  * file-switch reset ("a fresh note starts reading, so the strip starts as
  * the pill") - that is a document-switch concern, not pen-gesture chrome,
@@ -194,6 +212,42 @@ const FOCUS_ALLOWED: Readonly<Record<string, Exemption>> = {
 };
 
 /**
+ * The pairing needle's allowlist, and it is a different shape on purpose:
+ * there is no count to allow, only a file excused from asking the rule at
+ * all. `why` carries the same weight it does above.
+ *
+ * EMPTY, today. An entry here is a surface that mounts a floating strip
+ * unconditionally, which is the exact bug this needle exists for - so it
+ * needs a better reason than any entry above, not an equal one. "It is not an
+ * ink surface" will not do: a `new MobileTools(` IS the ink chrome.
+ */
+type StripMount = { readonly why: string };
+const PEN_TOOLS_RULE_ALLOWED: Readonly<Record<string, StripMount>> = {};
+
+/** Files that construct a strip, in scan order. */
+function stripMounters(): string[] {
+	return SOURCES.filter(([, text]) => occurrences(text, "new MobileTools(") > 0).map(
+		([path]) => path
+	);
+}
+
+/**
+ * Every scanned file that mounts a strip and never consults the rule that
+ * says whether it should have one. The dual of `overAllowance` below: that
+ * one fails on a call, this one fails on a MISSING call, because the two
+ * failures are opposite shapes of the same divergence.
+ */
+function mountsWithoutTheRule(): string[] {
+	const missing: string[] = [];
+	for (const path of stripMounters()) {
+		if (occurrences(SOURCE_TEXT.get(path) ?? "", "penToolsVisible(") > 0) continue;
+		if (PEN_TOOLS_RULE_ALLOWED[path]) continue;
+		missing.push(`${path}: new MobileTools( with no penToolsVisible( anywhere in the file`);
+	}
+	return missing;
+}
+
+/**
  * The sweep itself: every scanned file that uses `needle` more than its
  * allowlist entry permits, as a readable line. Returning strings rather than
  * asserting per file is what makes the failure say WHICH file and HOW MANY in
@@ -241,7 +295,12 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// nobody will read again, and worse, it hides that the exemption was
 		// never re-examined when the file moved.
 		const stale: string[] = [];
-		for (const list of [SET_INKING_ALLOWED, CLOSE_INK_SLIDERS_ALLOWED, FOCUS_ALLOWED]) {
+		for (const list of [
+			SET_INKING_ALLOWED,
+			CLOSE_INK_SLIDERS_ALLOWED,
+			FOCUS_ALLOWED,
+			PEN_TOOLS_RULE_ALLOWED,
+		]) {
 			for (const path of Object.keys(list)) {
 				if (!SOURCE_TEXT.has(path)) stale.push(path);
 			}
@@ -278,6 +337,43 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// are named anyway, because a reason on a line is the price of never
 		// having to remember to add a file.
 		expect(overAllowance(".focus(", FOCUS_ALLOWED)).toEqual([]);
+	});
+
+	it("no file in the tree mounts a strip without consulting the visibility rule", () => {
+		// The sixth divergence. Whether a floating strip exists at all is
+		// `penToolsVisible` (PenToolsMode.ts) and nothing else - "show",
+		// "hide", and "auto" meaning mobile-or-once-a-pen-was-seen. The rule
+		// was pure, factored and tested, and the pdf surface simply never
+		// called it: `ensureTools` built one on the first pen contact, so
+		// "Pen toolbar → Hide" worked on notes and did nothing over a PDF.
+		//
+		// Opt-out over the whole tree like every sweep above, and a PAIRING
+		// rather than a count because the failure shape is inverted: what
+		// fails here is a file that mounts a strip and does NOT ask.
+		expect(mountsWithoutTheRule()).toEqual([]);
+	});
+
+	it("the strip-mounting trigger actually matches the surfaces that mount one", () => {
+		// P3 again, and this needle needs it more than the others do: the
+		// sweep above asserts a list is empty, so a trigger needle that
+		// matched nothing would pass while checking nothing at all. Named
+		// with `toContain` rather than pinned as an exact list - a third
+		// surface that mounts a strip should fail the SWEEP, on its own
+		// missing call, not this harness check.
+		const mounters = stripMounters();
+		expect(mounters).toContain("/src/inline/InkOverlay.ts");
+		expect(mounters).toContain("/src/pdf/PdfInkController.ts");
+	});
+
+	it("both strip-mounting surfaces ask the same rule, once each", () => {
+		// Named as well as swept, for the reason every assertion in this
+		// block is: an allowlist entry added for either file cannot void the
+		// claim written about it. Exactly one call each, so a second gate on
+		// either surface - the beginning of a private answer to a shared
+		// question - fails here.
+		expect(occurrences(src("/src/inline/InkOverlay.ts"), "penToolsVisible(")).toBe(1);
+		expect(occurrences(src("/src/pdf/PdfInkController.ts"), "penToolsVisible(")).toBe(1);
+		expect(src("/src/pdf/PdfInkController.ts")).toContain('from "../inline/PenToolsMode"');
 	});
 
 	it("the pdf surface never calls setInking or closeInkSliders directly", () => {

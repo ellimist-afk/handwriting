@@ -1230,12 +1230,11 @@ describe("PdfInkController deleteSelectionCommand (what the strip, palette and a
  *
  * `hasSelection` goes through `selectionBounds`, which filters `strokes(page)`
  * - the PAGE-filtered source. `deleteSelection` goes through `opList`, which
- * filters `allStrokes()` - the WHOLE-DOCUMENT source, falling back to the page
- * list only when the document list is empty. They are two independently
- * injected constructor callbacks. `d7b02e9` made the button ask the bounds
- * rather than the raw id list, so the two now ask the same QUESTION; they
- * still read different LISTS, and they agree in production only because
- * main.ts builds both from one store at one synchronous instant.
+ * filters `allStrokes()` - the WHOLE-DOCUMENT source. They are two
+ * independently injected constructor callbacks. `d7b02e9` made the button ask
+ * the bounds rather than the raw id list, so the two now ask the same
+ * QUESTION; they still read different LISTS, and they agree in production
+ * only because main.ts builds both from one store at one synchronous instant.
  *
  * Latent, not live: ids are unique across pages, so filtering either list by
  * the picked ids lands on the same strokes today. This therefore CANNOT be
@@ -1248,11 +1247,17 @@ describe("PdfInkController deleteSelectionCommand (what the strip, palette and a
  * from.
  *
  * The harness is the part that can go quietly worthless (P3). `allStrokes`
- * defaults to `() => []`, which sends `opList` back to the page list, so a
- * controller built without it makes both questions read ONE list and every
- * assertion below becomes a tautology. Hence a document across three pages,
- * a selection on page three rather than page one, and the difference between
- * the two lists asserted before the invariant that depends on it.
+ * used to default to `() => []` and `opList` used to fall back to the page
+ * list when it answered empty, so a controller built without a document
+ * source made both questions read ONE list and every assertion below a
+ * tautology. Both are gone; the signature now refuses that controller.
+ *
+ * That does NOT make this block redundant, and the reason is the whole point
+ * of it: passing the SAME list to both parameters still type-checks, and it
+ * reproduces the identical blindness one argument later. The signature closes
+ * the omission, this closes the coincidence. Hence a document across three
+ * pages, a selection on page three rather than page one, and the difference
+ * between the two lists asserted before the invariant that depends on it.
  */
 describe("PdfInkController: the button's list and the delete's list resolve alike (C13)", () => {
 	const SELECTION_PAGE = 3;

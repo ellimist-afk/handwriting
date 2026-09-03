@@ -772,28 +772,6 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		}
 	}
 
-	/**
-	 * Write the snip beside its PDF and put the markdown on the clipboard.
-	 * The name counts up rather than overwriting: two snips of one figure
-	 * are two attempts, and the second should not eat the first.
-	 *
-	 * The clipboard is written BEFORE the file. Everything the markdown
-	 * needs is known once the name is chosen, and on iPadOS the clipboard
-	 * only accepts a write while the tap that ran the command is still
-	 * fresh; put it after the disk write and it refuses there every time,
-	 * with nothing to say why. Should the write then fail, the notice says
-	 * so and the embed on the clipboard points at a file that is not there
-	 * - visible and recoverable, where the other order was a silent no.
-	 *
-	 * The embed is the bare name only while the vault has no other file by
-	 * that name. Two `intro.pdf` in different folders both snip to
-	 * `intro.snip-1.png`, and Obsidian resolves a bare name to whichever it
-	 * finds first - the second paper's note would show the first paper's
-	 * figure. The full path is unambiguous, so it is used exactly when the
-	 * short one is not. The write goes through the vault so the file is
-	 * indexed as it lands: an adapter write is invisible to link resolution
-	 * until the watcher catches up, and the paste comes sooner than that.
-	 */
 	/** The note twin of snipPdf: ink on white, counted name, embed copied. */
 	private async snipNote(file: TFile, overlay: InkOverlayPlugin): Promise<void> {
 		const snip = await overlay.snipSelection();
@@ -831,6 +809,28 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		);
 	}
 
+	/**
+	 * Write the snip beside its PDF and put the markdown on the clipboard.
+	 * The name counts up rather than overwriting: two snips of one figure
+	 * are two attempts, and the second should not eat the first.
+	 *
+	 * The clipboard is written BEFORE the file. Everything the markdown
+	 * needs is known once the name is chosen, and on iPadOS the clipboard
+	 * only accepts a write while the tap that ran the command is still
+	 * fresh; put it after the disk write and it refuses there every time,
+	 * with nothing to say why. Should the write then fail, the notice says
+	 * so and the embed on the clipboard points at a file that is not there
+	 * - visible and recoverable, where the other order was a silent no.
+	 *
+	 * The embed is the bare name only while the vault has no other file by
+	 * that name. Two `intro.pdf` in different folders both snip to
+	 * `intro.snip-1.png`, and Obsidian resolves a bare name to whichever it
+	 * finds first - the second paper's note would show the first paper's
+	 * figure. The full path is unambiguous, so it is used exactly when the
+	 * short one is not. The write goes through the vault so the file is
+	 * indexed as it lands: an adapter write is invisible to link resolution
+	 * until the watcher catches up, and the paste comes sooner than that.
+	 */
 	private async snipPdf(file: TFile, controller: PdfInkController): Promise<void> {
 		const snip = await controller.snipSelection();
 		if (!snip.ok) {
@@ -1318,15 +1318,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-eraser",
 			name: "Eraser: toggle",
 			callback: () => {
-				// Asking for a pen tool is asking for the pen UI: without
-				// this, the command worked invisibly when no pen had been seen
-				// and the palette appeared to do nothing.
-				markPenSeen();
-				refreshPenToolsAll();
 				const on = !getInlineEraserMode();
 				setInlineEraserMode(on);
-				// A tool is only reachable once the tip exists; see armTipModeInput.
-				if (on) this.armTipModeInput();
+				this.enterTipMode(on);
 				new Notice(on ? "Handwriting: eraser" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
@@ -1336,15 +1330,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-lasso",
 			name: "Lasso: toggle",
 			callback: () => {
-				// Asking for a pen tool is asking for the pen UI: without
-				// this, the command worked invisibly when no pen had been seen
-				// and the palette appeared to do nothing.
-				markPenSeen();
-				refreshPenToolsAll();
 				const on = !getInlineLassoMode();
 				setInlineLassoMode(on);
-				// A tool is only reachable once the tip exists; see armTipModeInput.
-				if (on) this.armTipModeInput();
+				this.enterTipMode(on);
 				new Notice(on ? "Handwriting: lasso" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
@@ -1354,15 +1342,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-space",
 			name: "Insert space: toggle",
 			callback: () => {
-				// Asking for a pen tool is asking for the pen UI: without
-				// this, the command worked invisibly when no pen had been seen
-				// and the palette appeared to do nothing.
-				markPenSeen();
-				refreshPenToolsAll();
 				const on = !getInlineSpaceMode();
 				setInlineSpaceMode(on);
-				// A tool is only reachable once the tip exists; see armTipModeInput.
-				if (on) this.armTipModeInput();
+				this.enterTipMode(on);
 				new Notice(on ? "Handwriting: insert space" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
@@ -1372,15 +1354,9 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			id: "inline-tool-pan",
 			name: "Pan: toggle",
 			callback: () => {
-				// Asking for a pen tool is asking for the pen UI: without
-				// this, the command worked invisibly when no pen had been seen
-				// and the palette appeared to do nothing.
-				markPenSeen();
-				refreshPenToolsAll();
 				const on = !getInlinePanMode();
 				setInlinePanMode(on);
-				// A tool is only reachable once the tip exists; see armTipModeInput.
-				if (on) this.armTipModeInput();
+				this.enterTipMode(on);
 				new Notice(on ? "Handwriting: pan" : `Handwriting: ${getInlineTool()}`);
 			},
 		});
@@ -2801,6 +2777,34 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 
 
 	/**
+	 * Everything a tip-mode command does once its mode is set, in the order
+	 * the order matters in.
+	 *
+	 * The two halves were both added for the same user report and they
+	 * collided. `markPenSeen`/`refreshPenToolsAll` is the UI half - without
+	 * it the strip never appears for someone who has not held a pen, and the
+	 * palette entry looks like it did nothing. `armTipModeInput` is the
+	 * FUNCTIONAL half - without it the mode is set and nothing can read it,
+	 * because `InlinePenRouter.mouseActsAsPen` gates every mouse contact on
+	 * `mouseInkEnabled()`.
+	 *
+	 * The functional half goes first because it declines once a pen has been
+	 * seen, and the UI half's `markPenSeen` is what makes that true. Reversed,
+	 * it can never fire from a command callback at all.
+	 */
+	private enterTipMode(on: boolean): void {
+		// A tool is only reachable once the tip exists; see armTipModeInput.
+		// FIRST: it declines once a pen has been seen, and markPenSeen below
+		// is what makes that true. Reversed, it can never fire at all.
+		if (on) this.armTipModeInput();
+		// Asking for a pen tool is asking for the pen UI: without this, the
+		// command worked invisibly when no pen had been seen and the palette
+		// appeared to do nothing.
+		markPenSeen();
+		refreshPenToolsAll();
+	}
+
+	/**
 	 * A tip mode means nothing until the tip exists.
 	 *
 	 * Eraser, lasso, insert space and pan all say what the TIP does, and on a
@@ -2814,8 +2818,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	 * left alone - they did not ask for it, and claiming the mouse costs them
 	 * text selection.
 	 *
-	 * Returns whether it turned mouse ink on, so the notice can say so rather
-	 * than leaving a mode change to be inferred.
+	 * Returns whether it turned mouse ink on. NOTHING READS THAT TODAY -
+	 * `enterTipMode` discards it, and the `(mouse ink on)` notice suffix this
+	 * sentence was written for was removed by the toast-wording pass. The
+	 * value is kept rather than dropped because whether the notice should say
+	 * so again is alan's call, and deleting it would settle that quietly.
 	 */
 	private armTipModeInput(): boolean {
 		if (mouseInkEnabled() || penSeenThisSession()) return false;
@@ -3376,7 +3383,6 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		setShapeSnap(this.settings.shapeSnap);
 	}
 
-	/** Settings-tab writes: persist now, quietly. */
 	/**
 	 * Boox mode: the slice of e-ink latency the plugin owns. E-ink pays per
 	 * redraw, so everything that redraws for polish goes quiet while it is
@@ -3405,6 +3411,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		refreshAllStrips();
 	}
 
+	/** Settings-tab writes: persist now, quietly. */
 	saveSettingsNow(): void {
 		runDetached(this.persistSettings(), "save settings");
 	}

@@ -56,7 +56,27 @@ function inkFingerprint(strokes: readonly InkStroke[]): string {
  */
 export const PDF_COORD_SPACE = "page-css@1";
 
-/** The persistence this store needs. `PageStore` satisfies it as-is. */
+/**
+ * The persistence this store needs. `PageStore` satisfies it as-is.
+ *
+ * `schedule` takes NO writer, and that is load-bearing rather than an
+ * omission. `PageStore.reconcileInProcess` unions the page on disk with the
+ * one being written whenever a DIFFERENT in-process writer of the same store
+ * has already written that id. A union is correct there: two canvas panes are
+ * peers, neither is authoritative, and a stroke either holds is one the user
+ * made and nobody deliberately removed.
+ *
+ * It is wrong for anything that can receive an EXTERNAL revision. A revision
+ * that arrives by sync is a different authority, not a peer - erase a stroke
+ * on one device and a union resurrects it from the other's copy, on every
+ * sync, silently.
+ *
+ * PDFs cannot reach the union today only because they pass no writer through
+ * this signature. That containment is an accident of the interface, not a
+ * stated rule. Add a writer parameter here and PDFs inherit the union with no
+ * other change - and it would present as a sync bug rather than as the
+ * interface change that caused it.
+ */
 export interface PdfInkHost {
 	load(id: string): Promise<ParseResult | null>;
 	schedule(id: string, data: PageData): void;

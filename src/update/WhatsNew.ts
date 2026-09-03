@@ -63,6 +63,14 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 	"1.4.7": [
 		"emergency bug fix",
 	],
+	"1.4.8": [
+		"slider fix",
+		"eraser fix",
+		"tool bar fixes",
+		"pdf tool bar fix",
+		"icon fix",
+		"ios fix",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

@@ -351,14 +351,17 @@ export class PageStore {
 	}
 
 	/**
-	 * Cheap poll primitive for live reload: has the sidecar on disk changed
-	 * behind our back? One stat on the fast path; a read only when the mtime
-	 * moved (sync tools preserve mtimes, so the content stamp decides).
-	 * Never answers while a write for this page is queued - a half-landed
-	 * save of our own must not read as an external edit - and never for a
-	 * page this store has not read or written (nothing to compare against).
-	 * The write-path conflict guard stays the last word either way.
+	 * Is anything at all still waiting to be written?
+	 *
+	 * For callers that must know the folder is quiet before they move it, as
+	 * opposed to asking about one page. A failed write re-queues, so this can
+	 * still be true straight after a flush - which is the answer the caller
+	 * needs, not a detail to paper over.
 	 */
+	get busy(): boolean {
+		return this.pending.size > 0 || this.timers.size > 0 || this.maxTimers.size > 0;
+	}
+
 	/**
 	 * Is a write for this page queued right now? Synchronous on purpose.
 	 *
@@ -371,23 +374,19 @@ export class PageStore {
 	 * stale snapshot goes over the other device's ink with no conflict copy
 	 * and nothing said.
 	 */
-	/**
-	 * Is anything at all still waiting to be written?
-	 *
-	 * For callers that must know the folder is quiet before they move it, as
-	 * opposed to asking about one page. A failed write re-queues, so this can
-	 * still be true straight after a flush - which is the answer the caller
-	 * needs, not a detail to paper over.
-	 */
-	get busy(): boolean {
-		return this.pending.size > 0 || this.timers.size > 0 || this.maxTimers.size > 0;
-	}
-
 	hasQueuedWrite(pageId: string): boolean {
 		return this.pending.has(pageId) || this.timers.has(pageId) || this.maxTimers.has(pageId);
 	}
 
 	/**
+	 * Cheap poll primitive for live reload: has the sidecar on disk changed
+	 * behind our back? One stat on the fast path; a read only when the mtime
+	 * moved (sync tools preserve mtimes, so the content stamp decides).
+	 * Never answers while a write for this page is queued - a half-landed
+	 * save of our own must not read as an external edit - and never for a
+	 * page this store has not read or written (nothing to compare against).
+	 * The write-path conflict guard stays the last word either way.
+	 *
 	 * See hasQueuedWrite above for why a caller must re-ask synchronously.
 	 */
 	async externallyChanged(pageId: string): Promise<boolean> {

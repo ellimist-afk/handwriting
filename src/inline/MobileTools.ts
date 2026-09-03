@@ -119,9 +119,64 @@ export const nibIsLit = (h: MobileToolsHost, tool: "pen" | "highlighter"): boole
  */
 const pxToMult = (px: number, base: number): number => Math.round((px / base) * 1000) / 1000;
 const multToPx = (mult: number, base: number): number => Math.round(mult * base * 1000) / 1000;
-/** Same formatter shape as the eraser's `${v}px` - rounded to 1dp so a
- * sub-pixel base (the pen's) never prints a wall of decimals. */
-const pxLabel = (v: number): string => `${Math.round(v * 10) / 10}px`;
+/**
+ * The value chip's text, at ONE WIDTH for the whole of a slider's range.
+ *
+ * This is the judder. "Weird distortion on the pen slider as i slide it up
+ * and down, like the slider is just vibrating" (alan, on hardware,
+ * 2026-09-02) - and it is the POP that moves, not the thumb. The pop is a
+ * centered column, so its width is its widest child, which is this chip; and
+ * `hangUnder` re-centres the pop from its own measured `offsetWidth` on
+ * every refresh. So any change in the chip's TEXT WIDTH slides the whole
+ * pop, and the slot inside it, sideways under the finger.
+ *
+ * The old formatter dropped a trailing zero - `Math.round(v * 10) / 10`
+ * prints "1px" for 1 and "1.1px" for 1.1 - and the pen steps 0.1px from
+ * 0.66 to 6.6, so it crossed a whole number twelve times over its range,
+ * losing and regaining a character each time. Counted off the real
+ * constructions: pen 12 width changes, highlighter 1, eraser 1. That is why
+ * he named the pen and not the other two, and it is the only account of the
+ * report that tells those three sliders apart. `tabular-nums` (styles.css,
+ * .handwriting-slider-val) equalises DIGITS; it does nothing about a string
+ * that is two characters shorter.
+ *
+ * So the label is made constant-width instead, in the string rather than in
+ * CSS - no stylesheet change, and nothing that depends on a font's metrics:
+ *
+ * - Fixed decimals, taken from the slider's own step, so the decimal point
+ *   never appears and disappears: the pen (step 0.1) always shows one, the
+ *   highlighter and eraser (step 1) never show any.
+ * - Left-padded with FIGURE SPACE (U+2007), which is defined as the width of
+ *   a digit and is exactly what tabular-nums has already equalised, so
+ *   "9px" occupies the same width as "10px" without a stylesheet knowing.
+ *
+ * Every label a slider can produce is then the same run of digit-width
+ * glyphs plus the same suffix, so the chip cannot change width, so the pop
+ * cannot move.
+ */
+const FIGURE_SPACE = "\u2007";
+/** What a built slider hands back: its parts, and its own labeller. */
+interface SliderParts {
+	pop: HTMLElement;
+	input: HTMLInputElement;
+	val: HTMLElement;
+	label: (v: number) => string;
+}
+const constantWidthLabel = (min: number, max: number, step: number): ((v: number) => string) => {
+	// Decimals enough for the step: 0.1 needs one, 1 needs none. Sub-pixel
+	// bases are why this is not simply "integers" - the pen's own min is
+	// 0.66px.
+	const decimals = step < 1 ? 1 : 0;
+	const text = (v: number): string => `${v.toFixed(decimals)}px`;
+	let widest = text(max).length;
+	for (let v = min; v <= max + 1e-9; v = Math.round((v + step) * 1000) / 1000) {
+		widest = Math.max(widest, text(v).length);
+	}
+	return (v: number): string => {
+		const s = text(v);
+		return FIGURE_SPACE.repeat(Math.max(0, widest - s.length)) + s;
+	};
+};
 
 interface ButtonSpec {
 	icon: string;
@@ -260,9 +315,9 @@ let collapsedSession = false;
 export class MobileTools {
 	private el: HTMLElement;
 	private buttons: Array<{ el: HTMLElement; spec: ButtonSpec }> = [];
-	private slider!: { pop: HTMLElement; input: HTMLInputElement; val: HTMLElement };
-	private penSlider!: { pop: HTMLElement; input: HTMLInputElement; val: HTMLElement };
-	private hlSlider!: { pop: HTMLElement; input: HTMLInputElement; val: HTMLElement };
+	private slider!: SliderParts;
+	private penSlider!: SliderParts;
+	private hlSlider!: SliderParts;
 	/** Which nib's size slider is open; tap the active tool again to toggle. */
 	private openInkSlider: "pen" | "highlighter" | null = null;
 	private sliderHoverTimer: number | null = null;
@@ -273,6 +328,26 @@ export class MobileTools {
 	 * elsewhere, or writing closes it (the pen LEAVES a button it just
 	 * tapped, and 300ms later the slider it asked for was gone). */
 	private sliderFromHover = false;
+
+	/**
+	 * The slider input under a finger right now, or null.
+	 *
+	 * `hangUnder` will not write a value into this one. Writing into a
+	 * control the user is holding is wrong whatever the value is: the thumb
+	 * is answering to two masters, and on any engine where an assignment
+	 * disturbs a drag in flight the two take turns setting it - "weird
+	 * distortion on the pen slider as i slide it up and down, like the
+	 * slider is just vibrating" (alan, on hardware, 2026-09-02).
+	 *
+	 * Held by input IDENTITY rather than a flag per slider, so the release
+	 * is one document listener for all three and a fourth slider inherits
+	 * the guard just by being built through `dropSlider`. A drag flag, not
+	 * `document.activeElement`: a range input keeps focus after the pointer
+	 * lifts, so an activeElement test would suppress every later write-back
+	 * until focus moved on, and focus is the part least likely to behave the
+	 * same in an Android WebView as it does on desktop.
+	 */
+	private heldSlider: HTMLInputElement | null = null;
 
 	/** Whether the color swatch pop is open. */
 	private colorsOpen = false;
@@ -319,7 +394,10 @@ export class MobileTools {
 
 	/** The `eraserOn()` seen on the last `refreshNow`, so the eraser pop's
 	 * OFF-to-ON edge can be told apart from "still on" - see
-	 * `eraserPopClosed`. */
+	 * `eraserPopClosed`. Seeded from the host in the constructor, NOT left at
+	 * this default: the mode is global and this bit is per-strip, so a strip
+	 * that mounts into an eraser session is arriving mid-mode and has watched
+	 * no switch at all. */
 	private wasEraserOn = false;
 
 	private pill: HTMLElement;
@@ -367,6 +445,18 @@ export class MobileTools {
 		// tap was about, until another tool was pressed (ipad, 2026-08-30).
 		// Desktop never felt it because writing closes the pops.
 		this.closeInkSliders();
+	};
+
+	/**
+	 * A slider drag ends wherever the pointer happens to be, and for a
+	 * 28x104 slot that is very often NOT on the input: the pen lifts past
+	 * the edge of the slot, or a gesture cancels the pointer outright.
+	 * Listening on the document, in capture beside outsideTap and torn down
+	 * beside it, is what keeps a slider from staying "held" for the rest of
+	 * the session and silently suppressing every write-back after it.
+	 */
+	private readonly releaseSlider = (): void => {
+		this.heldSlider = null;
 	};
 
 	/**
@@ -459,6 +549,8 @@ export class MobileTools {
 		});
 		parent.ownerDocument.addEventListener("pointerdown", this.outsideTap, { capture: true });
 		parent.ownerDocument.addEventListener("keydown", this.escapeKey, { capture: true });
+		parent.ownerDocument.addEventListener("pointerup", this.releaseSlider, { capture: true });
+		parent.ownerDocument.addEventListener("pointercancel", this.releaseSlider, { capture: true });
 		this.el = parent.createDiv({ cls: "handwriting-mobile-tools" });
 		// The recording indicator lives HERE, not the status bar: status
 		// bars get hidden by themes and snippets, and an indicator nobody
@@ -753,9 +845,8 @@ export class MobileTools {
 			min: string,
 			max: string,
 			step: string,
-			format: (v: number) => string,
 			onValue: (v: number, commit: boolean) => void
-		): { pop: HTMLElement; input: HTMLInputElement; val: HTMLElement } => {
+		): SliderParts => {
 			const pop = this.el.createDiv({ cls: "handwriting-slider-pop" });
 			// The slot owns the layout (28x104); the input centers inside it,
 			// so whatever app.css does to range inputs cannot move the pop.
@@ -765,18 +856,25 @@ export class MobileTools {
 				attr: { type: "range", min, max, step, "aria-label": aria },
 			});
 			const val = pop.createDiv({ cls: "handwriting-slider-val" });
+			const label = constantWidthLabel(Number(min), Number(max), Number(step));
 			const show = () => {
-				val.setText(format(Number(input.value)));
+				val.setText(label(Number(input.value)));
 			};
+			// Which input is under a finger, for hangUnder's guard. On the
+			// input rather than the pop: the eraser's pop carries mode chips
+			// too, and pressing one of those is not holding the slider.
+			input.addEventListener("pointerdown", () => {
+				this.heldSlider = input;
+			});
 			input.addEventListener("input", () => {
 				show();
 				onValue(Number(input.value), false);
 			});
 			input.addEventListener("change", () => onValue(Number(input.value), true));
 			show();
-			return { pop, input, val };
+			return { pop, input, val, label };
 		};
-		this.slider = dropSlider("Eraser size", "3", "64", "1", (v) => `${v}px`, (v, c) =>
+		this.slider = dropSlider("Eraser size", "3", "64", "1", (v, c) =>
 			this.host.setEraserRadiusPx(v, c)
 		);
 		// The eraser's pop leads with its behavior: Stroke deletes what the
@@ -814,7 +912,6 @@ export class MobileTools {
 			String(multToPx(0.3, DEFAULT_PEN.baseWidth)),
 			String(multToPx(3, DEFAULT_PEN.baseWidth)),
 			"0.1",
-			pxLabel,
 			(v, c) => this.host.setInkSizeMult("pen", pxToMult(v, DEFAULT_PEN.baseWidth), c)
 		);
 		// The highlighter runs a narrower range: its base is already wide,
@@ -828,7 +925,6 @@ export class MobileTools {
 			String(multToPx(0.25, HIGHLIGHTER_PEN.baseWidth)),
 			String(multToPx(1.5, HIGHLIGHTER_PEN.baseWidth)),
 			"1",
-			pxLabel,
 			(v, c) => this.host.setInkSizeMult("highlighter", pxToMult(v, HIGHLIGHTER_PEN.baseWidth), c)
 		);
 		this.colorPop = this.el.createDiv({ cls: "handwriting-slider-pop handwriting-color-pop" });
@@ -850,6 +946,21 @@ export class MobileTools {
 				if (ev.pointerType !== "touch") this.sliderFromHover = false;
 			});
 		}
+		// The tip mode is GLOBAL and this pair of bits is per-strip, so a
+		// strip built while the eraser was already on has to be told that it
+		// arrived mid-mode rather than watching a switch. Seeded here, before
+		// the first refresh, because the constructor's own `refreshNow` is
+		// what read the unseeded values and fired the OFF-to-ON edge: every
+		// new pane, split and popout opened the eraser's size pop with no
+		// user action behind it. `eraserPopClosed` needs seeding too - the
+		// edge is not the only route in, since `eraserPopOpen` is true on a
+		// fresh strip whose flag still says nothing has closed the pop.
+		//
+		// With the eraser off both values are the ones the fields already
+		// declare, and the switch that turns it on later is still the real
+		// edge - which is the route this must not take away.
+		this.wasEraserOn = host.eraserOn();
+		this.eraserPopClosed = this.wasEraserOn;
 		this.refreshNow();
 		this.setCollapsed(collapsedSession);
 	}
@@ -939,10 +1050,18 @@ export class MobileTools {
 			const label = active ? `${active.spec.label} tools` : "Pen tools";
 			if (this.pill.dataset.icon !== icon) {
 				this.pill.dataset.icon = icon;
-				// setIcon replaces the button's children, which takes the
-				// sr-only name attachTip left there with it. Put it back in
+				// Emptied FIRST: setIcon APPENDS an svg, it does not replace
+				// the button's children, so the pill wore every tool it had
+				// ever been at once - a pen and a highlighter overlapping in
+				// the one circle (alan and samuelbits, with screenshots;
+				// there since the pill started following the tool in hand).
+				// This comment used to assert the opposite, which is what
+				// stopped anyone checking. Same sweep, for the same reason,
+				// as the chevron gets in setCorner. It takes the sr-only
+				// name attachTip left there with it, so that goes back in
 				// the same move, or the pill goes quiet for a screen reader
 				// the first time the tool changes.
+				this.pill.empty();
 				setIcon(this.pill, icon);
 				if (!this.pill.querySelector("svg")) this.pill.setText(active?.spec.glyph ?? "P");
 				this.pill.createSpan({ cls: "handwriting-sr-only", text: label });
@@ -959,16 +1078,23 @@ export class MobileTools {
 		// Hang a drop-down under its button, measured live so it survives
 		// the strip wrapping on narrow screens.
 		const hangUnder = (
-			slider: { pop: HTMLElement; input: HTMLInputElement; val: HTMLElement },
+			slider: SliderParts,
 			commandId: string,
 			show: boolean,
-			value: number,
-			format: (v: number) => string
+			value: number
 		) => {
 			slider.pop.toggleClass("is-showing", show);
 			if (!show) return;
-			slider.input.value = String(value);
-			slider.val.setText(format(value));
+			// Never into a control the user is holding. The placement below
+			// still has to run - the strip can wrap under an open pop - but
+			// the VALUE and its readout belong to the finger until it lifts.
+			// Any refresh landing mid-drag would otherwise write over the
+			// drag: a hover preview on the next button along, the 300ms
+			// close timer, or any command that refreshes every strip.
+			if (this.heldSlider !== slider.input) {
+				slider.input.value = String(value);
+				slider.val.setText(slider.label(value));
+			}
 			const btn = this.buttons.find((b) => b.spec.commandId === commandId)?.el;
 			if (btn) {
 				// Measured rects, and CENTERED under the button: the offset
@@ -1013,23 +1139,20 @@ export class MobileTools {
 			// (hasOpenPop, above; every caller of closeInkSliders - pen
 			// contact, an outside tap, Escape - sets it alike now).
 			this.eraserPopOpen(),
-			this.host.eraserRadiusPx(),
-			(v) => `${v}px`
+			this.host.eraserRadiusPx()
 		);
 		const nib = this.host.eraserOn() || this.colorsOpen ? null : this.openInkSlider;
 		hangUnder(
 			this.penSlider,
 			"handwriting:inline-tool-pen",
 			nib === "pen" && this.host.activeTool() === "pen",
-			multToPx(this.host.inkSizeMult("pen"), DEFAULT_PEN.baseWidth),
-			pxLabel
+			multToPx(this.host.inkSizeMult("pen"), DEFAULT_PEN.baseWidth)
 		);
 		hangUnder(
 			this.hlSlider,
 			"handwriting:inline-tool-highlighter",
 			nib === "highlighter" && this.host.activeTool() === "highlighter",
-			multToPx(this.host.inkSizeMult("highlighter"), HIGHLIGHTER_PEN.baseWidth),
-			pxLabel
+			multToPx(this.host.inkSizeMult("highlighter"), HIGHLIGHTER_PEN.baseWidth)
 		);
 		// Swatches: rebuilt per refresh (the palette is tiny), current color
 		// ringed, each executes the existing per-name color command.
@@ -1069,8 +1192,9 @@ export class MobileTools {
 		}
 	}
 
-	/** Writing started: nib-size drop-downs get out of the way. */
-	/** Returns whether anything was actually open; Escape needs to know.
+	/** Writing started: nib-size drop-downs get out of the way.
+	 *
+	 * Returns whether anything was actually open; Escape needs to know.
 	 * Closes every pop the strip can show, the eraser's included - pen-down,
 	 * outsideTap and Escape all route through here now (alan, 2026-09-02:
 	 * "you eraser pop should close when pen touches down... we did it for
@@ -1173,9 +1297,6 @@ export class MobileTools {
 	private tip!: HTMLElement;
 	private tipTimer: number | null = null;
 
-	/** OS-style tooltip: a beat of hover shows it, anything else hides it.
-	 * Touch is skipped - a tap would flash the tip under the finger while
-	 * the button acts, explaining nothing and covering the pops. */
 	/**
 	 * Obsidian renders its own tooltip from aria-label on MOUSE hover, so
 	 * every control showed two bubbles - Obsidian's and ours. The name
@@ -1191,6 +1312,9 @@ export class MobileTools {
 		el.createSpan({ cls: "handwriting-sr-only", text: label });
 	}
 
+	/** OS-style tooltip: a beat of hover shows it, anything else hides it.
+	 * Touch is skipped - a tap would flash the tip under the finger while
+	 * the button acts, explaining nothing and covering the pops. */
 	private attachTip(el: HTMLElement): void {
 		this.ownName(el);
 		const hide = () => {
@@ -1234,6 +1358,11 @@ export class MobileTools {
 		this.cancelSliderClose();
 		this.el.ownerDocument.removeEventListener("pointerdown", this.outsideTap, { capture: true });
 		this.el.ownerDocument.removeEventListener("keydown", this.escapeKey, { capture: true });
+		this.el.ownerDocument.removeEventListener("pointerup", this.releaseSlider, { capture: true });
+		this.el.ownerDocument.removeEventListener("pointercancel", this.releaseSlider, {
+			capture: true,
+		});
+		this.heldSlider = null;
 		this.el.remove();
 		this.pill.remove();
 		this.buttons = [];

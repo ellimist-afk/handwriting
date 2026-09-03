@@ -32,7 +32,17 @@ function makeController() {
 		{} as HTMLElement,
 		win as unknown as Window,
 		() => [],
-		() => "doc-1"
+		() => "doc-1",
+		// Both sources answer empty, and that is a statement rather than a
+		// shrug: this block drives the mount gate, which never draws, erases
+		// or selects, so the document under it genuinely has no ink. They are
+		// separate callbacks returning separate lists, not one list passed
+		// twice - nothing here should be able to read the page's ink as the
+		// document's. Until `allStrokes` was made required this site passed
+		// only the page source, which is the P3 hole in its concrete form:
+		// the omission was invisible because the default said the same thing
+		// an empty document says.
+		() => []
 	);
 	return { controller, priv: controller as unknown as Private, frames };
 }

@@ -24,7 +24,14 @@ import { diagnosticsEnabled } from "../diag/DiagSwitch";
 
 import { CameraState } from "../camera/coordinates";
 import { InkPoint, InkStroke, InkTool } from "../ink/Stroke";
-import { markPenSeen } from "../inline/PenToolsMode";
+import { Platform } from "obsidian";
+import {
+	getPenToolsMode,
+	markPenSeen,
+	onPenToolsChanged,
+	penSeenThisSession,
+	penToolsVisible,
+} from "../inline/PenToolsMode";
 import {
 	padBBox,
 	pointInBBox,
@@ -418,8 +425,17 @@ export class PdfInkController {
 	/** Whether the reticle's single teardown is already registered. */
 	private cursorDisposed = false;
 	private cursorTimer: ReturnType<Window["setTimeout"]> | null = null;
-	/** The floating pen strip, once this view has seen a pen. */
+	/** The floating pen strip, whenever the visibility rule says there is one. */
 	private tools: MobileTools | null = null;
+	/**
+	 * Drop this pane's subscription to the pen-toolbar rule.
+	 *
+	 * Held rather than fired-and-forgotten because the thing being unhooked
+	 * outlives the reason for it: main.ts unmounts and rebuilds a controller
+	 * whenever a leaf's file changes, and a listener left behind by each of
+	 * those would keep a closed pane's strip logic running for the session.
+	 */
+	private unwatchPenTools: (() => void) | null = null;
 	/**
 	 * The page's strokes as they were when an erase gesture began.
 	 *
@@ -454,8 +470,15 @@ export class PdfInkController {
 		 * it were page-local and only ever right on page one - undo an erase
 		 * on page five and the pieces came back at whatever depth those
 		 * numbers happened to name among the document's strokes.
+		 *
+		 * Required, and deliberately without a default. `= () => []` read as
+		 * "this document has no ink" AND as "nobody wired a document source",
+		 * two different facts that agree only while both lists are empty - so
+		 * a caller that simply forgot got page-local indices and a controller
+		 * that looked like it worked. Every construction site now has to say
+		 * which list it means, including when the answer is nothing.
 		 */
-		private allStrokes: () => readonly InkStroke[] = () => [],
+		private allStrokes: () => readonly InkStroke[],
 		private onOp: OpSink = () => {},
 		/** Runs an Obsidian command by id, for the toolbar's buttons. */
 		private exec: (commandId: string) => void = () => {},
@@ -501,19 +524,55 @@ export class PdfInkController {
 	 * are one setting, not two that drift. Almost every method here delegates
 	 * to a module-level accessor for exactly that reason.
 	 *
-	 * Created on the first pen contact rather than at mount, like the note
-	 * surface: a vault opened on a desktop with no pen never grows a strip.
+	 * Whether there is one at all is `penToolsVisible` (PenToolsMode.ts) and
+	 * nothing else - the same call, with the same three arguments, that the
+	 * note surface makes in `ensurePenToolsInner`. That rule had exactly ONE
+	 * caller in the tree until 1.4.8, and it was not this one: this method
+	 * built a strip on the first pen contact and consulted nothing, so
+	 * Settings → Appearance → Pen toolbar → Hide hid the strip on notes and
+	 * left it floating over every PDF (alan, 2026-09-02). Sixth entry on
+	 * StripPenChrome.ts's list, and the call below is now pinned by that
+	 * file's repo-wide sweep: any file constructing a MobileTools has to ask
+	 * the rule, or say in writing why it does not.
+	 *
+	 * On a desktop with no pen and the rule left on "auto" this still builds
+	 * nothing, which is what it did before - but now because the rule says so
+	 * rather than because nothing happened to call it, so "show" gives a pane
+	 * a strip with no pen anywhere near it, exactly as a note gets one.
 	 */
 	private ensureTools(): void {
-		if (this.tools) return;
 		try {
-			this.buildTools();
+			this.ensureToolsInner();
 		} catch (err) {
 			// A strip that cannot mount must never take the ink down with it.
 			// The note surface learned this on release day, on an iPad, where
 			// chrome failing stopped the pen working entirely.
 			console.error("[handwriting] pdf pen tools strip failed to mount", err);
 		}
+	}
+
+	/**
+	 * Create or destroy, not create-only.
+	 *
+	 * "Hide" chosen while a PDF is open has to take away the strip that is
+	 * already on screen, and "auto" on a desktop that has not seen a pen has
+	 * to do the same - so this answers the rule in both directions, the way
+	 * `ensurePenToolsInner` does, and the subscription in `mount` is what
+	 * calls it when the answer moves. `this.mounted` stands where the note
+	 * surface asks `this.container !== null`: a controller whose pane has
+	 * closed has no strip and grows none, whatever the setting does next.
+	 */
+	private ensureToolsInner(): void {
+		const want =
+			this.mounted &&
+			penToolsVisible(getPenToolsMode(), Platform.isMobileApp, penSeenThisSession());
+		if (want === (this.tools !== null)) return;
+		if (!want) {
+			this.tools?.destroy();
+			this.tools = null;
+			return;
+		}
+		this.buildTools();
 	}
 
 	private buildTools(): void {
@@ -643,6 +702,22 @@ export class PdfInkController {
 		// (StripPenChrome.ts). Once, here, rather than at pen contact: it is an
 		// attribute on the pane, not part of a gesture.
 		armStripPenFocus(this.root);
+		// The strip follows the setting for the life of this pane, not only at
+		// pen contact. Notes hear about a change through `refreshPenToolsAll`
+		// (InkOverlay.ts), which walks InkOverlay's own set of open editors and
+		// has never known that a PDF pane exists - so this surface listens to
+		// the rule itself instead of waiting to be told by a fan-out that was
+		// never going to reach it.
+		//
+		// Dropped-then-taken rather than added to: mount is the one place that
+		// binds, and a controller mounted twice must still hold exactly one
+		// subscription.
+		this.unwatchPenTools?.();
+		this.unwatchPenTools = onPenToolsChanged(() => this.ensureTools());
+		// And asked once now, so "show" - or "auto" on mobile, where the strip
+		// is the only path to the tools - has a strip on a pane nobody has
+		// inked yet. The note surface calls the same thing at its own mount.
+		this.ensureTools();
 		// No probe gate here. The viewer is not necessarily built when the leaf
 		// appears, and a controller that returned early here stayed inert for
 		// the life of the pane with nothing to say for itself - the same silent
@@ -868,6 +943,13 @@ export class PdfInkController {
 		// router on a controller that is gone - the leak unmount exists to
 		// prevent, rebuilt one frame later.
 		this.mounted = false;
+		// With the gate above and before the strip goes below: a mode change
+		// arriving after this line must not find a listener holding a dead
+		// controller. The viewer under a PDF pane is rebuilt routinely and
+		// main.ts rebuilds the controller whenever the leaf's file changes, so
+		// one leaked per teardown is a session's worth of them by evening.
+		this.unwatchPenTools?.();
+		this.unwatchPenTools = null;
 		this.palmShield.dispose();
 		this.pinchBridge.dispose();
 		// A trailing sync outlives the controller otherwise, and fires into a
@@ -997,14 +1079,6 @@ export class PdfInkController {
 	}
 
 	/**
-	 * Diagnostics: what the last sync actually decided, per page.
-	 *
-	 * "The marks did not appear" has several possible causes that look
-	 * identical on screen - the page never went live, it went live and we
-	 * asked for no strokes, or we painted and something covered it - and this
-	 * separates them without another build.
-	 */
-	/**
 	 * Every term of one pointer-to-page conversion, and the round trip back
 	 * through the OVERLAY's real screen rectangle. The delta on the last line
 	 * is the offset the person is seeing, decomposed: if it is zero here and
@@ -1065,6 +1139,14 @@ export class PdfInkController {
 		this.lastDownDebug = lines.join("\n");
 	}
 
+	/**
+	 * Diagnostics: what the last sync actually decided, per page.
+	 *
+	 * "The marks did not appear" has several possible causes that look
+	 * identical on screen - the page never went live, it went live and we
+	 * asked for no strokes, or we painted and something covered it - and this
+	 * separates them without another build.
+	 */
 	describe(): string {
 		// Uncached: a diagnostic that reports a cached reading is reporting on
 		// itself.
@@ -1397,7 +1479,7 @@ export class PdfInkController {
 		// forgotten was picked up.
 		this.clearSelection();
 		if (this.erasing) {
-			this.eraseFrom = [...this.opList(box.pageNumber)];
+			this.eraseFrom = [...this.opList()];
 			this.metrics.begin("pdf-erase", performance.now());
 			this.metricsLive = true;
 			this.startFrameTicker();
@@ -1694,14 +1776,6 @@ export class PdfInkController {
 	}
 
 	/**
-	 * Draw the newest segment onto the page's wet overlay.
-	 *
-	 * This surface has had a wet canvas of its own since the pen survived the
-	 * viewer being rebuilt underneath it. What it still lacks is the note
-	 * surface's third layer for the unsmoothed head, which is why the wet
-	 * renderer here is left unsmoothed - see where `smooth` is set.
-	 */
-	/**
 	 * The scale a POINTER sample is converted with.
 	 *
 	 * From the box, exactly as the drawing scale is, and for the same reason:
@@ -1756,7 +1830,23 @@ export class PdfInkController {
 		}
 	}
 
-	/** Extend the live stroke, drawn exactly as it will be once committed. */
+	/**
+	 * Extend the live stroke: draw the newest segment onto the page's wet
+	 * overlay, exactly as it will look once committed.
+	 *
+	 * This surface has had a wet canvas of its own since the pen survived the
+	 * viewer being rebuilt underneath it. What it still lacks is the note
+	 * surface's third layer for the unsmoothed head, which is why the live
+	 * stroke here sits one sample behind the pointer.
+	 *
+	 * Smoothing is left ON, not off. (This comment said the opposite, and
+	 * pointed at the line that disproves it - see where `smooth` is set.)
+	 * Turning it off was tried on 2026-08-30 and reverted the same day: the
+	 * unsmoothed path draws per-segment strokes whose anti-aliased end caps
+	 * overlap at every sample, and the stacked edges read as a fuzzy line at
+	 * zoom. The lag is the smaller of the two evils until the head layer is
+	 * ported.
+	 */
 	private drawWet(box: PageBox, point: InkPoint): void {
 		const pair = this.wetOn(box.pageNumber);
 		const cam = this.cameraFor(box);
@@ -1776,6 +1866,28 @@ export class PdfInkController {
 	}
 
 	/**
+	 * The list op indices are measured against. See `allStrokes`.
+	 *
+	 * An empty answer is an ANSWER: a document with no ink has no positions to
+	 * name. Wherever the two sources agree, an empty document is also an empty
+	 * page, so the erase gets no hit and the lasso no selection and no caller
+	 * below ever asks for an index into it.
+	 *
+	 * This used to fall back to the page list when the document list came back
+	 * empty, for the benefit of a caller that supplied no document source;
+	 * `allStrokes` is required now, so that caller cannot exist, and what
+	 * remained of the fallback fired only where the two sources genuinely
+	 * DISAGREE - substituting page-local indices into a splice against the
+	 * document, which is the defect `allStrokes` was added to fix.
+	 * main.ts's calibration wiring is one such disagreement: with
+	 * `pdfCalibration` on, the page source answers with synthetic crosses and
+	 * the document source answers empty, on purpose.
+	 */
+	private opList(): readonly InkStroke[] {
+		return this.allStrokes();
+	}
+
+	/**
 	 * Erase under the nib, as one operation per contact point.
 	 *
 	 * Two modes, the same two the note surface has, chosen by the strip's
@@ -1787,19 +1899,6 @@ export class PdfInkController {
 	 * - **Stroke** (whole): the whole stroke goes, indices kept so undo puts
 	 *   it back at its original depth rather than on top of everything.
 	 */
-	/**
-	 * The list op indices are measured against. See `allStrokes`.
-	 *
-	 * Falls back to the page list only when the document list is EMPTY, which
-	 * is a document with no ink at all - nothing to index, so the fallback is
-	 * unreachable in practice. It exists so a harness that supplies only a
-	 * page source still behaves as it did.
-	 */
-	private opList(page: number): readonly InkStroke[] {
-		const all = this.allStrokes();
-		return all.length > 0 ? all : this.strokes(page);
-	}
-
 	private eraseAt(box: PageBox, scale: number, sample: PenSample, scroller: HTMLElement): void {
 		const id = this.documentId();
 		if (!id) return;
@@ -1809,7 +1908,7 @@ export class PdfInkController {
 		// Hit-tested against the PAGE (the nib can only reach what is on it),
 		// but indexed against the document. Two different lists on purpose.
 		const onPage = [...this.strokes(box.pageNumber)];
-		const all = this.opList(box.pageNumber);
+		const all = this.opList();
 		// The radius is screen px; page units are screen px divided by scale,
 		// so the nib covers the same physical area at any zoom.
 		const r = getEraserRadiusPx() / scale;
@@ -1840,11 +1939,11 @@ export class PdfInkController {
 	}
 
 	/** One history entry for a whole erase gesture, or none if nothing went. */
-	private recordErase(id: string, page: number): void {
+	private recordErase(id: string): void {
 		// Both snapshots are of the DOCUMENT list, or the indices in this op
 		// would not name positions applyOp can splice at. See allStrokes.
 		const before = this.eraseFrom ?? [];
-		const after = this.opList(page);
+		const after = this.opList();
 		const afterIds = new Set(after.map((s) => s.id));
 		const beforeIds = new Set(before.map((s) => s.id));
 		const removed = before.filter((s) => !afterIds.has(s.id));
@@ -2114,9 +2213,8 @@ export class PdfInkController {
 	 */
 	deleteSelection(): boolean {
 		const id = this.documentId();
-		const page = this.selectionPage;
 		if (!id || this.selected.length === 0) return false;
-		const all = this.opList(page);
+		const all = this.opList();
 		const picked = new Set(this.selected);
 		const strokes = all.filter((s) => picked.has(s.id));
 		if (strokes.length === 0) return false;
@@ -2213,7 +2311,7 @@ export class PdfInkController {
 			return;
 		}
 		if (wasErasing) {
-			if (id && page > 0) this.recordErase(id, page);
+			if (id && page > 0) this.recordErase(id);
 			this.eraseFrom = null;
 			// The gesture's ops were applied live; this is its one write.
 			this.persistLive();

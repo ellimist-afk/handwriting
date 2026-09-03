@@ -285,12 +285,6 @@ export class InlineInkStore {
 		return true;
 	}
 
-	/**
-	 * Is this note a Handwriting page, meaning it carries spatial state? True when the
-	 * session has strokes or an id for it, or the note's frontmatter already
-	 * carries a `handwriting-page-id` (cheap metadata read, no file I/O). Drives
-	 * presentation only (the `handwriting-page` class); never mutates anything.
-	 */
 	/** The page id the session knows for this note (post-load/claim), if any. */
 	pageIdOf(path: string): string | null {
 		return this.byPath.get(path)?.pageId ?? null;
@@ -316,6 +310,12 @@ export class InlineInkStore {
 		return this.byPath.get(path)?.damagedLocked ?? false;
 	}
 
+	/**
+	 * Is this note a Handwriting page, meaning it carries spatial state? True when the
+	 * session has strokes or an id for it, or the note's frontmatter already
+	 * carries a `handwriting-page-id` (cheap metadata read, no file I/O). Drives
+	 * presentation only (the `handwriting-page` class); never mutates anything.
+	 */
 	isHandwritingPage(path: string): boolean {
 		const rec = this.byPath.get(path);
 		if (rec && (rec.strokes.length > 0 || rec.pageId)) return true;
@@ -638,12 +638,11 @@ export class InlineInkStore {
 	 * several passes, because a load may end by starting a claim. This is not
 	 * crash durability: a process killed before the I/O finishes can still
 	 * lose pending ink.
-	 */
-	/**
-	 * Wait for pending writes. Returns TRUE when everything drained and FALSE
-	 * when the deadline won - callers that are about to move files need to
-	 * know the difference, because proceeding after a timeout can race a
-	 * write into a directory being emptied.
+	 *
+	 * Returns TRUE when everything drained and FALSE when the deadline won -
+	 * callers that are about to move files need to know the difference,
+	 * because proceeding after a timeout can race a write into a directory
+	 * being emptied.
 	 */
 	async settle(maxWaitMs = 2000): Promise<boolean> {
 		let expire: (v: boolean) => void = () => {};
