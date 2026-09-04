@@ -68,17 +68,40 @@ function fingerprint(src: string): number {
 	return h;
 }
 
+/**
+ * The same source, with line endings normalised to LF before ANYTHING is
+ * measured.
+ *
+ * Without this the fingerprints below pin the checkout rather than the file.
+ * They were recorded on Windows, where git hands out CRLF, and every count
+ * was therefore one byte per line too large for a Linux checkout: CI went red
+ * on all four files the first time this suite ever ran there (1.4.9, four
+ * assertions, `- 2689 / + 2602` on ObjectOps - exactly its 87 lines). The
+ * plugin was fine; the guard was measuring the wrong thing.
+ *
+ * Worth stating plainly, because a failure here is meant to mean "someone
+ * edited canvas" and that is the one thing it did NOT mean that day: a
+ * line-ending difference is not an edit, and a guard that cries wolf on a
+ * checkout is a guard people learn to re-baseline without reading. The
+ * packager already normalises to LF before hashing for this exact reason
+ * (scripts/release.mjs, "these hashes identify the release rather than the
+ * machine that produced it"); this suite simply had not inherited the lesson.
+ */
+function lfOnly(src: string): string {
+	return src.replace(/\r\n/g, "\n");
+}
+
 /** The canvas surface's own files, and what they were when Alan froze them. */
 const FROZEN: readonly { file: string; bytes: number; hash: number }[] = [
-	{ file: "/src/view/HandwritingPageView.ts", bytes: 67661, hash: 1007849052 },
-	{ file: "/src/objects/TextLayer.ts", bytes: 9691, hash: 2153886746 },
-	{ file: "/src/objects/ImageLayer.ts", bytes: 4669, hash: 612816770 },
+	{ file: "/src/view/HandwritingPageView.ts", bytes: 65846, hash: 3905293681 },
+	{ file: "/src/objects/TextLayer.ts", bytes: 9384, hash: 3093913975 },
+	{ file: "/src/objects/ImageLayer.ts", bytes: 4513, hash: 3658389122 },
 	// The one the completeness check below found. It was NOT in the first
 	// draft of this list - `ObjectOps` is imported by `HandwritingPageView`
 	// and by nothing else in the tree, so it is canvas-owned, and freezing
 	// canvas without it would have left a canvas file editable while this
 	// file claimed canvas was frozen.
-	{ file: "/src/objects/ObjectOps.ts", bytes: 2689, hash: 2056327732 },
+	{ file: "/src/objects/ObjectOps.ts", bytes: 2602, hash: 3467873817 },
 ];
 
 /**
@@ -105,12 +128,13 @@ const WHY =
 describe("canvas is frozen", () => {
 	for (const pinned of FROZEN) {
 		it(`${pinned.file} is unchanged`, () => {
-			const src = ALL_TS[pinned.file];
+			const raw = ALL_TS[pinned.file];
 			// A rename or delete is a change too, and a missing file would
 			// otherwise make this assertion vacuous rather than red.
-			expect(src, `${pinned.file} is gone from the source scan. ${WHY}`).toBeTypeOf("string");
-			expect(src!.length, `${pinned.file} changed size. ${WHY}`).toBe(pinned.bytes);
-			expect(fingerprint(src!), `${pinned.file} changed. ${WHY}`).toBe(pinned.hash);
+			expect(raw, `${pinned.file} is gone from the source scan. ${WHY}`).toBeTypeOf("string");
+			const src = lfOnly(raw!);
+			expect(src.length, `${pinned.file} changed size. ${WHY}`).toBe(pinned.bytes);
+			expect(fingerprint(src), `${pinned.file} changed. ${WHY}`).toBe(pinned.hash);
 		});
 	}
 
