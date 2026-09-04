@@ -332,6 +332,43 @@ function fontAvailable(family: string): boolean {
 	return Math.abs(withFamily - generic) > 0.5;
 }
 
+/**
+ * Whether `family`, as resolved in THIS browser, actually behaves the way
+ * real Arial is documented to: `font-variant-numeric: tabular-nums`
+ * suppresses the kerning pair applied to adjacent "1" glyphs, so a run of
+ * "11" is exactly as wide as "10".
+ *
+ * `fontAvailable` answers "is this a real, distinct face" and stops there -
+ * which is exactly what a metric-compatible ALIAS defeats. Ubuntu's
+ * fontconfig substitutes Liberation Sans for "Arial": it is a real face with
+ * width-varied glyphs, so `fontAvailable` correctly reports it present, but
+ * it ignores `tabular-nums` outright (verified against the 1.4.9 CI run: the
+ * "normal" and "tabular-nums" dumps for Liberation Sans are byte-identical).
+ * Presence was never the thing in question for these assertions - the
+ * kern-suppression BEHAVIOUR is - so this measures that directly instead of
+ * trusting the name a second time.
+ */
+function tabularNumsSuppressesKern(family: string): boolean {
+	const span = document.createElement("span");
+	span.style.cssText =
+		"position:absolute;left:-9999px;top:-9999px;white-space:pre;font-size:72px;";
+	span.style.fontFamily = `"${family}", sans-serif`;
+	span.textContent = "11";
+	document.body.appendChild(span);
+
+	span.style.fontVariantNumeric = "normal";
+	const normal = span.getBoundingClientRect().width;
+
+	span.style.fontVariantNumeric = "tabular-nums";
+	const tabular = span.getBoundingClientRect().width;
+
+	span.remove();
+	// Sub-pixel on purpose, same reasoning as fontAvailable: a face that truly
+	// suppresses the kern does not land tabular-nums back on the kerned width
+	// by accident, at 72px.
+	return Math.abs(tabular - normal) > 0.5;
+}
+
 declare global {
 	interface Window {
 		__hw: {
@@ -340,8 +377,16 @@ declare global {
 			floorProbe: typeof floorProbe;
 			measureGlyphs: typeof measureGlyphs;
 			fontAvailable: typeof fontAvailable;
+			tabularNumsSuppressesKern: typeof tabularNumsSuppressesKern;
 		};
 	}
 }
 
-window.__hw = { buildStrip, sweepSlider, floorProbe, measureGlyphs, fontAvailable };
+window.__hw = {
+	buildStrip,
+	sweepSlider,
+	floorProbe,
+	measureGlyphs,
+	fontAvailable,
+	tabularNumsSuppressesKern,
+};

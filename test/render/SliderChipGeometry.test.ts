@@ -29,6 +29,7 @@ import {
 	launch,
 	openStrip,
 	stylesCss,
+	tabularNumsSuppressesKern,
 } from "./harness";
 
 let browser: Browser;
@@ -80,6 +81,46 @@ async function skipIfFontMissing(
 		!available,
 		`${family} is not installed on this machine - the browser falls back to a ` +
 			`substitute face, so ${because} cannot be proven here, only on a machine that has it`
+	);
+}
+
+/**
+ * Same cache-per-family shape as `familyAvailable`, for the BEHAVIOUR probe
+ * instead of the presence one. A metric-compatible alias (Ubuntu's fontconfig
+ * substituting Liberation Sans for "Arial") passes `familyAvailable` - it is
+ * a real, distinct face - and still ignores `tabular-nums` outright, which is
+ * exactly the case `familyAvailable` cannot see.
+ */
+const tabularHonouredCache = new Map<string, Promise<boolean>>();
+function tabularNumsHonoured(family: string): Promise<boolean> {
+	let cached = tabularHonouredCache.get(family);
+	if (!cached) {
+		cached = tabularNumsSuppressesKern(browser, family);
+		tabularHonouredCache.set(family, cached);
+	}
+	return cached;
+}
+
+/**
+ * Skip whatever comes after this call, in THIS test only, when the resolved
+ * face does not actually suppress the `11` kern under `tabular-nums` - i.e.
+ * when the mechanism a claim depends on is silently not running, name and
+ * presence notwithstanding. Call it after any assertion that holds regardless
+ * of tabular-nums (those must keep running), and before the first one that
+ * does not.
+ */
+async function skipUnlessTabularNumsHonoured(
+	ctx: { skip: (condition: boolean, note?: string) => void },
+	family: string,
+	because: string
+): Promise<void> {
+	const honoured = await tabularNumsHonoured(family);
+	ctx.skip(
+		!honoured,
+		`${family} resolved to a face that renders under that name but ignores ` +
+			`font-variant-numeric: tabular-nums outright (the 11 kern measured unchanged) - ` +
+			`most likely a metric-compatible substitute - so ${because} cannot be proven here, ` +
+			`only on a machine with the real face`
 	);
 }
 
@@ -153,25 +194,45 @@ describe("the value chip holds ONE rendered width across each slider's range", (
 				);
 
 				const h = await openStrip(browser, { theme });
-				const s = await h.sweep(aria);
+				try {
+					const s = await h.sweep(aria);
 
-				// Precondition, both ways. A case only proves something if the
-				// SAME labels really do render unevenly with nothing pinning
-				// the family - otherwise a missing Georgia, or a slider whose
-				// labels never need padding, passes for nothing at all.
-				const uneven = distinct(s.inheritedWidths).length > 1;
-				expect(
-					uneven,
-					uneven
-						? `${theme.name} renders ${aria}'s labels unevenly and the ` +
-							`case list says it does not - the list is measured, update it`
-						: `${theme.name} was supposed to render ${aria}'s labels ` +
-							`unevenly and did not, so this case proves nothing`
-				).toBe(theme.unevenSliders.includes(aria));
+					// The assertion the judder fix actually needs. The chip
+					// pins its OWN font-family to --font-monospace, never to
+					// the interface font, so this holds regardless of what
+					// the interface font resolves to - checked first, and
+					// unconditionally, so the behaviour gate below never
+					// hides it.
+					expect(distinct(s.widths)).toHaveLength(1);
 
-				// The assertion the judder fix actually needs.
-				expect(distinct(s.widths)).toHaveLength(1);
-				await h.close();
+					// Precondition, both ways. A case only proves something if
+					// the SAME labels really do render unevenly with nothing
+					// pinning the family - otherwise a missing Georgia, or a
+					// slider whose labels never need padding, passes for
+					// nothing at all. And when the "even" side of that claim
+					// rests on tabular-nums actually suppressing a kern (only
+					// Arial-like cases), a metric-compatible alias that
+					// ignores the request outright makes the claim unprovable
+					// here, not false - skip it rather than fail it.
+					if (theme.tabularNumsClaimed) {
+						await skipUnlessTabularNumsHonoured(
+							ctx,
+							family,
+							`whether ${theme.name} renders ${aria}'s labels unevenly`
+						);
+					}
+					const uneven = distinct(s.inheritedWidths).length > 1;
+					expect(
+						uneven,
+						uneven
+							? `${theme.name} renders ${aria}'s labels unevenly and the ` +
+								`case list says it does not - the list is measured, update it`
+							: `${theme.name} was supposed to render ${aria}'s labels ` +
+								`unevenly and did not, so this case proves nothing`
+					).toBe(theme.unevenSliders.includes(aria));
+				} finally {
+					await h.close();
+				}
 			});
 		}
 	}
@@ -209,18 +270,37 @@ describe("the two declarations on the chip do different jobs - measured, not ass
 		// thing holding the chip up.
 		await skipIfFontMissing(ctx, "Arial", "Arial's specific 11-pair kern being suppressed");
 		const h = await openStrip(browser, { theme: THEME_CASES[0]! });
-		const samples = [...DIGITS, FIGURE_SPACE, `${FIGURE_SPACE}3px`, "10px", "11px"];
-		const plain = await h.glyphs(samples);
-		const tabular = await h.glyphs(samples, TABULAR);
-		console.log("Arial 11px, normal: ", JSON.stringify(plain));
-		console.log("Arial 11px, tabular:", JSON.stringify(tabular));
-		expect(new Set(DIGITS.map((d) => plain[d]!)).size).toBe(1);
-		expect(plain[FIGURE_SPACE]).toBeCloseTo(plain["0"]!, 2);
-		// The kern, in a label the eraser really produces.
-		expect(plain["11px"]!).toBeLessThan(plain["10px"]!);
-		// And the request being honoured, which is the difference from Georgia.
-		expect(tabular["11px"]).toBeCloseTo(tabular["10px"]!, 3);
-		expect(tabular[`${FIGURE_SPACE}3px`]).toBeCloseTo(tabular["10px"]!, 3);
+		try {
+			const samples = [...DIGITS, FIGURE_SPACE, `${FIGURE_SPACE}3px`, "10px", "11px"];
+			const plain = await h.glyphs(samples);
+			const tabular = await h.glyphs(samples, TABULAR);
+			console.log("Arial 11px, normal: ", JSON.stringify(plain));
+			console.log("Arial 11px, tabular:", JSON.stringify(tabular));
+			// These hold under Liberation Sans, Ubuntu's metric-compatible
+			// substitute, exactly as they hold under real Arial - claims about
+			// the digits and the plain (non-tabular) kern, neither of which
+			// depends on tabular-nums being honoured.
+			expect(new Set(DIGITS.map((d) => plain[d]!)).size).toBe(1);
+			expect(plain[FIGURE_SPACE]).toBeCloseTo(plain["0"]!, 2);
+			// The kern, in a label the eraser really produces.
+			expect(plain["11px"]!).toBeLessThan(plain["10px"]!);
+
+			// The claim that IS specific to tabular-nums being honoured.
+			// fontAvailable already passed above - Liberation Sans is a real,
+			// distinct face - and it still ignores this request outright
+			// (verified against the 1.4.9 CI dump: normal and tabular came
+			// back byte-identical), so presence cannot stand in for behaviour.
+			await skipUnlessTabularNumsHonoured(
+				ctx,
+				"Arial",
+				"whether tabular-nums suppresses the 11 kern"
+			);
+			// And the request being honoured, which is the difference from Georgia.
+			expect(tabular["11px"]).toBeCloseTo(tabular["10px"]!, 3);
+			expect(tabular[`${FIGURE_SPACE}3px`]).toBeCloseTo(tabular["10px"]!, 3);
+		} finally {
+			await h.close();
+		}
 	});
 });
 

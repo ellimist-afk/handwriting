@@ -118,6 +118,19 @@ export interface ThemeCase {
 	 * fails loudly instead of passing for nothing.
 	 */
 	unevenSliders: readonly string[];
+	/**
+	 * Whether the sliders LEFT OUT of `unevenSliders` are left out because
+	 * `font-variant-numeric: tabular-nums` is doing real work - suppressing a
+	 * kern the face applies under `normal` - rather than because the face's
+	 * digits were never unequal to begin with.
+	 *
+	 * True only for a face documented to need that suppression (Arial's `11`
+	 * kern). A metric-compatible alias can resolve in place of that face,
+	 * pass `fontAvailable`, and still ignore `tabular-nums` outright - which
+	 * turns this precondition into a claim about a mechanism that silently
+	 * isn't running, not about the chip. Gate on it before trusting `uneven`.
+	 */
+	tabularNumsClaimed: boolean;
 }
 
 export const THEME_CASES: ThemeCase[] = [
@@ -129,6 +142,9 @@ export const THEME_CASES: ThemeCase[] = [
 		name: "proportional (Arial)",
 		interfaceFont: "Arial, sans-serif",
 		unevenSliders: [],
+		// Every slider here is even ONLY because tabular-nums suppresses the
+		// `11` kern; without that it would judder like Georgia below.
+		tabularNumsClaimed: true,
 	},
 	// The Georgia case. Old-style figures, no `tnum` feature, so
 	// `font-variant-numeric: tabular-nums` is a request the engine declines
@@ -138,6 +154,9 @@ export const THEME_CASES: ThemeCase[] = [
 		name: "serif (Georgia)",
 		interfaceFont: "Georgia, serif",
 		unevenSliders: ["Eraser size", "Pen size", "Highlighter size"],
+		// Nothing here is left out of unevenSliders, so there is no absence to
+		// pin on tabular-nums working - Georgia declines the request outright.
+		tabularNumsClaimed: false,
 	},
 ];
 
@@ -251,6 +270,26 @@ export async function fontAvailable(browser: Browser, family: string): Promise<b
 	const available = await page.evaluate((f) => window.__hw.fontAvailable(f), family);
 	await page.close();
 	return available;
+}
+
+/**
+ * Whether `family`, as resolved in `browser`, suppresses the `11` kern under
+ * `font-variant-numeric: tabular-nums` the way real Arial is documented to.
+ * See `stripPage.ts#tabularNumsSuppressesKern` for the measurement and why a
+ * name/presence check (`fontAvailable`) cannot answer this: a
+ * metric-compatible alias is a real face and passes that check while
+ * ignoring tabular-nums outright.
+ */
+export async function tabularNumsSuppressesKern(
+	browser: Browser,
+	family: string
+): Promise<boolean> {
+	const page = await browser.newPage();
+	await page.setContent("<!doctype html><meta charset=utf-8><title>tabular-nums check</title>");
+	await page.addScriptTag({ content: await pageBundle() });
+	const honoured = await page.evaluate((f) => window.__hw.tabularNumsSuppressesKern(f), family);
+	await page.close();
+	return honoured;
 }
 
 /** Distinct widths, rounded off float noise but not off a real difference. */
