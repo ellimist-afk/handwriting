@@ -3191,7 +3191,7 @@ export class PdfInkController {
 	 */
 	private isOwnMutation(record: MutationRecord): boolean {
 		if (record.target === this.cursorEl) return true;
-		if (record.target instanceof Element) {
+		if (record.target.instanceOf(Element)) {
 			for (const cls of OWN_CLASSES) {
 				if (record.target.classList.contains(cls)) return true;
 			}
