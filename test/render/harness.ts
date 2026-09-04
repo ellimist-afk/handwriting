@@ -239,6 +239,20 @@ export async function launch(): Promise<Browser> {
 	return chromium.launch();
 }
 
+/**
+ * Whether `family` resolves to a real face in `browser`, measured inside a
+ * throwaway page. See `stripPage.ts#fontAvailable` for the technique and why
+ * `document.fonts.check()` was rejected.
+ */
+export async function fontAvailable(browser: Browser, family: string): Promise<boolean> {
+	const page = await browser.newPage();
+	await page.setContent("<!doctype html><meta charset=utf-8><title>font check</title>");
+	await page.addScriptTag({ content: await pageBundle() });
+	const available = await page.evaluate((f) => window.__hw.fontAvailable(f), family);
+	await page.close();
+	return available;
+}
+
 /** Distinct widths, rounded off float noise but not off a real difference. */
 export const distinct = (widths: number[]): number[] => [
 	...new Set(widths.map((w) => Math.round(w * 100) / 100)),

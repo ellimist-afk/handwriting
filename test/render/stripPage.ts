@@ -285,6 +285,53 @@ function measureGlyphs(samples: string[], fontVariantNumeric = "normal"): Record
 	return out;
 }
 
+/**
+ * Whether `family` actually resolves to a real, distinct face in this
+ * browser, rather than silently falling through to the generic that follows
+ * it in the stack.
+ *
+ * `document.fonts.check()` looks like the obvious tool for this and was ruled
+ * out empirically, not on suspicion: in this same Playwright Chromium it
+ * reports `true` for `"12px NoSuchFaceXYZ"` - a family that cannot possibly
+ * be installed - which makes it worthless as a negative signal.
+ *
+ * This measures instead. A distinctive, width-varied string is rendered once
+ * in `"<family>, monospace"` and once in `monospace` alone, both at a
+ * magnified size so a real difference cannot be lost to sub-pixel rounding.
+ * If `family` resolved to an actual face - Arial and Georgia both are, and
+ * neither is monospaced - the two widths differ. If the browser fell through
+ * to the generic because `family` is not installed, both renders are the
+ * generic and the widths are identical.
+ *
+ * Proven against a real family (Arial, Georgia) and an invented one
+ * (NoSuchFaceXYZ) in this exact Playwright Chromium before being trusted -
+ * see the 1.4.9 branch report for the probe output. Not re-asserted as a
+ * test here: a family that is actually absent on the machine running the
+ * suite would make a "prove it returns true for a present family" case fail
+ * for the same reason this function exists, which is a worse failure mode
+ * than the one it replaces.
+ */
+function fontAvailable(family: string): boolean {
+	const probe = "mmmmmmmmmmlliWWW0123456789";
+	const span = document.createElement("span");
+	span.style.cssText =
+		"position:absolute;left:-9999px;top:-9999px;white-space:pre;font-size:72px;";
+	span.textContent = probe;
+	document.body.appendChild(span);
+
+	span.style.fontFamily = "monospace";
+	const generic = span.getBoundingClientRect().width;
+
+	span.style.fontFamily = `"${family}", monospace`;
+	const withFamily = span.getBoundingClientRect().width;
+
+	span.remove();
+	// Sub-pixel on purpose, same reasoning as floorProbe.binds: a family that
+	// truly resolved does not tie a magnified 27-glyph string to the generic
+	// by accident.
+	return Math.abs(withFamily - generic) > 0.5;
+}
+
 declare global {
 	interface Window {
 		__hw: {
@@ -292,8 +339,9 @@ declare global {
 			sweepSlider: typeof sweepSlider;
 			floorProbe: typeof floorProbe;
 			measureGlyphs: typeof measureGlyphs;
+			fontAvailable: typeof fontAvailable;
 		};
 	}
 }
 
-window.__hw = { buildStrip, sweepSlider, floorProbe, measureGlyphs };
+window.__hw = { buildStrip, sweepSlider, floorProbe, measureGlyphs, fontAvailable };

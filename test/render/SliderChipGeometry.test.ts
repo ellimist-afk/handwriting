@@ -25,6 +25,7 @@ import {
 	THEME_CASES,
 	declaredChipMinWidth,
 	distinct,
+	fontAvailable,
 	launch,
 	openStrip,
 	stylesCss,
@@ -37,6 +38,50 @@ beforeAll(async () => {
 afterAll(async () => {
 	await browser?.close();
 });
+
+/**
+ * The first family named in a CSS font stack, e.g. `"Georgia, serif"` ->
+ * `"Georgia"` - the one whose actual presence a theme case depends on.
+ */
+const primaryFamily = (stack: string): string =>
+	stack
+		.split(",")[0]!
+		.trim()
+		.replace(/^["']|["']$/g, "");
+
+/**
+ * One page-open per distinct family for the whole file, not one per test:
+ * the detector is a real measurement in a real page and every case below
+ * that needs it asks the same question about the same two families.
+ */
+const fontAvailableCache = new Map<string, Promise<boolean>>();
+function familyAvailable(family: string): Promise<boolean> {
+	let cached = fontAvailableCache.get(family);
+	if (!cached) {
+		cached = fontAvailable(browser, family);
+		fontAvailableCache.set(family, cached);
+	}
+	return cached;
+}
+
+/**
+ * The vocabulary the precondition block above this file's header asks for: a
+ * missing face is not a failed proof, it is an unavailable one. Call at the
+ * top of a font-dependent case, before it does any measuring that would
+ * otherwise report the absence as a broken assertion.
+ */
+async function skipIfFontMissing(
+	ctx: { skip: (condition: boolean, note?: string) => void },
+	family: string,
+	because: string
+): Promise<void> {
+	const available = await familyAvailable(family);
+	ctx.skip(
+		!available,
+		`${family} is not installed on this machine - the browser falls back to a ` +
+			`substitute face, so ${because} cannot be proven here, only on a machine that has it`
+	);
+}
 
 describe("the harness itself", () => {
 	it("renders the chip under the injected box-sizing reset, not by luck", async () => {
@@ -99,7 +144,14 @@ describe("the harness itself", () => {
 describe("the value chip holds ONE rendered width across each slider's range", () => {
 	for (const theme of THEME_CASES) {
 		for (const aria of SLIDERS) {
-			it(`${aria}, interface font ${theme.name}`, async () => {
+			it(`${aria}, interface font ${theme.name}`, async (ctx) => {
+				const family = primaryFamily(theme.interfaceFont);
+				await skipIfFontMissing(
+					ctx,
+					family,
+					`whether ${theme.name} renders ${aria}'s labels unevenly`
+				);
+
 				const h = await openStrip(browser, { theme });
 				const s = await h.sweep(aria);
 
@@ -130,10 +182,11 @@ describe("the two declarations on the chip do different jobs - measured, not ass
 	const DIGITS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 	const TABULAR = "tabular-nums";
 
-	it("Georgia: the digits differ, so tabular-nums cannot save the chip", async () => {
+	it("Georgia: the digits differ, so tabular-nums cannot save the chip", async (ctx) => {
 		// Rule 3 of the 1.4.9 design doc, measured: a CSS declaration is a
 		// request. Georgia has old-style figures and no `tnum` feature, so
 		// asking for tabular-nums changes nothing and the digits stay unequal.
+		await skipIfFontMissing(ctx, "Georgia", "Georgia's old-style figures staying unequal");
 		const h = await openStrip(browser, { theme: THEME_CASES[1]! });
 		const plain = await h.glyphs([...DIGITS, FIGURE_SPACE]);
 		const tabular = await h.glyphs([...DIGITS, FIGURE_SPACE], TABULAR);
@@ -146,7 +199,7 @@ describe("the two declarations on the chip do different jobs - measured, not ass
 		// a chip that changes width.
 	});
 
-	it("Arial: the digits agree, and tabular-nums is what suppresses the 11 kern", async () => {
+	it("Arial: the digits agree, and tabular-nums is what suppresses the 11 kern", async (ctx) => {
 		// The other half, and it is not the half anyone expected. Arial's
 		// digits are all one advance, so `constantWidthLabel`'s padding does
 		// hold - EXCEPT that Arial kerns the pair `11`, which shortens exactly
@@ -154,6 +207,7 @@ describe("the two declarations on the chip do different jobs - measured, not ass
 		// kern off and the set goes even again. On this face the family pin is
 		// belt to `font-variant-numeric`'s braces; on Georgia it is the only
 		// thing holding the chip up.
+		await skipIfFontMissing(ctx, "Arial", "Arial's specific 11-pair kern being suppressed");
 		const h = await openStrip(browser, { theme: THEME_CASES[0]! });
 		const samples = [...DIGITS, FIGURE_SPACE, `${FIGURE_SPACE}3px`, "10px", "11px"];
 		const plain = await h.glyphs(samples);
