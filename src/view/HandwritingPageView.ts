@@ -4,7 +4,7 @@ import { CameraState } from "../camera/coordinates";
 import { telemetry } from "../diag/Telemetry";
 import { PointerRouter, PenSample } from "../input/PointerRouter";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
-import { InkStroke, InkTool } from "../ink/Stroke";
+import { InkPoint, InkStroke, InkTool } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { drawCommitted, drawStroke } from "../ink/StrokeRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
@@ -861,6 +861,27 @@ export class HandwritingPageView extends TextFileView {
 			this.lassoDown(sample);
 			return;
 		}
+		// A BARE tip landing inside an active selection drags it - onenote's
+		// grammar (alan, 2026-08-27). The note surface has had this since the
+		// ruling; here the only ways into a drag were the side button and the
+		// lasso tool, so a tip that landed on ink the user had just selected
+		// dissolved the selection below and drew straight across it. Outside
+		// the bounds nothing changes.
+		//
+		// BARE is the load-bearing word. An eraser is not a bare tip, and the
+		// note surface paid for learning it: left out of the test, lassoed ink
+		// became the one ink on the page the eraser could not reach, because
+		// every contact dragged the selection instead. Hence `eraser` rather
+		// than `eraserButton` - the toolbar's eraser is as much an eraser as
+		// the pen's own end, and `this.erasing` below is the same expression.
+		const eraser = eraserButton || this.tool === "eraser";
+		if (!eraser && !this.selection.isEmpty) {
+			const w = this.camera.screenToWorld(sample.x, sample.y);
+			if (this.selectionGrabbed(w)) {
+				this.lassoDown(sample);
+				return;
+			}
+		}
 		// Tip and eraser return the pen to normal behavior: selection
 		// dissolves. The note surface has done this since the OneNote grammar
 		// landed (InkOverlay.ts, the same comment); this surface kept a stale
@@ -871,7 +892,7 @@ export class HandwritingPageView extends TextFileView {
 		// drop the selection either. clearSelection is a no-op when there is
 		// nothing selected.
 		this.clearSelection();
-		this.erasing = eraserButton || this.tool === "eraser";
+		this.erasing = eraser;
 		this.erasedThisStroke = [];
 		this.penHistory = [sample];
 		this.lastTail = [];
@@ -898,7 +919,10 @@ export class HandwritingPageView extends TextFileView {
 		// The tool's flatness, not the layer's: the highlighter is exempt from
 		// the shaped width law and from the raw centerline, and the wet layer
 		// cannot work that out for itself.
-		if (point) this.wet().beginStroke(point, style, tool === "highlighter");
+		if (point) {
+			this.wet().beginStroke(point, style, tool === "highlighter");
+			this.drawContact(point, style);
+		}
 		this.startTicker();
 	}
 
@@ -972,6 +996,35 @@ export class HandwritingPageView extends TextFileView {
 		this.metrics.recordDraw(drawEnd - drawStart, drawEnd - newestTs);
 		this.updateOverlay(predicted);
 		this.schedulePresentProbe(newestTs);
+	}
+
+	/**
+	 * The contact dot: the mark a pen-down makes before anything has moved.
+	 *
+	 * A SECOND call site next to `updateOverlay`, which is the whole
+	 * mechanism. `updateOverlay` serves the MOVING head and has to keep
+	 * tapering, so it must go on asking for the bare live width; this one
+	 * serves the first sample, where the dot is the entire visible mark, and
+	 * asks for `contactHalfWidth` - the shaped width floored at the nib
+	 * (alan, 2026-09-02). Sharing one site would have forced a choice between
+	 * a tap drawn at the shaper's 12% tip floor and a stroke that never
+	 * tapers. The note surface splits it the same way.
+	 *
+	 * Ungated on `head()`: the smoother has nothing to report at pen-down,
+	 * and with smoothing off (boox) it never will, so a gated draw would put
+	 * a tap back to nothing at all.
+	 */
+	private drawContact(point: InkPoint, style: PenStyle): void {
+		this.tail.clear();
+		this.lastTail = [];
+		this.tail.drawHead(
+			this.camera.snapshot,
+			style,
+			{ x: point.x, y: point.y },
+			{ x: point.x, y: point.y },
+			point.pressure,
+			this.wet().contactHalfWidth(style, point.pressure)
+		);
 	}
 
 	/**
@@ -1269,12 +1322,28 @@ export class HandwritingPageView extends TextFileView {
 		);
 	}
 
+	/**
+	 * Whether a world point lands on the active selection - the grab test.
+	 *
+	 * Padded, the way the note surface pads its own, in screen px turned into
+	 * world units so the slack is the same size on the glass at any zoom.
+	 *
+	 * One predicate, two callers: `lassoDown` below, and the bare-tip branch
+	 * in `penDown`. Written out twice it would be two chances to pad
+	 * differently.
+	 */
+	private selectionGrabbed(w: Point2): boolean {
+		const bounds = this.selectionBounds();
+		return (
+			!!bounds && pointInBBox(w.x, w.y, padBBox(bounds, SELECTION_GRAB_PAD / this.camera.zoom))
+		);
+	}
+
 	private lassoDown(sample: PenSample): void {
 		const w = this.camera.screenToWorld(sample.x, sample.y);
-		const bounds = this.selectionBounds();
 		// Landing inside an existing selection moves it; anywhere else starts a
 		// new lasso.
-		if (bounds && pointInBBox(w.x, w.y, padBBox(bounds, SELECTION_GRAB_PAD / this.camera.zoom))) {
+		if (this.selectionGrabbed(w)) {
 			this.dragFrom = { x: w.x, y: w.y };
 			this.dragTotal = { dx: 0, dy: 0 };
 			return;

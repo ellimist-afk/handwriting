@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	markPenHardwareSeen,
 	markPenSeen,
 	nextPenToolsMode,
 	normalizePenToolsMode,
 	onPenToolsChanged,
+	penHardwareSeen,
 	penSeenThisSession,
 	penToolsListenerCountForTest,
 	penToolsVisible,
@@ -114,5 +116,57 @@ describe("pen tools change notifications", () => {
 		setPenToolsMode("hide");
 		expect(heard).toHaveBeenCalledTimes(1);
 		expect(penToolsListenerCountForTest()).toBe(1);
+	});
+});
+
+/**
+ * The two flags are separate, and only one of them may move.
+ *
+ * `penSeen` answers "show the strip" and is deliberately set by UI paths -
+ * every tool command, the mouse-ink toggle, the settings switch. `penHardware`
+ * answers "does the tip ink without mouse ink" and only real pen events set
+ * it. Collapsing them in either direction is a shipped bug:
+ *
+ *  - reading penSeen as hardware is what left the nib light stuck on for a
+ *    mouse user through 1.4.6, 1.4.7 and 1.4.8 (alan, 2026-09-02);
+ *  - gating markPenSeen on the pointer type - the tempting one-line "fix" -
+ *    would take the toolbar away from every mouse-ink user on a desktop in
+ *    auto mode, which is a behaviour change nobody asked for. The last test
+ *    here is the one that goes red if anyone tries it.
+ */
+describe("pen sightings: visibility and hardware are different questions", () => {
+	beforeEach(resetPenToolsForTest);
+
+	it("a UI sighting shows the strip without claiming a pen exists", () => {
+		markPenSeen();
+		expect(penSeenThisSession()).toBe(true);
+		expect(penHardwareSeen()).toBe(false);
+	});
+
+	it("a real pen answers both", () => {
+		markPenHardwareSeen();
+		expect(penHardwareSeen()).toBe(true);
+		// Visibility rides along: a pen is proof for both questions, and this
+		// is what keeps the strip appearing exactly when it did before.
+		expect(penSeenThisSession()).toBe(true);
+	});
+
+	it("a pen after a UI sighting still upgrades the hardware answer", () => {
+		// markPenSeen latches and returns early on the second call. If the
+		// hardware flag were set inside that early-returning edge it would be
+		// lost here - a pen user who opened the palette first would never
+		// light their own nib.
+		markPenSeen();
+		markPenHardwareSeen();
+		expect(penHardwareSeen()).toBe(true);
+	});
+
+	it("a mouse-only user still gets the strip on a desktop in auto mode", () => {
+		// Exactly what a mouse user's first click does: the tool command
+		// calls markPenSeen to raise the pen UI. The strip must appear, and
+		// must go on appearing, with no pen anywhere in the session.
+		markPenSeen();
+		expect(penToolsVisible("auto", false, penSeenThisSession())).toBe(true);
+		expect(penHardwareSeen()).toBe(false);
 	});
 });

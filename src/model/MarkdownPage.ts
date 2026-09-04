@@ -180,12 +180,29 @@ export function parseMarkdownPage(md: string): ParsedMarkdownPage {
 				i++;
 			}
 			i++;
-			const embed = EMBED_RE.exec(body.join("\n"));
+			// WHICH line the embed is on, not just that the block has one: the
+			// rest of the block is the user's and is kept below, and a scan of
+			// the joined body cannot say which line to leave out. A body-wide
+			// match could also span two lines (`![[a` / `b]]`), and reading
+			// that as an embed target invented a link out of two of the user's
+			// lines while keeping neither.
+			const embedLine = body.findIndex((l) => EMBED_RE.test(l));
+			const embed = embedLine >= 0 ? EMBED_RE.exec(body[embedLine]!) : null;
 			const target = embed?.[1] ?? embed?.[2];
 			// A block whose embed we cannot read is not silently dropped: it
 			// falls through to `extra` and stays in the file verbatim.
-			if (target) images.push({ id: uniqueId(id), target: target.trim() });
-			else extraLines.push(...body);
+			if (target) {
+				images.push({ id: uniqueId(id), target: target.trim() });
+				// Neither is the rest of the block. An image block WE wrote
+				// holds the embed and nothing else, so this adds nothing to an
+				// ordinary file. But a block whose closing marker a sync or a
+				// hand edit tore off swallows every line to the end of the
+				// note, and dropping that body here deleted the user's
+				// paragraphs outright the next time the file was composed.
+				for (let k = 0; k < body.length; k++) {
+					if (k !== embedLine) extraLines.push(body[k]!);
+				}
+			} else extraLines.push(...body);
 			continue;
 		}
 		const open = OPEN_RE.exec(line.trim());

@@ -17,7 +17,7 @@ import {
 	stylusOnlyTouches,
 	touchesPredateStroke,
 } from "./StylusTouch";
-import { mouseInkEnabled } from "./MouseInk";
+import { mouseActsAsPen, mouseInkEnabled } from "./MouseInk";
 import { MouseTrail } from "../input/MouseTrail";
 import { penSeenThisSession } from "./PenToolsMode";
 
@@ -1248,7 +1248,14 @@ export class InlinePenRouter {
 	 * downstream of the claim is the ordinary pen path.
 	 */
 	private mouseActsAsPen(e: PointerEvent): boolean {
-		return e.pointerType === "mouse" && mouseInkEnabled();
+		// The expression itself moved to MouseInk.ts, unchanged, so that
+		// `pointerRaisesPenTools` (PenToolsMode.ts) - which both ink surfaces
+		// now read at their hover sites - is built from THIS rule rather than
+		// from a second copy of it. Still a method here because every caller
+		// in this file has an event in hand and none of them should learn a
+		// new import. No allocation and no extra work on the move path: one
+		// module call replaces one module call.
+		return mouseActsAsPen(e.pointerType);
 	}
 
 	private sampleFrom(e: PointerEvent): PenSample {

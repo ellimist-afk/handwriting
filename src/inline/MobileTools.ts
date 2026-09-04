@@ -32,7 +32,8 @@ import {
 	toolbarCornerClass,
 } from "./ToolbarCorner";
 import { stripEscapeVerdict } from "./StripEscape";
-import { penSeenThisSession } from "./PenToolsMode";
+import { penHardwareSeen } from "./PenToolsMode";
+import { markMousePutDown } from "./MouseInk";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN } from "../ink/PenStyle";
 
 export interface MobileToolsHost {
@@ -70,6 +71,11 @@ export interface MobileToolsHost {
 	setMouseInk(on: boolean): void;
 	/** Arm without a toast: for arming that rides inside a tool click. */
 	armMouseInkQuietly(): void;
+	/**
+	 * Disarm without a toast, and put the nib light out with it: for the
+	 * put-down that rides inside a tool click. The mirror of the line above.
+	 */
+	disarmMouseInkQuietly(): void;
 	/** Bug-report recording state, for the strip's dot. */
 	recordingOn(): boolean;
 	/** Whether a lasso selection exists, so copy and trash can dim. */
@@ -93,8 +99,16 @@ const tipInks = (h: MobileToolsHost): boolean =>
 /**
  * Whether a nib button's LIGHT (and the collapsed pill) should show it lit:
  * the tip must nominally hold this tool AND the tip must actually ink with
- * it - true once a pen has been seen this session, or for a mouse user only
- * while mouse ink is armed. Pulled out as a pure function of (host, tool) -
+ * it - true once a real PEN has been seen this session, or for a mouse user
+ * only while mouse ink is armed.
+ *
+ * `penHardwareSeen`, not `penSeenThisSession`. The latter is the strip's
+ * VISIBILITY flag and every tool command sets it, so on a mouse-only machine
+ * it went true on the user's first click and this whole predicate collapsed
+ * to `isActive` for the rest of the session - the light could then never
+ * follow mouse ink going off, which is the defect this function was extracted
+ * to fix and did not (alan, 2026-09-02, shipped unfixed in 1.4.6-1.4.8).
+ * Pulled out as a pure function of (host, tool) -
  * this needs only a fake MobileToolsHost, so MobileTools.test.ts pins it
  * directly, with no element tree at all. (That comment used to say the class
  * itself "cannot be constructed under the suite"; the C16 test in that same
@@ -103,7 +117,7 @@ const tipInks = (h: MobileToolsHost): boolean =>
  * read from isActive, which the click chain still branches on.
  */
 export const nibIsLit = (h: MobileToolsHost, tool: "pen" | "highlighter"): boolean =>
-	tipInks(h) && h.activeTool() === tool && (penSeenThisSession() || h.mouseInkOn());
+	tipInks(h) && h.activeTool() === tool && (penHardwareSeen() || h.mouseInkOn());
 
 /**
  * Pixel<->multiplier conversion for the nib sliders (Alan, 2026-09: "aligning
@@ -195,8 +209,19 @@ interface ButtonSpec {
 	 * toast than today (alan, 2026-09-02, traced by hand before this was
 	 * written). isActive keeps meaning "the nominal tool"; isLit answers
 	 * "does the tip actually ink with this right now" - the tip only inks
-	 * for a mouse user when mouse ink is armed, or for anyone once a pen has
-	 * been seen this session (penSeenThisSession, PenToolsMode.ts).
+	 * for a mouse user when mouse ink is armed, or for anyone once a real PEN
+	 * has fired a real event (penHardwareSeen, PenToolsMode.ts).
+	 *
+	 * That last clause used to read "once a pen has been seen this session
+	 * (penSeenThisSession, PenToolsMode.ts)", and it was FALSE. It is the same
+	 * citation that hid the nib-light bug for three releases: penSeenThisSession
+	 * is the strip's VISIBILITY flag, which every tool command, the mouse-ink
+	 * toggle and the settings switch also set, so on a mouse-only machine it
+	 * went true on the first click and isLit collapsed to isActive from then on.
+	 * `cff850d` moved nibIsLit onto penHardwareSeen, which only genuine pen
+	 * contact or pen hover sets; this doc is the half that did not move with it.
+	 * Left as a correction rather than a quiet rewrite, because the wrong
+	 * citation was believed for three releases precisely by being tidy.
 	 */
 	isLit?: (host: MobileToolsHost) => boolean;
 	/** Dims the button when false; omitted = always enabled. */
@@ -227,9 +252,18 @@ const BUTTONS: ButtonSpec[] = [
 		// when we click it with mouse and moes ink turns off?" A mouse click
 		// on the lit pen button turns mouse ink off (:570 below) and the
 		// mouse goes back to text; the light must follow that, not just the
-		// nominal tool. Pen/touch users always have penSeenThisSession()
-		// true from their first stroke, so this reduces to isActive for
-		// them - only a mouse-without-a-pen user ever sees it diverge.
+		// nominal tool.
+		//
+		// This comment used to end "Pen/touch users always have
+		// penSeenThisSession() true from their first stroke, so this reduces
+		// to isActive for them - only a mouse-without-a-pen user ever sees it
+		// diverge." That was FALSE and it is why nobody re-checked this for
+		// three releases: a mouse-without-a-pen user's penSeenThisSession()
+		// also goes true on their very first click, because the tool command
+		// the click execs calls markPenSeen() to raise the strip. So the
+		// predicate reduced to isActive for EVERYONE, isLit was dead, and the
+		// fix Alan asked for never worked in 1.4.6, 1.4.7 or 1.4.8. nibIsLit
+		// reads penHardwareSeen() now, which only real pen events set.
 		isLit: (h) => nibIsLit(h, "pen"),
 	},
 	{
@@ -375,8 +409,13 @@ export class MobileTools {
 	 * until §5p (alan, 2026-09-02: "pressing the eraser while it is already
 	 * active should reopen its size pop, not switch the tool off" - a mouse
 	 * excepted, "mouse sould disable"): the click handler's eraser branch
-	 * now flips this bit directly too, the way the nib buttons' `isActive`
-	 * branches flip `openInkSlider` for pen and highlighter.
+	 * now CLEARS this bit directly too, so the way back is one tap. It only
+	 * clears - it never sets - because a press made while the pop is already
+	 * showing is not asking for the pop, and is left to switch the tool off
+	 * the way it always did. So the only things that SET it are
+	 * `closeInkSliders` and the hover-leave timer in `scheduleSliderClose`,
+	 * and the only things that clear it are the activation edge, the
+	 * mouse-hover preview and that tap.
 	 */
 	private eraserPopClosed = false;
 
@@ -626,7 +665,28 @@ export class MobileTools {
 						: spec.commandId === "handwriting:inline-tool-highlighter"
 							? "highlighter"
 							: null;
-				if (hoverNib && spec.isActive?.(this.host)) {
+				// THE LIT predicate, not the active one (alan, 2026-09-03: "plain
+				// mouse without mouse ink armed should not open the slider
+				// popout, correct?" - he is right). `isActive` means "the
+				// NOMINAL tool" and deliberately ignores mouse ink, so a plain
+				// mouse with ink off used to hover the Pen button and be handed
+				// a size slider for a tool that cannot lay down a stroke. Same
+				// family as the dead-looking button that produced
+				// `armMouseInkQuietly`, and the light was already telling the
+				// truth beside it - this is the preview catching up to it.
+				//
+				// `spec.isLit ?? spec.isActive` is the render path's own
+				// resolution (:1046 and the pill at :1093), so a button with no
+				// `isLit` of its own - every one but the two nibs - is
+				// untouched, and the eraser's preview branch below keeps its
+				// separate §5p ruling.
+				//
+				// HOVER ONLY. The click path below still branches on `isActive`
+				// and must: clicking an unlit nib is exactly how a mouse user
+				// arms mouse ink (the final `else`'s `armMouseInkQuietly`), and
+				// gating that would leave them no way in at all. Hover previews,
+				// click decides.
+				if (hoverNib && (spec.isLit ?? spec.isActive)?.(this.host)) {
 					// A hover is a preview, not a decision: crossing this button on
 					// the way to the palette must not close what a CLICK opened.
 					// While the palette is up, hover keeps its hands off entirely.
@@ -643,14 +703,16 @@ export class MobileTools {
 				// `eraserPopClosed`, not `openInkSlider` - so it needs its own
 				// preview branch, and MOUSE ONLY (§5p AI CONFIRMED, item 1).
 				// Pen is not excluded above, only touch is, so a pen reaches
-				// this point too; it is turned away here on purpose. The
-				// eraser's tap branch below (already built, ptr !== "mouse")
-				// TOGGLES `eraserPopClosed` on every pen/touch press - unlike
-				// the nib case above, whose pen branch just confirms the
-				// slider open rather than toggling it. Letting pen hover open
-				// the pop first would make a real pen tap immediately toggle
-				// it straight back shut, silently breaking that already-
-				// confirmed pen behaviour.
+				// this point too; it is turned away here on purpose, and the
+				// reason is stronger than it was. The eraser's tap branch
+				// below reads the pop's state: with the pop SHOWING, a
+				// pen/touch press on the active eraser falls through to
+				// exec() and switches the tool off. So a pen hover that
+				// opened the pop first would turn the tap that followed it
+				// into a tool-off - the pointer merely crossing the button on
+				// its way there would change what pressing it does. The nib
+				// case above has no such hazard: its pen branch only confirms
+				// the slider open, and re-tapping a nib never puts it down.
 				if (
 					ev.pointerType === "mouse" &&
 					spec.commandId === "handwriting:inline-tool-eraser" &&
@@ -772,7 +834,8 @@ export class MobileTools {
 				} else if (
 					spec.commandId === "handwriting:inline-tool-eraser" &&
 					spec.isActive?.(this.host) &&
-					ptr !== "mouse"
+					ptr !== "mouse" &&
+					!this.eraserPopOpen()
 				) {
 					// Mirrors the nib branches above: pressing the tool you
 					// already hold reopens its pop instead of picking it again.
@@ -788,7 +851,27 @@ export class MobileTools {
 					// eraser button IS the mode, exactly the reasoning the
 					// nibs' ptr === "mouse" branches give above - it falls
 					// through to exec() untouched.
-					this.eraserPopClosed = this.eraserPopOpen();
+					//
+					// The `!eraserPopOpen()` half is what keeps pen and touch
+					// able to put the eraser DOWN. As first written this
+					// branch took EVERY non-mouse press on the active eraser,
+					// and since the pop is showing whenever the eraser was
+					// just picked up, the ordinary re-tap - the one that had
+					// switched the tool off since before the strip existed -
+					// only toggled the pop shut and back. Shipped in 1.4.6.
+					// The tool was still escapable by picking a nib, which is
+					// what the Pen button is for, but the eraser's OWN button
+					// no longer answered a press the way it looked like it
+					// would. Reading the pop's own state splits
+					// the two intents the one press carries: pop hidden means
+					// pen contact took it away and the press is asking for it
+					// back, which is the case the branch was added for; pop
+					// showing means the user is looking at the thing this
+					// branch would reopen, so the press can only mean the
+					// other thing, and it falls through to exec() the way a
+					// mouse click does. Each intent costs one tap and neither
+					// is reachable only through the other.
+					this.eraserPopClosed = false;
 					// A tap is a decision, same as the nib branches' own
 					// `sliderFromHover = false`: whatever hover was previewing
 					// is settled now, so the leave timer must not later undo it.
@@ -823,11 +906,64 @@ export class MobileTools {
 						spec.commandId === "handwriting:inline-tool-space" ||
 						spec.commandId === "handwriting:inline-tool-pan";
 					const wasActive = spec.isActive?.(this.host) ?? false;
+					// Computed BEFORE exec, from the same host reads exec
+					// itself would see (none of these four commands touch
+					// mouse ink, so the answer cannot change underneath us) -
+					// exec is what actually flips the mode, and the flag
+					// below has to be in place before it runs so the
+					// command's own Notice can see it while it is building.
+					const puttingDown = claimsTip && wasActive && ptr === "mouse" && this.host.mouseInkOn();
+					if (puttingDown) {
+						// Tell the command its own toast is about to be wrong.
+						// The exec's toast names the nib the tip fell back to,
+						// which is correct for a pen or touch tap actually
+						// picking that nib and false here - a mouse put-down
+						// picked nothing, it got its cursor back (alan,
+						// hardware finding 2026-09-03: "it says highlighter
+						// after doing it"). `consumeMousePutDown` reads this
+						// while composing that Notice and substitutes the
+						// words the loud mouse-ink-toggle command already
+						// uses for "off" - matching, not inventing. See
+						// MouseInk.ts for why the command cannot infer this
+						// itself from `mouseInkEnabled()` alone.
+						markMousePutDown();
+					}
 					this.host.exec(spec.commandId);
 					if (claimsTip && !wasActive && ptr === "mouse" && !this.host.mouseInkOn()) {
 						// Quietly: the exec above already toasted the tool.
 						// One click, one toast (alan, 2026-08-31).
 						this.host.armMouseInkQuietly();
+					} else if (puttingDown) {
+						// PUTTING IT DOWN, the mirror of the arm above (alan,
+						// 2026-09-03). The two nibs already did this - their own
+						// branches near the top call `setMouseInk(false)` -
+						// which routes through the loud toggle command and
+						// therefore always toasted right; these four tools
+						// went through the generic exec above instead, whose
+						// toast is written for a different caller of the same
+						// off edge (see `markMousePutDown` above for the fix).
+						// The eraser, lasso, insert-space and pan only toggled
+						// back to the last nib, and for a MOUSE that is not
+						// putting anything down: the pointer is still claimed
+						// and still cannot select text, so the only way back to
+						// the cursor was to click a button you were not using.
+						// His words: "much more consistent for them all to be
+						// dropped and revert back to mouse cursor".
+						//
+						// The `exec` above has already toggled the tool off, so
+						// this only has to release the pointer. Quiet, and for
+						// a different reason than the arm now: the toast this
+						// time is `markMousePutDown`'s, consumed inside the
+						// exec above, not a second Notice stacked on top of it.
+						//
+						// MOUSE ONLY, and the guard is what keeps it that way.
+						// A pen's resting state is the nib, so returning there
+						// IS its put-down and nothing about pen or touch should
+						// move; he asked for the two to stay as they are while
+						// he thinks the flow through. The nibs never reach here
+						// with a mouse - their branches catch that case first -
+						// so this is exactly the four tools.
+						this.host.disarmMouseInkQuietly();
 					}
 				}
 				this.refresh();

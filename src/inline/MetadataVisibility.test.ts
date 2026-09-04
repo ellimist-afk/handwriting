@@ -1,5 +1,34 @@
+/**
+ * THE STYLESHEET ASSERTION READS CODE, NOT THE STYLESHEET'S TEXT, and this
+ * file is where both failure directions sat on ADJACENT LINES.
+ *
+ *   - `toContain(".metadata-container.<class>")` is satisfied by a comment
+ *     that names the class - the false ALL-CLEAR, silent.
+ *   - `not.toContain(":has(")` is TRIPPED by a comment that names `:has(` -
+ *     the false ALARM, loud. And the obvious comment to write above this rule
+ *     is one saying why `:has()` was avoided, which is precisely the sentence
+ *     that breaks it.
+ *
+ * Both were demonstrated on this branch in one edit: the real rule's class was
+ * renamed to a typo - the rename that missed the stylesheet - and a comment
+ * was added naming the correct class and explaining the `:has()` decision.
+ * The presence assertion PASSED over a stylesheet that no longer carried the
+ * rule; the relational-selector assertion then failed on the prose, which is
+ * the sharper detail: the loud half fires first and masks the silent half, so
+ * a maintainer chasing the visible failure deletes the sentence, goes green,
+ * and never learns the rule is gone.
+ *
+ * `codeOnly` (src/CodeOnly.ts) is the shared stripper, imported not copied.
+ * `styles.css` has no `//` sequence (verified), so its line-comment half
+ * cannot over-blank this input. Neither direction is weakened: matching code
+ * can only find FEWER matches, so no real rule stops satisfying the first
+ * assertion and no real `:has(` stops tripping the second - what stops
+ * counting is a rule, or a selector, that was only ever a sentence.
+ */
+
 import { describe, expect, it } from "vitest";
 import css from "../../styles.css?raw";
+import { codeOnly } from "../CodeOnly";
 import {
 	frontmatterPropertyKeys,
 	ID_ONLY_METADATA_CLASS,
@@ -40,8 +69,24 @@ function root(...containers: HTMLElement[]): ParentNode {
 
 describe("metadata visibility", () => {
 	it("uses a maintained class instead of relational selectors", () => {
-		expect(css).toContain(`.metadata-container.${ID_ONLY_METADATA_CLASS}`);
-		expect(css).not.toContain(":has(");
+		// Both halves against the cascade, for opposite reasons - see the note
+		// at the top of this file.
+		const cssCode = codeOnly(css);
+		expect(cssCode).toContain(`.metadata-container.${ID_ONLY_METADATA_CLASS}`);
+		expect(cssCode).not.toContain(":has(");
+	});
+
+	it("reads rules, not sentences, in both directions", () => {
+		// Fixtures, so the assertion above is evidence. THE DEFEAT, verbatim,
+		// plus the anti-vacuity halves that stop a stripper which blanked
+		// everything from passing all of this while proving nothing.
+		const rule = `.metadata-container.${ID_ONLY_METADATA_CLASS} { display: none; }\n`;
+		const prose = `/* Maintained from MetadataVisibility.ts: .metadata-container.${ID_ONLY_METADATA_CLASS}, rather than :has(). */\n`;
+
+		expect(codeOnly(rule)).toContain(`.metadata-container.${ID_ONLY_METADATA_CLASS}`);
+		expect(codeOnly(prose)).not.toContain(`.metadata-container.${ID_ONLY_METADATA_CLASS}`);
+		expect(codeOnly(prose)).not.toContain(":has(");
+		expect(codeOnly(".x:has(.y) { color: red; }\n")).toContain(":has(");
 	});
 
 	it("marks a container whose only row is the Handwriting page id", () => {

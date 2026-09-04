@@ -20,14 +20,24 @@
  * `enterTipMode` is the two halves in one place, in the order the order
  * matters in. This is the first test in the repo to import `src/main.ts`.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import HandwritingPlugin from "./main";
-import { mouseInkEnabled, setMouseInk } from "./inline/MouseInk";
-import { markPenSeen, penSeenThisSession, resetPenToolsForTest } from "./inline/PenToolsMode";
+import { consumeMousePutDown, markMousePutDown, mouseInkEnabled, setMouseInk } from "./inline/MouseInk";
+import {
+	clearPenHardwareSeen,
+	markPenHardwareSeen,
+	markPenSeen,
+	penHardwareSeen,
+	penSeenThisSession,
+	resetPenToolsForTest,
+} from "./inline/PenToolsMode";
+import { addStripSurface, getInlineTool, setInlineTool } from "./inline/InkOverlay";
 
 const proto = HandwritingPlugin.prototype as unknown as {
 	enterTipMode(this: unknown, on: boolean): void;
+	applyMouseInkUiFanout(this: unknown, on: boolean): void;
+	tipModeOffNotice(this: unknown): string;
 };
 
 /**
@@ -91,5 +101,134 @@ describe("entering a tip mode from a command", () => {
 		setMouseInk(false);
 		proto.enterTipMode.call(fakePlugin(), true);
 		expect(penSeenThisSession()).toBe(true);
+	});
+});
+
+/**
+ * Bug 1 (this session's hardware report, 2026-09-03): "you have to tap a
+ * couple times for pen to light as well as turn mouse ink off's light on
+ * even though the toast works properly immediately."
+ *
+ * The STATE changed instantly - `penHardwareSeen()`/`mouseInkEnabled()` flip
+ * the moment the command runs, which is why the toast (built from the same
+ * state) was always right. Only the STRIP's paint lagged, because
+ * `refreshPenToolsAll` (`ensurePenTools` per editor) is a no-op once a strip
+ * already exists - the common case - and it never walks the PDF surface at
+ * all regardless (that lives in a different map; see InkOverlay.ts's own
+ * comment on `stripSurfaces`). `refreshAllStrips` is the one call that both
+ * repaints an existing strip and reaches every surface registered via
+ * `addStripSurface` - the PDF's, in production.
+ *
+ * These tests register a fake strip surface the same way main.ts registers
+ * the PDF's, and assert THAT REGISTERED CALLBACK fires. Asserting only that
+ * `refreshPenToolsAll` ran (the pre-fix code path) would still pass if the
+ * fix were reverted, since that call reaches the editors and nothing else -
+ * exactly the bug.
+ */
+describe("applyMouseInkUiFanout: the light repaints on every open strip, not just the editors", () => {
+	beforeEach(() => {
+		resetPenToolsForTest();
+		setMouseInk(false);
+	});
+
+	it("turning mouse ink OFF reaches a registered (PDF-like) strip surface immediately", () => {
+		markPenHardwareSeen();
+		const refresh = vi.fn();
+		const undo = addStripSurface(refresh);
+		try {
+			refresh.mockClear();
+
+			proto.applyMouseInkUiFanout.call(fakePlugin(), false);
+
+			// Not "at least once" - the fan-out must reach it, and reaching
+			// it twice would mean a redundant second sweep.
+			expect(refresh).toHaveBeenCalledTimes(1);
+			// And the state half, so a failure here is unambiguously about
+			// the repaint reaching the surface, not about the underlying
+			// flag never having moved at all.
+			expect(penHardwareSeen()).toBe(false);
+		} finally {
+			undo();
+		}
+	});
+
+	it("turning mouse ink ON reaches a registered (PDF-like) strip surface immediately too", () => {
+		const refresh = vi.fn();
+		const undo = addStripSurface(refresh);
+		try {
+			proto.applyMouseInkUiFanout.call(fakePlugin(), true);
+
+			expect(refresh).toHaveBeenCalledTimes(1);
+		} finally {
+			undo();
+		}
+	});
+
+	it("OFF does not take the strip away - penSeen (visibility) is untouched", () => {
+		markPenSeen();
+		const plugin = fakePlugin();
+
+		proto.applyMouseInkUiFanout.call(plugin, false);
+
+		expect(penSeenThisSession()).toBe(true);
+	});
+});
+
+/**
+ * Bug 2 (this session's hardware report, 2026-09-03): "toast is incorrect
+ * but this works on all tools but it says highlighter after doing it."
+ *
+ * `tipModeOffNotice` is what the eraser/lasso/insert-space/pan commands call
+ * to build their OFF-toggle Notice (main.ts). Ordinarily it names the nib the
+ * tip fell back to, which is correct for a pen or touch tap that really did
+ * just pick that nib up. `markMousePutDown` (MouseInk.ts) is set by
+ * MobileTools.ts immediately before it runs one of these commands as part of
+ * a MOUSE put-down, where nothing was picked - the mouse only got its cursor
+ * back - and these tests pin that the wrong wording gets replaced with the
+ * loud mouse-ink-toggle command's own OFF text, matched verbatim rather than
+ * invented, and consumed so it cannot leak into the next ordinary toggle.
+ */
+describe("tipModeOffNotice: what the OFF toast says", () => {
+	beforeEach(() => {
+		resetPenToolsForTest();
+		setMouseInk(false);
+		consumeMousePutDown();
+		clearPenHardwareSeen();
+	});
+
+	it("ordinarily names the nib the tip fell back to", () => {
+		setInlineTool("highlighter");
+		const plugin = fakePlugin();
+
+		const text = proto.tipModeOffNotice.call(plugin);
+
+		expect(text).toBe(`Handwriting: ${getInlineTool()}`);
+		expect(text).toBe("Handwriting: highlighter");
+	});
+
+	it("says cursor for a mouse put-down, not the nib's name", () => {
+		setInlineTool("highlighter");
+		markMousePutDown();
+		const plugin = fakePlugin();
+
+		const text = proto.tipModeOffNotice.call(plugin);
+
+		// Matched to the loud mouse-ink-toggle command's own OFF string
+		// (main.ts), not invented wording - and specifically NOT the nib
+		// name, which is the exact defect reported ("it says highlighter").
+		expect(text).toBe("Handwriting: cursor");
+		expect(text).not.toBe("Handwriting: highlighter");
+	});
+
+	it("consumes the flag - a second OFF toggle right after gets the ordinary wording", () => {
+		setInlineTool("pen");
+		markMousePutDown();
+		const plugin = fakePlugin();
+
+		const first = proto.tipModeOffNotice.call(plugin);
+		const second = proto.tipModeOffNotice.call(plugin);
+
+		expect(first).toBe("Handwriting: cursor");
+		expect(second).toBe("Handwriting: pen");
 	});
 });

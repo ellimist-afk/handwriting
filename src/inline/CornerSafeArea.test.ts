@@ -144,3 +144,84 @@ describe("styles.css - toolbar corners clear the phone's unsafe edges", () => {
 		}
 	});
 });
+
+/*
+ * The slider readout's width is load-bearing: `hangUnder` re-centres the pop
+ * from its own offsetWidth, so a chip that changes width moves the pop. The
+ * label is padded to a constant character count to stop that, which only
+ * works if the characters are constant width. `tabular-nums` asks for that
+ * and a font without a `tnum` feature ignores the request silently, so the
+ * chip has to pin a font rather than inherit the theme's interface one.
+ *
+ * This block used to read `css` and take the FIRST matching rule, and both
+ * halves of that were defeatable - by exactly the two mistakes the corner
+ * rules above already defend against, in the same file:
+ *
+ *   - COMMENTING THE DECLARATION OUT passed, because the raw stylesheet still
+ *     contains the text. `bare` is the stripper the corner assertions have
+ *     used all along and it was sitting six lines up;
+ *   - A LATER OVERRIDE passed, because `[0]` reads the first block and the
+ *     LAST rule to match is the one that wins. That is the hazard this file's
+ *     own header names - "three separate blocks re-declare top/bottom for
+ *     these elements and the last one to match wins" - and `declarationsFor`
+ *     is the answer it already reached for.
+ *
+ * So this reads `bare` through `declarationsFor` and holds EVERY font-family
+ * the chip is given, not the first. All of them must be the monospace var
+ * rather than only the last: a chip that names another font anywhere is a
+ * chip somebody meant to change, and a rule ordering is a worse thing to rest
+ * on than a rule.
+ *
+ * A rendered-geometry harness that measures the chip for real is being built
+ * alongside this. It does not make this redundant - the stylesheet assertion
+ * is the cheap first line, and it is the one that says WHICH font was asked
+ * for rather than what some engine did about the request.
+ */
+describe("styles.css - the slider readout pins a font", () => {
+	const CHIP = ".handwriting-slider-val";
+	/** Monospace by definition; this stylesheet's choice for every readout. */
+	const MONO = /^var\(\s*--font-monospace\s*\)$/;
+
+	/** Every font-family declared inside a rule, in source order. */
+	function fontFamiliesIn(body: string): string[] {
+		return [...body.matchAll(/(?:^|;)\s*font-family\s*:([^;]*)/g)].map((m) => m[1]!.trim());
+	}
+
+	/** Every font-family the chip's own rules declare, in source order. */
+	function chipFonts(): string[] {
+		return declarationsFor(CHIP).flatMap(fontFamiliesIn);
+	}
+
+	it("declares a font-family rather than inheriting the theme's", () => {
+		expect(declarationsFor(CHIP).length, `${CHIP} rule missing`).toBeGreaterThan(0);
+		expect(
+			chipFonts().length,
+			"the chip inherits the interface font, so a serif theme reintroduces the pop-width judder"
+		).toBeGreaterThan(0);
+	});
+
+	it("pins one whose digits are equal width, in every rule that sets one", () => {
+		const fonts = chipFonts();
+		// Length first: with none at all the loop below is vacuous and would
+		// pass over a chip that declares no font whatsoever.
+		expect(fonts.length).toBeGreaterThan(0);
+		for (const font of fonts) {
+			expect(font, `${CHIP} is given a font that is not the monospace var`).toMatch(MONO);
+		}
+	});
+
+	it("nothing anywhere in the stylesheet re-declares the chip's font", () => {
+		// The same sweep the android shade constants get above, and for the
+		// same reason: `declarationsFor` matches a selector LIST, so a
+		// compound or descendant selector - `.is-mobile .handwriting-slider-val`
+		// - would override the font from outside its reach.
+		for (const block of bare.match(/[^{}]+\{[^{}]*\}/g) ?? []) {
+			const brace = block.indexOf("{");
+			const selector = block.slice(0, brace);
+			if (!selector.includes(CHIP)) continue;
+			for (const font of fontFamiliesIn(block.slice(brace + 1, -1))) {
+				expect(font, `${CHIP} font re-declared by ${selector.trim()}`).toMatch(MONO);
+			}
+		}
+	});
+});

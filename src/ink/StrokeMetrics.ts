@@ -20,6 +20,24 @@ function statText(s: StatSummary, unit = "ms"): string {
 	return s.n === 0 ? "(not recorded)" : `${s.avg}/${s.max}${unit}`;
 }
 
+/**
+ * Same convention as statText, for a rate rather than a distribution:
+ * zero events did not measure a zero rate - nothing measured it. Without
+ * this, an uncounted rate and a genuine zero rate print the identical
+ * `0Hz` - which is exactly what the PDF surface printed for the life of
+ * its `onPenMove: () => {}` (fixed in `beb6fbb`), because moveHz/rawHz are
+ * bare numbers with no sample count attached.
+ *
+ * Stated honestly: this gate is on the EVENT COUNT, not the rate. It
+ * proves "nothing counted this". It does not and cannot distinguish that
+ * from "counted, but slow" - a real 0Hz is still reachable with events
+ * present over a long enough duration, and that case correctly prints
+ * `0Hz` here, not "(not recorded)".
+ */
+function rateText(events: number, durationMs: number): string {
+	return events === 0 ? "(not recorded)" : `${round2((events * 1000) / durationMs)}Hz`;
+}
+
 export interface StatSummary {
 	avg: number;
 	max: number;
@@ -256,6 +274,16 @@ export class StrokeMetrics {
 		return summary;
 	}
 
+	/**
+	 * Uncalled - confirmed by grep, one hit, this definition. Not dead code
+	 * to prune: it is the live counterpart to summaryText, an instance
+	 * method that reads the counters directly so metrics can be sampled
+	 * DURING a stroke, which summaryText structurally cannot do because it
+	 * formats an already-finished StrokeSummary. It is also the only live
+	 * consumer of statText. Deleting it would lose the one sampling path a
+	 * future in-progress HUD would need; kept deliberately until that HUD
+	 * exists.
+	 */
 	liveText(): string {
 		return [
 			`mode ${this.mode}`,
@@ -268,7 +296,7 @@ export class StrokeMetrics {
 
 	static summaryText(s: StrokeSummary): string {
 		const lines = [
-			`[${s.mode}] ${s.durationMs}ms  move ${s.moveHz}Hz raw ${s.rawHz}Hz`,
+			`[${s.mode}] ${s.durationMs}ms  move ${rateText(s.moveEvents, s.durationMs)} raw ${rateText(s.rawEvents, s.durationMs)}`,
 			`samples ${s.samples} (acc ${s.accepted} / dedup ${s.deduped})  coalesced avg ${s.coalescedPerEvent.avg} max ${s.coalescedPerEvent.max}`,
 			`delivery ${s.deliveryAgeMs.avg}/${s.deliveryAgeMs.max}ms  handler ${s.handlerMs.avg}/${s.handlerMs.max}ms  draw ${s.drawMs.avg}/${s.drawMs.max}ms`,
 			`age@draw ${s.ageAtDrawMs.avg}/${s.ageAtDrawMs.max}ms  age@present ${s.ageAtPresentMs.avg}/${s.ageAtPresentMs.max}ms`,

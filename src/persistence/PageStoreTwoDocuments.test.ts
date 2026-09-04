@@ -87,6 +87,36 @@ import { PageDocument } from "../model/PageDocument";
 import { PageData, emptyPage } from "../model/PageData";
 import type { InkStroke } from "../ink/Stroke";
 import viewSource from "../view/HandwritingPageView.ts?raw";
+import { codeOnly } from "../CodeOnly";
+
+/**
+ * The canvas view's CODE, without the canvas view's prose.
+ *
+ * The last test in this file reads the shipped view as source text, and its
+ * own comment says it took "the `?raw` idiom StripPenChrome.test.ts
+ * established" - it inherited the idiom and it inherited the hole with it. A
+ * file read as text is a document: it carries the schedule calls and the
+ * paragraphs about the schedule calls, and a regex cannot tell them apart.
+ *
+ * Demonstrated on this branch rather than argued. Both real sites were moved
+ * behind a helper and the old lines left behind as `// was: …` comments - the
+ * ordinary way a refactor leaves a file. The view then had ZERO schedule sites
+ * and passed no writer identity anywhere, and the assertion below still found
+ * two calls, both "carrying" `this.writer`, and passed. So did the whole suite.
+ * Its anti-vacuity guard - "a rename or a refactor that voided this regex
+ * fails here rather than silently asserting nothing" - was the assertion the
+ * comments propped up, which is the worst one to lose.
+ *
+ * `codeOnly` (src/CodeOnly.ts) is the shared stripper, imported not copied.
+ * Counting code can only find FEWER call sites, so no real site stops being
+ * checked; what stops being counted is a call that was only ever a sentence.
+ */
+const viewCode = codeOnly(viewSource);
+
+/** Every schedule/saveNow call in a piece of view source, comments excluded. */
+function scheduleCalls(src: string): string[] {
+	return codeOnly(src).match(/store\.(?:schedule|saveNow)\([^)]*\)/g) ?? [];
+}
 
 const PAGE_ID = "p1";
 const FINAL = ".handwriting/p1.json";
@@ -448,13 +478,46 @@ describe("the reconcile is per WRITER, and only ever adds", () => {
 		// stay green over a plugin whose view still called `schedule` with two
 		// arguments - the fix would be present in the store and absent from the
 		// only surface that needs it. Read from the view's source instead, in
-		// the `?raw` idiom StripPenChrome.test.ts established.
-		expect(viewSource).toContain("newPageWriter(");
-		const calls = viewSource.match(/store\.(?:schedule|saveNow)\([^)]*\)/g) ?? [];
+		// the `?raw` idiom StripPenChrome.test.ts established - but from its
+		// CODE, not its text. See the note on `viewCode` at the top of this
+		// file: read raw, this assertion was satisfied by two comments over a
+		// view that had stopped scheduling altogether.
+		expect(viewCode).toContain("newPageWriter(");
+		const calls = scheduleCalls(viewSource);
 		// Anti-vacuity: the view really does schedule sidecars, so a rename or
 		// a refactor that voided this regex fails here rather than silently
-		// asserting nothing.
+		// asserting nothing. This is the half comments used to prop up.
 		expect(calls.length).toBeGreaterThanOrEqual(2);
 		expect(calls.filter((c) => !c.includes("this.writer"))).toEqual([]);
+	});
+});
+
+/**
+ * Fixtures over the scanner, so the assertion above is evidence rather than a
+ * coincidence, and so the defeat is pinned in a form nobody has to reconstruct.
+ */
+describe("the view scan reads schedule calls, not sentences about them", () => {
+	const REAL = "\t\tthis.host.store.schedule(this.pageId, this.page, this.writer);\r\n";
+
+	it("finds a real schedule call and keeps its arguments", () => {
+		expect(scheduleCalls(REAL)).toEqual(["store.schedule(this.pageId, this.page, this.writer)"]);
+	});
+
+	it("still catches a real call that dropped the writer identity", () => {
+		// The assertion's original job, unchanged. Reading code must not have
+		// cost it anything.
+		const dropped = "\t\tthis.host.store.schedule(this.pageId, this.page);\r\n";
+		expect(scheduleCalls(dropped).filter((c) => !c.includes("this.writer"))).toHaveLength(1);
+	});
+
+	it("does NOT count a call that survives only as a comment", () => {
+		// THE DEFEAT, verbatim: the shape a refactor leaves behind.
+		const moved = `\t\t// moved to the shared persist helper; was:\r\n\t\t//   this.host.store.schedule(this.pageId, this.page, this.writer)\r\n\t\tthis.host.persistPage(this.pageId, this.page);\r\n`;
+		expect(scheduleCalls(moved)).toEqual([]);
+	});
+
+	it("does NOT let a doc comment supply the writer field either", () => {
+		const explained = "\t/**\r\n\t * Every save goes through newPageWriter(\"canvas-page-view\").\r\n\t */\r\n";
+		expect(codeOnly(explained)).not.toContain("newPageWriter(");
 	});
 });

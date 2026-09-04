@@ -255,6 +255,72 @@ describe("PdfInkController lasso", () => {
 		expect(strokes[0]!.bbox.x).toBeCloseTo(s1.bbox.x + 10, 6);
 	});
 
+	// A BARE tip inside the selection drags it - onenote's grammar (alan,
+	// 2026-08-27). The note surface has had this since the ruling; here the
+	// only ways into a drag were the side button and the toolbar's lasso mode,
+	// so a tip landing on ink the user had just selected drew a stroke across
+	// it. These three pin the whole rule: bare tip drags, eraser erases,
+	// outside inks.
+	it("a bare tip inside the selection drags it", () => {
+		setTipMode("lasso");
+		lasso([
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		]);
+		ops = [];
+		// Not lasso, not the side button, not the eraser: the plain nib.
+		setTipMode("nib");
+		pen.penDown(sample(205, 205));
+		pen.penRaw([sample(225, 205)]);
+		pen.penUp();
+		const moves = ops.filter((op) => op.type === "move");
+		expect(moves.length).toBeGreaterThan(0);
+		const dx = moves.reduce((sum, op) => sum + (op as { dx: number }).dx, 0);
+		expect(dx).toBeCloseTo(10, 6);
+		// And nothing was drawn over the selection, which was the defect.
+		expect(ops.some((op) => op.type === "add")).toBe(false);
+		expect(stored()).toEqual(["s1"]);
+	});
+
+	it("the eraser still reaches ink inside a selection", () => {
+		setTipMode("lasso");
+		lasso([
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		]);
+		ops = [];
+		// BARE is load-bearing: an eraser is not a bare tip. Swallowed by the
+		// grab test, lassoed ink becomes the one ink on the page the eraser
+		// cannot reach - it drags instead, on every contact.
+		setTipMode("eraser");
+		pen.penDown(sample(205, 205));
+		pen.penUp();
+		expect(ops.some((op) => op.type === "move")).toBe(false);
+		expect(stored()).toEqual([]);
+	});
+
+	it("a bare tip outside the selection still inks", () => {
+		setTipMode("lasso");
+		lasso([
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		]);
+		ops = [];
+		setTipMode("nib");
+		// Well clear of the bounds and its pad.
+		pen.penDown(sample(500, 500));
+		pen.penRaw([sample(530, 530), sample(560, 560)]);
+		pen.penUp();
+		expect(ops.filter((op) => op.type === "add")).toHaveLength(1);
+		expect(ops.some((op) => op.type === "move")).toBe(false);
+	});
+
 	it("a document switch mid-gesture leaves the pane able to sync again", () => {
 		setTipMode("nib");
 		pen.penDown(sample(200, 200));
@@ -607,6 +673,145 @@ describe("PdfInkController, the rest of what went wrong", () => {
 	});
 });
 
+/**
+ * The tap floor, on the pdf.
+ *
+ * A tap draws at exactly the nib whatever the pressure (alan, 2026-09-02);
+ * `WetInkRenderer.contactHalfWidth` is that ruling and WetInkRenderer.test.ts
+ * pins the arithmetic. What is pinned HERE is the thing this surface got
+ * wrong: which width it ASKS for. One shared head-draw call site served both
+ * the contact dot and the moving head, so the contact dot came out at the
+ * shaper's tip floor - 12% of the nib, a speck - and the obvious repair
+ * (point that site at `contactHalfWidth`) would have floored the moving head
+ * too and taken the taper out of every stroke. Two call sites is the fix and
+ * the split is what these assert.
+ */
+describe("the contact draw is floored and the moving draw is not", () => {
+	/** Distinguishable answers, so the assertion is about which was asked. */
+	const LIVE_HW = 0.11;
+	const CONTACT_HW = 5;
+
+	function harness() {
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: () => {},
+			setTimeout: () => 0,
+			requestAnimationFrame: () => 0,
+		};
+		let strokes: InkStroke[] = [];
+		const controller = new PdfInkController(
+			{} as HTMLElement,
+			win as unknown as Window,
+			() => strokes,
+			() => "doc-1",
+			() => strokes,
+			(op) => {
+				strokes = applyOp(strokes, op);
+			}
+		);
+		const asked: string[] = [];
+		const widths: number[] = [];
+		// A stub pair, because the real one needs canvases this harness has
+		// none of. It records the QUESTION, which is the whole subject.
+		const pair = {
+			wetCanvas: { setCssProps: () => {} },
+			headCanvas: { setCssProps: () => {} },
+			wet: {
+				clear: () => {},
+				shape: true,
+				beginStroke: () => {},
+				appendPoint: () => {},
+				finishStroke: () => {},
+				head: () => ({ from: { x: 0, y: 0 }, to: { x: 1, y: 1 }, pressure: 0.5 }),
+				liveHalfWidth: () => {
+					asked.push("live");
+					return LIVE_HW;
+				},
+				contactHalfWidth: () => {
+					asked.push("contact");
+					return CONTACT_HW;
+				},
+				liveWidthPx: () => 1,
+			},
+			tail: {
+				clear: () => {},
+				clearAll: () => {},
+				draw: () => {},
+				drawHead: (
+					_cam: unknown,
+					_style: unknown,
+					_from: unknown,
+					_to: unknown,
+					_pressure: number,
+					hw: number
+				) => {
+					widths.push(hw);
+				},
+			},
+		};
+		const priv = controller as unknown as {
+			pair: unknown;
+			wetHostPage: number;
+			pageSize: Map<number, { wPt: number; hPt: number }>;
+		};
+		// The page's size in points, which `cameraFor` needs and only a
+		// measured page element would otherwise supply. 600 css px / 300 pt
+		// is the SCALE the rest of this file's coordinates assume.
+		priv.pageSize.set(1, { wPt: 300, hPt: 400 });
+		priv.pair = pair;
+		priv.wetHostPage = 1;
+		const pen = controller as unknown as {
+			penDown(s: PenSample): void;
+			penRaw(s: PenSample[]): void;
+			penUp(): void;
+		};
+		return { pen, asked, widths };
+	}
+
+	afterEach(() => {
+		resetTipModeForTest();
+	});
+
+	it("asks for the floored width on the first sample and the live width after", () => {
+		const { pen, asked, widths } = harness();
+		pen.penDown(sample(200, 200));
+		pen.penRaw([sample(230, 230)]);
+		pen.penRaw([sample(260, 260)]);
+		pen.penUp();
+		// First accepted sample is the contact dot; everything after it is the
+		// moving head and must stay unfloored or the stroke cannot taper.
+		expect(asked[0]).toBe("contact");
+		expect(asked.slice(1)).not.toContain("contact");
+		expect(asked.slice(1)).toContain("live");
+		expect(widths[0]).toBe(CONTACT_HW);
+		expect(widths.slice(1).every((w) => w === LIVE_HW)).toBe(true);
+	});
+
+	it("a tap that never moves is drawn once, at the floored width", () => {
+		const { pen, asked, widths } = harness();
+		// Down and straight up. The whole visible mark is the contact dot, so
+		// if this asked for the bare live width the tap would be a speck.
+		pen.penDown(sample(200, 200));
+		pen.penUp();
+		expect(asked).toEqual(["contact"]);
+		expect(widths).toEqual([CONTACT_HW]);
+	});
+});
+
 describe("pdfPenWidth — the reticle and the stroke must agree", () => {
 	// The dot promises the width of the line. It is drawn in css px; the
 	// stroke is stored in page units and rendered times the scale. Those two
@@ -760,6 +965,59 @@ describe("pan and space on a pdf", () => {
 		pen.penUp();
 		expect(ops.some((op) => op.type === "add")).toBe(true);
 	});
+
+	// Alan, hardware, testing on a page with no ink: "all of the tools only
+	// work when there's ink on the page but no indication that it's not
+	// working other than it's not working". The eraser and the lasso both
+	// need existing ink to do anything at all - unlike pan above, which
+	// never touches the store and keeps working on a blank page - so an
+	// empty page guarantees the whole gesture finds nothing, whichever way
+	// the pen moves. Same shape as the space refusal above: said once, at
+	// contact, not merely quiet.
+
+	it("erase with no ink on the page says so and erases nothing", () => {
+		setTipMode("eraser");
+		pen.penDown(sample(200, 200));
+		pen.penRaw([sample(210, 210)]);
+		pen.penUp();
+		expect(ops).toEqual([]);
+		expect(notices).toEqual(["Handwriting: no ink on the page to erase"]);
+	});
+
+	it("erase with ink present on the page does not nag, even though this gesture never reaches it", () => {
+		// The ink sits far from where the eraser actually drags: a miss is
+		// ordinary use, not a broken tool, and must stay as quiet as it
+		// always has. The check is existence on the PAGE, not proximity to
+		// the gesture, so this must not fire just because the ink happens
+		// to lie elsewhere.
+		strokes = [inkAt("s1")];
+		setTipMode("eraser");
+		pen.penDown(sample(200, 200));
+		pen.penRaw([sample(210, 210)]);
+		pen.penUp();
+		expect(notices).toEqual([]);
+	});
+
+	it("lasso with no ink on the page says so and selects nothing", () => {
+		setTipMode("lasso");
+		pen.penDown(sample(200, 200));
+		pen.penRaw([sample(260, 200)]);
+		pen.penRaw([sample(260, 260)]);
+		pen.penRaw([sample(200, 260)]);
+		pen.penUp();
+		expect(notices).toEqual(["Handwriting: no ink on the page to select"]);
+	});
+
+	it("lasso with ink present on the page does not nag, even when the loop misses it", () => {
+		strokes = [inkAt("s1")];
+		setTipMode("lasso");
+		pen.penDown(sample(200, 200));
+		pen.penRaw([sample(260, 200)]);
+		pen.penRaw([sample(260, 260)]);
+		pen.penRaw([sample(200, 260)]);
+		pen.penUp();
+		expect(notices).toEqual([]);
+	});
 });
 
 describe("the scale a pointer sample is converted with", () => {
@@ -812,7 +1070,7 @@ describe("PdfInkController pen reticle", () => {
 	let cursorEl: {
 		setAttribute(): void;
 		remove(): void;
-		classList: { toggle(): void };
+		classList: { toggle(): void; add(): void; remove(): void };
 		setCssStyles(styles: Record<string, unknown>): void;
 		parentElement: unknown;
 	} | null;
@@ -834,7 +1092,7 @@ describe("PdfInkController pen reticle", () => {
 				cursorEl = {
 					setAttribute: () => {},
 					remove: () => {},
-					classList: { toggle: () => {} },
+					classList: { toggle: () => {}, add: () => {}, remove: () => {} },
 					setCssStyles: (styles: Record<string, unknown>) => {
 						Object.assign(cursorStyle, styles);
 					},
@@ -898,6 +1156,275 @@ describe("PdfInkController pen reticle", () => {
 		priv.refreshStrip();
 		expect(cursorStyle.display).toBe("none");
 		expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+/**
+ * Task 2: the pdf reticle used to special-case ONLY the eraser - every other
+ * mode got `Math.max(1.5, nib)`, the same near-invisible dot the nib itself
+ * gets, sized off the ink width rather than off what the tip is about to do.
+ * These pin the three looks `showCursor` now gives lasso, pan and space,
+ * against the exact fixed constants the note surface's `showPenCursor` uses
+ * for `LASSO_CURSOR_CLASS` (9), `PAN_CURSOR_CLASS` (11) and
+ * `SPACE_CURSOR_CLASS` (24, half-width) - see `InkOverlay.ts`.
+ *
+ * The fake `classList` here actually tracks membership (a `Set`), unlike the
+ * no-op one in "PdfInkController pen reticle" above: those tests only needed
+ * `display`/timers, these need to know WHICH class survived.
+ */
+describe("PdfInkController pen reticle - mode-specific looks", () => {
+	let controller: PdfInkController;
+	let priv: { showCursor(sample: PenSample, pointerType?: string): void };
+	let cursorClasses: Set<string>;
+	let cursorStyle: Record<string, unknown>;
+
+	beforeEach(() => {
+		resetTipModeForTest();
+		setPenReticle(true);
+		cursorClasses = new Set();
+		cursorStyle = {};
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+			setCssStyles: () => {},
+			createDiv: () => ({
+				setAttribute: () => {},
+				remove: () => {},
+				classList: {
+					add: (...cls: string[]) => cls.forEach((c) => cursorClasses.add(c)),
+					remove: (...cls: string[]) => cls.forEach((c) => cursorClasses.delete(c)),
+					toggle: (cls: string, on?: boolean) => {
+						const next = on ?? !cursorClasses.has(cls);
+						if (next) cursorClasses.add(cls);
+						else cursorClasses.delete(cls);
+					},
+				},
+				setCssStyles: (styles: Record<string, unknown>) => {
+					Object.assign(cursorStyle, styles);
+				},
+				parentElement: scroller,
+			}),
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: () => {},
+			setTimeout: () => 1,
+			requestAnimationFrame: () => 0,
+			getComputedStyle: () => ({ position: "relative" }),
+		};
+		controller = new PdfInkController(
+			{} as HTMLElement,
+			win as unknown as Window,
+			() => [],
+			() => "doc-1",
+			() => [],
+			() => {}
+		);
+		priv = controller as unknown as typeof priv;
+	});
+
+	afterEach(() => {
+		setPenReticle(true);
+	});
+
+	it("nib: no ring, no pan ring, no space rule", () => {
+		setTipMode("nib");
+		priv.showCursor(sample(10, 10), "pen");
+		expect(cursorClasses.has("handwriting-pdf-cursor-ring")).toBe(false);
+		expect(cursorClasses.has("handwriting-pdf-cursor-pan")).toBe(false);
+		expect(cursorClasses.has("handwriting-pdf-cursor-space")).toBe(false);
+	});
+
+	it("lasso: a dashed ring at the fixed 9px radius, not the nib width", () => {
+		setTipMode("lasso");
+		priv.showCursor(sample(10, 10), "pen");
+		expect(cursorClasses.has("handwriting-pdf-cursor-ring")).toBe(true);
+		expect(cursorClasses.has("handwriting-pdf-cursor-pan")).toBe(false);
+		// 9px radius -> 18px square, whatever the nib width setting is.
+		expect(cursorStyle.width).toBe("18px");
+		expect(cursorStyle.height).toBe("18px");
+	});
+
+	it("pan: the one solid ring, at the fixed 11px radius", () => {
+		setTipMode("pan");
+		priv.showCursor(sample(10, 10), "pen");
+		expect(cursorClasses.has("handwriting-pdf-cursor-pan")).toBe(true);
+		// Solid, not dashed: must not also carry the eraser/lasso ring class.
+		expect(cursorClasses.has("handwriting-pdf-cursor-ring")).toBe(false);
+		expect(cursorStyle.width).toBe("22px");
+		expect(cursorStyle.height).toBe("22px");
+	});
+
+	it("space: a dashed rule, not a ring - zero height, fixed 48px width", () => {
+		setTipMode("space");
+		priv.showCursor(sample(10, 10), "pen");
+		expect(cursorClasses.has("handwriting-pdf-cursor-space")).toBe(true);
+		expect(cursorClasses.has("handwriting-pdf-cursor-ring")).toBe(false);
+		expect(cursorClasses.has("handwriting-pdf-cursor-pan")).toBe(false);
+		expect(cursorStyle.width).toBe("48px");
+		expect(cursorStyle.height).toBe("0px");
+	});
+
+	it("eraser still reads its true erase radius, unaffected by the new branches", () => {
+		setTipMode("eraser");
+		priv.showCursor(sample(10, 10), "pen");
+		expect(cursorClasses.has("handwriting-pdf-cursor-ring")).toBe(true);
+		const r = getEraserRadiusPx();
+		expect(cursorStyle.width).toBe(`${r * 2}px`);
+	});
+});
+
+/**
+ * Task 1: pan, lasso and space left the reticle exactly where the eraser was
+ * before d2b6f4a - shown only from a hover sample, so the same 1000ms
+ * watchdog (`showCursor`'s own `setTimeout`) took it away mid-gesture because
+ * nothing re-armed it once the pen was down and hover samples stopped
+ * arriving. These drive a REAL gesture through `penDown`/`penRaw`/`penUp` -
+ * not the wrapper methods directly - and check the same evidence the erase
+ * fix rests on: the watchdog is re-armed (a fresh `setTimeout`) at pen-down
+ * and again on the next raw batch, without a fresh hover sample in between,
+ * and the reticle is put away at pen-up rather than left for the watchdog.
+ *
+ * `cursorEl` is primed by one hover first, matching the limit `showLasso/
+ * Pan/SpaceCursor` all state in their own comments: none of them BUILD the
+ * reticle, they only refresh one that hover already built.
+ */
+describe("PdfInkController pen reticle - stays alive through pan, lasso and space", () => {
+	let controller: PdfInkController;
+	let pen: {
+		showCursor(s: PenSample, pointerType?: string): void;
+		penDown(s: PenSample, ev?: unknown): void;
+		penRaw(s: PenSample[]): void;
+		penUp(): void;
+	};
+	let strokes: InkStroke[];
+	let cursorStyle: Record<string, unknown>;
+	let setTimeoutSpy: ReturnType<typeof vi.fn>;
+	let clearTimeoutSpy: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		resetTipModeForTest();
+		setPenReticle(true);
+		strokes = [];
+		cursorStyle = { display: "none" };
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+			setCssStyles: () => {},
+			createDiv: () => ({
+				setAttribute: () => {},
+				remove: () => {},
+				classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+				setCssStyles: (styles: Record<string, unknown>) => {
+					Object.assign(cursorStyle, styles);
+				},
+				parentElement: scroller,
+			}),
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		setTimeoutSpy = vi.fn(() => 1);
+		clearTimeoutSpy = vi.fn();
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: clearTimeoutSpy,
+			setTimeout: setTimeoutSpy,
+			requestAnimationFrame: () => 0,
+			getComputedStyle: () => ({ position: "relative" }),
+		};
+		controller = new PdfInkController(
+			{} as HTMLElement,
+			win as unknown as Window,
+			(page) => strokes.filter((st) => (st.page ?? 1) === page),
+			() => "doc-1",
+			() => strokes,
+			() => {}
+		);
+		pen = controller as unknown as typeof pen;
+		(controller as unknown as { boundScroller: unknown }).boundScroller = scroller;
+	});
+
+	afterEach(() => {
+		setPenReticle(true);
+	});
+
+	it("pan: pen-down and the next raw batch each re-arm the watchdog", () => {
+		pen.showCursor(sample(10, 10), "pen"); // the pen approached and hovered first
+		setTimeoutSpy.mockClear();
+		setTipMode("pan");
+		pen.penDown(sample(200, 200));
+		expect(setTimeoutSpy, "pen-down did not refresh the reticle").toHaveBeenCalledTimes(1);
+		expect(cursorStyle.display).toBe("block");
+		pen.penRaw([sample(210, 190)]);
+		expect(setTimeoutSpy, "the raw batch did not refresh the reticle").toHaveBeenCalledTimes(2);
+		expect(cursorStyle.display).toBe("block");
+		pen.penUp();
+		expect(cursorStyle.display, "pen-up left the reticle up instead of hiding it").toBe("none");
+	});
+
+	it("lasso: a fresh loop's pen-down and its raw batch each re-arm the watchdog", () => {
+		pen.showCursor(sample(10, 10), "pen");
+		setTimeoutSpy.mockClear();
+		setTipMode("lasso");
+		pen.penDown(sample(200, 200));
+		expect(setTimeoutSpy, "pen-down did not refresh the reticle").toHaveBeenCalledTimes(1);
+		pen.penRaw([sample(210, 210)]);
+		expect(setTimeoutSpy, "the raw batch did not refresh the reticle").toHaveBeenCalledTimes(2);
+		expect(cursorStyle.display).toBe("block");
+		pen.penUp();
+		expect(cursorStyle.display, "pen-up left the reticle up instead of hiding it").toBe("none");
+	});
+
+	it("space: pen-down and the next raw batch each re-arm the watchdog", () => {
+		// `showSpaceCursor` is only reached once the gesture has ink to move -
+		// the "no ink below the line" refusal returns before it, matching the
+		// eraser's own "show only once the erase actually begins" shape. So
+		// this needs real ink below the touch point, the same as "space
+		// shoves the rows below the divider" in the "pan and space" suite.
+		const pts = [100, 105, 110].map((v, i) => ({ x: v, y: 200 + i * 2, pressure: 0.5, t: i * 8 }));
+		strokes = [
+			{
+				id: "s1",
+				tool: "pen",
+				color: "#000000",
+				width: 2,
+				points: pts,
+				bbox: computeBBox(pts, 4),
+				createdAt: 0,
+				page: 1,
+			},
+		];
+		pen.showCursor(sample(10, 10), "pen");
+		setTimeoutSpy.mockClear();
+		setTipMode("space");
+		// Page y at scrollTop 0, scale 2: contentY / 2. 100 -> page y 50,
+		// above the ink at ~200, so strokeIdsBelow finds it.
+		pen.penDown(sample(200, 100));
+		expect(setTimeoutSpy, "pen-down did not refresh the reticle").toHaveBeenCalledTimes(1);
+		expect(cursorStyle.display).toBe("block");
+		pen.penRaw([sample(200, 140)]);
+		expect(setTimeoutSpy, "the raw batch did not refresh the reticle").toHaveBeenCalledTimes(2);
+		expect(cursorStyle.display).toBe("block");
+		pen.penUp();
+		expect(cursorStyle.display, "pen-up left the reticle up instead of hiding it").toBe("none");
 	});
 });
 
@@ -1548,5 +2075,245 @@ describe("PdfInkController with a synthetic stroke source", () => {
 		expect(ops).toEqual([]);
 		expect(persists).toEqual([]);
 		expect(real.map((s) => s.id)).toEqual(["real-1"]);
+	});
+});
+
+/**
+ * The pane's keydown handler, driven directly.
+ *
+ * `handleKeyDown` became a class field (rather than the local closure `mount`
+ * used to build) so it could be called here without a root that implements
+ * `addEventListener` for real - the same way `stripExec` is already driven in
+ * the strip-dispatch block above. That refactor is the reason this block
+ * exists: the two rules ported onto this surface from the note
+ * (InkOverlay.handleKeyDown - Escape hands the tip back, Ctrl/Cmd+C and +X
+ * act on a lasso) arrived with only registry MARKERS pinning them, and a
+ * marker proves the source text contains a condition, not that pressing the
+ * key does anything. It also moved the undo branch below a new early return,
+ * which is the kind of reordering that silently eats a hotkey.
+ */
+describe("PdfInkController keyboard: Escape hands the tip back, Ctrl/Cmd+C and +X act on a lasso", () => {
+	let strokes: InkStroke[];
+	let ops: InkOp[];
+	let notices: string[];
+	let execs: string[];
+	let controller: PdfInkController;
+	let pen: { penDown(s: PenSample): void; penRaw(s: PenSample[]): void; penUp(): void };
+	let keys: { handleKeyDown(ev: KeyboardEvent): void };
+	/**
+	 * What `win.getSelection()` answers. Null is "no text selected anywhere",
+	 * the state every test but the guard cases wants; `textSelectionLive`
+	 * reads it through `this.win`, never the bare global, so a stub is enough.
+	 */
+	let textSel: { isCollapsed: boolean; anchorNode: unknown } | null;
+	/** A node the pane's root contains, and one it does not. */
+	const inPane = {};
+	const otherPane = {};
+
+	beforeEach(() => {
+		resetTipModeForTest();
+		clearInkClipboard();
+		strokes = [inkAt("s1")];
+		ops = [];
+		notices = [];
+		execs = [];
+		textSel = null;
+		const scroller = {
+			scrollLeft: 0,
+			scrollTop: 0,
+			classList: { add: () => {}, remove: () => {} },
+			querySelector: () => null,
+		};
+		probe.current = {
+			scroller,
+			scaleFactor: SCALE,
+			scaleSource: "test",
+			pages: [
+				{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true },
+			],
+		};
+		// A root that can answer `contains`, which the other blocks' `{}` cannot:
+		// the Ctrl+C guard is scoped to THIS pane's text selection, and a root
+		// that contained everything (or threw) would not show the difference.
+		const root = { contains: (n: unknown) => n === inPane } as unknown as HTMLElement;
+		const win = {
+			devicePixelRatio: 1,
+			clearTimeout: () => {},
+			setTimeout: () => 0,
+			requestAnimationFrame: () => 0,
+			getSelection: () => textSel,
+		};
+		controller = new PdfInkController(
+			root,
+			win as unknown as Window,
+			() => strokes,
+			() => "doc-1",
+			() => strokes,
+			(op) => {
+				ops.push(op);
+				strokes = applyOp(strokes, op);
+			},
+			(id) => execs.push(id),
+			(message) => notices.push(message)
+		);
+		pen = controller as unknown as typeof pen;
+		keys = controller as unknown as typeof keys;
+	});
+
+	afterEach(() => {
+		clearInkClipboard();
+	});
+
+	/** A keydown, and a way to ask afterwards whether it was consumed. */
+	function press(
+		key: string,
+		mods: {
+			ctrl?: boolean;
+			meta?: boolean;
+			alt?: boolean;
+			shift?: boolean;
+			target?: unknown;
+		} = {}
+	): boolean {
+		let prevented = false;
+		const ev = {
+			key,
+			ctrlKey: mods.ctrl ?? false,
+			metaKey: mods.meta ?? false,
+			altKey: mods.alt ?? false,
+			shiftKey: mods.shift ?? false,
+			target: mods.target ?? null,
+			preventDefault: () => {
+				prevented = true;
+			},
+			stopPropagation: () => {},
+		};
+		keys.handleKeyDown(ev as unknown as KeyboardEvent);
+		return prevented;
+	}
+
+	/** Select s1 through the real lasso path, which also leaves lasso holding the tip. */
+	function select(): void {
+		setTipMode("lasso");
+		const corners: [number, number][] = [
+			[150, 150],
+			[250, 150],
+			[250, 250],
+			[150, 250],
+		];
+		pen.penDown(sample(corners[0]![0], corners[0]![1]));
+		for (const [x, y] of corners.slice(1)) pen.penRaw([sample(x, y)]);
+		pen.penRaw([sample(corners[0]![0], corners[0]![1])]);
+		pen.penUp();
+	}
+
+	it("Escape puts the selection away first, and leaves the mode holding the tip", () => {
+		select();
+		expect(controller.hasSelection).toBe(true);
+		expect(press("Escape")).toBe(true);
+		expect(controller.hasSelection).toBe(false);
+		// Deliberately NOT released: the note surface splits these across two
+		// presses for the same reason - someone clearing a stray selection
+		// mid-lasso has not asked to put the lasso away too.
+		expect(tipMode()).toBe("lasso");
+	});
+
+	it("a second Escape, with nothing selected, hands the tip back to the nib", () => {
+		select();
+		press("Escape");
+		expect(press("Escape")).toBe(true);
+		expect(tipMode()).toBe("nib");
+	});
+
+	it("Escape releases a held mode that never had a selection - the stranding this fixes", () => {
+		// The report this rule comes from: landing in pan on a PDF stranded the
+		// pen, and the strip is the only way back on this surface - there is no
+		// toolbar row above an editor to fall back on.
+		setTipMode("pan");
+		expect(press("Escape")).toBe(true);
+		expect(tipMode()).toBe("nib");
+	});
+
+	it("Escape with neither a selection nor a held mode is left alone", () => {
+		expect(press("Escape")).toBe(false);
+		expect(tipMode()).toBe("nib");
+	});
+
+	it("Escape inside the viewer's find bar belongs to the find bar", () => {
+		setTipMode("pan");
+		expect(press("Escape", { target: { tagName: "INPUT" } })).toBe(false);
+		// Still panning: the key never reached our branch, which is the point -
+		// closing a find bar must not also change what the pen is.
+		expect(tipMode()).toBe("pan");
+	});
+
+	it("Ctrl+C copies the lassoed ink and consumes the key", () => {
+		select();
+		expect(press("c", { ctrl: true })).toBe(true);
+		expect(clipboardSize()).toBe(1);
+		expect(notices).toEqual(["Handwriting: copied 1 stroke(s)"]);
+		// Through the controller's own command method, not a fourth dispatcher.
+		expect(execs).toEqual([]);
+	});
+
+	it("Cmd+X cuts the lassoed ink, and the ink is gone from the store", () => {
+		select();
+		expect(press("x", { meta: true })).toBe(true);
+		expect(clipboardSize()).toBe(1);
+		expect(notices).toEqual(["Handwriting: cut 1 stroke(s)"]);
+		expect(ops.map((o) => o.type)).toEqual(["remove"]);
+		expect(strokes.map((s) => s.id)).toEqual([]);
+	});
+
+	it("Ctrl+C with nothing lassoed reaches the viewer, so a PDF's own text still copies", () => {
+		expect(press("c", { ctrl: true })).toBe(false);
+		expect(clipboardSize()).toBe(0);
+		expect(notices).toEqual([]);
+	});
+
+	it("Ctrl+C with text selected in this pane is the text's, not the lasso's", () => {
+		select();
+		textSel = { isCollapsed: false, anchorNode: inPane };
+		expect(press("c", { ctrl: true })).toBe(false);
+		expect(clipboardSize()).toBe(0);
+		expect(notices).toEqual([]);
+	});
+
+	it("text selected in ANOTHER pane does not block this pane's lasso copy", () => {
+		select();
+		textSel = { isCollapsed: false, anchorNode: otherPane };
+		expect(press("c", { ctrl: true })).toBe(true);
+		expect(clipboardSize()).toBe(1);
+	});
+
+	it("a collapsed caret is not a text selection", () => {
+		select();
+		textSel = { isCollapsed: true, anchorNode: inPane };
+		expect(press("c", { ctrl: true })).toBe(true);
+		expect(clipboardSize()).toBe(1);
+	});
+
+	it("Ctrl+Alt+C is not ours", () => {
+		select();
+		expect(press("c", { ctrl: true, alt: true })).toBe(false);
+		expect(clipboardSize()).toBe(0);
+	});
+
+	it("Ctrl+Z still undoes while a selection is live - the new branch must not eat it", () => {
+		select();
+		controller.deleteSelection();
+		expect(ops.map((o) => o.type)).toEqual(["remove"]);
+		select();
+		expect(press("z", { ctrl: true })).toBe(true);
+		expect(ops.map((o) => o.type)).toEqual(["remove", "add"]);
+		expect(clipboardSize()).toBe(0);
+	});
+
+	it("Delete with a live selection still deletes, and a bare Backspace still says nothing", () => {
+		expect(press("Backspace")).toBe(false);
+		expect(notices).toEqual([]);
+		select();
+		expect(press("Delete")).toBe(true);
+		expect(ops.map((o) => o.type)).toEqual(["remove"]);
 	});
 });

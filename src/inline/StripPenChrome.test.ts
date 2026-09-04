@@ -37,7 +37,7 @@
  * reason - the allowlist is a hole: naming the three known surfaces separately
  * means an allowlist entry added for one of them cannot quietly void the
  * assertion that was written about it. They read the same file text the scan
- * does, through `src()`, so a rename fails loudly instead of silently
+ * does, through `code()`/`raw()`, so a rename fails loudly instead of silently
  * removing a check.
  *
  * What this file is NOT is a claim that every surface is a copy of every
@@ -86,9 +86,43 @@
  * fails `tsc -noEmit` outright - `?raw` gets the same file text without it.
  * `import.meta.glob` is the repo-wide form of the same thing, and is what
  * makes the scan opt-out instead of opt-in.
+ *
+ * IT NOW MATCHES CODE, NOT PROSE, AND ONLY WHERE IT MEANS TO. Every needle
+ * above used to be counted in RAW source, so a comment counted as an
+ * implementation. Both directions of that were real and both happened here:
+ *
+ *   - toward a false ALARM: a doc comment in `InkSurfaces.ts` spelled a strip
+ *     construction while EXPLAINING it, and this file's pairing sweep filed
+ *     the registry as a surface that mounts one. Loud, and it cost an hour.
+ *   - toward a false ALL-CLEAR, which is the expensive one: `penToolsVisible(`
+ *     is satisfied by PRESENCE, so a file that really did mount a strip and
+ *     really did not ask the rule passed the pairing on a comment that merely
+ *     mentioned the symbol. Demonstrated on this branch by deleting the pdf
+ *     surface's real call and leaving such a comment: all 16 tests here
+ *     passed. That is the same shape that once passed 89.
+ *
+ * The needles are matched against `codeOnly` (src/CodeOnly.ts), the same
+ * function `InkSurfaceRules.test.ts` uses, imported rather than copied - two
+ * strippers in two sibling guards is precisely the divergence these guards
+ * exist to catch, and the four fixture tests that pin it shut live over there
+ * and now stand over this file too.
+ *
+ * BLANKING IS APPLIED PER ASSERTION, NOT PER FILE, AND THAT IS LOAD-BEARING.
+ * Two assertions below deliberately read a COMMENT: the note's file-switch
+ * exception and the canvas's caret exemption each pin the sentence stating
+ * WHY, so that deleting the reason fails as surely as adding a second call
+ * does. Those keep reading `raw()`. Everything asking "is this symbol
+ * implemented" reads `code()`. Blanking the whole file would have voided two
+ * real assertions while looking like a safety improvement.
+ *
+ * Note the direction of the change for the over-allowance sweeps: counting
+ * code rather than raw text can only LOWER a count, so no real call escapes
+ * that was caught before - what stops being caught is a mention in a comment,
+ * which was never a call.
  */
 
 import { describe, expect, it } from "vitest";
+import { codeOnly } from "../CodeOnly";
 
 /**
  * Every `.ts` under src, as text. Keys are root-absolute with forward slashes
@@ -134,18 +168,50 @@ const SOURCES: ReadonlyArray<readonly [string, string]> = Object.entries(ALL_TS)
 const SOURCE_TEXT = new Map(SOURCES);
 
 /**
- * A named file's text, from the same scan the sweeps use. Throws rather than
- * returning "" if the path is gone, so renaming a surface fails the assertion
- * that was written about it instead of passing it vacuously.
+ * The same files with comments blanked, computed once. Length and line count
+ * survive, so an offset into one is an offset into the other.
  */
-function src(path: string): string {
+const CODE_TEXT = new Map(SOURCES.map(([path, text]) => [path, codeOnly(text)] as const));
+
+/**
+ * A named file's RAW text, from the same scan the sweeps use. Throws rather
+ * than returning "" if the path is gone, so renaming a surface fails the
+ * assertion that was written about it instead of passing it vacuously.
+ *
+ * Only the two assertions that pin a documented REASON use this. An assertion
+ * about whether a symbol is implemented must not, or a comment satisfies it.
+ */
+function raw(path: string): string {
 	const text = SOURCE_TEXT.get(path);
+	if (text === undefined) throw new Error(`not in the source scan: ${path}`);
+	return text;
+}
+
+/** The same file with comments blanked. What every needle is matched against. */
+function code(path: string): string {
+	const text = CODE_TEXT.get(path);
 	if (text === undefined) throw new Error(`not in the source scan: ${path}`);
 	return text;
 }
 
 function occurrences(text: string, needle: string): number {
 	return text.split(needle).length - 1;
+}
+
+/**
+ * The two halves of the pairing needle, as pure predicates over source text so
+ * that the fixtures at the bottom of this file can attack them directly with a
+ * string instead of having to plant a comment in a real surface.
+ *
+ * `new MobileTools(` is the trigger - constructing the strip is the act that
+ * needs a reason - and `penToolsVisible(` is what satisfies it.
+ */
+function mountsAStrip(text: string): boolean {
+	return occurrences(codeOnly(text), "new MobileTools(") > 0;
+}
+
+function asksTheVisibilityRule(text: string): boolean {
+	return occurrences(codeOnly(text), "penToolsVisible(") > 0;
 }
 
 /**
@@ -224,11 +290,9 @@ const FOCUS_ALLOWED: Readonly<Record<string, Exemption>> = {
 type StripMount = { readonly why: string };
 const PEN_TOOLS_RULE_ALLOWED: Readonly<Record<string, StripMount>> = {};
 
-/** Files that construct a strip, in scan order. */
+/** Files that construct a strip, in scan order. Prose about one does not count. */
 function stripMounters(): string[] {
-	return SOURCES.filter(([, text]) => occurrences(text, "new MobileTools(") > 0).map(
-		([path]) => path
-	);
+	return SOURCES.filter(([, text]) => mountsAStrip(text)).map(([path]) => path);
 }
 
 /**
@@ -236,11 +300,16 @@ function stripMounters(): string[] {
  * says whether it should have one. The dual of `overAllowance` below: that
  * one fails on a call, this one fails on a MISSING call, because the two
  * failures are opposite shapes of the same divergence.
+ *
+ * This is the assertion the comment hole actually cost something on. It is
+ * satisfied by PRESENCE, so before the needles were blanked a file that
+ * mounted a strip and never asked the rule passed on a comment that spelled
+ * the symbol. The fixtures at the bottom of this file attack both halves.
  */
 function mountsWithoutTheRule(): string[] {
 	const missing: string[] = [];
 	for (const path of stripMounters()) {
-		if (occurrences(SOURCE_TEXT.get(path) ?? "", "penToolsVisible(") > 0) continue;
+		if (asksTheVisibilityRule(SOURCE_TEXT.get(path) ?? "")) continue;
 		if (PEN_TOOLS_RULE_ALLOWED[path]) continue;
 		missing.push(`${path}: new MobileTools( with no penToolsVisible( anywhere in the file`);
 	}
@@ -256,8 +325,8 @@ function mountsWithoutTheRule(): string[] {
  */
 function overAllowance(needle: string, allowed: Readonly<Record<string, Exemption>>): string[] {
 	const over: string[] = [];
-	for (const [path, text] of SOURCES) {
-		const count = occurrences(text, needle);
+	for (const [path] of SOURCES) {
+		const count = occurrences(code(path), needle);
 		if (count === 0) continue;
 		const max = allowed[path]?.max ?? 0;
 		if (count > max) over.push(`${path}: ${count}x ${needle} (allowed ${max})`);
@@ -371,29 +440,35 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// claim written about it. Exactly one call each, so a second gate on
 		// either surface - the beginning of a private answer to a shared
 		// question - fails here.
-		expect(occurrences(src("/src/inline/InkOverlay.ts"), "penToolsVisible(")).toBe(1);
-		expect(occurrences(src("/src/pdf/PdfInkController.ts"), "penToolsVisible(")).toBe(1);
-		expect(src("/src/pdf/PdfInkController.ts")).toContain('from "../inline/PenToolsMode"');
+		expect(occurrences(code("/src/inline/InkOverlay.ts"), "penToolsVisible(")).toBe(1);
+		expect(occurrences(code("/src/pdf/PdfInkController.ts"), "penToolsVisible(")).toBe(1);
+		expect(code("/src/pdf/PdfInkController.ts")).toContain('from "../inline/PenToolsMode"');
 	});
 
 	it("the pdf surface never calls setInking or closeInkSliders directly", () => {
 		// This is the actual bug: PdfInkController had zero calls to either
 		// before this slice. Any direct call re-introduced here recreates it.
 		// Named as well as swept, so that an allowlist entry cannot void it.
-		const pdfInkControllerSrc = src("/src/pdf/PdfInkController.ts");
+		const pdfInkControllerSrc = code("/src/pdf/PdfInkController.ts");
 		expect(occurrences(pdfInkControllerSrc, "setInking(")).toBe(0);
 		expect(occurrences(pdfInkControllerSrc, "closeInkSliders(")).toBe(0);
 	});
 
 	it("the note surface never calls setInking directly", () => {
-		expect(occurrences(src("/src/inline/InkOverlay.ts"), "setInking(")).toBe(0);
+		expect(occurrences(code("/src/inline/InkOverlay.ts"), "setInking(")).toBe(0);
 	});
 
 	it("the note surface's only direct closeInkSliders call is the named file-switch exception", () => {
-		const inkOverlaySrc = src("/src/inline/InkOverlay.ts");
-		expect(occurrences(inkOverlaySrc, "closeInkSliders(")).toBe(1);
+		// The count reads CODE - one real call, and a comment elsewhere in the
+		// file mentioning the symbol is not a second one. The regex below reads
+		// RAW, because what it pins is the COMMENT: the sentence saying why this
+		// one call is not routed through stripPenDown. Deleting the reason has to
+		// fail as surely as adding a call does, and blanking comments here would
+		// have quietly voided that. The pair is what makes it sound - the count
+		// proves a real call exists, the regex proves the reason sits against it.
+		expect(occurrences(code("/src/inline/InkOverlay.ts"), "closeInkSliders(")).toBe(1);
 		// \r?\n rather than a literal newline: the tree is CRLF.
-		expect(inkOverlaySrc).toMatch(
+		expect(raw("/src/inline/InkOverlay.ts")).toMatch(
 			/\/\/ A fresh note starts reading, so the strip starts as the pill\.\r?\n\s*this\.mobileTools\?\.closeInkSliders\(\);/
 		);
 	});
@@ -405,7 +480,7 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// today and the count it keeps if a strip is ever given to it, since
 		// the only supported way to drive one is stripPenDown/stripPenUp.
 		// Same assertion the pdf gets, for the same reason.
-		const pageViewSrc = src("/src/view/HandwritingPageView.ts");
+		const pageViewSrc = code("/src/view/HandwritingPageView.ts");
 		expect(occurrences(pageViewSrc, "setInking(")).toBe(0);
 		expect(occurrences(pageViewSrc, "closeInkSliders(")).toBe(0);
 	});
@@ -417,13 +492,13 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// `focusClaimedPenEditor` (InlineFocus.ts, a CodeMirror view), the pdf
 		// through `stripPenFocus` here (a root element). A raw `.focus(`
 		// reappearing in either file is the shape of the bug coming back.
-		expect(occurrences(src("/src/inline/InkOverlay.ts"), ".focus(")).toBe(0);
-		expect(occurrences(src("/src/pdf/PdfInkController.ts"), ".focus(")).toBe(0);
+		expect(occurrences(code("/src/inline/InkOverlay.ts"), ".focus(")).toBe(0);
+		expect(occurrences(code("/src/pdf/PdfInkController.ts"), ".focus(")).toBe(0);
 		// The canvas is NOT held to zero - the next test says which single
 		// call it is allowed, and why. Counted here as well so that a SECOND
 		// focus call on that surface fails even if the exemption below is
 		// edited to match it.
-		expect(occurrences(src("/src/view/HandwritingPageView.ts"), ".focus(")).toBe(1);
+		expect(occurrences(code("/src/view/HandwritingPageView.ts"), ".focus(")).toBe(1);
 	});
 
 	it("the canvas surface's only focus call is the named caret exception", () => {
@@ -447,7 +522,10 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// `\s*` rather than the `\r?\n\s*` the note exception above uses:
 		// it spans the CRLF and the indent in one class, and still lets
 		// nothing but whitespace sit between the comment and the call.
-		expect(src("/src/view/HandwritingPageView.ts")).toMatch(
+		// RAW, and deliberately: this assertion's subject IS the comment. The
+		// exact count in the test above reads code, so the two together say
+		// "one real call, and the reason for it written next to it".
+		expect(raw("/src/view/HandwritingPageView.ts")).toMatch(
 			/\/\/ StripPenChrome\.test\.ts pins this exemption by name\.\s*this\.rootEl\.focus\(\);/
 		);
 	});
@@ -460,13 +538,97 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// zero-direct-calls rule above instead. This one stays named rather
 		// than swept for the same reason: it asserts a PRESENCE, and no scan
 		// can demand every file in the tree import a module.
-		expect(src("/src/inline/InkOverlay.ts")).toContain('from "./StripPenChrome"');
-		expect(src("/src/pdf/PdfInkController.ts")).toContain('from "../inline/StripPenChrome"');
+		expect(code("/src/inline/InkOverlay.ts")).toContain('from "./StripPenChrome"');
+		expect(code("/src/pdf/PdfInkController.ts")).toContain('from "../inline/StripPenChrome"');
 	});
 
 	it("the pdf surface takes its focus claim from the shared file", () => {
-		const pdfInkControllerSrc = src("/src/pdf/PdfInkController.ts");
+		const pdfInkControllerSrc = code("/src/pdf/PdfInkController.ts");
 		expect(pdfInkControllerSrc).toContain("stripPenFocus(this.root)");
 		expect(pdfInkControllerSrc).toContain("armStripPenFocus(this.root)");
+	});
+});
+
+describe("strip pen chrome — a comment is not an implementation", () => {
+	// Every fixture here would have PASSED against raw source, which is the
+	// only reason any of them is worth a line. `InkSurfaceRules.test.ts` pins
+	// `codeOnly` itself; these pin THIS FILE'S needles going through it, which
+	// is a different claim - the stripper was already correct over there while
+	// this guard scanned raw text beside it for its whole life.
+
+	it("the blanking is actually happening on the real tree", () => {
+		// P3, the harness that cannot fail. If `code()` returned raw text every
+		// fixture below would still pass on the strings, while the sweeps above
+		// carried on reading prose. This file is doc-heavy by design, so its
+		// own surfaces are a fair witness: blanking must remove characters and
+		// must not remove lines.
+		const rawText = raw("/src/inline/InkOverlay.ts");
+		const codeText = code("/src/inline/InkOverlay.ts");
+		expect(codeText).not.toEqual(rawText);
+		expect(codeText.replace(/ /g, "").length).toBeLessThan(rawText.replace(/ /g, "").length);
+		expect(codeText).toHaveLength(rawText.length);
+		expect(codeText.split("\n")).toHaveLength(rawText.split("\n").length);
+	});
+
+	it("a comment mentioning the visibility rule does not satisfy the pairing", () => {
+		// THE EXPENSIVE DIRECTION, and the one that was open here. The pairing
+		// is satisfied by presence, so a surface that really mounts a strip and
+		// really never asks could pass on prose alone. Demonstrated on the tree
+		// before this changed: the pdf surface's real call was replaced and a
+		// comment spelling the symbol left behind, and all 16 tests passed.
+		const prose = [
+			"const tools = new MobileTools(this.host);",
+			"// whether it should exist at all is penToolsVisible( in PenToolsMode.ts",
+		].join("\n");
+		expect(mountsAStrip(prose)).toBe(true);
+		expect(asksTheVisibilityRule(prose)).toBe(false);
+
+		const blockComment = [
+			"const tools = new MobileTools(this.host);",
+			"/** the rule is penToolsVisible(mode, mobile, seen) - asked elsewhere */",
+		].join("\n");
+		expect(asksTheVisibilityRule(blockComment)).toBe(false);
+	});
+
+	it("a real call still satisfies it", () => {
+		// The other half of the same fixture, and not decoration: a `codeOnly`
+		// that blanked everything would pass the test above while making the
+		// pairing sweep fail on both real surfaces - loudly, but for the wrong
+		// reason. Pinned so the fix cannot be over-applied either.
+		const real = [
+			"const tools = new MobileTools(this.host);",
+			"if (!penToolsVisible(getPenToolsMode(), mobile, seen)) return;",
+		].join("\n");
+		expect(mountsAStrip(real)).toBe(true);
+		expect(asksTheVisibilityRule(real)).toBe(true);
+	});
+
+	it("a comment spelling a strip construction does not make a file a mounter", () => {
+		// The loud direction, and it is not hypothetical: a doc comment in
+		// InkSurfaces.ts spelled this construction while EXPLAINING it, and the
+		// pairing sweep filed the registry - a DOM-free description of the tree
+		// that mounts nothing - as a surface that mounts a strip. The workaround
+		// was to write the symbol in prose without its paren. That workaround is
+		// no longer load-bearing.
+		const registryProse = "/** derived from the new MobileTools( construction site */";
+		expect(mountsAStrip(registryProse)).toBe(false);
+		expect(mountsAStrip("// see new MobileTools( in InkOverlay")).toBe(false);
+	});
+
+	it("a needle inside a comment does not count against an allowance", () => {
+		// The over-allowance sweeps count `occurrences(code(path), needle)`;
+		// this is that expression. Counting code can only LOWER a count against
+		// raw text, so nothing real escapes - what stops being reported is a
+		// file whose only mention was somebody explaining the rule, which is
+		// the false-alarm half of the same fault.
+		const explained = [
+			"// routed through stripPenDown rather than calling setInking( here",
+			"/* and closeInkSliders( is the strip's own business */",
+			"this.el.querySelector('x')?.scrollIntoView();",
+		].join("\n");
+		expect(occurrences(codeOnly(explained), "setInking(")).toBe(0);
+		expect(occurrences(codeOnly(explained), "closeInkSliders(")).toBe(0);
+		// and a real one is still counted
+		expect(occurrences(codeOnly("this.tools?.setInking(true);"), "setInking(")).toBe(1);
 	});
 });

@@ -76,7 +76,12 @@ import {
 	setDiagnosticsEnabled,
 } from "./diag/DiagSwitch";
 import { traceGuardVerdict } from "./diag/TraceGuard";
-import { mouseInkEnabled, setMouseInk, setPersistMouseInk } from "./inline/MouseInk";
+import {
+	consumeMousePutDown,
+	mouseInkEnabled,
+	setMouseInk,
+	setPersistMouseInk,
+} from "./inline/MouseInk";
 import { setPrediction, setPredictionEink } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
 import { inkToSvg } from "./ink/SvgExport";
@@ -97,6 +102,7 @@ import {
 import { notifyInkChanged, onInkChanged } from "./inline/InkEvents";
 import {
 	PenToolsMode,
+	clearPenHardwareSeen,
 	getPenToolsMode,
 	markPenSeen,
 	penSeenThisSession,
@@ -1262,10 +1268,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				runDetached(this.persistSettings(), "save the mouse ink setting");
 				// Turning mouse ink on IS declaring yourself a pen person: the
 				// strip appears without waiting for hardware that never comes.
-				if (on) {
-					markPenSeen();
-					refreshPenToolsAll();
-				}
+				// Off puts the nib light out instead (alan, 2026-09-03: dark
+				// "until you touch with your pen", and off "at any point").
+				// Both surfaces' strip buttons route here rather than
+				// touching the mode themselves - their hosts execute this
+				// command - so this one branch covers the strip, the palette
+				// and the hotkey alike. The settings switch is the only
+				// other writer and carries the same pair - see
+				// `applyMouseInkUiFanout` for both halves and why each needs
+				// what it calls.
+				this.applyMouseInkUiFanout(on);
 				// Named after the TOOL the mouse now holds, nothing else - no
 				// "(mouse ink on)" rider. The mouse is a pen; a pen picking
 				// up the highlighter says "highlighter" (alan, 2026-08-31).
@@ -1280,7 +1292,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 							: getInlinePanMode()
 								? "pan"
 								: getInlineTool();
-				new Notice(on ? `Handwriting: ${tip}` : "Handwriting: mouse ink off");
+				new Notice(on ? `Handwriting: ${tip}` : "Handwriting: cursor");
 			},
 		});
 		this.addCommand({
@@ -1321,7 +1333,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const on = !getInlineEraserMode();
 				setInlineEraserMode(on);
 				this.enterTipMode(on);
-				new Notice(on ? "Handwriting: eraser" : `Handwriting: ${getInlineTool()}`);
+				new Notice(on ? "Handwriting: eraser" : this.tipModeOffNotice());
 			},
 		});
 		// Lasso as a mode: the side button was the only way in, and every
@@ -1333,7 +1345,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const on = !getInlineLassoMode();
 				setInlineLassoMode(on);
 				this.enterTipMode(on);
-				new Notice(on ? "Handwriting: lasso" : `Handwriting: ${getInlineTool()}`);
+				new Notice(on ? "Handwriting: lasso" : this.tipModeOffNotice());
 			},
 		});
 		// Insert space as a mode, same shape as lasso: plant a divider with
@@ -1345,7 +1357,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const on = !getInlineSpaceMode();
 				setInlineSpaceMode(on);
 				this.enterTipMode(on);
-				new Notice(on ? "Handwriting: insert space" : `Handwriting: ${getInlineTool()}`);
+				new Notice(on ? "Handwriting: insert space" : this.tipModeOffNotice());
 			},
 		});
 		// Pan as a mode: touch already pans by finger, but a pen on glass had
@@ -1357,7 +1369,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				const on = !getInlinePanMode();
 				setInlinePanMode(on);
 				this.enterTipMode(on);
-				new Notice(on ? "Handwriting: pan" : `Handwriting: ${getInlineTool()}`);
+				new Notice(on ? "Handwriting: pan" : this.tipModeOffNotice());
 			},
 		});
 		this.addCommand({
@@ -2805,6 +2817,69 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	}
 
 	/**
+	 * Everything the strip on every open surface needs to hear when mouse
+	 * ink flips, on or off. The mouse-ink-toggle command and the settings
+	 * switch are the only two writers of this mode (a9bf181) and both owe it
+	 * the same pair, so it lives once here rather than twice at the call
+	 * sites - the duplication a9bf181 accepted deliberately turned out to be
+	 * exactly the kind this project keeps paying for.
+	 *
+	 * ON: `markPenSeen` may flip the strip's VISIBILITY (false to true, for
+	 * someone who has never held a pen), which only `refreshPenToolsAll`'s
+	 * `ensurePenTools` create-or-destroy sweep can do, and only on this
+	 * file's own editor overlays - `PdfInkController` lives in a different
+	 * map and is not in that sweep at all. Once a strip already exists (the
+	 * ordinary case), that sweep is a no-op and the light on it never
+	 * repaints, on EITHER surface.
+	 *
+	 * `refreshAllStrips` is what actually repaints an existing strip's
+	 * light, and it is the one call that also reaches the PDF surface, via
+	 * the `addStripSurface` registration below. So both directions need it:
+	 * ON needs `refreshPenToolsAll` first for the rare create, then
+	 * `refreshAllStrips` for the light; OFF needs only `refreshAllStrips` -
+	 * `clearPenHardwareSeen` moves no surface's existence (`penSeen` is left
+	 * alone on purpose, so the toolbar itself never disappears), so
+	 * `refreshPenToolsAll` there was a guaranteed no-op and the light simply
+	 * never moved until an unrelated tap repainted it (alan, hardware
+	 * finding 2026-09-03: "you have to tap a couple times for pen to
+	 * light").
+	 */
+	// Not private: HandwritingSettingTab is the mode's second writer
+	// (a9bf181) and calls this through `this.plugin`, the same access
+	// `applyBooxMode` already gets for the same reason.
+	applyMouseInkUiFanout(on: boolean): void {
+		if (on) {
+			markPenSeen();
+			refreshPenToolsAll();
+		} else {
+			clearPenHardwareSeen();
+		}
+		refreshAllStrips();
+	}
+
+	/**
+	 * What the eraser/lasso/insert-space/pan toggle commands say when they
+	 * turn OFF. One place, called from all four, for the same reason
+	 * `enterTipMode` is: a rule written at each of four call sites is a rule
+	 * that drifts at one of them eventually.
+	 *
+	 * Ordinarily this just names the nib the tip fell back to - a pen or
+	 * touch tap really did just pick that nib back up by putting the mode
+	 * down, and the toast says so. `consumeMousePutDown` (MouseInk.ts) is the
+	 * one exception: MobileTools.ts's strip sets that flag immediately before
+	 * calling this command as part of a MOUSE put-down (b93edd1), where nothing
+	 * was picked - the mouse only got its pointer back - and the nib name was
+	 * wrong there (alan, hardware finding 2026-09-03: "it says highlighter
+	 * after doing it"). That case gets the words the loud mouse-ink-toggle
+	 * command's own OFF branch already uses, matched rather than invented, and
+	 * still exactly one Notice - the flag is consumed (read-and-clear), never
+	 * adding a second toast on top of this one.
+	 */
+	private tipModeOffNotice(): string {
+		return consumeMousePutDown() ? "Handwriting: cursor" : `Handwriting: ${getInlineTool()}`;
+	}
+
+	/**
 	 * A tip mode means nothing until the tip exists.
 	 *
 	 * Eraser, lasso, insert space and pan all say what the TIP does, and on a
@@ -3869,10 +3944,14 @@ class HandwritingSettingTab extends PluginSettingTab {
 			case "mouseInk":
 				s.mouseInk = on;
 				setMouseInk(on);
-				if (on) {
-					markPenSeen();
-					refreshPenToolsAll();
-				}
+				// The settings switch is the second writer of this mode
+				// (a9bf181) and owes it the same fan-out as the command -
+				// see `applyMouseInkUiFanout` for both halves. Written as a
+				// call here rather than pushed into `setMouseInk` because
+				// `MouseInk.ts` cannot import `PenToolsMode.ts` - that
+				// module already imports `mouseActsAsPen` from it, and the
+				// cycle would be real.
+				this.plugin.applyMouseInkUiFanout(on);
 				break;
 			case "paperStyle": {
 				const style = normalizePaperStyle(str);

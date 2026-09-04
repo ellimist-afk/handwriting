@@ -50,8 +50,9 @@ To wipe a note, run `Delete all ink on this note`. It asks first, copies the
 ink to the trash described in [storage.md](storage.md), and one undo brings
 everything back.
 
-Only the pen draws. Touch and mouse keep working the way they do everywhere
-else in Obsidian, with a few exceptions that exist to keep the pen reliable.
+By default, only the pen draws. Touch and mouse keep working the way they do
+everywhere else in Obsidian, with a few exceptions that exist to keep the pen
+reliable.
 
 While the pen is writing, or has just been near the glass, a new finger
 contact does nothing at all, which is what keeps a resting hand from dragging
@@ -123,7 +124,7 @@ the backup.
 
 `.handwriting/` is hidden, and about half of all sync tools don't carry hidden
 folders by default. Obsidian Sync, iCloud and Dropbox don't. If you use one of
-these, turn on **Compatibility with Obsidian Sync** in the settings panel to get
+these, turn on **Compatibility with Obsidian Sync, iCloud and Dropbox** in the settings panel to get
 your ink syncing across devices.
 
 ## writing on PDFs
@@ -177,6 +178,11 @@ copies the ink to `.handwriting/trash/` before removing anything, the same
 bargain the note command makes.
 
 ## the canvas
+
+**The canvas is early and rough. Parts of it are broken and I wouldn't
+trust important ink to it yet — bug reports are welcome. Your strokes are
+stored in the same sidecar as notes and PDFs, so this won't touch your
+Markdown, but treat the surface itself as experimental.**
 
 A note with `handwriting: page` in its frontmatter opens in a dedicated
 canvas view instead of the editor, with its own toolbar, free-placed text
@@ -239,7 +245,7 @@ window. Recording on with nothing reproduced yet gets its own message.
 
 ## developer diagnostics
 
-Off by default. Turn it on in Settings and reload the plugin to add eleven
+Off by default. Turn it on in Settings and reload the plugin to add thirteen
 more commands to the palette - scroll trace, ink metrics, pointer hit
 probe, region census, and the rest of the instruments this plugin is built
 and tested with. `Bug report: record` covers ordinary reporting on its
@@ -247,7 +253,7 @@ own; this is for chasing something specific.
 
 ## building and testing
 
-Node 18 or newer.
+Node 20 or newer.
 
 ```
 npm ci            # install the locked dependency set

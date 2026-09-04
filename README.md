@@ -148,7 +148,7 @@ the first time you open Obsidian after an update a small notice in the corner sh
 ### obsidian sync notes
 
 * `.handwriting/` is hidden and about half of all sync tools don't carry hidden folders by default (Obsidian Sync, iCloud, and Dropbox don't)
-* if you use one of these services, turn on Compatibility with Obsidian Sync in the Handwriting settings panel to get your ink syncing across devices
+* if you use one of these services, turn on Compatibility with Obsidian Sync, iCloud and Dropbox in the Handwriting settings panel to get your ink syncing across devices
 
 ## how it works
 

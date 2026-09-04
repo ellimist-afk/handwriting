@@ -5,7 +5,9 @@ import { isolateHistory, redo, redoDepth, undo, undoDepth } from "@codemirror/co
 import { Notice, Platform, editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
 import { CameraState } from "../camera/coordinates";
+import { contentOriginLeft } from "./ContentOrigin";
 import {
+	penContactIntent,
 	releaseTipMode,
 	setTipModeListener,
 	tipMode,
@@ -54,6 +56,19 @@ export function inkCanvasReallocs(): number {
  */
 const SCALE_EPSILON = 1e-3;
 
+/**
+ * Whole CSS px the content origin must move before `handleResize`'s
+ * `unchanged` guard treats it as a real reposition, not rect-measurement
+ * wobble. Same shape as `SCALE_EPSILON` and `ScrollBand`'s
+ * `BAND_MOVE_EPSILON`: `getBoundingClientRect().left` is fractional, so an
+ * exact compare against `lastSyncContentLeft` would fire on sub-pixel noise
+ * most ticks - which defeats the guard as completely as never checking at
+ * all, re-syncing and re-scheduling a repaint every time `handleResize`
+ * runs for an unrelated reason. A whole pixel is the smallest displacement
+ * that could ever separate ink from the text under it.
+ */
+const CONTENT_ORIGIN_EPSILON = 1;
+
 const LASSO_CURSOR_CLASS = "handwriting-pen-hover-lasso";
 const SPACE_CURSOR_CLASS = "handwriting-pen-hover-space";
 const PAN_CURSOR_CLASS = "handwriting-pen-hover-pan";
@@ -61,7 +76,15 @@ import {
 	DEFAULT_TOOLBAR_CORNER,
 	ToolbarCorner,
 } from "./ToolbarCorner";
-import { getPenToolsMode, markPenSeen, penSeenThisSession, penToolsVisible } from "./PenToolsMode";
+import {
+	getPenToolsMode,
+	markPenHardwareSeen,
+	markPenSeen,
+	penSeenThisSession,
+	penToolsVisible,
+	pointerRaisesPenTools,
+	releaseMouseInkQuietly,
+} from "./PenToolsMode";
 import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { eraserRect, splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
@@ -554,6 +577,33 @@ export function refreshAllStrips(): void {
 }
 
 /**
+ * Put a mouse-claimed tool down QUIETLY, and repaint every open strip's
+ * light - not just the one that was clicked.
+ *
+ * `releaseMouseInkQuietly` (PenToolsMode.ts) clears the mode and the pen
+ * light's `penHardware` flag but does not `announce()` - it changes no
+ * surface's existence, only how a strip draws, so it leaves the repaint to
+ * its callers. Before this wrapper, both hosts' `disarmMouseInkQuietly`
+ * called it directly and then relied on `MobileTools`'s own post-click
+ * `this.refresh()`, which repaints only the ONE strip the pointer is on. A
+ * second open pane - another note, or the PDF - kept showing whatever light
+ * it had before the put-down until something unrelated repainted it
+ * (hardware finding, 2026-09-03, the same class of bug as the mouse-ink-off
+ * command carried).
+ *
+ * Defined once, here, rather than duplicated in both hosts' object literals:
+ * PenToolsMode.ts's own comment on `releaseMouseInkQuietly` names that kind
+ * of duplication as this project's most expensive recurring defect, and
+ * `MobileTools.ts` cannot reach `refreshAllStrips` itself (it is imported BY
+ * this file, so importing back would close a cycle) - this module is the one
+ * place that can pair the two calls once for every surface.
+ */
+export function releaseMouseInkQuietlyEverywhere(): void {
+	releaseMouseInkQuietly();
+	refreshAllStrips();
+}
+
+/**
  * Repaint every surface's committed ink: the shaping, smoothing and pressure
  * toggles all change render-time geometry and none of them touches a stroke,
  * so nothing else would.
@@ -779,6 +829,22 @@ export class InkOverlayPlugin {
 	private cssHeight = 0;
 	private dpr = 1;
 	private resizeObserver: ResizeObserver | null = null;
+	/**
+	 * A second observer, on `.cm-content`. `resizeObserver` above watches
+	 * `.cm-editor`, whose box does not change when Obsidian's "Readable line
+	 * length" toggles - that setting caps `.cm-content`'s max-width while the
+	 * editor keeps filling the leaf, and the scroller and overlay-container
+	 * boxes stay the size they were. Without a second observer, `syncCamera`
+	 * never re-reads the content origin, `cam.x` stays at its pre-toggle
+	 * value, and every stroke paints against a stale content-relative frame:
+	 * the samuelbits drift, reproduced by Alan on 2026-09-03 the moment the
+	 * Readable line length toggle became the recipe. `handleResize` cannot
+	 * be reused here - its `unchanged` guard early-returns when canvas box
+	 * has not moved, which is exactly this case - so the callback goes
+	 * straight to `syncCamera` + `scheduleRepaint`, the two steps that
+	 * actually re-anchor the paint against the fresh content origin.
+	 */
+	private contentResizeObserver: ResizeObserver | null = null;
 	private repaintQueued = false;
 	private presentProbePending = false;
 	private scrollFn: (() => void) | null = null;
@@ -1078,7 +1144,15 @@ export class InkOverlayPlugin {
 			container,
 			{
 				onPenDown: (s, ev) => this.penDown(s, ev),
-				onPenHover: (s) => this.showPenCursor(s),
+				// The pointerType is PASSED ON. The interface has always
+				// declared it (onPenHover(sample, pointerType?)) and the
+				// router has always supplied it; this call site dropped it,
+				// so the hover path could not tell a pen from a mouse and
+				// marked a pen seen for both - `mouseActsAsPen` lets a plain
+				// mouse move reach here whenever mouse ink is armed. That is
+				// one of the two writers that made nibIsLit's flag a constant
+				// for a mouse-only user (alan, 2026-09-02).
+				onPenHover: (s, pt) => this.showPenCursor(s, pt),
 				onPenLeave: () => this.hidePenCursor(),
 				onPinch: (phase, ratio, centroid) => this.pinch(phase, ratio, centroid),
 				onPenRaw: (samples, ev) => this.penRaw(samples, ev),
@@ -1098,6 +1172,12 @@ export class InkOverlayPlugin {
 
 		this.resizeObserver = new ResizeObserver(() => this.handleResize());
 		this.resizeObserver.observe(host);
+		this.contentResizeObserver = new ResizeObserver(() => {
+			if (!this.container || this.frame.locked) return;
+			this.syncCamera();
+			this.scheduleRepaint("content-resize");
+		});
+		this.contentResizeObserver.observe(this.view.contentDOM);
 		this.handleResize();
 
 		// Hit-probe context: what note-space point and granted extent this
@@ -1361,6 +1441,7 @@ export class InkOverlayPlugin {
 				if (mouseInkEnabled() !== on) commands.executeCommandById("handwriting:mouse-ink-toggle");
 			},
 			armMouseInkQuietly: () => armMouseInkQuietly(),
+			disarmMouseInkQuietly: () => releaseMouseInkQuietlyEverywhere(),
 			palette: () => colorsFor(getInlineTool()),
 			pickColor: (name, hex) => pickStripColor(name, hex),
 			inkSizeMult: (tool) => getInkSizeMult(tool as InkTool),
@@ -1380,6 +1461,8 @@ export class InkOverlayPlugin {
 		this.router = null;
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
+		this.contentResizeObserver?.disconnect();
+		this.contentResizeObserver = null;
 		if (this.scrollFn) {
 			this.view.scrollDOM.removeEventListener("scroll", this.scrollFn);
 			this.scrollFn = null;
@@ -1615,6 +1698,7 @@ export class InkOverlayPlugin {
 	zoomReport(): string {
 		const rect = this.container?.getBoundingClientRect();
 		const content = this.view.contentDOM.getBoundingClientRect();
+		const originLeft = contentOriginLeft(this.view.contentDOM);
 		const cs = this.winRef.getComputedStyle(this.view.contentDOM);
 		return [
 			`file: ${this.filePath() ?? "(none)"}`,
@@ -1623,7 +1707,8 @@ export class InkOverlayPlugin {
 			`font: current ${this.lastFontStr || "(unread)"} reference ${this.refFontPx}px  camera zoom ${this.camera.zoom}`,
 			`overlay rect: ${rect?.width.toFixed(2)} x ${rect?.height.toFixed(2)} (visual px)`,
 			`overlay offset: ${this.container?.offsetWidth} x ${this.container?.offsetHeight} (layout px)`,
-			`content rect left/width: ${content.left.toFixed(2)} / ${content.width.toFixed(2)}`,
+			`content rect left/width: ${content.left.toFixed(2)} / ${content.width.toFixed(2)}` +
+				`  origin (column left, camera-facing): ${originLeft.toFixed(2)}`,
 			`content offsetWidth: ${this.view.contentDOM.offsetWidth}`,
 			`content font-size / line-height: ${cs.fontSize} / ${cs.lineHeight}`,
 			`documentTop: ${this.view.documentTop.toFixed(2)}  contentHeight: ${this.view.contentHeight.toFixed(2)}`,
@@ -1750,6 +1835,24 @@ export class InkOverlayPlugin {
 		this.cssHeight = size.cssH;
 		if (unchanged) {
 			this.router?.refreshRect();
+			// `ResizeObserver` fires on SIZE changes only. Readable line length
+			// caps `.cm-content` at `--file-line-width` and centres it in the
+			// scroller, so opening or closing a sidebar at constant pane width
+			// re-centres the column without moving anything `unchanged` just
+			// compared - band, canvas dims and cssWidth/cssHeight all stay put,
+			// and neither ResizeObserver's callback fires either (nothing sized).
+			// This is the only path left that runs on every geometry-relevant
+			// tick, so it is where the shifted origin actually gets noticed.
+			// Same frame guard as contentResizeObserver's callback: a stroke in
+			// flight owns its coordinate frame and must not have the camera
+			// moved under it.
+			if (!this.frame.locked) {
+				const contentLeft = contentOriginLeft(this.view.contentDOM);
+				if (Math.abs(contentLeft - this.lastSyncContentLeft) > CONTENT_ORIGIN_EPSILON) {
+					this.syncCamera();
+					this.scheduleRepaint("content-resize");
+				}
+			}
 			return;
 		}
 		for (const c of [
@@ -1850,7 +1953,7 @@ export class InkOverlayPlugin {
 		// A stroke in flight owns its coordinate frame until it ends.
 		if (this.frame.locked) return;
 		const overlay = this.container.getBoundingClientRect();
-		const contentLeft = this.view.contentDOM.getBoundingClientRect().left;
+		const contentLeft = contentOriginLeft(this.view.contentDOM);
 		const documentTop = this.view.documentTop;
 		// Measure the SCALE from the same rect read as the camera, every
 		// time, instead of trusting the value handleResize last cached.
@@ -1948,13 +2051,17 @@ export class InkOverlayPlugin {
 		stripPenDown(this.mobileTools);
 
 		// The pen decides what it is at contact (§52/§53, mode-free):
-		// eraser end erases, side button held lassos/moves, tip inks.
-		const eraserEnd = (ev.buttons & 32) !== 0 || ev.button === 5;
-		const eraser = eraserEnd || tipMode() === "eraser";
-		// Lasso mode makes the TIP lasso: the side-button path for hardware that
-		// has no side button (every apple pencil, every mouse).
-		const side = !eraser && ((ev.buttons & 2) !== 0 || tipMode() === "lasso");
-		if (side) {
+		// eraser end erases, side button held lassos/moves, tip inks - and
+		// each of those meanings also has a strip mode, for hardware that has
+		// neither button. The whole arbitration is `penContactIntent`
+		// (TipMode.ts), ONE implementation shared with the pdf surface, which
+		// had its own hand-written copy of these three lines. It answers with
+		// the mode too, so the pan and space branches further down read the
+		// same value rather than re-asking `tipMode()` behind their own
+		// `!eraser` guards.
+		const intent = penContactIntent(ev.buttons, ev.button, tipMode());
+		const eraser = intent === "erase";
+		if (intent === "lasso") {
 			this.mode = "lasso";
 			this.lassoDown(sample);
 			return;
@@ -2000,6 +2107,15 @@ export class InkOverlayPlugin {
 			// PdfInkController.recordErase does with eraseFrom.
 			const here = this.filePath();
 			this.eraseFrom = here ? [...inlineInk.strokes(here)] : [];
+			if (this.eraseFrom.length === 0) {
+				// A gesture that touches nothing is indistinguishable from a
+				// broken one - the same lesson insert-space paid an evening of
+				// hardware testing to learn. This page has no ink at all, so
+				// the whole gesture is guaranteed to find nothing, whichever
+				// way the eraser moves; say so once, right here, rather than
+				// leaving the eraser to look dead for however long it drags.
+				new Notice("Handwriting: no ink on the page to erase");
+			}
 			// Stroke or reticle is a property of the ERASER, whichever way
 			// it was reached (eraser end or the mode). The radius still
 			// decides what counts as touched either way.
@@ -2010,7 +2126,7 @@ export class InkOverlayPlugin {
 			this.eraseAt(sample);
 			return;
 		}
-		if (tipMode() === "pan") {
+		if (intent === "pan") {
 			this.mode = "pan";
 			// A pan MOVES the surface under the ink, so the frame must stay
 			// live: the lock exists to stop reflow shearing a stroke, and
@@ -2018,9 +2134,14 @@ export class InkOverlayPlugin {
 			// behind the scroll until pen-up.
 			this.frame.cancel();
 			this.panLast = { x: ev.clientX, y: ev.clientY };
+			// Drive the reticle through the pan: nothing else touches
+			// `penCursorEl` once hover has gone quiet, so without this the
+			// 1000ms watchdog (armHoverWatchdog) takes the ring away
+			// mid-drag, same as the eraser and the lasso above.
+			this.showPanCursor(sample);
 			return;
 		}
-		if (tipMode() === "space") {
+		if (intent === "space") {
 			this.mode = "space";
 			this.spaceDown(sample, ev);
 			return;
@@ -2037,7 +2158,15 @@ export class InkOverlayPlugin {
 			(tool === "highlighter" ? HIGHLIGHTER_PEN.baseWidth : DEFAULT_PEN.baseWidth) *
 			getInkSizeMult(tool);
 		this.activeStyle.color = getInkColorHex(tool);
-		markPenSeen();
+		// Same split as showPenCursor: the strip appears for any stroke, but
+		// only a real pen proves the tip inks without mouse ink. A mouse
+		// stroke reaches here whenever mouse ink is armed, and marking that
+		// as hardware is the second of the two writers that left the nib
+		// light stuck on. Touch never reaches this line at all -
+		// InlinePenRouter.pointerDown returns on every branch of its touch
+		// block - so there is no third pointer type to rule on.
+		if (ev.pointerType === "pen") markPenHardwareSeen();
+		else markPenSeen();
 		this.ensurePenTools();
 		// The strip stepped aside at contact, above; a strip only just created
 		// by ensurePenTools has not heard that yet, so tell it now.
@@ -2111,14 +2240,25 @@ export class InkOverlayPlugin {
 	private penRaw(samples: PenSample[], ev: PointerEvent): void {
 		if (this.mode === "lasso") {
 			this.lassoMove(samples);
+			// Last sample only, matching the erase branch below: one DOM
+			// write per batch, and every call re-arms the watchdog for the
+			// length of the drag.
+			const last = samples[samples.length - 1];
+			if (last) this.showLassoCursor(last);
 			return;
 		}
 		if (this.mode === "space") {
 			this.spaceMove(samples);
+			// Last sample only, same reasoning as lasso and erase.
+			const last = samples[samples.length - 1];
+			if (last) this.showSpaceCursor(last);
 			return;
 		}
 		if (this.mode === "pan") {
 			this.panMove(ev);
+			// Last sample only, same reasoning as lasso and erase.
+			const last = samples[samples.length - 1];
+			if (last) this.showPanCursor(last);
 			return;
 		}
 		if (this.mode === "erase") {
@@ -2279,7 +2419,7 @@ export class InkOverlayPlugin {
 	private freshFrame(): { x: number; y: number } | null {
 		if (!this.container) return null;
 		const overlay = this.container.getBoundingClientRect();
-		const contentLeft = this.view.contentDOM.getBoundingClientRect().left;
+		const contentLeft = contentOriginLeft(this.view.contentDOM);
 		return {
 			x: visualToNote(overlay.left - contentLeft, this.scale),
 			y: visualToNote(overlay.top - this.view.documentTop, this.scale),
@@ -2340,17 +2480,25 @@ export class InkOverlayPlugin {
 		if (this.mode === "pan") {
 			this.mode = "ink";
 			this.panLast = null;
+			// Put the reticle away with the gesture, not the watchdog - a
+			// released pan should not strand its ring on screen for up to a
+			// second.
+			this.hidePanCursor();
 			this.updateExtent(true);
 			return;
 		}
 		if (this.mode === "space") {
 			this.mode = "ink";
+			// Same reasoning as pan above.
+			this.hideSpaceCursor();
 			this.spaceUp();
 			this.updateExtent(true);
 			return;
 		}
 		if (this.mode === "lasso") {
 			this.mode = "ink";
+			// Same reasoning as pan and space above.
+			this.hideLassoCursor();
 			this.lassoUp();
 			this.updateExtent(true);
 			return;
@@ -2750,7 +2898,7 @@ export class InkOverlayPlugin {
 			camX: this.camera.x,
 			camY: this.camera.y,
 			camZoom: this.camera.zoom,
-			contentLeft: this.view.contentDOM.getBoundingClientRect().left,
+			contentLeft: contentOriginLeft(this.view.contentDOM),
 			documentTop: this.view.documentTop,
 			desynchronizedRequested: this.wet?.requested ?? false,
 			desynchronizedActual: String(this.wet?.actualDesynchronized),
@@ -2950,8 +3098,26 @@ export class InkOverlayPlugin {
 		this.handleResize();
 	}
 
-	private showPenCursor(sample: PenSample): void {
-		markPenSeen();
+	private showPenCursor(sample: PenSample, pointerType?: string): void {
+		// Visibility for anything that can ink - a mouse hovering with mouse
+		// ink armed still wants the strip, and gating that would silently take
+		// the toolbar away from every mouse-ink user. Alan ruled for exactly
+		// this on 2026-09-03 and made the pdf surface match it; the predicate
+		// is `pointerRaisesPenTools` (PenToolsMode.ts) and both surfaces read
+		// it now, so neither can drift from the other again.
+		//
+		// Not a behaviour change HERE. It says out loud what the unconditional
+		// `else markPenSeen()` already did, because the router fires
+		// onPenHover only for a pen or a mouse with ink armed (its own
+		// `mouseActsAsPen` gate, which the predicate is built from). Saying it
+		// at the call site is what lets the surface guard demand the pdf say
+		// the same thing.
+		//
+		// Only the HARDWARE claim is gated on a real pen, on both surfaces. An
+		// armed mouse may raise the strip and may never claim to be a pen;
+		// `nibIsLit` answers the mouse through its own `|| h.mouseInkOn()`.
+		if (pointerType === "pen") markPenHardwareSeen();
+		else if (pointerRaisesPenTools(pointerType)) markPenSeen();
 		this.ensurePenTools();
 		// Reticle off: the native cursor stays, so no hover class either.
 		if (!penReticleOn) return;
@@ -3204,6 +3370,65 @@ export class InkOverlayPlugin {
 		if (this.eraserEl) this.eraserEl.setCssStyles({ display: "none" });
 	}
 
+	/**
+	 * The lasso reticle, during a lasso gesture - including the "grab an
+	 * existing selection and drag it" branch, which reaches the tip through
+	 * `lassoDown` exactly like a fresh loop does (both call sites in
+	 * `penDown` land there). One call site covers the family.
+	 *
+	 * Named rather than a raw `showPenCursor` call, the same reasoning as
+	 * `showEraserCursor` two methods up: the surface registry
+	 * (InkSurfaceRules.test.ts) needs a marker that cannot be satisfied by a
+	 * declaration nobody calls, and `this.showLassoCursor(` is that marker
+	 * here now - never the declaration below, since a method never calls
+	 * itself through `this.` in its own signature - mirroring the pdf's own
+	 * wrapper of the same name from 2127ed6.
+	 *
+	 * `showPenCursor` already switches its look by `tipMode()` - lasso adds
+	 * `LASSO_CURSOR_CLASS` - so this is thin on purpose: no new look is
+	 * added here, only persistence through the gesture.
+	 *
+	 * No `pointerType`: the hardware/pen-seen claims belong to the hover and
+	 * pen-down that already happened, not to every sample of a gesture in
+	 * flight. `pointerRaisesPenTools(undefined)` is false (`mouseActsAsPen`,
+	 * MouseInk.ts, requires `pointerType === "mouse"`), so this never makes
+	 * a claim the hover call site did not already make.
+	 */
+	private showLassoCursor(sample: PenSample): void {
+		this.showPenCursor(sample);
+	}
+
+	/**
+	 * Put the lasso reticle away with the gesture, not the watchdog - a
+	 * released lasso should not strand its ring on screen for up to a
+	 * second. Reuses `hidePenCursor` because lasso, pan and space all paint
+	 * through the SAME element hover does (`penCursorEl`), unlike the eraser
+	 * which has its own (`eraserEl`).
+	 */
+	private hideLassoCursor(): void {
+		this.hidePenCursor();
+	}
+
+	/** The pan reticle, during a pan gesture. See showLassoCursor. */
+	private showPanCursor(sample: PenSample): void {
+		this.showPenCursor(sample);
+	}
+
+	/** Put the pan reticle away with the gesture. See hideLassoCursor. */
+	private hidePanCursor(): void {
+		this.hidePenCursor();
+	}
+
+	/** The insert-space divider reticle, during a space gesture. See showLassoCursor. */
+	private showSpaceCursor(sample: PenSample): void {
+		this.showPenCursor(sample);
+	}
+
+	/** Put the insert-space reticle away with the gesture. See hideLassoCursor. */
+	private hideSpaceCursor(): void {
+		this.hidePenCursor();
+	}
+
 	// ---- lasso / move (side button held; §52/§53, ink-only on the inline surface) --
 
 	private strokesHere(): readonly InkStroke[] {
@@ -3216,6 +3441,14 @@ export class InkOverlayPlugin {
 	}
 
 	private lassoDown(sample: PenSample): void {
+		// One call site for both paths into a lasso gesture - a fresh loop
+		// and grabbing an existing selection to drag both reach here, from
+		// the two call sites in `penDown` - so the reticle persists through
+		// either kind of lasso without either call site having to remember
+		// it. Same watchdog reasoning as the eraser: hover has gone quiet by
+		// the time a contact is claimed, and nothing else touches
+		// `penCursorEl` for the length of the gesture without this.
+		this.showLassoCursor(sample);
 		const w = this.camera.screenToWorld(sample.x, sample.y);
 		const bounds = this.selectionBounds();
 		// Landing inside an existing selection moves it; anywhere else lassos.
@@ -3230,6 +3463,13 @@ export class InkOverlayPlugin {
 		this.selection.clear();
 		this.lassoActive = true;
 		this.lassoPts = [w];
+		if (this.strokesHere().length === 0) {
+			// Same reasoning as the eraser's own empty-page check right above
+			// it: a fresh loop on a page with no ink at all can never select
+			// anything, whatever shape it ends up drawing, so say so now
+			// rather than let the lasso close over nothing in silence.
+			new Notice("Handwriting: no ink on the page to select");
+		}
 		this.redrawSelectionUI();
 	}
 
@@ -3323,6 +3563,11 @@ export class InkOverlayPlugin {
 	// ---- insert space (divider gesture: ink below the line follows the pen) --
 
 	private spaceDown(sample: PenSample, ev: PointerEvent): void {
+		// Same watchdog reasoning as lassoDown and the pan branch above: this
+		// is the one call site into a space gesture, so the reticle persists
+		// through it from the first sample rather than only from whatever
+		// hover happened to leave behind.
+		this.showSpaceCursor(sample);
 		const w = this.camera.screenToWorld(sample.x, sample.y);
 		const here = this.strokesHere();
 		// Snap out of any row the line was drawn through, and DRAW it where it
@@ -3490,9 +3735,26 @@ export class InkOverlayPlugin {
 	 * Design §5o: leaving a lasso outline live after the strip's tool
 	 * changed read as "the lasso selector remains" (Alan, device finding
 	 * 2026-09-02). Exact idiom as the pen-contact clear at `:1919-1920`.
+	 *
+	 * The strip too, not just the canvas. The §5o listener refreshes every
+	 * strip BEFORE it dissolves, so a refresh done there sees the selection
+	 * that is about to go; Delete and Copy are gated on `hasInkSelection()`
+	 * and stayed lit over nothing. Picking up Pan with ink selected is how
+	 * that shows: the ruling clears the selection (pan and lasso are
+	 * exclusive - alan, 2026-09-02) and the two buttons were left behind.
+	 * `pasteInkHere` is the symmetric case and already does this - it selects
+	 * what it pasted and refreshes so the buttons light UP. The pdf's
+	 * `dissolveSelection` has ended in `refreshStrip()` all along; this is the
+	 * note surface agreeing with it.
+	 *
+	 * Only when a selection actually went away: the listener has already
+	 * refreshed once for the mode change itself, and an unconditional second
+	 * refresh would run on every tool change for nothing.
 	 */
 	dissolveSelection(): void {
-		if (this.selection.clear()) this.redrawSelectionUI();
+		if (!this.selection.clear()) return;
+		this.redrawSelectionUI();
+		this.refreshStrip();
 	}
 
 	private redrawSelectionUI(): void {
@@ -4009,7 +4271,7 @@ export class InkOverlayPlugin {
 		const contentRect = this.view.contentDOM.getBoundingClientRect();
 		const preRect = scroller.getBoundingClientRect();
 		const origin = surfaceOriginInScroller({
-			contentLeftVisual: contentRect.left,
+			contentLeftVisual: contentOriginLeft(this.view.contentDOM),
 			documentTopVisual: this.view.documentTop,
 			scrollRectLeft: preRect.left,
 			scrollRectTop: preRect.top,

@@ -69,10 +69,13 @@ import { PdfInkController } from "./PdfInkController";
 import { PenSample } from "../input/PointerRouter";
 import {
 	markPenSeen,
+	penHardwareSeen,
+	penSeenThisSession,
 	penToolsListenerCountForTest,
 	resetPenToolsForTest,
 	setPenToolsMode,
 } from "../inline/PenToolsMode";
+import { setMouseInk } from "../inline/MouseInk";
 
 /** The gesture path rebinds, which constructs observers Node does not have. */
 class NoopObserver {
@@ -101,7 +104,15 @@ function fakeEl(): Record<string, unknown> {
 	};
 }
 
-type Pen = { penDown(s: PenSample): void; showCursor(s: PenSample, kind?: string): void };
+type Pen = {
+	// `ev` is the router's PointerEvent in production; the only fields this
+	// surface reads off it at contact are `pointerType`, `buttons` and
+	// `button`, and `recordDown` - the one place that reads more - is already
+	// wrapped in a try/catch for exactly this harness. So a two-field literal
+	// is the honest fake rather than a corner cut.
+	penDown(s: PenSample, ev?: { pointerType?: string; buttons?: number }): void;
+	showCursor(s: PenSample, kind?: string): void;
+};
 
 function makeController() {
 	const scroller: Record<string, unknown> = {
@@ -285,5 +296,147 @@ describe("the pdf pen strip obeys the Pen toolbar setting", () => {
 		c.unmount();
 		setPenToolsMode("show");
 		expect(strips.built).toBe(0);
+	});
+});
+
+/**
+ * The nib light on a PDF, and the strip's visibility beside it.
+ *
+ * THE EIGHTH surface divergence of the cycle, and it happened inside the
+ * seventh's fix. `cff850d` split one flag into two - `penSeen` still means
+ * "show the strip" and is set by every tool command, `penHardware` means "a
+ * real pen fired a real event" and is what `nibIsLit` (MobileTools.ts) reads -
+ * and it taught both of InkOverlay's call sites the difference. This file's
+ * surface was left calling the visibility function at both of its own, while
+ * `buildTools` here hands MobileTools the same `isLit: (h) => nibIsLit(h,
+ * "pen")` spec the note surface does. So a user who only ever writes on PDFs,
+ * with a real pen, never set `penHardware` and their pen and highlighter
+ * buttons stayed dark unless mouse ink was on.
+ *
+ * TWO questions per contact, and they have different answers. These tests
+ * assert BOTH on every path, because the failure mode of fixing the second is
+ * silently moving the first: gating the visibility claim is the tempting
+ * one-line version of this fix and it would take the toolbar away from every
+ * mouse-ink user on a PDF. `penSeenThisSession()` here is the pin.
+ */
+describe("a pdf tells a real pen from a mouse, without moving the strip", () => {
+	let open: PdfInkController[] = [];
+
+	beforeEach(() => {
+		resetPenToolsForTest();
+		// Module state like the pen flags, and it decides whether a hovering
+		// mouse may raise the strip - a test that armed it and did not put it
+		// back would hand the next one a different answer.
+		setMouseInk(false);
+		platform.isMobileApp = false;
+		strips.built = 0;
+		strips.destroyed = 0;
+		strips.live = 0;
+		open = [];
+	});
+
+	afterEach(() => {
+		setMouseInk(false);
+		for (const c of open) c.unmount();
+	});
+
+	function mounted(): { controller: PdfInkController; pen: Pen } {
+		const made = makeController();
+		made.controller.mount();
+		open.push(made.controller);
+		return made;
+	}
+
+	it("a real pen on the glass claims the hardware, and raises the strip", () => {
+		// The regression, stated as the thing a user does. Alan's pass
+		// signature for this is "open a PDF, write one stroke with the pen,
+		// the pen button is lit".
+		const { pen } = mounted();
+		expect(penHardwareSeen()).toBe(false);
+		pen.penDown(sample(200, 200), { pointerType: "pen", buttons: 1 });
+		expect(penHardwareSeen()).toBe(true);
+		expect(penSeenThisSession()).toBe(true);
+		expect(strips.live).toBe(1);
+	});
+
+	it("a mouse stroke raises the strip and claims no hardware", () => {
+		// Both halves matter and they pull opposite ways. The strip MUST
+		// still appear - a mouse only reaches penDown with mouse ink already
+		// armed, and taking its toolbar away is the behaviour change this
+		// whole split exists to avoid. The hardware flag MUST NOT be set, or
+		// the nib light goes back to being a constant and `cff850d` is
+		// undone on this surface.
+		const { pen } = mounted();
+		pen.penDown(sample(200, 200), { pointerType: "mouse", buttons: 1 });
+		expect(penSeenThisSession()).toBe(true);
+		expect(strips.live).toBe(1);
+		expect(penHardwareSeen()).toBe(false);
+	});
+
+	it("a contact with no event at all still raises the strip", () => {
+		// This surface's own teardown paths call penDown without an event
+		// (see the `ev?.buttons ?? 0` comment at the contact site). Undefined
+		// is not a pen, so it takes the visibility branch - which is exactly
+		// what the unconditional `markPenSeen()` did before this change.
+		const { pen } = mounted();
+		pen.penDown(sample(200, 200));
+		expect(penSeenThisSession()).toBe(true);
+		expect(strips.live).toBe(1);
+		expect(penHardwareSeen()).toBe(false);
+	});
+
+	it("a pen hover claims the hardware without touching the glass", () => {
+		// An Apple Pencil with hover, or a Surface pen held above the page.
+		// The strip rides along, as it did before: `markPenHardwareSeen`
+		// calls `markPenSeen` itself.
+		const { pen } = mounted();
+		pen.showCursor(sample(200, 200), "pen");
+		expect(penHardwareSeen()).toBe(true);
+		expect(penSeenThisSession()).toBe(true);
+		expect(strips.live).toBe(1);
+	});
+
+	it("a hovering mouse still claims nothing at all", () => {
+		// A mouse with ink OFF, which is the half of 1.4.6-design.md 5m/AF5
+		// that survives Alan's 2026-09-03 reversal: it cannot ink, so it is
+		// not asking for the tools and it raises nothing. `setMouseInk` is
+		// left at its false default here rather than being set, and the
+		// beforeEach turns it off again after every test that armed it.
+		const { pen } = mounted();
+		pen.showCursor(sample(200, 200), "mouse");
+		expect(penSeenThisSession()).toBe(false);
+		expect(penHardwareSeen()).toBe(false);
+		expect(strips.live).toBe(0);
+	});
+
+	it("a mouse with ink ARMED raises the toolbar, and claims no hardware", () => {
+		// ALAN'S REVERSAL, 2026-09-03: "with mouse ink armed, yes a hovering
+		// mouse should bring toolbar out". Before this, a mouse-ink user
+		// hovering a PDF in auto mode got nothing until they touched the page
+		// with a real pen, while the same hover over a note raised the strip.
+		//
+		// The second assertion is the one that keeps the fix honest. Marking
+		// hardware here would ALSO make this pass and would rebuild the
+		// 1.4.6-to-1.4.8 nib-light bug from the far end; the light already
+		// covers this user through nibIsLit's own `|| h.mouseInkOn()`.
+		setMouseInk(true);
+		const { pen } = mounted();
+		pen.showCursor(sample(200, 200), "mouse");
+		expect(penSeenThisSession()).toBe(true);
+		expect(strips.live).toBe(1);
+		expect(penHardwareSeen()).toBe(false);
+	});
+
+	it("touch raises nothing on either flag", () => {
+		// Not reachable through the router - its hover path returns on any
+		// pointer that is neither a pen nor an armed mouse - but the
+		// predicate is asked directly here so the third pointer type has an
+		// answer on the record rather than an assumption.
+		setMouseInk(true);
+		const { pen } = mounted();
+		pen.showCursor(sample(200, 200), "touch");
+		expect(penSeenThisSession()).toBe(false);
+		expect(penHardwareSeen()).toBe(false);
+		expect(strips.live).toBe(0);
 	});
 });

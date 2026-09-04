@@ -24,6 +24,7 @@ import { describe, expect, it } from "vitest";
 import { HandwritingPageView } from "./HandwritingPageView";
 import { SelectionModel } from "../objects/SelectionModel";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN, PenStyle, widthForPressure } from "../ink/PenStyle";
+import type { InkStroke } from "../ink/Stroke";
 import type { PenSample } from "../input/PointerRouter";
 
 type Tool = "pen" | "highlighter" | "eraser" | "lasso";
@@ -43,6 +44,27 @@ interface Harness {
 	redraws: number;
 	lassoDowns: number;
 	loaded: boolean;
+	doc: { page: { strokes: InkStroke[]; textBoxes: never[]; images: never[] } };
+	erases: number;
+}
+
+/**
+ * A selected stroke with a real bbox, so `selectionBounds` has something to
+ * return. The seeded selection alone gives none: `bounds` unions the boxes of
+ * strokes it can FIND, and a harness with an empty page finds nothing - which
+ * is why the grab test below has to be handed ink as well as ids.
+ */
+function strokeAt(id: string, x: number, y: number): InkStroke {
+	const points = [{ x, y, pressure: 0.5, t: 0 }];
+	return {
+		id,
+		tool: "pen",
+		color: "#000000",
+		width: 2,
+		points,
+		bbox: { x: x - 5, y: y - 5, width: 10, height: 10 },
+		createdAt: 0,
+	};
 }
 
 function makeView(tool: Tool): Harness {
@@ -57,12 +79,28 @@ function makeView(tool: Tool): Harness {
 	view.inkRefusalSaid = null;
 	// Only the three fields inkRefusal reads; a real PageDocument wants a
 	// vault behind it.
-	view.doc = { spatialFutureVersion: undefined, spatialDamaged: false };
-	view.textLayer = { isEditing: false };
+	// `page` is a getter over `doc`, so the ink goes in here. Empty by
+	// default, so `selectionBounds` is null and the grab test cannot fire:
+	// the dissolve cases below assert exactly what they always did. The drag
+	// cases put a real stroke in it.
+	view.doc = {
+		spatialFutureVersion: undefined,
+		spatialDamaged: false,
+		page: { strokes: [], textBoxes: [], images: [] },
+	};
+	view.textLayer = { isEditing: false, rectOf: () => null };
+	view.imageLayer = { rectOf: () => null };
 	view.metrics = { begin: () => {} };
 	view.penStyle = { ...DEFAULT_PEN };
-	view.camera = { screenToWorld: (x: number, y: number) => ({ x, y }) };
-	view.wetInk = { beginStroke: () => {} };
+	view.camera = {
+		screenToWorld: (x: number, y: number) => ({ x, y }),
+		zoom: 1,
+		snapshot: { x: 0, y: 0, zoom: 1 },
+	};
+	view.wetInk = { beginStroke: () => {}, contactHalfWidth: () => 1 };
+	view.lastTail = [];
+	view.tail = { clear: () => {}, drawHead: () => {} };
+	view.erases = 0;
 	view.redraws = 0;
 	view.lassoDowns = 0;
 	view.redrawSelectionUI = () => {
@@ -73,7 +111,9 @@ function makeView(tool: Tool): Harness {
 	};
 	view.startTicker = () => {};
 	view.showEraserCursor = () => {};
-	view.eraseAt = () => {};
+	view.eraseAt = () => {
+		(view.erases as number)++;
+	};
 	return view as unknown as Harness;
 }
 
@@ -132,6 +172,59 @@ describe("canvas pen-down and the live selection", () => {
 
 		expect(view.lassoDowns).toBe(1);
 		expect(view.selection.isEmpty).toBe(false);
+	});
+
+	// A BARE tip inside the selection drags it - onenote's grammar (alan,
+	// 2026-08-27). The note surface has had this since the ruling; this
+	// surface reached a drag only through the side button or the lasso tool,
+	// so a tip landing on ink the user had just selected dissolved the
+	// selection and drew across it.
+	it("a bare tip inside the selection drags it", () => {
+		const view = makeView("pen");
+		// SAMPLE is (10,12) and the camera is 1:1, so this bbox contains it.
+		view.doc.page.strokes = [strokeAt("stroke-a", 10, 12)];
+		expect(view.selection.isEmpty).toBe(false);
+
+		view.penDown(SAMPLE, TIP);
+
+		expect(view.lassoDowns).toBe(1);
+		expect(view.selection.isEmpty).toBe(false);
+	});
+
+	it("the eraser end inside the selection still erases", () => {
+		// BARE is load-bearing: an eraser is not a bare tip. Swallowed by the
+		// grab test, lassoed ink becomes the one ink on the page the eraser
+		// cannot reach - it drags instead, on every contact.
+		const view = makeView("pen");
+		view.doc.page.strokes = [strokeAt("stroke-a", 10, 12)];
+
+		view.penDown(SAMPLE, ERASER_END);
+
+		expect(view.lassoDowns).toBe(0);
+		expect(view.erases).toBe(1);
+		expect(view.selection.isEmpty).toBe(true);
+	});
+
+	it("the eraser tool inside the selection still erases", () => {
+		const view = makeView("eraser");
+		view.doc.page.strokes = [strokeAt("stroke-a", 10, 12)];
+
+		view.penDown(SAMPLE, TIP);
+
+		expect(view.lassoDowns).toBe(0);
+		expect(view.erases).toBe(1);
+		expect(view.selection.isEmpty).toBe(true);
+	});
+
+	it("a bare tip outside the selection dissolves it and inks", () => {
+		const view = makeView("pen");
+		// Far from SAMPLE, and far from the 8 px grab pad.
+		view.doc.page.strokes = [strokeAt("stroke-a", 400, 400)];
+
+		view.penDown(SAMPLE, TIP);
+
+		expect(view.lassoDowns).toBe(0);
+		expect(view.selection.isEmpty).toBe(true);
 	});
 
 	it("a refused page leaves the selection alone", () => {

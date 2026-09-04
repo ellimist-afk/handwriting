@@ -317,18 +317,44 @@
 }
 
 /* Eraser and lasso show their reach rather than a nib: a dot that lies about
-   what the eraser is about to take is worse than no dot at all. */
+   what the eraser is about to take is worse than no dot at all. Told apart
+   by size in PdfInkController.showCursor - the eraser's radius is the
+   erase-radius setting, the lasso's is a fixed constant - since this surface
+   keeps one fixed page-white/ink-black palette rather than the note
+   surface's per-mode accent colour. */
 .handwriting-pdf-cursor-ring {
 	/* Same reasoning as the base ring: the page is white in dark mode too. */
 	border: 1px dashed rgba(0, 0, 0, 0.65);
 	box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
 }
 
+/* Pan mode: the one SOLID ring, so "grab the page" never reads as one of the
+   dashed marking tools - the same rule the note surface's PAN_CURSOR_CLASS
+   follows (InkOverlay.showPenCursor). */
+.handwriting-pdf-cursor-pan {
+	border: 1.5px solid rgba(0, 0, 0, 0.65);
+	box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+
+/* Insert-space mode: the divider in miniature - a dashed horizontal rule
+   instead of a ring, so the tip shows the seam it is about to plant rather
+   than a dot that would say "pen". Matches the note surface's
+   SPACE_CURSOR_CLASS in shape; width and position come from PdfInkController
+   (SPACE_CURSOR_HALF_PX), which sets height to 0 so only this border-top
+   paints. */
+.handwriting-pdf-cursor-space {
+	border: 0;
+	border-top: 1.5px dashed rgba(0, 0, 0, 0.65);
+	border-radius: 0;
+	box-shadow: none;
+}
+
 /* A mouse gets a fixed locator ring around the ink-true dot: with the system
    cursor hidden, a small nib left a four-pixel speck as the only pointer on
    the screen. Fixed-size on purpose - it locates, the dot informs. The
-   eraser and lasso rings are already big enough to be their own locator. */
-.handwriting-pdf-cursor-mouse:not(.handwriting-pdf-cursor-ring)::after {
+   eraser, lasso, pan and space reticles are already big enough (or, for
+   space, wide enough) to be their own locator. */
+.handwriting-pdf-cursor-mouse:not(.handwriting-pdf-cursor-ring):not(.handwriting-pdf-cursor-pan):not(.handwriting-pdf-cursor-space)::after {
 	content: "";
 	position: absolute;
 	left: 50%;
@@ -810,6 +836,16 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 
 .handwriting-slider-val {
 	font-size: 11px;
+	/* tabular-nums is a REQUEST, not a guarantee. Georgia has old-style
+	   figures and no `tnum` feature, so the declaration silently does
+	   nothing there and the digits are genuinely unequal - 4.734px for `1`
+	   against 6.766px for `0`. The readout is padded to a constant
+	   character count, which cannot save a label whose characters are not
+	   constant width, so a serif interface theme reproduced the pop-width
+	   judder this padding exists to stop. Pinning the font is what makes
+	   the padding mean anything; monospace is already this stylesheet's
+	   choice for every other numeric readout. */
+	font-family: var(--font-monospace);
 	font-variant-numeric: tabular-nums;
 	/* The readout floats over the PAGE, not over strip chrome - muted gray
 	   on a white note was unreadable (glass, 2026-08-31). Normal text on a

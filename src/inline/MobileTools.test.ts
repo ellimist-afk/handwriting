@@ -1,6 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { MobileTools, nibIsLit, type MobileToolsHost } from "./MobileTools";
-import { markPenSeen, resetPenToolsForTest } from "./PenToolsMode";
+// markPenHardwareSeen, not markPenSeen: these tests want "a pen exists", and
+// markPenSeen only means "show the strip" - it is set by every tool command,
+// which is exactly the confusion that left the nib light stuck on for three
+// releases. See PenToolsMode.ts's `penHardware`.
+import {
+	clearPenHardwareSeen,
+	markPenHardwareSeen,
+	markPenSeen,
+	penSeenThisSession,
+	resetPenToolsForTest,
+} from "./PenToolsMode";
+import { consumeMousePutDown } from "./MouseInk";
 
 /**
  * Obsidian's real `setIcon` APPENDS an svg to the parent; it does not clear
@@ -51,6 +62,7 @@ const fakeHost = (over: Partial<MobileToolsHost> = {}): MobileToolsHost => ({
 	mouseInkOn: () => false,
 	setMouseInk: () => {},
 	armMouseInkQuietly: () => {},
+	disarmMouseInkQuietly: () => {},
 	recordingOn: () => false,
 	hasInkSelection: () => false,
 	palette: () => [],
@@ -62,13 +74,61 @@ describe("nibIsLit", () => {
 	beforeEach(() => resetPenToolsForTest());
 
 	it("is lit for a pen that has been seen this session, mouse ink off", () => {
-		markPenSeen();
+		markPenHardwareSeen();
 		expect(nibIsLit(fakeHost({ activeTool: () => "pen", mouseInkOn: () => false }), "pen")).toBe(true);
 	});
 
 	it("is dark for a mouse user with mouse ink off and no pen seen", () => {
 		expect(nibIsLit(fakeHost({ activeTool: () => "pen", mouseInkOn: () => false }), "pen")).toBe(
 			false
+		);
+	});
+
+	// ALAN'S RULE, 2026-09-03: the light is dark "until you touch with your
+	// pen", and turning mouse ink off puts it out "at any point". Before this
+	// the hardware flag latched for the whole session, so once he had used his
+	// pen the button stayed lit however often mouse ink was switched off - by
+	// hand it read as stuck, and no amount of toggling could make it go dark.
+	it("goes dark when mouse ink is turned off, even after a pen has been seen", () => {
+		markPenHardwareSeen();
+		const off = fakeHost({ activeTool: () => "pen", mouseInkOn: () => false });
+		expect(nibIsLit(off, "pen")).toBe(true);
+		clearPenHardwareSeen();
+		expect(nibIsLit(off, "pen")).toBe(false);
+	});
+
+	it("comes back on the next pen contact - the whole of 'until you touch with your pen'", () => {
+		markPenHardwareSeen();
+		clearPenHardwareSeen();
+		const off = fakeHost({ activeTool: () => "pen", mouseInkOn: () => false });
+		expect(nibIsLit(off, "pen")).toBe(false);
+		// Both surfaces call this on every real pen contact.
+		markPenHardwareSeen();
+		expect(nibIsLit(off, "pen")).toBe(true);
+	});
+
+	it("leaves the TOOLBAR alone - clearing the light must not take the strip away", () => {
+		// The half he was explicit about twice, and the reason the clear is
+		// narrow: "make turning ink turns off the pen light, but NOT the
+		// toolbar off", then "why the fuck would the toolbar disappear".
+		// `penSeen` decides the strip exists; only `penHardware` may be
+		// cleared here. Clearing both would delete the toolbar out from under
+		// him, which is the opposite of the request.
+		markPenHardwareSeen();
+		expect(penSeenThisSession()).toBe(true);
+		clearPenHardwareSeen();
+		expect(penSeenThisSession()).toBe(true);
+	});
+
+	it("still lights for an armed mouse with no pen, which the clear must not break", () => {
+		// A mouse user's light does not ride the hardware flag at all - it
+		// rides `mouseInkOn()`. Pinned because the obvious wrong fix for the
+		// rule above is to drop the `|| h.mouseInkOn()` disjunct, and that
+		// would leave a mouse user staring at a dark button while their mouse
+		// was drawing.
+		clearPenHardwareSeen();
+		expect(nibIsLit(fakeHost({ activeTool: () => "pen", mouseInkOn: () => true }), "pen")).toBe(
+			true
 		);
 	});
 
@@ -86,7 +146,7 @@ describe("nibIsLit", () => {
 	});
 
 	it("is dark when the nominal tool is not this nib", () => {
-		markPenSeen();
+		markPenHardwareSeen();
 		expect(nibIsLit(fakeHost({ activeTool: () => "highlighter" }), "pen")).toBe(false);
 	});
 
@@ -107,11 +167,15 @@ describe("nibIsLit", () => {
  * strip only ever touches the handful of calls below, and a fake that
  * records classes is exactly what an assertion about `is-disabled` wants to
  * read. Measurement (getBoundingClientRect, offsetWidth) IS reached, by the
- * one reader there is: `hangUnder` returns before measuring while a pop is
- * shut, and goes on to measure when one opens. It used to be true that no
- * test here ever opened one; the eraser-pop tests at the foot of this file do,
- * so the rects answer zeros rather than throwing. Nothing asserts on the
- * placement they produce - only on whether the pop is showing at all.
+ * reader these tests get as far as: `hangUnder` returns before measuring
+ * while a pop is shut - the state the C16 tests below run in - and goes on
+ * to measure the strip and the button when one opens, to centre the pop
+ * under it. It used to be true that no test here opened one at all. Three
+ * groups at the foot of this file now do: the eraser's pop off the mode's
+ * own OFF-to-ON edge, all three pops under the held-slider tests, and the
+ * eraser's again off the tap that reopens it. So the rects answer zeros
+ * rather than not answering at all. Nothing asserts on the placement they
+ * produce - only on whether a pop is showing, and on what its slider holds.
  */
 interface ElOpts {
 	cls?: string;
@@ -385,7 +449,7 @@ describe("MobileTools: the collapsed pill wears one tool, not all of them", () =
 	};
 
 	it("swaps the pill's icon on a tool change instead of stacking a second one", () => {
-		markPenSeen();
+		markPenHardwareSeen();
 		const tool = { value: "pen" };
 		const lasso = { value: false };
 		const { strip, pill } = buildPill({
@@ -426,7 +490,7 @@ describe("MobileTools: the collapsed pill wears one tool, not all of them", () =
 		// just emptied has to leave the same glyph behind it left on one full
 		// of stale svgs, and the sr-only name still has to survive it.
 		icons.appends = false;
-		markPenSeen();
+		markPenHardwareSeen();
 		const tool = { value: "pen" };
 		const { strip, pill } = buildPill({ activeTool: () => tool.value });
 		expect(svgCount(pill)).toBe(0);
@@ -747,5 +811,603 @@ describe("MobileTools: a refresh does not write into the slider under a finger",
 			rig.strip.refreshNow();
 			expect(rig.input.value).toBe(row.awayShown);
 		});
+	}
+});
+
+/**
+ * The eraser's tap, both halves at once.
+ *
+ * §5p gave the eraser button a branch of its own so that a re-tap reopens
+ * the size pop: pen contact closes every pop (`closeInkSliders`, driven by
+ * StripPenChrome), and once it had, the only route back was to switch the
+ * tool off and on again - two taps through the OFF-to-ON edge `refreshNow`
+ * watches. The branch was written for pen and touch alike (`ptr !== "mouse"`)
+ * and so it also swallowed the tap that used to put the eraser DOWN, on
+ * every device that is not a mouse. Shipped in 1.4.6.
+ *
+ * Either half is satisfiable alone by a fix that loses the other - deleting
+ * the branch restores the toggle and reinstates the two-tap trap - so both
+ * are pinned here, and the state the pop is IN is what tells them apart.
+ */
+describe("MobileTools: tapping the eraser while it is already active", () => {
+	beforeEach(() => resetPenToolsForTest());
+
+	const descendants = (el: FakeEl): FakeEl[] =>
+		el.children.flatMap((kid) => [kid, ...descendants(kid)]);
+
+	/** The eraser's own pop, found by the slider it carries rather than by
+	 * the order the strip happens to build its three pops in. */
+	const eraserPop = (pane: FakeEl): FakeEl => {
+		const hit = descendants(pane).find(
+			(el) =>
+				el.classes.has("handwriting-slider-pop") &&
+				descendants(el).some((kid) => kid.getAttribute("aria-label") === "Eraser size")
+		);
+		if (!hit) throw new Error("no eraser pop was built");
+		return hit;
+	};
+
+	/**
+	 * `eraser` is a live box the host reads, and `exec` flips it the way the
+	 * command does: `main.ts`'s eraser command is a plain toggle,
+	 * `on = !getInlineEraserMode()`. So a test can tell "the branch ran" from
+	 * "the command ran" by reading the box rather than by trusting the strip.
+	 *
+	 * The strip is built with the eraser OFF and `pickUp()` switches it on.
+	 * That is now the only route to an open pop: a strip stopped reading its
+	 * own mount as an OFF-to-ON edge (the describe above), so building one
+	 * with the eraser already on leaves every pop shut. It is also the
+	 * honest sequence - the pop is showing because the user just picked the
+	 * eraser up, which is the moment before the tap under test.
+	 */
+	const buildStrip = (
+		eraser: { value: boolean }
+	): {
+		doc: FakeDoc;
+		execed: string[];
+		tools: MobileTools;
+		btn: FakeEl;
+		pop: FakeEl;
+		pickUp: () => void;
+	} => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const execed: string[] = [];
+		const host = fakeHost({
+			eraserOn: () => eraser.value,
+			exec: (id: string) => {
+				execed.push(id);
+				if (id === "handwriting:inline-tool-eraser") eraser.value = !eraser.value;
+			},
+		});
+		const tools = new MobileTools(pane as unknown as HTMLElement, host);
+		const btn = pane.findByTipLabel("Eraser");
+		if (!btn) throw new Error("no Eraser button was built");
+		const pickUp = (): void => {
+			eraser.value = true;
+			tools.refreshNow();
+		};
+		return { doc, execed, tools, btn, pop: eraserPop(pane), pickUp };
+	};
+
+	for (const ptr of ["touch", "pen"]) {
+		it(`switches the eraser off on a ${ptr} tap while the pop is showing`, () => {
+			// The eraser is picked up, which fires the OFF-to-ON edge and
+			// hangs the pop out - the state a user is in the moment after
+			// taking the tool, and the state they tap in to put it down.
+			const eraser = { value: false };
+			const { doc, execed, btn, pop, pickUp } = buildStrip(eraser);
+			pickUp();
+			expect(pop.classes.has("is-showing")).toBe(true);
+
+			btn.fire("click", { pointerType: ptr });
+			doc.flushFrames();
+
+			expect(execed).toContain("handwriting:inline-tool-eraser");
+			expect(eraser.value).toBe(false);
+			expect(pop.classes.has("is-showing")).toBe(false);
+		});
+	}
+
+	it("reopens the pop instead, in one tap, once pen contact has closed it", () => {
+		const eraser = { value: false };
+		const { doc, execed, tools, btn, pop, pickUp } = buildStrip(eraser);
+		pickUp();
+		expect(pop.classes.has("is-showing")).toBe(true);
+
+		// Pen contact takes every pop down without touching the mode.
+		tools.closeInkSliders();
+		doc.flushFrames();
+		expect(pop.classes.has("is-showing")).toBe(false);
+		expect(eraser.value).toBe(true);
+
+		btn.fire("click", { pointerType: "touch" });
+		doc.flushFrames();
+
+		// One tap, and the tool is still in hand: this is the half the §5p
+		// branch exists for, and the half a bare deletion would lose.
+		expect(execed).not.toContain("handwriting:inline-tool-eraser");
+		expect(eraser.value).toBe(true);
+		expect(pop.classes.has("is-showing")).toBe(true);
+	});
+
+	/**
+	 * "mouse sould disable" (alan, 2026-09-02): a mouse only draws because
+	 * its owner has no pen, so the eraser button IS the mode for them and
+	 * the pop never gets in the way of putting it down.
+	 *
+	 * Both pop states are run, and the hidden one carries the weight: that
+	 * is the exact state in which the pen tap above reopens the pop instead
+	 * of switching the tool off, so it is the row that would catch a fix
+	 * that reached the mouse. Neither row goes red when the fix is taken out
+	 * - the mouse path is not what changed - which is the point of them.
+	 */
+	for (const showing of [true, false]) {
+		it(`still switches the eraser off on a mouse click, pop ${
+			showing ? "showing" : "hidden"
+		}`, () => {
+			const eraser = { value: false };
+			const { doc, execed, tools, btn, pop, pickUp } = buildStrip(eraser);
+			pickUp();
+			if (!showing) {
+				// Pen contact, the same way the reopen test gets there.
+				tools.closeInkSliders();
+				doc.flushFrames();
+			}
+			// Asserted, not assumed: a row that had silently lost its own
+			// state would be the other row over again.
+			expect(pop.classes.has("is-showing")).toBe(showing);
+			expect(eraser.value).toBe(true);
+
+			btn.fire("click", { pointerType: "mouse" });
+			doc.flushFrames();
+
+			expect(execed).toContain("handwriting:inline-tool-eraser");
+			expect(eraser.value).toBe(false);
+		});
+	}
+});
+
+/**
+ * The nib light follows mouse ink going OFF.
+ *
+ * alan, 2026-09-02: "left clicking with mouse on pen and highlighter gives
+ * the toast that mouse ink is now enabled, but doesnt unhighlight the boxes,
+ * they are still lit". His own earlier request - "can we make sure that the
+ * pen button unhilights when we click it with mouse and moes ink turns off?"
+ * - shipped in 1.4.6 and did not work in 1.4.6, 1.4.7 or 1.4.8, because
+ * `nibIsLit` read `penSeenThisSession()`, which every tool command sets.
+ *
+ * The rig wires the fake host to what the real code actually does, which is
+ * the only reason this test can see the defect at all:
+ *   - `inline-tool-pen` calls markPenSeen() unconditionally (main.ts)
+ *   - `mouse-ink-toggle` calls markPenSeen() whenever it turns ink ON,
+ *     inside its own `if (on)` (main.ts)
+ *   - the host's setMouseInk EXECS that command (InkOverlay.ts), which is
+ *     where Alan's toast comes from - not from armMouseInkQuietly, which is
+ *     genuinely silent and is on a branch he never reaches.
+ */
+describe("MobileTools: the nib light follows mouse ink going off", () => {
+	beforeEach(() => resetPenToolsForTest());
+
+	const rig = (): {
+		doc: FakeDoc;
+		btn: FakeEl;
+		mouseInk: { value: boolean };
+		toasts: string[];
+	} => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const mouseInk = { value: false };
+		const toasts: string[] = [];
+		const exec = (id: string): void => {
+			if (id === "handwriting:inline-tool-pen") {
+				markPenSeen();
+				toasts.push("Handwriting: pen");
+			}
+			if (id === "handwriting:mouse-ink-toggle") {
+				const on = !mouseInk.value;
+				mouseInk.value = on;
+				if (on) markPenSeen();
+				toasts.push(on ? "Handwriting: pen" : "Handwriting: cursor");
+			}
+		};
+		const host = fakeHost({
+			exec,
+			activeTool: () => "pen",
+			mouseInkOn: () => mouseInk.value,
+			setMouseInk: (on: boolean) => {
+				if (mouseInk.value !== on) exec("handwriting:mouse-ink-toggle");
+			},
+			armMouseInkQuietly: () => {
+				mouseInk.value = true;
+			},
+		});
+		new MobileTools(pane as unknown as HTMLElement, host);
+		const btn = pane.findByTipLabel("Pen");
+		if (!btn) throw new Error("no Pen button was built");
+		return { doc, btn, mouseInk, toasts };
+	};
+
+	it("goes dark when a mouse click hands the tip back to text", () => {
+		const { doc, btn, mouseInk, toasts } = rig();
+
+		// Cold: no pen has ever been seen and mouse ink is off. Pen is the
+		// nominal tool, so isActive is true - but nothing inks with it, so
+		// the button is dark. Asserted rather than assumed: if this were
+		// already lit the last assertion could pass for the wrong reason.
+		expect(btn.classes.has("is-active")).toBe(false);
+
+		// Click one: the mouse claims the pen, mouse ink comes on, the
+		// button lights. This half worked before the fix and must keep
+		// working after it.
+		btn.fire("click", { pointerType: "mouse" });
+		doc.flushFrames();
+		expect(mouseInk.value).toBe(true);
+		expect(btn.classes.has("is-active")).toBe(true);
+
+		// Click two: Alan's click. The mouse goes back to text.
+		btn.fire("click", { pointerType: "mouse" });
+		doc.flushFrames();
+
+		// The BEHAVIOUR was never broken - mouse ink really did go off, and
+		// the toast really did say so. Pinned so a later fix to the light
+		// cannot quietly change what the button does.
+		expect(mouseInk.value).toBe(false);
+		expect(toasts.at(-1)).toBe("Handwriting: cursor");
+
+		// The LIGHT is the defect: "doesnt unhighlight the boxes".
+		expect(btn.classes.has("is-active")).toBe(false);
+	});
+
+	/**
+	 * The other half of the same rule, and the one a careless fix breaks: a
+	 * real pen lights the nib with mouse ink off and keeps it lit. Deleting
+	 * the `penHardwareSeen()` disjunct outright would pass the test above and
+	 * fail this one, leaving every pen user with a permanently dark strip.
+	 */
+	it("stays lit for a real pen with mouse ink off", () => {
+		markPenHardwareSeen();
+		const { btn, mouseInk } = rig();
+		expect(mouseInk.value).toBe(false);
+		expect(btn.classes.has("is-active")).toBe(true);
+	});
+});
+
+/**
+ * The size slider previews what the tip can DO, not what it is nominally set to.
+ *
+ * alan, 2026-09-03: "plain mouse without mouse ink armed should not open the
+ * slider popout, correct?" He is right, and it was broken. The hover branch
+ * read `spec.isActive`, which means "the nominal tool" and deliberately
+ * ignores mouse ink (see ButtonSpec.isLit for why the two predicates are split
+ * at all), so a plain mouse with ink off hovered the Pen button and was handed
+ * a size slider for a tool that could not lay down a stroke. The BUTTON was
+ * already dark beside it - the light read `isLit` and the preview did not,
+ * which is two controls on one button disagreeing about the same question.
+ *
+ * The hover gate now uses the render path's own resolution,
+ * `spec.isLit ?? spec.isActive`, so buttons without their own `isLit` - all of
+ * them but the two nibs - are untouched, and the eraser's separate §5p preview
+ * branch keeps its own ruling.
+ *
+ * WHAT IS DELIBERATELY NOT CHANGED: the click path. Clicking an unlit nib is
+ * the only way a mouse user arms mouse ink at all (the final else's
+ * `armMouseInkQuietly`), and gating that would strand them with no way in. The
+ * last test here is the one that goes red if anyone tidies the two into
+ * agreement.
+ *
+ * The window shim is why this describe stands apart: the hover path arms the
+ * tooltip through `window.setTimeout`, which the rest of this suite avoids by
+ * opening pops with a touch tap instead. Here hover IS the subject, so the
+ * timers are supplied and made flushable.
+ */
+describe("MobileTools: hover previews a nib that can ink, and no other", () => {
+	let timers: Array<{ id: number; fn: () => void }> = [];
+	let priorWindow: unknown;
+
+	beforeEach(() => {
+		resetPenToolsForTest();
+		timers = [];
+		let next = 1;
+		priorWindow = (globalThis as Record<string, unknown>).window;
+		(globalThis as Record<string, unknown>).window = {
+			setTimeout: (fn: () => void): number => {
+				const id = next++;
+				timers.push({ id, fn });
+				return id;
+			},
+			clearTimeout: (id: number): void => {
+				const at = timers.findIndex((t) => t.id === id);
+				if (at >= 0) timers.splice(at, 1);
+			},
+		};
+	});
+
+	afterEach(() => {
+		(globalThis as Record<string, unknown>).window = priorWindow;
+	});
+
+	/** Run every pending timer, the tooltip's included - harmless on fakes. */
+	const flushTimers = (): void => {
+		const due = timers.splice(0, timers.length);
+		for (const t of due) t.fn();
+	};
+
+	const rig = (
+		over: Partial<MobileToolsHost> = {}
+	): {
+		doc: FakeDoc;
+		strip: MobileTools;
+		btn: FakeEl;
+		mouseInk: { value: boolean };
+		armed: string[];
+	} => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const mouseInk = { value: false };
+		const armed: string[] = [];
+		const host = fakeHost({
+			activeTool: () => "pen",
+			mouseInkOn: () => mouseInk.value,
+			armMouseInkQuietly: () => {
+				armed.push("quiet");
+				mouseInk.value = true;
+			},
+			...over,
+		});
+		const strip = new MobileTools(pane as unknown as HTMLElement, host);
+		const btn = pane.findByTipLabel("Pen");
+		if (!btn) throw new Error("no Pen button was built");
+		return { doc, strip, btn, mouseInk, armed };
+	};
+
+	it("a plain mouse with ink off is offered nothing", () => {
+		// Alan's case exactly. Pen is the nominal tool, so isActive is true
+		// and the old gate opened the pop; nothing inks, so isLit is false and
+		// the button is dark. Both are asserted, because a test that checked
+		// only the pop could pass on a build where the button lit as well.
+		const { doc, strip, btn } = rig();
+		doc.flushFrames();
+		expect(btn.classes.has("is-active")).toBe(false);
+		btn.fire("pointerenter", { pointerType: "mouse" });
+		doc.flushFrames();
+		expect(strip.openNibSlider).toBe(null);
+	});
+
+	it("a mouse with ink armed still gets its preview", () => {
+		const { doc, strip, btn, mouseInk } = rig();
+		mouseInk.value = true;
+		strip.refreshNow();
+		expect(btn.classes.has("is-active")).toBe(true);
+		btn.fire("pointerenter", { pointerType: "mouse" });
+		doc.flushFrames();
+		expect(strip.openNibSlider).toBe("pen");
+	});
+
+	it("a real pen gets its preview with mouse ink off", () => {
+		// The interaction with the pdf fix, and why it matters: once a surface
+		// sets the hardware flag its pen user is lit and gets the preview. A
+		// PDF-only pen user was dark before that fix, so tightening this gate
+		// on its own would have taken their slider away too.
+		markPenHardwareSeen();
+		const { doc, strip, btn, mouseInk } = rig();
+		expect(mouseInk.value).toBe(false);
+		btn.fire("pointerenter", { pointerType: "mouse" });
+		doc.flushFrames();
+		expect(strip.openNibSlider).toBe("pen");
+	});
+
+	it("a pen hovering the glass gets it too", () => {
+		markPenHardwareSeen();
+		const { doc, strip, btn } = rig();
+		btn.fire("pointerenter", { pointerType: "pen" });
+		doc.flushFrames();
+		expect(strip.openNibSlider).toBe("pen");
+	});
+
+	it("leaving a previewed nib still closes the pop on the timer", () => {
+		// The close half. `scheduleSliderClose` only closes what hover opened,
+		// so a gate that stops hover opening must not leave a pop behind that
+		// nothing will now take away.
+		markPenHardwareSeen();
+		const { doc, strip, btn } = rig();
+		btn.fire("pointerenter", { pointerType: "mouse" });
+		doc.flushFrames();
+		expect(strip.openNibSlider).toBe("pen");
+		btn.fire("pointerleave", { pointerType: "mouse" });
+		flushTimers();
+		doc.flushFrames();
+		expect(strip.openNibSlider).toBe(null);
+	});
+
+	it("a tap-opened pop survives a hover that can no longer open one", () => {
+		// The other side of the same worry. A touch tap opens the pop as a
+		// DECISION (sliderFromHover false). A mouse then crosses the button
+		// with ink off: the new gate skips the branch, so no
+		// `cancelSliderClose` runs - and the leave timer still declines to
+		// close a pop that hover did not open. Nothing leaks, and nothing the
+		// user asked for is taken away.
+		const { doc, strip, btn } = rig();
+		btn.fire("click", { pointerType: "touch" });
+		doc.flushFrames();
+		expect(strip.openNibSlider).toBe("pen");
+		btn.fire("pointerenter", { pointerType: "mouse" });
+		btn.fire("pointerleave", { pointerType: "mouse" });
+		flushTimers();
+		doc.flushFrames();
+		expect(strip.openNibSlider).toBe("pen");
+	});
+
+	it("clicking an unlit nib still arms mouse ink", () => {
+		// HOVER ONLY. This is the way in for a mouse user with no pen and it
+		// runs through the click chain's `isActive` branches, which are
+		// untouched. If a later change points the click path at `isLit` too,
+		// this goes red and says why.
+		const { doc, strip, btn, mouseInk, armed } = rig({
+			// The tip is not the pen right now, so the click is a PICK rather
+			// than a toggle - the final else, which is the branch that arms.
+			activeTool: () => "highlighter",
+		});
+		expect(mouseInk.value).toBe(false);
+		btn.fire("click", { pointerType: "mouse" });
+		doc.flushFrames();
+		expect(armed).toEqual(["quiet"]);
+		expect(mouseInk.value).toBe(true);
+		expect(strip.openNibSlider).toBe("pen");
+	});
+});
+
+/**
+ * Putting a tool DOWN with a mouse hands the pointer back to text.
+ *
+ * ALAN, 2026-09-03. The two nibs already did this - clicking the nib you are
+ * drawing with calls `setMouseInk(false)` - but the other four tip tools only
+ * toggled back to the last nib. For a MOUSE that is not putting anything down:
+ * the pointer is still claimed and still cannot select text, so the only way
+ * back to the cursor from the eraser was to click a button you were not using.
+ * His words: "much more consistent for them all to be dropped and revert back
+ * to mouse cursor", and the extra click that costs is "correct behavior.
+ * sometimes you need the mouse cursor back".
+ *
+ * PEN AND TOUCH ARE DELIBERATELY UNCHANGED and are pinned here as such. A
+ * pen's resting state IS the nib, so returning there is already its put-down;
+ * there is no cursor for it to get back. He asked for the two to stay as they
+ * are while he thinks the flow through, so a change reaching them is a
+ * regression against a live instruction, not a bonus.
+ *
+ * A second regression rode in on this feature (alan, hardware finding
+ * 2026-09-03: "toast is incorrect ... it says highlighter after doing it"):
+ * `exec(spec.commandId)` is what actually reverts the mode, and that
+ * command's own Notice is written for a pen or touch tap really picking the
+ * nib the tip fell back to - true for THEM, false for a mouse put-down, which
+ * picked nothing. `markMousePutDown` (MouseInk.ts) is how the strip tells
+ * that command its toast is about to be wrong; `putDownFlagAtExec` below
+ * reads `consumeMousePutDown()` from INSIDE the exec mock, at the exact point
+ * the real command callback would read it, so these tests pin both that the
+ * flag is set and that it is set in time - not merely that it is set
+ * eventually.
+ */
+describe("MobileTools: a mouse putting a tip tool down gets its cursor back", () => {
+	beforeEach(() => {
+		resetPenToolsForTest();
+		// Drain any flag a previous test's exec never consumed, so no test
+		// here can pass because an EARLIER test left it set.
+		consumeMousePutDown();
+	});
+
+	const TOOLS = [
+		{ label: "Eraser", id: "handwriting:inline-tool-eraser", key: "eraserOn" },
+		{ label: "Lasso", id: "handwriting:inline-tool-lasso", key: "lassoOn" },
+		{ label: "Insert space", id: "handwriting:inline-tool-space", key: "spaceOn" },
+		{ label: "Pan", id: "handwriting:inline-tool-pan", key: "panOn" },
+	] as const;
+
+	const rig = (
+		tool: (typeof TOOLS)[number],
+		opts: { active: boolean; inkOn: boolean }
+	): {
+		btn: FakeEl;
+		doc: FakeDoc;
+		disarmed: number;
+		armed: number;
+		execed: string[];
+		putDownFlagAtExec: boolean | null;
+	} => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const state = { active: opts.active, ink: opts.inkOn };
+		const counts = { disarmed: 0, armed: 0 };
+		const execed: string[] = [];
+		let putDownFlagAtExec: boolean | null = null;
+		const host = fakeHost({
+			[tool.key]: () => state.active,
+			mouseInkOn: () => state.ink,
+			exec: (id: string) => {
+				execed.push(id);
+				if (id === tool.id) {
+					// Read-and-clear, exactly as the real command's
+					// `tipModeOffNotice` (main.ts) would while building its
+					// own Notice - this IS that read, moved into the test.
+					putDownFlagAtExec = consumeMousePutDown();
+					state.active = !state.active;
+				}
+			},
+			armMouseInkQuietly: () => {
+				counts.armed++;
+				state.ink = true;
+			},
+			disarmMouseInkQuietly: () => {
+				counts.disarmed++;
+				state.ink = false;
+			},
+		} as Partial<MobileToolsHost>);
+		new MobileTools(pane as unknown as HTMLElement, host);
+		const btn = pane.findByTipLabel(tool.label);
+		if (!btn) throw new Error(`no ${tool.label} button was built`);
+		return {
+			btn,
+			doc,
+			get disarmed() {
+				return counts.disarmed;
+			},
+			get armed() {
+				return counts.armed;
+			},
+			execed,
+			get putDownFlagAtExec() {
+				return putDownFlagAtExec;
+			},
+		};
+	};
+
+	for (const tool of TOOLS) {
+		it(`${tool.label}: a mouse click while active hands the cursor back`, () => {
+			const r = rig(tool, { active: true, inkOn: true });
+			r.btn.fire("click", { pointerType: "mouse" });
+			// The tool still comes off through its own command - the put-down
+			// is the tool AND the pointer, not one instead of the other.
+			expect(r.execed).toContain(tool.id);
+			expect(r.disarmed).toBe(1);
+		});
+
+		it(`${tool.label}: a mouse put-down tells the command its toast is wrong, before the command runs`, () => {
+			const r = rig(tool, { active: true, inkOn: true });
+			r.btn.fire("click", { pointerType: "mouse" });
+			// If this is null, exec never ran (a different bug); if it is
+			// false, the flag was not set before exec, which is exactly the
+			// state that leaves the OFF toast naming a nib nobody picked.
+			expect(r.putDownFlagAtExec).toBe(true);
+		});
+
+		it(`${tool.label}: a mouse click while INACTIVE still arms, unchanged`, () => {
+			const r = rig(tool, { active: false, inkOn: false });
+			r.btn.fire("click", { pointerType: "mouse" });
+			expect(r.armed).toBe(1);
+			expect(r.disarmed).toBe(0);
+			// Picking UP is not putting down: the exec's own toast IS right
+			// for this edge (it names what was picked), so the flag must
+			// stay clear.
+			expect(r.putDownFlagAtExec).toBe(false);
+		});
+
+		for (const ptr of ["pen", "touch"] as const) {
+			it(`${tool.label}: a ${ptr} click while active does NOT touch mouse ink`, () => {
+				const r = rig(tool, { active: true, inkOn: true });
+				r.btn.fire("click", { pointerType: ptr });
+				expect(r.disarmed).toBe(0);
+				expect(r.armed).toBe(0);
+				// A pen or touch tap really did just pick the nib the tip
+				// fell back to - the exec's toast is correct for them, so
+				// the flag that overrides it must never be seen true here
+				// (some tools' pen/touch tap does not even reach exec - the
+				// eraser's own pop-reopen branch is one - so `null`, meaning
+				// exec never ran on this id at all, is an equally clean pass).
+				expect(r.putDownFlagAtExec).not.toBe(true);
+				// And whether or not exec ran, nothing may be left armed for
+				// the NEXT off-toggle to pick up by mistake.
+				expect(consumeMousePutDown()).toBe(false);
+			});
+		}
 	}
 });

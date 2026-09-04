@@ -44,6 +44,13 @@ jobs:
       # rather than quietly rewriting the lock.
       - run: npm ci
 
+      # Chromium for the rendered-geometry suite. `--with-deps` installs the
+      # system libraries (libgbm, libnss3, etc.) that headless Chromium needs
+      # on a stock Ubuntu runner. Placed here so the binary is ready when the
+      # `rendered geometry` step runs after `tests`.
+      - name: install chromium
+        run: npx playwright install chromium --with-deps
+
       # The version lives in three files and they must agree. The
       # packager checks this too, but only at packaging time - after the
       # commit, the push, and the decision to ship.
@@ -62,6 +69,14 @@ jobs:
 
       - name: tests
         run: npm test
+
+      # The rendered-geometry suite: launches real Chromium, builds the tool
+      # strip under the real stylesheet, and measures pixel widths. Kept out
+      # of `npm test` on purpose so the unit count and timing stay clean; run
+      # here as its own step. Hard fail rather than skip on missing browser -
+      # a guard nobody runs is a guard that is right and unread.
+      - name: rendered geometry
+        run: npm run test:render
 
       # esbuild directly, not `npm run build` (which is `tsc -noEmit &&
       # esbuild...`): the typecheck step above already ran tsc over the same

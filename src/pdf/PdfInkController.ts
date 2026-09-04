@@ -27,10 +27,12 @@ import { InkPoint, InkStroke, InkTool } from "../ink/Stroke";
 import { Platform } from "obsidian";
 import {
 	getPenToolsMode,
+	markPenHardwareSeen,
 	markPenSeen,
 	onPenToolsChanged,
 	penSeenThisSession,
 	penToolsVisible,
+	pointerRaisesPenTools,
 } from "../inline/PenToolsMode";
 import {
 	padBBox,
@@ -54,7 +56,13 @@ import { copyInk, pasteInk } from "../inline/InkClipboard";
 import { drawStroke, ribbonCacheStats } from "../ink/StrokeRenderer";
 import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
 import { getInkColorHex } from "../ink/InkColor";
-import { getInkSizeMult, getInlineTool, penReticleEnabled, pickStripColor } from "../inline/InkOverlay";
+import {
+	getInkSizeMult,
+	getInlineTool,
+	penReticleEnabled,
+	pickStripColor,
+	releaseMouseInkQuietlyEverywhere,
+} from "../inline/InkOverlay";
 import { InlinePenRouter } from "../inline/InlinePenRouter";
 import { PenSample } from "../input/PointerRouter";
 import { InkOp } from "../inline/InkHistory";
@@ -83,7 +91,7 @@ import {
 } from "../inline/StripPenChrome";
 import { clipboardSize } from "../inline/InkClipboard";
 import { colorsFor } from "../ink/InkColor";
-import { tipMode } from "../inline/TipMode";
+import { penContactIntent, releaseTipMode, tipMode, tipModeHeld } from "../inline/TipMode";
 import { PdfInkHistory } from "./PdfInkHistory";
 import { PageBox, livePages, pageAt, snipViewport, toPagePoint } from "./PageMap";
 import { findScaleFactor, ProbedViewer, probeViewer, viewerCanvasOf } from "./PdfViewerProbe";
@@ -123,6 +131,19 @@ export type SnipResult =
 
 /** Screen-px slack around a selection for the grab that starts a drag. */
 const SELECTION_GRAB_PAD_PX = 8;
+
+/**
+ * The three fixed reticle sizes for modes that are not the eraser, in screen
+ * px. Not scaled by the page's zoom - see `showCursor`'s eraser radius,
+ * which is the same fixed-under-any-zoom reasoning - and not derived, on
+ * purpose: these are the exact constants `InkOverlay.showPenCursor` uses for
+ * `LASSO_CURSOR_CLASS`, `PAN_CURSOR_CLASS` and `SPACE_CURSOR_CLASS` (9, 11,
+ * 24), reused rather than re-picked so the two surfaces show the same size
+ * reticle for the same mode.
+ */
+const LASSO_CURSOR_RADIUS_PX = 9;
+const PAN_CURSOR_RADIUS_PX = 11;
+const SPACE_CURSOR_HALF_PX = 24;
 
 /**
  * The pen's stored width on this surface, in PAGE units.
@@ -585,6 +606,7 @@ export class PdfInkController {
 				if (mouseInkEnabled() !== on) this.exec("handwriting:mouse-ink-toggle");
 			},
 			armMouseInkQuietly: () => armMouseInkQuietly(),
+			disarmMouseInkQuietly: () => releaseMouseInkQuietlyEverywhere(),
 			exec: (id) => this.stripExec(id),
 			activeTool: () => getInlineTool(),
 			eraserOn: () => getInlineEraserMode(),
@@ -791,76 +813,150 @@ export class PdfInkController {
 		// Undo scoped to this view, not a global command. Obsidian's own undo
 		// stack owns Ctrl+Z everywhere else, and a global binding would fight
 		// it in every editor in the vault.
-		const keys = (ev: KeyboardEvent): void => {
-			// A PDF pane still contains places to type: the viewer's find
-			// bar, and form fields in the document itself. This listener runs
-			// ahead of them, so Backspace in a search box deleted the ink
-			// selection and never reached the box. Undo is the same story -
-			// Ctrl+Z in a text field belongs to the field.
-			if (isTypingTarget(ev.target)) return;
-			// Escape puts a selection away; Delete takes it. Both ahead of the
-			// modifier check, because neither uses one.
-			if (ev.key === "Escape" && this.selected.length > 0) {
-				this.clearSelection();
-				this.refreshStrip();
-				ev.preventDefault();
-				return;
-			}
-			// Audit doc §5r/§5s: this used to call `deleteSelection()` directly -
-			// a fourth dispatcher beside the strip button, the palette and the
-			// hotkey (Slice AD unified only those three onto the controller's
-			// command methods). `deleteSelection()` carries no id gate and no
-			// notice, so a Delete pressed with a live selection whose document
-			// id was still missing, or whose ids no longer matched a live
-			// stroke, did nothing and said nothing.
-			// §5s/AM-B, correcting this file's own first pass (9c17b12, which
-			// made `deleteSelectionCommand()` answer - and consume - every
-			// Delete/Backspace unconditionally): a toast is a fair answer to a
-			// deliberate press of a control labelled delete, and noise in
-			// answer to an ordinary Backspace that was never a request to
-			// delete ink. `this.selected` is the raw id list, the same field
-			// the Escape branch above already reads for the identical reason -
-			// non-empty means SOMETHING was lassoed, which is what makes the
-			// key a deliberate request, whether or not that request can still
-			// be honoured:
-			//  - empty: an ordinary Backspace. Do nothing, say nothing, do not
-			//    consume - `deleteSelectionCommand()` is not even called, so it
-			//    cannot notify.
-			//  - non-empty, refused (no document id yet, or the ids resolve to
-			//    no live stroke - the id gate and the empty-after-resolution
-			//    case `deleteSelection` itself covers): notify with the
-			//    existing wording and consume - the request was real and it
-			//    failed for a reason the user cannot see.
-			//  - non-empty, succeeds: delete silently and consume, as today.
-			// `deleteSelectionCommand()` returns whether it deleted (§5s/AM-A)
-			// for a future caller that needs to know; this branch does not
-			// need the value; only whether it was asked at all decides
-			// whether the key is consumed, and every path that IS asked
-			// consumes it, by construction of the gate above.
-			if (ev.key === "Delete" || ev.key === "Backspace") {
-				// §5u: `this.selected` is the raw id list and outlives a sidecar
-				// reload, so ids from a selection deleted on another device
-				// still pass a length check while resolving to nothing. `hasSelection`
-				// is the bounds-resolved question the strip's trash button (:541)
-				// already asks - one question, one answer, in this file.
-				if (!this.hasSelection) return;
-				this.deleteSelectionCommand();
-				ev.preventDefault();
-				return;
-			}
-			if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
-			const key = ev.key.toLowerCase();
-			const redo = key === "y" || (key === "z" && ev.shiftKey);
-			if (key !== "z" && key !== "y") return;
-			if (this.historyStep(redo)) {
-				ev.preventDefault();
-				ev.stopPropagation();
-			}
-		};
-		this.root.addEventListener("keydown", keys, { capture: true });
-		this.disposers.push(() => this.root.removeEventListener("keydown", keys, { capture: true }));
+		this.root.addEventListener("keydown", this.handleKeyDown, { capture: true });
+		this.disposers.push(() =>
+			this.root.removeEventListener("keydown", this.handleKeyDown, { capture: true })
+		);
 
 		this.schedule();
+	}
+
+	/**
+	 * The keydown listener bound to this pane's root, above. A class field
+	 * rather than a local closure so it is one fixed function reference for
+	 * add/removeEventListener (the pair must match) and so it can be driven
+	 * directly, the same way the strip/palette dispatch already is
+	 * (`stripExec`) - PdfInkController.test.ts calls this like any other
+	 * private method, cast into reach, rather than needing a live root that
+	 * implements `addEventListener` for real.
+	 */
+	private handleKeyDown = (ev: KeyboardEvent): void => {
+		// A PDF pane still contains places to type: the viewer's find
+		// bar, and form fields in the document itself. This listener runs
+		// ahead of them, so Backspace in a search box deleted the ink
+		// selection and never reached the box. Undo is the same story -
+		// Ctrl+Z in a text field belongs to the field.
+		if (isTypingTarget(ev.target)) return;
+		// Escape puts a selection away; Delete takes it. Both ahead of the
+		// modifier check, because neither uses one.
+		if (ev.key === "Escape" && this.selected.length > 0) {
+			this.clearSelection();
+			this.refreshStrip();
+			ev.preventDefault();
+			return;
+		}
+		// ...and with nothing selected, Escape leaves whatever mode has the
+		// tip - InkOverlay.ts:1627-1637's rule ("Landing in pan or insert
+		// space used to strand you until you found the Pen button; Escape is
+		// what a hand reaches for, and the nib it returns to is the one that
+		// was already chosen"), never ported to this surface until now. A
+		// PDF pane stranded the same way is worse off: the strip is the
+		// ONLY way back to the pen here, there being no toolbar row above an
+		// editor to fall back on. `tipMode` is process-global (TipMode.ts),
+		// so this is the same held state the note surface just released.
+		if (ev.key === "Escape" && tipModeHeld()) {
+			releaseTipMode();
+			this.refreshStrip();
+			this.hideCursor();
+			ev.preventDefault();
+			return;
+		}
+		// Audit doc §5r/§5s: this used to call `deleteSelection()` directly -
+		// a fourth dispatcher beside the strip button, the palette and the
+		// hotkey (Slice AD unified only those three onto the controller's
+		// command methods). `deleteSelection()` carries no id gate and no
+		// notice, so a Delete pressed with a live selection whose document
+		// id was still missing, or whose ids no longer matched a live
+		// stroke, did nothing and said nothing.
+		// §5s/AM-B, correcting this file's own first pass (9c17b12, which
+		// made `deleteSelectionCommand()` answer - and consume - every
+		// Delete/Backspace unconditionally): a toast is a fair answer to a
+		// deliberate press of a control labelled delete, and noise in
+		// answer to an ordinary Backspace that was never a request to
+		// delete ink. `this.selected` is the raw id list, the same field
+		// the Escape branch above already reads for the identical reason -
+		// non-empty means SOMETHING was lassoed, which is what makes the
+		// key a deliberate request, whether or not that request can still
+		// be honoured:
+		//  - empty: an ordinary Backspace. Do nothing, say nothing, do not
+		//    consume - `deleteSelectionCommand()` is not even called, so it
+		//    cannot notify.
+		//  - non-empty, refused (no document id yet, or the ids resolve to
+		//    no live stroke - the id gate and the empty-after-resolution
+		//    case `deleteSelection` itself covers): notify with the
+		//    existing wording and consume - the request was real and it
+		//    failed for a reason the user cannot see.
+		//  - non-empty, succeeds: delete silently and consume, as today.
+		// `deleteSelectionCommand()` returns whether it deleted (§5s/AM-A)
+		// for a future caller that needs to know; this branch does not
+		// need the value; only whether it was asked at all decides
+		// whether the key is consumed, and every path that IS asked
+		// consumes it, by construction of the gate above.
+		if (ev.key === "Delete" || ev.key === "Backspace") {
+			// §5u: `this.selected` is the raw id list and outlives a sidecar
+			// reload, so ids from a selection deleted on another device
+			// still pass a length check while resolving to nothing. `hasSelection`
+			// is the bounds-resolved question the strip's trash button (:541)
+			// already asks - one question, one answer, in this file.
+			if (!this.hasSelection) return;
+			this.deleteSelectionCommand();
+			ev.preventDefault();
+			return;
+		}
+		// Ctrl/Cmd+C and X act on lassoed ink while a selection is held, the
+		// note surface's rule (InkOverlay.ts:1638-1664, "that is what a lasso
+		// means everywhere else"), ported here for the first time. Gated on
+		// `hasSelection` FIRST so the branch is not even entered - and the
+		// key not consumed - without a lasso: a plain Ctrl+C over a PDF's own
+		// selectable text must reach the viewer untouched. `textSelectionLive`
+		// is this surface's answer to the note's second guard (its own
+		// editor's text selection must also be empty); see that method for
+		// why. Once both hold, this reuses the controller's own
+		// copy/cut-selected-ink command methods (`copySelection`,
+		// `cutSelectionCommand`) rather than a fourth dispatcher (main.ts's
+		// own audit note on `activeInkSurface`, next to `pdfControllerWithSelection`,
+		// is the same lesson) - they already say the identical "copied/cut N
+		// stroke(s)" the note command uses, and already notify every refusal,
+		// so nothing here needs to.
+		if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && this.hasSelection && !this.textSelectionLive()) {
+			const key = ev.key.toLowerCase();
+			if (key === "c" || key === "x") {
+				ev.preventDefault();
+				if (key === "c") this.copySelection();
+				else this.cutSelectionCommand();
+				return;
+			}
+		}
+		if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+		const key = ev.key.toLowerCase();
+		const redo = key === "y" || (key === "z" && ev.shiftKey);
+		if (key !== "z" && key !== "y") return;
+		if (this.historyStep(redo)) {
+			ev.preventDefault();
+			ev.stopPropagation();
+		}
+	};
+
+	/**
+	 * Is there a live (non-collapsed) text selection somewhere inside this
+	 * pane right now - pdf.js's own text layer, most likely, since that is
+	 * the only selectable text a PDF view holds?
+	 *
+	 * The note surface's equivalent guard is `this.view.state.selection.main.empty`
+	 * - CodeMirror's own model of THAT editor's selection. A PDF pane has no
+	 * CodeMirror; the reader selects text through the browser's native DOM
+	 * Selection API instead, which is why this asks `this.win.getSelection()`
+	 * rather than reading any state of ours. Scoped to `this.root` - the same
+	 * containerEl `probeViewer` walks, so it holds the whole pane including
+	 * the text layer - not the whole window: a selection left over in some
+	 * other pane must not block a Ctrl+C meant for this one's lasso, the same
+	 * way it would not on the note surface, where the check is per-editor.
+	 * `this.win`, not the bare global, for the same popout-window reason
+	 * every other DOM read in this file goes through it.
+	 */
+	private textSelectionLive(): boolean {
+		const sel = this.win.getSelection?.();
+		return !!sel && !sel.isCollapsed && this.root.contains(sel.anchorNode);
 	}
 
 	/**
@@ -921,7 +1017,30 @@ export class PdfInkController {
 				onPenLeave: () => this.hideCursor(),
 				onPinch: () => {},
 				onPenRaw: (samples, ev) => this.penRaw(samples, ev),
-				onPenMove: () => {},
+				// Was `() => {}` from this surface's first commit (`579b678`,
+				// "the pen writes on pdfs") with no comment and an empty commit
+				// body - an oversight, not a decision. This surface instruments
+				// everything else on the same StrokeMetrics: raw, accepted,
+				// draw, present, prediction tails, frames. It then PRINTS the
+				// result in debugSummary, and summaryText's first line is
+				// `move ${moveHz}Hz`, so a PDF report has always read `move 0Hz`
+				// while a note's reads a real rate. That is the exact failure
+				// StrokeMetrics' own header was hardened against - "a stat with
+				// no samples did not measure zero, nothing measured it", written
+				// after `frame 0/0ms` sent a flicker hunt astray on Alan's
+				// hardware - and moveHz is a bare number rather than a Stat, so
+				// it cannot say "(not recorded)". It can only lie quietly.
+				//
+				// Byte-for-byte the note's line (InkOverlay.ts), on this
+				// surface's own metrics object. Nothing new on the hot path:
+				// the closure is built once here, not per event; recordEvent
+				// returns on its first line unless a stroke is live; and with
+				// isInkSource false it does one increment and touches no Stat,
+				// so there is no allocation on a move. The gate is `active`,
+				// the note's gate, deliberately NOT diagnosticsEnabled() - a
+				// stricter gate on one of two surfaces is this project's most
+				// expensive defect shape rebuilt at small scale.
+				onPenMove: (_ev, count) => this.metrics.recordEvent("move", count, 0, false),
 				onPenUp: (ev) => this.penUp(ev),
 			},
 			() => 1,
@@ -1206,20 +1325,39 @@ export class PdfInkController {
 	 * the eraser's reach is worse than no dot.
 	 */
 	private showCursor(sample: PenSample, pointerType?: string): void {
-		// A hover sample is proof of a pen only when it came from one -
-		// audit doc §5k/(d) put the mark ahead of the reticle gate below so
-		// turning "Pen reticle" off (or Boox mode, which turns it off for
-		// you) would not also stop the pen being noticed, but left it
-		// unconditional. This method also draws the dot for an actively
-		// drawing mouse (this file's wet-draw loop calls
-		// `showCursor(s, "mouse")`) and, via onPenHover, for a mouse that is
-		// merely hovering when mouse ink is armed (InlinePenRouter.ts's
-		// `mouseActsAsPen` gate lets it reach here) - so a mouse in the
-		// room, reticle off, raised the pen toolbar in auto mode for a
-		// pointer that was never a pen (1.4.6-design.md 5m/AF5). penDown
-		// marks it ahead of its own gates for the same reason as this line
-		// meant to, and is unaffected: it fires only on real pen contact.
-		if (pointerType === "pen") markPenSeen();
+		// Both marks sit ahead of the reticle gate below - audit doc §5k/(d):
+		// turning "Pen reticle" off, or Boox mode, which turns it off for you,
+		// must not also stop the pointer being noticed.
+		//
+		// THE HARDWARE CLAIM, gated on a real pen. `nibIsLit` (MobileTools.ts)
+		// reads `penHardwareSeen()` as of `cff850d`; that fix landed on the
+		// note surface alone, and a user who only ever wrote on PDFs never set
+		// the flag, so their pen and highlighter buttons stayed dark unless
+		// mouse ink was on. Eighth time in this cycle a ruling reached one
+		// surface and not the other, and it was inside the seventh's own fix.
+		// An armed mouse never sets this: it is not a pen, and the light
+		// answers it through `nibIsLit`'s own `|| h.mouseInkOn()`.
+		if (pointerType === "pen") markPenHardwareSeen();
+		// THE VISIBILITY CLAIM, and this is a REVERSAL of a ruling, not a bug
+		// fix. This comment used to end: "a mouse in the room, reticle off,
+		// raised the pen toolbar in auto mode for a pointer that was never a
+		// pen (1.4.6-design.md 5m/AF5)" - so the mark was refused to every
+		// mouse, and the note surface raised the strip for one while this
+		// surface would not. AF5 SUPERSEDED BY ALAN, 2026-09-03, asked
+		// directly and with that sentence quoted back to him: "with mouse ink
+		// armed, yes a hovering mouse should bring toolbar out". The half of
+		// AF5 that stands is the UNARMED mouse, which still raises nothing -
+		// what it did not separate out was a mouse whose owner had turned
+		// mouse ink on deliberately, and that mouse is asking for the tools.
+		//
+		// `pointerRaisesPenTools` (PenToolsMode.ts) is the shared predicate,
+		// read by the note surface's showPenCursor as well, so the two cannot
+		// drift apart again. The explicit call matters here beyond tidiness:
+		// this method has a second caller that does NOT come through the
+		// router's own gate - the wet-draw loop below calls
+		// `showCursor(s, "mouse")` for an actively drawing mouse - so relying
+		// on the router's guarantee would be relying on the wrong caller.
+		else if (pointerRaisesPenTools(pointerType)) markPenSeen();
 		// Audit doc §5f: the note surface's reticle obeys the "Pen reticle"
 		// setting (InkOverlay.ts's own `penReticleOn`, gated at its
 		// showPenCursor); this surface consulted nothing, so turning the
@@ -1275,8 +1413,19 @@ export class PdfInkController {
 			) *
 				probed.scaleFactor) /
 			2;
-		const r = mode === "eraser" ? getEraserRadiusPx() : Math.max(1.5, nib);
-		this.cursorEl.classList.toggle("handwriting-pdf-cursor-ring", mode !== "nib");
+		// Every mode class is cleared before the branches below pick one:
+		// `classList.toggle(x, false)` on a class the PREVIOUS call left off is
+		// a silent no-op, so a stale mode class would otherwise ride into the
+		// next paint. The note surface's `showPenCursor` avoids the same trap
+		// by removing every other mode's class in each branch before adding
+		// its own; clearing all three here once does the same job in one
+		// place. Lasso has no class of its own - it shares `-ring` with the
+		// eraser, told apart by size - so there are three, not four.
+		this.cursorEl.classList.remove(
+			"handwriting-pdf-cursor-ring",
+			"handwriting-pdf-cursor-pan",
+			"handwriting-pdf-cursor-space"
+		);
 		// A pen's hand covers the dot, so the dot alone is enough. A mouse
 		// HAS no hand: at small nib sizes the ink-true dot is a four-pixel
 		// speck and it is the only pointer on screen, so it gets a locator
@@ -1286,13 +1435,48 @@ export class PdfInkController {
 		// Dimmed while there is no id: the pen is about to refuse, and the
 		// reticle is the only thing on screen that can say so.
 		this.cursorEl.classList.toggle("handwriting-pdf-cursor-waiting", !this.documentId());
-		this.cursorEl.setCssStyles({
-			display: "block",
-			width: `${r * 2}px`,
-			height: `${r * 2}px`,
-			transform: `translate(${cx - r}px, ${cy - r}px)`,
-			backgroundColor: mode === "nib" ? getInkColorHex(tool) : "transparent",
-		});
+		// Insert-space: the reticle IS the divider, in miniature - a short
+		// dashed rule lying where the seam would be planted, rather than a dot
+		// that would say "pen" for a tip about to move rows instead. Same
+		// visual as the note surface's SPACE_CURSOR_CLASS (InkOverlay
+		// showPenCursor); it is a rule, not a ring, so it gets its own branch
+		// instead of a radius.
+		if (mode === "space") {
+			this.cursorEl.classList.add("handwriting-pdf-cursor-space");
+			this.cursorEl.setCssStyles({
+				display: "block",
+				width: `${SPACE_CURSOR_HALF_PX * 2}px`,
+				height: "0px",
+				transform: `translate(${cx - SPACE_CURSOR_HALF_PX}px, ${cy}px)`,
+				backgroundColor: "transparent",
+			});
+		} else {
+			const r =
+				mode === "eraser"
+					? getEraserRadiusPx()
+					: mode === "lasso"
+						? LASSO_CURSOR_RADIUS_PX
+						: mode === "pan"
+							? PAN_CURSOR_RADIUS_PX
+							: Math.max(1.5, nib);
+			// Eraser and lasso both read as "reach" and are dashed to say
+			// "removes / selects" at a glance - the note surface's own
+			// reasoning for ERASER_CURSOR_CLASS and LASSO_CURSOR_CLASS. Told
+			// apart by SIZE: the eraser's radius is the user's erase-radius
+			// setting, the lasso's is the fixed constant above.
+			this.cursorEl.classList.toggle("handwriting-pdf-cursor-ring", mode === "eraser" || mode === "lasso");
+			// Pan is the one SOLID ring: "grab the page" must never read as
+			// one of the dashed marking tools, matching the note surface's own
+			// rule for PAN_CURSOR_CLASS.
+			this.cursorEl.classList.toggle("handwriting-pdf-cursor-pan", mode === "pan");
+			this.cursorEl.setCssStyles({
+				display: "block",
+				width: `${r * 2}px`,
+				height: `${r * 2}px`,
+				transform: `translate(${cx - r}px, ${cy - r}px)`,
+				backgroundColor: mode === "nib" ? getInkColorHex(tool) : "transparent",
+			});
+		}
 		// The system cursor is drawn too, and two dots near each other read as
 		// one being wrong. The note surface hides it the same way while a pen
 		// is near; the class comes off when the pen leaves, not at contact.
@@ -1318,6 +1502,89 @@ export class PdfInkController {
 		this.cursorEl?.setCssStyles({ display: "none" });
 		const probed = this.probe();
 		probed?.scroller.classList.remove("handwriting-pdf-hover");
+	}
+
+	/**
+	 * The eraser's ring, during an erase stroke.
+	 *
+	 * Thin on purpose: `showCursor` already reads `tipMode()` and sizes itself
+	 * to `getEraserRadiusPx()` when that is "eraser", so there is no second
+	 * implementation here and no second radius to drift. What this buys is a
+	 * NAME. The erase branches say what they are doing instead of making a
+	 * generic hover call, and - the reason it is a method rather than a
+	 * comment - the surface registry gets one spelling that means "this
+	 * surface drives its eraser reticle" on BOTH surfaces.
+	 *
+	 * A registry marker of `showCursor(` would have been vacuous: that call is
+	 * in this file for hover whether or not the erase path ever touches the
+	 * reticle, so the row would have passed green across the entire life of
+	 * the defect it exists to catch. `showEraserCursor(` is only here because
+	 * the erase path drives the ring, and deleting that makes the row fail.
+	 */
+	private showEraserCursor(sample: PenSample): void {
+		// REUSE the reticle, never build one mid-stroke. The note surface can
+		// style unconditionally because its `eraserEl` is created once at
+		// mount and lives as long as the overlay; this surface's `cursorEl` is
+		// created lazily inside `showCursor` and thrown away whenever pdf.js
+		// rebuilds its viewer, which that method's own comment calls "an
+		// ordinary Tuesday". Letting an erase sample be the thing that first
+		// builds it would put element creation on the erase path.
+		//
+		// THE LIMIT THIS ACCEPTS, stated rather than found later: an erase
+		// that never hovered first draws no ring for that gesture, and the
+		// next hover restores it. A digitizer sees a pen approaching, so hover
+		// has effectively always happened by the time a nib touches - the case
+		// that loses the ring is a finger in eraser mode, which never had one.
+		if (!this.cursorEl) return;
+		this.showCursor(sample);
+	}
+
+	/** Put the eraser's ring away. The note surface's name for the same act. */
+	private hideEraserCursor(): void {
+		this.hideCursor();
+	}
+
+	/**
+	 * The lasso's reticle, during a lasso gesture - including the "grab an
+	 * existing selection and drag it" branch, which reaches the tip through
+	 * `lassoDown` exactly like a fresh loop does. Same shape and same reason
+	 * as `showEraserCursor`: named rather than a raw `showCursor` call so the
+	 * surface registry has something to look for, and thin because
+	 * `showCursor` already reads `tipMode() === "lasso"` and picks the fixed
+	 * radius itself.
+	 */
+	private showLassoCursor(sample: PenSample): void {
+		// Same reuse-only rule as the eraser: never build the reticle mid-
+		// gesture. See showEraserCursor's comment for why.
+		if (!this.cursorEl) return;
+		this.showCursor(sample);
+	}
+
+	/** Put the lasso's reticle away. */
+	private hideLassoCursor(): void {
+		this.hideCursor();
+	}
+
+	/** The pan reticle, during a pan gesture. See showLassoCursor. */
+	private showPanCursor(sample: PenSample): void {
+		if (!this.cursorEl) return;
+		this.showCursor(sample);
+	}
+
+	/** Put the pan reticle away. */
+	private hidePanCursor(): void {
+		this.hideCursor();
+	}
+
+	/** The insert-space divider reticle, during a space gesture. See showLassoCursor. */
+	private showSpaceCursor(sample: PenSample): void {
+		if (!this.cursorEl) return;
+		this.showCursor(sample);
+	}
+
+	/** Put the insert-space reticle away. */
+	private hideSpaceCursor(): void {
+		this.hideCursor();
 	}
 
 	// ---- pen ----------------------------------------------------------------
@@ -1348,7 +1615,31 @@ export class PdfInkController {
 		// at all and the toolbar simply did not exist (hardware, ipad,
 		// 2026-08-29). Ahead of the id gate, because a pen that cannot draw yet
 		// still wants its tools - and the dimmed reticle explains the refusal.
-		markPenSeen();
+		//
+		// VISIBILITY IS UNCONDITIONAL HERE AND STAYS THAT WAY, and it is not
+		// the same ruling as the hover site's above. Contact is a deliberate
+		// act: a mouse only reaches this line when mouse ink is already armed
+		// (InlinePenRouter's `mouseActsAsPen`) and its owner has just drawn on
+		// the page, which is a request for the tools in a way a mouse drifting
+		// across the pane is not. `showCursor` gates because a hover is not an
+		// act; this does not because a stroke is. So the strip appears for
+		// every stroke on a PDF exactly as it did before, and the note surface
+		// does the same at its own `penDown`.
+		//
+		// The HARDWARE claim is a different question and it is gated, because
+		// a mouse stroke is not a pen. This is the divergence `cff850d` left
+		// behind: it split the flags and taught InkOverlay's two sites the
+		// difference, and this file kept calling the visibility function at
+		// both of its own - so nothing a PDF-only user did with a real pen
+		// ever set `penHardware`, and `nibIsLit` held their pen and
+		// highlighter buttons dark unless mouse ink was on.
+		//
+		// The earlier comment on `showCursor` said this line "fires only on
+		// real pen contact". It does not, and never did - that claim is why
+		// the ungated call read as correct. Corrected in place, the way the
+		// Pen spec's comment was, rather than deleted.
+		if (ev?.pointerType === "pen") markPenHardwareSeen();
+		else markPenSeen();
 		// A pen on a viewer whose markup we do not recognise inks nothing, and
 		// until now said nothing: from the outside that is indistinguishable
 		// from the plugin being broken. It happens to a pane Obsidian has not
@@ -1427,31 +1718,65 @@ export class PdfInkController {
 		// Decided once, at contact: reading this per sample would let a
 		// mid-gesture toggle turn half a stroke into an erase.
 		//
-		// The pen's own eraser end counts as well as the mode. A pen turned
-		// over is an unambiguous statement of intent and should not need the
-		// toolbar to agree with it first - the same test the note surface uses.
-		const eraserEnd = ev ? (ev.buttons & 32) !== 0 || ev.button === 5 : false;
-		this.erasing = eraserEnd || tipMode() === "eraser";
-		// The side button lassos here exactly as it does on a note. Only the
-		// toolbar mode was checked, so holding the button over a pdf did nothing
-		// at all - the one way into the lasso that needs no toolbar was missing
-		// from the surface where the toolbar is hardest to reach (hardware,
-		// 2026-08-29).
-		const sideHeld = ev ? (ev.buttons & 2) !== 0 : false;
-		if (!this.erasing && (sideHeld || tipMode() === "lasso")) {
+		// The pen's own eraser end counts as well as the mode, the side button
+		// lassos exactly as it does on a note, and the strip's modes give both
+		// meanings to hardware that has neither button. That is one rule, and
+		// it lived here as a hand-written copy of the note surface's - which
+		// is how the side button came to be checked on one surface and not the
+		// other (hardware, 2026-08-29). `penContactIntent` (TipMode.ts) is now
+		// the single implementation both surfaces call.
+		//
+		// `ev` is optional here because this surface's own teardown paths call
+		// penDown without one; `?? 0` / `?? -1` are exactly what the `ev ? ...
+		// : false` ternaries this replaced computed - no eraser end and no
+		// side button, leaving the strip mode to decide alone. -1 is the DOM's
+		// own "no button changed" value, and 0 would be the primary button.
+		const intent = penContactIntent(ev?.buttons ?? 0, ev?.button ?? -1, tipMode());
+		this.erasing = intent === "erase";
+		if (intent === "lasso") {
 			this.lassoDown(box, scale, sample, probed.scroller);
 			return;
+		}
+		// A BARE tip landing inside an active selection drags it - onenote's
+		// grammar (alan, 2026-08-27), which the note surface has had since the
+		// ruling and this surface never got. Here the only ways into a drag
+		// were the side button and the toolbar's lasso mode, so a tip that
+		// landed on ink the user had just selected drew a stroke straight
+		// across it. Outside the bounds nothing changes: the tip dissolves the
+		// selection below and inks.
+		//
+		// BARE is the load-bearing word. An eraser is not a bare tip, and the
+		// note surface paid for learning it: left out of the test, lassoed ink
+		// became the one ink on the page the eraser could not reach, because
+		// every contact dragged the selection instead. `this.erasing` is
+		// already decided above, from the pen's eraser end or the mode, and
+		// this branch stands behind it.
+		//
+		// Above pan and space for the same reason the note surface puts it
+		// above them: the selection is an object, and reaching for it should
+		// not depend on which mode the strip was left in.
+		if (!this.erasing && this.selected.length > 0) {
+			const p = toPagePoint(box, scale, content.x, content.y);
+			if (p && this.selectionGrabbed(box.pageNumber, p, scale)) {
+				this.lassoDown(box, scale, sample, probed.scroller);
+				return;
+			}
 		}
 		// Pan and space, before anything inks. Both buttons are on this
 		// surface's strip and both modes silently DREW here - a control that
 		// looks alive and does the wrong thing is worse than one that is
 		// missing (alan, 2026-08-30). Pan drags the viewer's own scroller;
 		// space is refused with the reason, because a pdf page cannot grow.
-		if (!this.erasing && tipMode() === "pan") {
+		if (intent === "pan") {
 			this.panLast = { x: sample.x, y: sample.y };
+			// Drive the reticle through the pan, the same reasoning as the
+			// erase branch below: nothing calls `showCursor` again once the
+			// pen is down (hover has gone quiet), so without this the 1000ms
+			// watchdog takes the ring away mid-drag.
+			this.showPanCursor(sample);
 			return;
 		}
-		if (!this.erasing && tipMode() === "space") {
+		if (intent === "space") {
 			// The page cannot grow, but the ink can make room: everything in
 			// the rows below the divider follows the pen, the same gesture -
 			// and the same pure membership rule - the note surface uses.
@@ -1472,6 +1797,11 @@ export class PdfInkController {
 			this.spaceLastY = p.y;
 			this.spaceTotalDy = 0;
 			this.drawSpaceLine(box);
+			// Same watchdog problem as pan and the eraser: the divider reticle
+			// was drawn on the wet canvas above, but the DOT reticle
+			// (`cursorEl`) only ever moved on hover, so it went stale and then
+			// vanished mid-drag without this.
+			this.showSpaceCursor(sample);
 			return;
 		}
 		// Any other contact puts a selection away. Leaving it live while ink
@@ -1480,9 +1810,35 @@ export class PdfInkController {
 		this.clearSelection();
 		if (this.erasing) {
 			this.eraseFrom = [...this.opList()];
+			// PAGE-scoped, not `eraseFrom` (document-wide): the note surface's
+			// "page" is the whole file, but a pdf page is one of many, and a
+			// page with no ink of its own can never be touched by this
+			// gesture even while other pages carry ink. Checking the document
+			// list here would stay silent on exactly that page. Same lesson
+			// insert-space paid hardware time to learn, said once at the
+			// moment the gesture finds nothing on this page.
+			if (this.strokes(box.pageNumber).length === 0) {
+				this.notify("Handwriting: no ink on the page to erase");
+			}
 			this.metrics.begin("pdf-erase", performance.now());
 			this.metricsLive = true;
 			this.startFrameTicker();
+			// Drive the reticle through the erase, the way the note surface
+			// does (InkOverlay's own penDown erase branch calls
+			// `showEraserCursor` right here). `showCursor` already sizes
+			// itself to the eraser - `mode === "eraser" ? getEraserRadiusPx()
+			// : ...` - and its header has promised since it was written that
+			// "size follows the mode, the way it does on a note". It did, on
+			// HOVER. Nothing called it once the pen was DOWN, so the 1000ms
+			// watchdog fired mid-erase and took the ring away: the eraser
+			// worked and you could not see what it was about to take (alan,
+			// hardware, 2026-09-03, checklist item 5 on a PDF).
+			//
+			// No pointerType: the hardware and pen-seen claims belong to the
+			// hover and the pen-down that already happened, not to every
+			// sample of a stroke in flight. `pointerRaisesPenTools(undefined)`
+			// is false, so this cannot mark anything by accident.
+			this.showEraserCursor(sample);
 			this.eraseAt(box, scale, sample, probed.scroller);
 			return;
 		}
@@ -1581,6 +1937,11 @@ export class PdfInkController {
 				last.y = smp.y;
 			}
 			this.panLast = last;
+			// Last sample only, matching the erase branch below: one DOM write
+			// per batch, and every call re-arms the watchdog for the length of
+			// the drag.
+			const lastPan = samples[samples.length - 1];
+			if (lastPan) this.showPanCursor(lastPan);
 			return;
 		}
 		const box = frame.boxes.find((b) => b.pageNumber === this.strokePageNumber);
@@ -1609,6 +1970,9 @@ export class PdfInkController {
 				}
 			}
 			this.drawSpaceLine(box);
+			// Last sample only, same reasoning as pan and erase.
+			const lastSpace = samples[samples.length - 1];
+			if (lastSpace) this.showSpaceCursor(lastSpace);
 			return;
 		}
 		// A lasso runs with no builder and no eraser, so it has to be routed
@@ -1618,11 +1982,22 @@ export class PdfInkController {
 		// selected nothing.
 		if (this.lassoPts.length > 0 || this.dragFrom) {
 			for (const s of samples) this.lassoMove(box, frame.scale, s, scroller);
+			// Last sample only, same reasoning as pan and erase.
+			const lastLasso = samples[samples.length - 1];
+			if (lastLasso) this.showLassoCursor(lastLasso);
 			return;
 		}
 		if (!builder && !this.erasing) return;
 		if (this.erasing) {
 			for (const s of samples) this.eraseAt(box, frame.scale, s, scroller);
+			// The LAST sample only, matching the note surface's erase branch:
+			// the ring is one element and only its final position in this
+			// batch is ever seen, so painting it once per batch costs one DOM
+			// write instead of one per coalesced sample. Keeping it alive here
+			// is also what holds the watchdog off for the length of the
+			// stroke, since every call re-arms that timer.
+			const last = samples[samples.length - 1];
+			if (last) this.showEraserCursor(last);
 			return;
 		}
 		if (!builder) return;
@@ -1803,6 +2178,34 @@ export class PdfInkController {
 	}
 
 	/**
+	 * Draw the contact dot: the mark a pen-down makes before anything moves.
+	 *
+	 * A SECOND call site, and that is the whole mechanism. The one below
+	 * serves the MOVING head and has to keep tapering; this one serves the
+	 * first accepted sample, where the dot is the entire visible mark. The
+	 * note surface splits the same job the same way - its pen-down draw and
+	 * its raw draw are separate calls - and the split is what lets each ask
+	 * for the width its case needs without the other knowing about it.
+	 *
+	 * Ungated on `head()`, deliberately: the smoother has nothing to report
+	 * at pen-down, and with smoothing off (boox) it never will. The segment
+	 * is the contact point to itself, and the width is `contactHalfWidth` -
+	 * the shaped width floored at the nib (alan, 2026-09-02), so a light tap
+	 * draws the nib rather than the 12% sliver the shaper resets to.
+	 */
+	private drawContact(pair: WetPair, cam: CameraState, point: InkPoint): void {
+		pair.tail.clear();
+		pair.tail.drawHead(
+			cam,
+			this.strokeStyle,
+			{ x: point.x, y: point.y },
+			{ x: point.x, y: point.y },
+			point.pressure,
+			pair.wet.contactHalfWidth(this.strokeStyle, point.pressure)
+		);
+	}
+
+	/**
 	 * Redraw the stub between the settled curve and the nib.
 	 *
 	 * After every appended sample: the wet layer's smoothed tail is always
@@ -1861,6 +2264,13 @@ export class PdfInkController {
 			// TOOL - never from the layer, which is one pair for both tools.
 			this.wetBegun = true;
 			pair.wet.beginStroke(point, this.strokeStyle, this.wetFlat);
+			// The contact draw, not the moving one. One shared call site meant
+			// this surface asked for the bare live width on the FIRST sample
+			// too, so a tap came out at the shaper's tip floor; swapping that
+			// shared site to `contactHalfWidth` would have floored the moving
+			// head as well and killed the taper. Two sites, one per case.
+			this.drawContact(pair, cam, point);
+			return;
 		}
 		this.drawHead(pair, cam);
 	}
@@ -1963,6 +2373,23 @@ export class PdfInkController {
 	}
 
 	/**
+	 * Whether a page point lands on the active selection - the grab test.
+	 *
+	 * Padded, the way the note surface pads its own. The pad is screen px
+	 * turned into page units here, so the slack stays the same size on the
+	 * glass at any zoom.
+	 *
+	 * One predicate, two callers: `lassoDown` below, and the bare-tip branch
+	 * in pen-down. Written out twice it would be two chances to pad
+	 * differently, and a grab area that moved depending on how the pen got
+	 * here is exactly the kind of thing nobody reports and everybody feels.
+	 */
+	private selectionGrabbed(pageNumber: number, p: { x: number; y: number }, scale: number): boolean {
+		const bounds = this.selectionBounds(pageNumber);
+		return !!bounds && pointInBBox(p.x, p.y, padBBox(bounds, SELECTION_GRAB_PAD_PX / scale));
+	}
+
+	/**
 	 * A lasso contact either grabs the existing selection or starts a new one.
 	 *
 	 * Inside the selection's bounds means move it; anywhere else means the
@@ -1973,11 +2400,13 @@ export class PdfInkController {
 	private lassoDown(box: PageBox, scale: number, sample: PenSample, scroller: HTMLElement): void {
 		const p = this.pagePoint(box, scale, sample, scroller);
 		if (!p) return;
-		const bounds = this.selectionBounds(box.pageNumber);
-		// Padded, the way the note surface pads its own grab test. The pad is
-		// screen px turned into page units here, so the slack stays the same
-		// size on the glass at any zoom.
-		if (bounds && pointInBBox(p.x, p.y, padBBox(bounds, SELECTION_GRAB_PAD_PX / scale))) {
+		// One call site for both paths into a lasso gesture (a fresh loop and
+		// grabbing an existing selection both reach here), so the reticle is
+		// driven once for the family rather than at each of penDown's two
+		// call sites. Same watchdog reasoning as pan and space: hover has
+		// gone quiet by the time a contact is claimed.
+		this.showLassoCursor(sample);
+		if (this.selectionGrabbed(box.pageNumber, p, scale)) {
 			this.dragFrom = { x: p.x, y: p.y };
 			this.dragTotal = { dx: 0, dy: 0 };
 			return;
@@ -1987,6 +2416,12 @@ export class PdfInkController {
 		// the page the selection BELONGED to and only clearSelection knows it.
 		this.clearSelection();
 		this.lassoPts = [{ x: p.x, y: p.y }];
+		// Page-scoped, same reasoning as the erase branch: a fresh loop on a
+		// page with no ink of its own can never select anything, whatever
+		// shape it ends up drawing, even while other pages carry ink.
+		if (this.strokes(box.pageNumber).length === 0) {
+			this.notify("Handwriting: no ink on the page to select");
+		}
 	}
 
 	private lassoMove(box: PageBox, scale: number, sample: PenSample, scroller: HTMLElement): void {
@@ -2256,9 +2691,17 @@ export class PdfInkController {
 		stripPenUp(this.tools);
 		if (this.panLast !== null) {
 			this.panLast = null;
+			// Put the pan reticle away with the gesture, exactly as the erase
+			// branch does below - not left to the watchdog, so a released pan
+			// does not strand its ring on screen for up to a second.
+			this.hidePanCursor();
 			return;
 		}
 		if (this.spaceLineY !== null) {
+			// Same reasoning as the pan branch above and the erase branch
+			// below: the gesture is over, so the reticle goes with it rather
+			// than waiting on the watchdog.
+			this.hideSpaceCursor();
 			const spaceId = this.documentId();
 			if (spaceId && this.spaceTotalDy !== 0 && this.spaceIds.length > 0) {
 				// Recorded but not re-applied: the moves already landed live.
@@ -2293,7 +2736,18 @@ export class PdfInkController {
 		this.wetBegun = false;
 		const wasErasing = this.erasing;
 		this.erasing = false;
+		// Put the eraser ring away with the stroke, exactly as the note
+		// surface does at its own erase pen-up. Not left to the watchdog: that
+		// would strand a full-size eraser ring on screen for a second after
+		// the lift, and if the pen is still in hover range the very next hover
+		// sample brings the reticle back at the RIGHT size for whatever the
+		// tip is now - which is the behaviour the hover path already owns.
+		if (wasErasing) this.hideEraserCursor();
 		if (this.dragFrom) {
+			// Same reasoning as the pan and erase branches: the gesture is
+			// over, put its reticle away rather than leaving it for the
+			// watchdog.
+			this.hideLassoCursor();
 			this.dragFrom = null;
 			const { dx, dy } = this.dragTotal;
 			// One op for the whole drag, recorded but NOT re-applied: the
@@ -2307,6 +2761,7 @@ export class PdfInkController {
 			return;
 		}
 		if (this.lassoPts.length > 0) {
+			this.hideLassoCursor();
 			this.lassoUp(page);
 			return;
 		}

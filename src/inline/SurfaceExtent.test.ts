@@ -1,4 +1,26 @@
+/**
+ * THE ONE STYLESHEET ASSERTION HERE READS CODE, NOT THE STYLESHEET'S TEXT, and
+ * it is the worst-shaped member of the family: a commented-out rule does not
+ * merely satisfy the presence match, it SUPPLIES THE BODY the two assertions
+ * after it inspect. `String.match` returns the FIRST match, so a retired copy
+ * sitting above the live rule is the one that gets read.
+ *
+ * Demonstrated on this branch: a commented copy of the axis rule was inserted
+ * ahead of the real one, and the real one was given `overflow-x: auto
+ * !important` - the exact thing the third assertion forbids, because the
+ * `.handwriting-page` ancestor already supplies the specificity. All 33 tests
+ * passed. The guard reported on a comment and never looked at the cascade.
+ *
+ * `codeOnly` (src/CodeOnly.ts) is the shared stripper, imported not copied.
+ * `styles.css` carries no `//` sequence (verified), so the line-comment half
+ * cannot over-blank it. Nothing here is weakened: blanking comments can only
+ * remove candidate matches, and the match that remains is the rule the browser
+ * actually applies. No assertion in this file pins a documented REASON, so
+ * none is left reading raw.
+ */
+
 import { describe, expect, it } from "vitest";
+import { codeOnly } from "../CodeOnly";
 import {
 	EXTENT_CHUNK,
 	EXTENT_HEADROOM,
@@ -19,6 +41,18 @@ import {
 } from "./SurfaceExtent";
 import { InkStroke } from "../ink/Stroke";
 import css from "../../styles.css?raw";
+
+/**
+ * The axis rule's declarations as the browser would see them, or null if the
+ * sheet does not carry the rule. A pure function over sheet text so the
+ * fixtures below can attack it with a string.
+ */
+function axisRuleBody(sheet: string): string | null {
+	const rule = new RegExp(
+		`\\.markdown-source-view\\.handwriting-page\\s+\\.cm-scroller\\.${HSCROLL_AXIS_CLASS}\\s*\\{([^}]*)\\}`
+	);
+	return codeOnly(sheet).match(rule)?.[1] ?? null;
+}
 
 function stroke(x: number, y: number, w: number, h: number): InkStroke {
 	return {
@@ -187,13 +221,25 @@ describe("ScrollAxisGuard", () => {
 		// The guard is inert without its stylesheet half; the packager asserts
 		// this too, but a stale styles.css in dev should fail loudly here. The
 		// Handwriting-page ancestor supplies enough specificity without important.
-		const rule = new RegExp(
-			`\\.markdown-source-view\\.handwriting-page\\s+\\.cm-scroller\\.${HSCROLL_AXIS_CLASS}\\s*\\{([^}]*)\\}`
-		);
-		const m = css.match(rule);
-		expect(m, "axis rule present").not.toBeNull();
-		expect(m![1]).toMatch(/overflow-x:\s*auto/);
-		expect(m![1]).not.toContain("!important");
+		//
+		// The body comes from the cascade, not from the file. A retired copy
+		// above the live rule used to be the one this read.
+		const body = axisRuleBody(css);
+		expect(body, "axis rule present in the cascade, not merely in the file").not.toBeNull();
+		expect(body!).toMatch(/overflow-x:\s*auto/);
+		expect(body!).not.toContain("!important");
+	});
+
+	it("the axis-rule reader takes its body from the cascade", () => {
+		// Fixtures. Anti-vacuity first, then THE DEFEAT verbatim: a commented
+		// copy ahead of a live rule that has grown !important. Read raw, the
+		// comment answered for the rule and all 33 tests passed.
+		const live = `.markdown-source-view.handwriting-page .cm-scroller.${HSCROLL_AXIS_CLASS} {\n\toverflow-x: auto;\n}\n`;
+		const loud = `.markdown-source-view.handwriting-page .cm-scroller.${HSCROLL_AXIS_CLASS} {\n\toverflow-x: auto !important;\n}\n`;
+
+		expect(axisRuleBody(live)).toMatch(/overflow-x:\s*auto/);
+		expect(axisRuleBody(`/*\n${live}*/\n`)).toBeNull();
+		expect(axisRuleBody(`/*\n${live}*/\n${loud}`)).toContain("!important");
 	});
 });
 

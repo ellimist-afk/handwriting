@@ -1,6 +1,6 @@
 {
 	"name": "handwriting",
-	"version": "1.4.8",
+	"version": "1.4.9",
 	"description": "Handwrite, highlight, erase and lasso on your notes and PDFs. Your notes stay Markdown.",
 	"main": "main.js",
 	"private": true,
@@ -8,6 +8,8 @@
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit && node esbuild.config.mjs production",
 		"test": "vitest run",
+		"test:render": "vitest run --config vitest.render.mts",
+		"gate": "npm run check:versions && npm run check:site && tsc -noEmit && vitest run && npm run test:render && node esbuild.config.mjs production",
 		"probe": "node scripts/webkit-probe.mjs",
 		"release": "node scripts/release.mjs",
 		"check:versions": "node scripts/check-versions.mjs",

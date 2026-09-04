@@ -71,6 +71,15 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"icon fix",
 		"ios fix",
 	],
+	"1.4.9": [
+		"ink fix fixes for minimal theme and other centered themes (ty samuelbits)",
+		"pdf fixes",
+		"more pdf fixes",
+		"omg more pdf fixes",
+		"data safety fix",
+		"toolbar fixes",
+		"bug fixes",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */
