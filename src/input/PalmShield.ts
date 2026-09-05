@@ -125,16 +125,51 @@ export function palmVerdict(
  * keeps the viewer's own touch handlers - pdf.js implements pinch itself on
  * some platforms - from acting on a contact the shield has claimed.
  */
+/**
+ * One touch contact as it crossed the shield, for the diagnostics report.
+ * `radiusX`/`radiusY` are exactly what the hardware reported (0 if the
+ * driver never fills them in - see `palmRadiusTrustworthy`); `swallowed` is
+ * this shield's verdict at that instant, not a guess about intent.
+ */
+export interface RecentContact {
+	radiusX: number;
+	radiusY: number;
+	swallowed: boolean;
+}
+
+/**
+ * How many contacts the diagnostics ring keeps. Small on purpose: this is
+ * read off a tablet screen by a person mid-report, not analysed offline: a
+ * couple of the last stroke's worth of touches is enough to answer "does a
+ * stabilising side-finger read above or below 16px on THIS hardware" without
+ * scrolling.
+ */
+export const RECENT_CONTACT_CAP = 12;
+
 export class PalmShield {
 	private swallowed = new Set<number>();
 	private el: HTMLElement | null = null;
 	/** Palm contacts rejected since attach, for the diagnostics report. */
 	rejected = 0;
+	/**
+	 * Last `RECENT_CONTACT_CAP` contacts seen, oldest first - the radius the
+	 * hardware reported and this shield's verdict, so a hardware question
+	 * ("what radius does a resting side-finger report?") can be read off the
+	 * bug report instead of guessed at from the swallow count alone.
+	 */
+	readonly recent: RecentContact[] = [];
+
+	private record(t: TouchLike, swallowed: boolean): void {
+		this.recent.push({ radiusX: t.radiusX ?? 0, radiusY: t.radiusY ?? 0, swallowed });
+		if (this.recent.length > RECENT_CONTACT_CAP) this.recent.shift();
+	}
 
 	private onStart = (e: TouchEvent): void => {
-		const { veto, begin } = palmVerdict(Array.from(e.changedTouches), this.swallowed);
+		const changed = Array.from(e.changedTouches);
+		const { veto, begin } = palmVerdict(changed, this.swallowed);
 		for (const id of begin) this.swallowed.add(id);
 		this.rejected += begin.length;
+		for (const t of changed) this.record(t, isPalmTouch(t) || this.swallowed.has(t.identifier));
 		if (veto) {
 			e.preventDefault();
 			e.stopImmediatePropagation();
@@ -146,9 +181,11 @@ export class PalmShield {
 		// gently and FLATTENS mid-contact only crosses the threshold on a
 		// move, and judging moves by past verdicts alone let it through.
 		// Still shape, never timing.
-		const { veto, begin } = palmVerdict(Array.from(e.changedTouches), this.swallowed);
+		const changed = Array.from(e.changedTouches);
+		const { veto, begin } = palmVerdict(changed, this.swallowed);
 		for (const id of begin) this.swallowed.add(id);
 		this.rejected += begin.length;
+		for (const t of changed) this.record(t, isPalmTouch(t) || this.swallowed.has(t.identifier));
 		if (veto) {
 			e.preventDefault();
 			e.stopImmediatePropagation();
@@ -185,5 +222,8 @@ export class PalmShield {
 		this.el.removeEventListener("touchcancel", this.onEnd, opts);
 		this.el = null;
 		this.swallowed.clear();
+		// `recent` is left alone: the diagnostics report is read after the
+		// pane closes as often as while it is open, and the last stroke's
+		// contacts are the ones worth showing then.
 	}
 }

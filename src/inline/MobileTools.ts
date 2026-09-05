@@ -35,6 +35,8 @@ import { stripEscapeVerdict } from "./StripEscape";
 import { penHardwareSeen } from "./PenToolsMode";
 import { markMousePutDown } from "./MouseInk";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN } from "../ink/PenStyle";
+import { describeEl } from "./PenHitProbe";
+import { traceStripClick } from "./InlinePenRouter";
 
 export interface MobileToolsHost {
 	/** Execute a command by its full id (e.g. "handwriting:inline-tool-pen"). */
@@ -68,7 +70,6 @@ export interface MobileToolsHost {
 	canPasteInk(): boolean;
 	/** Mouse ink: on for people writing with a mouse instead of a pen. */
 	mouseInkOn(): boolean;
-	setMouseInk(on: boolean): void;
 	/** Arm without a toast: for arming that rides inside a tool click. */
 	armMouseInkQuietly(): void;
 	/**
@@ -76,6 +77,21 @@ export interface MobileToolsHost {
 	 * put-down that rides inside a tool click. The mirror of the line above.
 	 */
 	disarmMouseInkQuietly(): void;
+	/**
+	 * Say one line to the user.
+	 *
+	 * This file's header says it invents nothing - every button execs the
+	 * command the palette would, so notices stay in one place. The active-nib
+	 * mouse click is the one branch with no command to exec: it changes only
+	 * the mouse's claim on the pointer, and the command that would have said
+	 * so is the LOUD toggle, which also writes data.json (alan, 2026-09-04:
+	 * "dont persist a quiet arm"). So the words move here and the wording is
+	 * copied verbatim from that command's own branches - `Handwriting: pen` /
+	 * `Handwriting: highlighter` on the way in, `Handwriting: cursor` on the
+	 * way out. Injected rather than importing `Notice`, the seam
+	 * `PdfInkController`'s `notify` already is, so a test can read the words.
+	 */
+	toast(message: string): void;
 	/** Bug-report recording state, for the strip's dot. */
 	recordingOn(): boolean;
 	/** Whether a lasso selection exists, so copy and trash can dim. */
@@ -487,6 +503,27 @@ export class MobileTools {
 	};
 
 	/**
+	 * Trace-only: did a click reach the strip or the pill? Diagnosis for the
+	 * tool-dependent strip-tap bug (InlinePenRouter.ts's window mirror):
+	 * when a pen tap's `window-pointerdown` trace line says the composed
+	 * path missed the editor scroller - the strip's normal position, since
+	 * it mounts as a SIBLING of the scroller - that line alone cannot tell
+	 * "the pointerdown hit the strip but no click was ever synthesized"
+	 * from "a click arrived and the strip's own handler did nothing". This
+	 * is the other half: a capture-phase listener on this strip's own pane,
+	 * same as `outsideTap` beside it, so it sees the click before anything
+	 * on the strip could stop it. `traceStripClick` gates on whether tracing
+	 * is actually running, so the cost here while it is not is two cheap
+	 * `contains()` calls - the same shape `outsideTap` already pays on
+	 * every pointerdown in the document, unconditionally.
+	 */
+	private readonly traceClick = (ev: MouseEvent): void => {
+		const t = ev.target as Node | null;
+		if (!t || !(this.el.contains(t) || this.pill.contains(t))) return;
+		traceStripClick(t as Element);
+	};
+
+	/**
 	 * A slider drag ends wherever the pointer happens to be, and for a
 	 * 28x104 slot that is very often NOT on the input: the pen lifts past
 	 * the edge of the slot, or a gesture cancels the pointer outright.
@@ -590,6 +627,7 @@ export class MobileTools {
 		parent.ownerDocument.addEventListener("keydown", this.escapeKey, { capture: true });
 		parent.ownerDocument.addEventListener("pointerup", this.releaseSlider, { capture: true });
 		parent.ownerDocument.addEventListener("pointercancel", this.releaseSlider, { capture: true });
+		parent.ownerDocument.addEventListener("click", this.traceClick, { capture: true });
 		this.el = parent.createDiv({ cls: "handwriting-mobile-tools" });
 		// The recording indicator lives HERE, not the status bar: status
 		// bars get hidden by themes and snippets, and an indicator nobody
@@ -783,7 +821,34 @@ export class MobileTools {
 				if (nib && spec.isActive?.(this.host) && ptr === "mouse" && this.host.mouseInkOn()) {
 					// Clicking the tool you are drawing with hands the mouse
 					// back to text. Click it again and it draws again.
-					this.host.setMouseInk(false);
+					//
+					// QUIET, SINCE 1.4.10. This used to call `host.setMouseInk
+					// (false)`, which both surfaces wired to the LOUD toggle
+					// command - so putting the nib down wrote `mouseInk: false`
+					// to data.json, and picking it back up wrote `true`. That
+					// is the fourth path the "dont persist a quiet arm" ruling
+					// (alan, 2026-09-04) was about and the one it missed: the
+					// two edges below are the same session-only edges the four
+					// tip tools take, and the rule is now written once for all
+					// six buttons. Someone who turned the mode on BY NAME still
+					// has it tomorrow; a nib click moves this session's pointer
+					// and nothing else.
+					//
+					// The LIGHT is unchanged, which is the point of routing
+					// through the wrappers rather than the bare module
+					// functions: `releaseMouseInkQuietlyEverywhere` clears
+					// `penHardware` and repaints every strip, which is exactly
+					// what `applyMouseInkUiFanout(false)` did on the way past.
+					// A nib put-down darkening the pen-hardware light is right
+					// for the same reason the tip tools' put-down is - the
+					// light says "something can ink with this", the mouse just
+					// stopped being that something, and a mouse user has no
+					// hardware for the flag to be true about (alan, 2026-09-03:
+					// off "at any point").
+					this.host.disarmMouseInkQuietly();
+					// The words the loud command's off branch used, said here
+					// because there is no exec on this branch to say them.
+					this.host.toast("Handwriting: cursor");
 					this.openInkSlider = null;
 					this.colorsOpen = false;
 				} else if (nib && spec.isActive?.(this.host) && ptr === "mouse") {
@@ -810,7 +875,17 @@ export class MobileTools {
 					// mouse their command is still a plain toggle
 					// (toggleTipMode in TipMode.ts), so tapping the active
 					// one already lands on off.
-					this.host.setMouseInk(true);
+					//
+					// Quiet, and session-only, for the reason its mirror above
+					// is. `armMouseInkQuietlyEverywhere` is the arm half of the
+					// same fan-out, so the second open pane's nib lights with
+					// this one exactly as it did through the command.
+					this.host.armMouseInkQuietly();
+					// `isActive` for a nib is `tipInks(h) && activeTool() ===
+					// nib`, so no tip mode is on and the loud command's own
+					// `tip` expression can only have come out as this nib -
+					// the same words it would have shown.
+					this.host.toast(`Handwriting: ${nib}`);
 					this.openInkSlider = nib;
 					this.sliderFromHover = false;
 					this.colorsOpen = false;
@@ -936,9 +1011,10 @@ export class MobileTools {
 					} else if (puttingDown) {
 						// PUTTING IT DOWN, the mirror of the arm above (alan,
 						// 2026-09-03). The two nibs already did this - their own
-						// branches near the top call `setMouseInk(false)` -
-						// which routes through the loud toggle command and
-						// therefore always toasted right; these four tools
+						// branches near the top - but through the loud toggle
+						// command, which toasted right and wrote data.json with
+						// it; they take this same quiet edge since 1.4.10 and
+						// say the command's words themselves. These four tools
 						// went through the generic exec above instead, whose
 						// toast is written for a different caller of the same
 						// off edge (see `markMousePutDown` above for the fix).
@@ -1498,6 +1574,7 @@ export class MobileTools {
 		this.el.ownerDocument.removeEventListener("pointercancel", this.releaseSlider, {
 			capture: true,
 		});
+		this.el.ownerDocument.removeEventListener("click", this.traceClick, { capture: true });
 		this.heldSlider = null;
 		this.el.remove();
 		this.pill.remove();
@@ -1507,5 +1584,65 @@ export class MobileTools {
 	/** Test seam / debugging: the currently open nib slider, if any. */
 	get openNibSlider(): "pen" | "highlighter" | null {
 		return this.openInkSlider;
+	}
+
+	/**
+	 * Trace-only snapshot of this strip's hit-testability, for
+	 * InlinePenRouter's window mirror (InlinePenCallbacks.describeChrome).
+	 * `target` is the pointerdown's actual hit element - classified against
+	 * THIS strip's real element references rather than a caller guessing
+	 * selector strings, because the router deliberately holds none of them
+	 * (InlinePenRouter.ts: "the router doesn't know chrome exists, by
+	 * design"). Deliberately NOT `instanceof Element` anywhere below - a
+	 * popout window's elements belong to another realm and instanceof
+	 * refuses them (see `outsideTap`'s own note on this, above); `contains`
+	 * and `classList` work across realms and duck-type fine in a test's
+	 * hand-rolled element fakes too. Read-only: getComputedStyle calls and
+	 * class/field reads, never a write - and it only ever runs while the
+	 * router is already composing a trace line, which is itself gated on
+	 * `diagnosticsEnabled`, so this costs nothing on the ordinary path.
+	 */
+	traceState(target: Element | null): string {
+		const style = (el: Element | null): string => {
+			if (!el) return "(none)";
+			const cs = getComputedStyle(el);
+			return `vis=${cs.visibility} pe=${cs.pointerEvents} op=${cs.opacity} disp=${cs.display}`;
+		};
+		const part = ((): string => {
+			if (!target) return "none";
+			if (this.pill.contains(target)) return "pill";
+			if (
+				this.penSlider.pop.contains(target) ||
+				this.hlSlider.pop.contains(target) ||
+				this.slider.pop.contains(target) ||
+				this.colorPop.contains(target)
+			) {
+				return "slider-pop";
+			}
+			if (this.buttons.some(({ el }) => el.contains(target))) return "button";
+			if (this.el.contains(target)) return "strip-root";
+			return "none";
+		})();
+		const openPop = this.colorsOpen
+			? "color"
+			: this.eraserPopOpen()
+				? "eraser"
+				: (this.openInkSlider ?? "none");
+		// Named rather than a bare boolean: which element is stuck, not just
+		// whether one is, is the part worth reading off a trace line - a
+		// resting finger's lost pointerup (the same shape abandonActiveStroke
+		// exists for) would strand this class on exactly one button or the
+		// pill, forever, with nothing else in this file's own state to say so.
+		const stuckPressed = [this.pill, ...this.buttons.map((b) => b.el)]
+			.filter((el) => el.classList.contains("is-pressed"))
+			.map((el) => describeEl(el));
+		return (
+			`hit=${describeEl(target)} strip-part=${part} ` +
+			`hitStyle[${style(target)}] stripStyle[${style(this.el)}] pillStyle[${style(this.pill)}] ` +
+			`is-inking=${this.el.classList.contains("is-inking")} ` +
+			`is-collapsed=${this.el.classList.contains("is-collapsed")} ` +
+			`openPop=${openPop} stuckPressed=${stuckPressed.length ? stuckPressed.join(",") : "none"} ` +
+			`activeTool=${this.host.activeTool()}`
+		);
 	}
 }

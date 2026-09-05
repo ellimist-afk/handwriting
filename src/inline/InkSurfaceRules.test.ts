@@ -22,11 +22,13 @@
  *   - do the registry's own columns match the tree: the file exists, the
  *     router family is the one it actually constructs, a surface that claims
  *     to mount a strip mentions one
- *   - do note and pdf still each wire all seven REQUIRED `InlinePenRouter`
- *     callbacks, which is the duplication surface every one of the seven
- *     divergences happened on. The interface declares eight; the eighth,
- *     `claimBandContact?`, is optional and note-only and is excluded on
- *     purpose - see INLINE_PEN_CALLBACKS (InkSurfaces.ts)
+ *   - do note and pdf still each wire every `InlinePenRouter` callback BOTH
+ *     surfaces owe an answer to, which is the duplication surface every one of
+ *     the divergences happened on. That set is not the same as the type's
+ *     required members: the interface declares ten, three of them optional,
+ *     and two of those three are note-only while the third
+ *     (`onStrokeAbandoned?`) is owed by both - see INLINE_PEN_CALLBACKS
+ *     (InkSurfaces.ts)
  *
  * WHAT THIS CANNOT ANSWER
  *   - whether the rule is CORRECT where it is present. `markPenSeen` was in
@@ -259,6 +261,35 @@ const RULES: readonly SurfaceRule[] = [
 		},
 	},
 	{
+		// THE TWELFTH one-surface divergence, and the third this registry was
+		// standing for. a7eba85 taught the pdf that the reticle watchdog is a
+		// PEN's guard and not a mouse's: a mouse cannot leave hover range
+		// without sending pointerleave, so the timer protects it against
+		// nothing, and firing it took the ring away from anyone who paused for
+		// a second - at hover, and mid-drag, where hiding the ring also drops
+		// `cursor: none` while the button is still down (alan, hardware,
+		// 2026-09-04, mouse ink armed). The note surface, which has the same
+		// watchdog and the same three in-gesture wrappers that pass no
+		// pointerType, was left with no exemption at all.
+		//
+		// The marker is the PREDICATE rather than the name `mousePointer`,
+		// which would be satisfied by a `const` nobody read - the same vacuity
+		// the eraser row above had to be rewritten to escape. Both halves are
+		// in it on purpose: an explicit "mouse" is exempt, and a caller that
+		// says nothing is answered by what pen-down wrote down, which is the
+		// half the in-gesture wrappers need and the half that was missing.
+		rule: "the reticle watchdog is the pen's guard, and a mouse is exempt from it",
+		markers: ['pointerType === "mouse" || (pointerType === undefined && this.mouseStroke)'],
+		on: ["note", "pdf"],
+		exempt: {
+			canvas:
+				"has no pen-hover reticle for a watchdog to guard, and no watchdog: the only reticle element it builds is `eraserEl` (a plain circle, shown and hidden by the erase gesture itself at `showEraserCursor`/`hideEraserCursor`), so nothing here is ever left on screen by a hover sample that stopped arriving",
+			penlab:
+				"draws no reticle of any kind - its own header: \"No file, no persistence, no text, no eraser\". It is a probe for the stroke pipeline, and a probe with a fixed nib has no ring to strand",
+			demo: "no reticle on the site: one tool chosen by its own buttons, no hover mark under the pointer, and so no timer that could take one away",
+		},
+	},
+	{
 		rule: "pen-contact arbitration is shared, not re-implemented",
 		markers: ["penContactIntent("],
 		on: ["note", "pdf"],
@@ -287,6 +318,36 @@ const RULES: readonly SurfaceRule[] = [
 			canvas: "constructs no MobileTools strip",
 			penlab: "constructs no MobileTools strip",
 			demo: "constructs no MobileTools strip - the site has no plugin chrome at all",
+		},
+	},
+	{
+		// THE ELEVENTH one-surface divergence, and the second this registry
+		// was standing for - the row below the watchdog's in the file and the
+		// one BEFORE it in the count, which is how they came to share a
+		// number. The note surface learned in `7c95c39` that a pane which
+		// shows a different document in place has to tell its router:
+		// Obsidian REUSES the editor and the pdf pane alike, so the router
+		// survives the switch still holding whatever gesture was in flight,
+		// and a pen contact whose lift was lost across it (a finger resting on
+		// the glass) leaves `activePenId` set forever - which keeps
+		// armOwnership's window click-suppressor armed forever, which eats
+		// every future pen tap on the strip. `f5f2333` then added the chrome
+		// half on the same surface.
+		//
+		// `git log -S abandonActiveStroke src/pdf/PdfInkController.ts` was
+		// EMPTY: the pdf never had either half, on the same router, reached by
+		// the same main.ts file-change sweep (`forgetHistory`). Same shape as
+		// the eraser ring above - not a regression, a rule that only ever
+		// reached one of the two surfaces and was never written down.
+		rule: "a pane that changes document in place abandons the router's stroke",
+		markers: ["abandonActiveStroke("],
+		on: ["note", "pdf"],
+		exempt: {
+			canvas:
+				"a whole-surface view on PointerRouter, which has no abandonActiveStroke: its leaf is not reused for a different document under a live gesture",
+			penlab:
+				"not user-reachable and shows no document, so there is no in-place file switch to strand a contact across",
+			demo: "ships on the website with no router and one document; nothing swaps out from under a stroke",
 		},
 	},
 	{
@@ -608,22 +669,24 @@ describe("ink surfaces - the registry describes the tree it claims to", () => {
 	});
 });
 
-describe("ink surfaces - the seven required callbacks are still wired twice", () => {
+describe("ink surfaces - the shared callbacks are still wired twice", () => {
 	// The duplication surface itself, stated as a fact rather than a wish.
-	// Every one of the seven divergences happened inside one of these, and
-	// this assertion exists so that the day somebody collapses the two wirings
+	// Every one of the divergences happened inside one of these, and this
+	// assertion exists so that the day somebody collapses the two wirings
 	// into one, the change is loud rather than quiet.
 	//
-	// Seven, not eight: `claimBandContact?` is optional and note-only, so
-	// demanding it of the pdf would report a legitimately surface-specific
-	// member as a divergence.
+	// The list is INLINE_PEN_CALLBACKS, and it is not simply "the required
+	// members": `claimBandContact?` and `describeChrome?` are optional AND
+	// note-only, so demanding them of the pdf would report a legitimately
+	// surface-specific member as a divergence, while `onStrokeAbandoned?` is
+	// optional and owed by both. That file carries the reason for each.
 	const inline = INK_SURFACES.filter((s) => s.router === "InlinePenRouter");
 
 	it("there are exactly two InlinePenRouter surfaces", () => {
 		expect(inline.map((s) => s.id)).toEqual(["note", "pdf"]);
 	});
 
-	it.each(inline)("$id wires all seven required callbacks itself", (surface) => {
+	it.each(inline)("$id wires every shared callback itself", (surface) => {
 		const text = surfaceText(surface.file);
 		for (const cb of INLINE_PEN_CALLBACKS) {
 			expect(text, `${surface.id} does not wire ${cb}`).toContain(`${cb}:`);

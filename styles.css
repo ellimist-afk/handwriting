@@ -1170,16 +1170,46 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
  * nested scrollers' effective value changes. `!important` so no theme rule
  * on a descendant can re-open a hole. Unit-tested in GuardStyle.test.ts.
  */
-/*
- * Both surfaces. The rule was written for the editor and scoped to its
- * scroller, so on a pdf only half the guard was ever active: the inline style
- * landed on .pdf-viewer-container and the nested scrollers inside the viewer
- * kept their own touch-action. A pen landing while a hand rests can then be
- * arbitrated as a two-pointer gesture, which is a pinch, which is a zoom
- * (hardware, 2026-08-29: "it did a weird zoom when i put pen to surface").
- */
 .cm-scroller.handwriting-touch-guard * {
 	touch-action: none !important;
+}
+
+/*
+ * Both surfaces, but not the same value. The rule above was written for the
+ * editor and scoped to `.cm-scroller`, so on a pdf it never fired at all: the
+ * inline style and the class both land on whichever element
+ * PdfViewerProbe's scroller is (`.pdf-viewer-container`, `.pdfViewer`,
+ * `#viewerContainer`, or `.pdf-content-container` - PdfInkController hands
+ * armGuardStyle whatever ProbedViewer.scroller resolved to, and which of the
+ * four candidates actually wins on a live Obsidian pdf view is not
+ * determinable from source, so all four are covered here rather than
+ * guessed), and pdf.js's own nested scroll containers inside it re-enable
+ * single-finger panning the same way the editor's backlinks pane did: Blink
+ * ORs pan-x/pan-y back into any descendant with its own overflow: auto or
+ * scroll, no matter what the ancestor's touch-action says. That is the
+ * resting-finger drift (hardware, Surface, 2026-09-03: "when I touch with
+ * the side of my finger to stabilize, it slides to the right") - a real
+ * single-finger pan surviving at a nested container the guard never reached.
+ *
+ * The value here is deliberately `pinch-zoom`, not `none`. PdfInkController
+ * arms this surface's guard with `pinch-zoom` (GuardStyle's `guardTouchAction`
+ * param), not `none`, specifically so the browser keeps two-finger pinch
+ * during a stroke - nothing here implements a pinch, and handing that
+ * gesture to the app instead reads as its sidebar-swipe. Descendants forced
+ * to `none` while armed would defeat that: intersecting a nested container's
+ * effective touch-action with `none` blocks the whole gesture the moment
+ * either touch point lands inside one, undoing the reason `pinch-zoom` was
+ * chosen over `none` in the first place. Matching the armed value instead -
+ * `pinch-zoom` on the descendant, same as the scroller - closes the
+ * single-finger hole without touching the two-finger case. The RESTING value
+ * (disarmed, `savedTouchAction` restored) is untouched by this rule; it only
+ * ever fires while the guard class is present, i.e. while armed.
+ */
+.pdf-viewer-container.handwriting-touch-guard *,
+.pdfViewer.handwriting-touch-guard *,
+#viewerContainer.handwriting-touch-guard *,
+.pdf-content-container.handwriting-touch-guard * {
+	touch-action: pinch-zoom !important;
 }
 
 /*

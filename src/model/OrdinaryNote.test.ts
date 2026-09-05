@@ -278,6 +278,18 @@ describe("no frontmatter is invented", () => {
 		expect(parseMarkdownPage(out).isHandwritingPage).toBe(false);
 		expect(out).toContain("- bread");
 	});
+
+	it("claiming identity on it does not manufacture a blank line above the body", () => {
+		// Regression: compose() built the fence the same way InlineClaim.ts
+		// does, and had the same extra-blank-line defect - the closing fence
+		// already ends with `eol`, so a body that does not itself start with
+		// `eol` must follow it directly, not after a second one.
+		const doc = open(BARE);
+		doc.claimIdentity();
+		const out = doc.compose();
+		expect(out).toBe(`---\nhandwriting-page-id: ${doc.pageId}\n---\n${BARE}`);
+		expect(parseMarkdownPage(out).rawBody).toBe(BARE);
+	});
 });
 
 describe("parseMarkdownPage detects the file's own line ending (5i I5)", () => {

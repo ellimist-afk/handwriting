@@ -479,6 +479,13 @@ export class InlineInkStore {
 		// PdfInkStore.reloadExternal has guarded this since it was written;
 		// this is the same guard, on the same evidence.
 		const kept = rec.strokes;
+		// The BASE PAGE is kept for the same reason and was not, which cost
+		// more than the strokes would have. It carries the text boxes, the
+		// images and every forward-compatible field this build does not know
+		// about, and `snapshot()` spreads it into the next write: a record put
+		// back with `basePage` still null falls to `emptyPage(pageId)` there
+		// and the next save writes `textBoxes: []` over the disk copy.
+		const keptBase = rec.basePage;
 		rec.load = "no";
 		rec.strokes = [];
 		rec.basePage = null;
@@ -488,6 +495,7 @@ export class InlineInkStore {
 			// session back. A lock leaves the file untouched; if it vanished,
 			// the next save rewrites it from what is still on screen.
 			rec.strokes = kept;
+			rec.basePage = keptBase;
 			return false;
 		}
 		return inkFingerprint(this.strokes(path)) !== before;

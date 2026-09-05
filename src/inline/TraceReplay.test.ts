@@ -17,6 +17,7 @@ import { markPenSeen, resetPenToolsForTest } from "./PenToolsMode";
 import {
 	captureInlinePenTrace,
 	clearInlinePenTrace,
+	formatInlinePenTrace,
 	summarizeAcquisitions,
 	TraceCapture,
 } from "./InlinePenRouter";
@@ -114,6 +115,111 @@ describe("capture: the trace records what the ink consumed", () => {
 		};
 		expect(back.futureField).toBe("from-2.0");
 		expect((back.events[0] as { futureNote?: string }).futureNote).toBe("kept");
+	});
+});
+
+// ---- suppressed native events -----------------------------------------------
+//
+// traceSuppressed() (the ownership guard's window-capture listener, armed for
+// the life of a claimed stroke) does its own de-dupe bookkeeping - at most one
+// "suppressed" trace line per native event TYPE per ownership window, tracked
+// in a Set the router clears at the next armOwnership(). That bookkeeping must
+// run strictly BEHIND the diagnostics gate: a type marked "already traced"
+// while recording was off has never actually appeared in any trace, so it
+// must still write its first line once recording turns on.
+
+/** A native event the ownership guard's window listener can suppress. */
+function nativeEvent(type: string): PointerEvent {
+	let prevented = false;
+	return {
+		type,
+		pointerType: undefined,
+		preventDefault: () => void (prevented = true),
+		stopPropagation: () => {},
+		get defaultPrevented() {
+			return prevented;
+		},
+	} as unknown as PointerEvent;
+}
+
+describe("suppressed native events: de-dupe bookkeeping stays behind the gate", () => {
+	afterEach(() => setDiagnosticsEnabled(false));
+
+	it("a type suppressed while OFF still gets its first trace line once ON", () => {
+		setDiagnosticsEnabled(false);
+		const h = harness();
+		h.fire(penEvent("pointerdown", 100)); // claims the stroke, arms ownership
+
+		h.fireWin(nativeEvent("click")); // suppressed, but recording is off
+
+		setDiagnosticsEnabled(true);
+		h.fireWin(nativeEvent("click")); // same type, now recording
+
+		const events = captureInlinePenTrace({}).events;
+		const suppressedLines = events.filter((e) => e.type === "suppressed");
+		expect(suppressedLines).toHaveLength(1);
+		expect(suppressedLines[0]?.note).toContain("click");
+	});
+
+	it("diagnostics OFF the whole time: no trace entry at all (unchanged)", () => {
+		setDiagnosticsEnabled(false);
+		const h = harness();
+		h.fire(penEvent("pointerdown", 100));
+
+		h.fireWin(nativeEvent("click"));
+
+		expect(captureInlinePenTrace({}).events).toHaveLength(0);
+	});
+
+	it("SUMMARY carries the suppressed count, and it resets with the trace clear", () => {
+		setDiagnosticsEnabled(true);
+		const h1 = harness();
+		h1.fire(penEvent("pointerdown", 100));
+		h1.fireWin(nativeEvent("click"));
+		h1.fireWin(nativeEvent("mousedown"));
+
+		const before = formatInlinePenTrace();
+		expect(before).toContain("2 native event(s) suppressed by the ownership guard");
+
+		clearInlinePenTrace();
+
+		// A fresh router: a fresh de-dupe set, so this is a clean single count
+		// rather than a dedupe artifact of the router used above.
+		const h2 = harness();
+		h2.fire(penEvent("pointerdown", 200));
+		h2.fireWin(nativeEvent("click"));
+
+		const after = formatInlinePenTrace();
+		expect(after).toContain("1 native event(s) suppressed by the ownership guard");
+	});
+
+	it("a new recording starts with the SAME router's de-dupe set empty", () => {
+		// The test above says it out loud - "a fresh router: a fresh de-dupe
+		// set" - and that was the only reason it could count at all. A bug
+		// report is recorded from a pane that has been open all along, so the
+		// router is the one that was already there: `clearInlinePenTrace()`
+		// reset the buffer and the counter and left every live router's
+		// `suppressedTraced` holding whatever the PREVIOUS recording had
+		// already de-duped. The first click of the new recording - the strip
+		// tap this trace exists to explain - then wrote nothing, and nothing
+		// on the timeline said a line had been withheld.
+		setDiagnosticsEnabled(true);
+		const h = harness();
+		h.fire(penEvent("pointerdown", 100)); // claims the stroke, arms ownership
+		h.fireWin(nativeEvent("click"));
+		expect(
+			captureInlinePenTrace({}).events.filter((e) => e.type === "suppressed")
+		).toHaveLength(1);
+
+		// The recording the user actually keeps, started without the pen ever
+		// lifting: the ownership window is the same one, so nothing calls
+		// `armOwnership()` to clear the set on the way in.
+		clearInlinePenTrace();
+		h.fireWin(nativeEvent("click"));
+
+		const lines = captureInlinePenTrace({}).events.filter((e) => e.type === "suppressed");
+		expect(lines, "the type stayed de-duped from the previous recording").toHaveLength(1);
+		expect(lines[0]?.note).toContain("click");
 	});
 });
 

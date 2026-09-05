@@ -141,6 +141,14 @@ interface Rig {
 	pane: PaneState;
 	/** Device pixel ratio, read through winRef exactly as the overlay does. */
 	setDpr(dpr: number): void;
+	/**
+	 * Obsidian's editor font size. Changes the resolved `font-size` on the
+	 * ONE computed-style object the overlay caches, which is how a browser
+	 * delivers it, and does NOT resize `.cm-editor` - matching the DOM
+	 * consequence that makes this interesting: only the content observer
+	 * fires, so `syncCamera` runs and `handleResize` does not.
+	 */
+	setFontPx(px: number): void;
 	/** The real `handleResize`. Returns how many repaints it triggered. */
 	resize(): number;
 	/** The real `syncBand`. */
@@ -154,6 +162,10 @@ interface Rig {
 	fontZoom(): number;
 	cssWidth(): number;
 	band(): Band | null;
+	/** The font `update()` compares against, so its trigger can be checked. */
+	lastFontStr(): string;
+	/** What `update()` would decide on a geometry tick right now. */
+	updateWouldResize(): boolean;
 	lastSyncContentLeft(): number;
 	lastSyncRectLeft(): number;
 	/** `.cm-content`'s left edge on screen right now, visual px. */
@@ -254,9 +266,15 @@ function makeRig(initial: Partial<PaneState> = {}): Rig {
 		scrollHeight: { get: () => pane.scrollHeight },
 	});
 
+	// ONE object, returned by every `getComputedStyle` call, because a real
+	// computed style is LIVE: `contentStyle` is cached with `??=` and the
+	// overlay re-reads `fontSize` off the cached object. A fresh literal per
+	// call would model a snapshot, and a font change would be invisible to
+	// exactly the code path under test.
+	const contentFont = { fontSize: "16px" };
 	const win = {
 		devicePixelRatio: 1,
-		getComputedStyle: () => ({ fontSize: "16px" }),
+		getComputedStyle: () => contentFont,
 		cancelAnimationFrame: () => undefined,
 		clearTimeout: () => undefined,
 	};
@@ -373,6 +391,9 @@ function makeRig(initial: Partial<PaneState> = {}): Rig {
 		setDpr(dpr: number) {
 			win.devicePixelRatio = dpr;
 		},
+		setFontPx(px: number) {
+			contentFont.fontSize = `${px}px`;
+		},
 		resize() {
 			repaints = 0;
 			proto.handleResize.call(o);
@@ -388,6 +409,12 @@ function makeRig(initial: Partial<PaneState> = {}): Rig {
 		fontZoom: () => o.fontZoom as number,
 		cssWidth: () => o.cssWidth as number,
 		band: () => o.band as Band | null,
+		lastFontStr: () => o.lastFontStr as string,
+		// `update()`'s trigger, verbatim from InkOverlay: a geometry update
+		// calls `handleResize` when the live computed size differs from the
+		// one it last recorded. Modelled rather than called because `update`
+		// takes a real `ViewUpdate`.
+		updateWouldResize: () => contentFont.fontSize !== (o.lastFontStr as string),
 		lastSyncContentLeft: () => o.lastSyncContentLeft as number,
 		lastSyncRectLeft: () => o.lastSyncRectLeft as number,
 		contentLeft,
@@ -669,5 +696,99 @@ describe("pane-width change: the mobile asymmetry", () => {
 			expect(r.cssScale()).toBe(1);
 			expect(r.paintedX(500)).toBeCloseTo(r.trueX(500), 9);
 		}
+	});
+});
+
+/**
+ * The other half of `scale`, on the same rig: the FONT zoom, and whether
+ * `syncCamera` alone keeps it current.
+ *
+ * `RemountFontRef.test.ts` pins what `refFontPx` means across a remount. This
+ * is the narrower question 1.4.10 fixed: an editor font-size change makes the
+ * lines taller, so it resizes `.cm-content` and NOT `.cm-editor`. Only
+ * `contentResizeObserver` fires, and that observer calls `syncCamera`, which
+ * until 1.4.10 re-measured `cssScale` from a fresh rect and reused whatever
+ * `fontZoom` `handleResize` had last cached. The camera was then rebuilt with
+ * a scale short by the whole font ratio - 48px of displacement at a 1400px
+ * pane going 16px to 20px, measured against a real engine in
+ * `test/render/MinimalCameraScale.test.ts`, and theme-independent.
+ *
+ * The rig drives this directly because `syncCamera` is called off the
+ * prototype here and the computed style it reads is one live object.
+ */
+describe("syncCamera and the editor font size", () => {
+	it("refreshes the font zoom, so `scale` is right without a handleResize", () => {
+		const r = makeRig({ paneWidth: 1400 });
+		// Mount: `handleResize` latches `refFontPx` at the font in force.
+		r.resize();
+		expect(r.fontZoom()).toBe(1);
+		const mounted = r.scale();
+
+		// The font change, delivered the way the DOM delivers it: the style
+		// object now says 20px, and `handleResize` is never called - only the
+		// content observer's `syncCamera`.
+		r.setFontPx(20);
+		r.syncCamera();
+
+		expect(r.fontZoom()).toBeCloseTo(20 / 16, 12);
+		expect(r.scale()).toBeCloseTo(r.cssScale() * (20 / 16), 12);
+		expect(r.scale()).not.toBe(mounted);
+	});
+
+	it("leaves the reference font alone, so persisted coordinates keep meaning", () => {
+		// `refFontPx` latches at mount and every stored stroke is expressed
+		// against it. Re-latching it here would make the zoom read 1 again and
+		// silently redefine the note's coordinate system.
+		const r = makeRig({ paneWidth: 1400 });
+		r.resize();
+		r.setFontPx(20);
+		r.syncCamera();
+		r.setFontPx(24);
+		r.syncCamera();
+		expect(r.fontZoom()).toBeCloseTo(24 / 16, 12);
+	});
+
+	it("does not disarm update()'s own handleResize trigger", () => {
+		// TWO TRIGGERS, ONE FIELD, until 1.4.10. `update()` calls
+		// `handleResize` on a geometry update when the live `fontSize`
+		// differs from `lastFontStr`; `syncCamera` learned to re-derive
+		// `fontZoom` for itself and wrote that same field. Whichever observer
+		// fired first consumed the difference, and the one left holding a
+		// font that "had not changed" was `handleResize` - the only writer of
+		// the canvas backing store.
+		const r = makeRig({ paneWidth: 1400 });
+		r.resize();
+		expect(r.updateWouldResize()).toBe(false);
+
+		// The content observer wins the race, as it does whenever taller
+		// lines resize `.cm-content` without resizing `.cm-editor`.
+		r.setFontPx(20);
+		r.syncCamera();
+
+		// The sync path saw it...
+		expect(r.fontZoom()).toBeCloseTo(20 / 16, 12);
+		// ...and the update path still can.
+		expect(r.lastFontStr()).toBe("16px");
+		expect(r.updateWouldResize()).toBe(true);
+
+		// And once `handleResize` does run, both are settled.
+		r.resize();
+		expect(r.updateWouldResize()).toBe(false);
+		expect(r.fontZoom()).toBeCloseTo(20 / 16, 12);
+	});
+
+	it("costs one string compare when the font did not change", () => {
+		// The hot-path claim, in the only form this rig can state it: a second
+		// sync at the same font must not move the scale at all. `syncCamera`
+		// runs on resize and scroll ticks and at pen-down, so a font read that
+		// did work every frame would be work on every scroll.
+		const r = makeRig({ paneWidth: 1400 });
+		r.resize();
+		r.setFontPx(20);
+		r.syncCamera();
+		const after = r.scale();
+		r.syncCamera();
+		r.syncCamera();
+		expect(r.scale()).toBe(after);
 	});
 });

@@ -197,6 +197,7 @@ export function recorder() {
 	const moveCounts: number[] = [];
 	let downs = 0;
 	let ups = 0;
+	let abandons = 0;
 	const cb: InlinePenCallbacks = {
 		onPenDown: () => void downs++,
 		onPenHover: () => {},
@@ -205,6 +206,11 @@ export function recorder() {
 		onPenRaw: (samples) => void rawCalls.push(samples),
 		onPenMove: (_ev, n) => void moveCounts.push(n),
 		onPenUp: () => void ups++,
+		// Counted SEPARATELY from ups on purpose. An abandoned stroke must
+		// never reach onPenUp (AbandonStrokeOnSwitch.test.ts pins that), so a
+		// single counter would make the two indistinguishable and let a
+		// regression that routed an abandon through onPenUp pass.
+		onStrokeAbandoned: () => void abandons++,
 	};
 	return {
 		cb,
@@ -215,6 +221,9 @@ export function recorder() {
 		},
 		get ups() {
 			return ups;
+		},
+		get abandons() {
+			return abandons;
 		},
 	};
 }

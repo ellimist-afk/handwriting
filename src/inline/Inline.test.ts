@@ -71,7 +71,32 @@ describe("claimMarkdown (identity rule: the only Markdown write)", () => {
 	it("creates a fence for a note with no frontmatter, body verbatim", () => {
 		const md = "# Shopping\n\n- milk\n- bread\n";
 		const r = claimMarkdown(md, "pid-2");
-		expect(r.content).toBe(`---\nhandwriting-page-id: pid-2\n---\n\n${md}`);
+		// The closing fence already ends with one eol - the body follows it
+		// directly, with no extra blank line manufactured on top (regression:
+		// the extra term used to add a second eol here, which Obsidian's Live
+		// Preview then showed as a blank first row above the user's text).
+		expect(r.content).toBe(`---\nhandwriting-page-id: pid-2\n---\n${md}`);
+	});
+
+	it("no frontmatter, body starts with text: exactly one eol before the body, and it round-trips", () => {
+		const md = "# Shopping\n\n- milk\n- bread\n";
+		const r = claimMarkdown(md, "pid-2b");
+		const closeFenceIdx = r.content.indexOf("---\n", r.content.indexOf("---\n") + 1);
+		const afterFence = r.content.slice(closeFenceIdx + "---\n".length);
+		expect(afterFence).toBe(md);
+		expect(afterFence.startsWith("\n")).toBe(false);
+		const reparsed = parseMarkdownPage(r.content);
+		expect(reparsed.pageId).toBe("pid-2b");
+		expect(reparsed.rawBody).toBe(md);
+	});
+
+	it("body starting with its own blank line keeps that blank line - it is the user's, not manufactured", () => {
+		const md = "\n# Shopping\n\n- milk\n";
+		const r = claimMarkdown(md, "pid-2c");
+		expect(r.content).toBe(`---\nhandwriting-page-id: pid-2c\n---\n${md}`);
+		const reparsed = parseMarkdownPage(r.content);
+		expect(reparsed.pageId).toBe("pid-2c");
+		expect(reparsed.rawBody).toBe(md);
 	});
 
 	it("an existing id wins and the content is byte-untouched", () => {

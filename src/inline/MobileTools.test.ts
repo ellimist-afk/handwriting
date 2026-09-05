@@ -11,7 +11,13 @@ import {
 	penSeenThisSession,
 	resetPenToolsForTest,
 } from "./PenToolsMode";
-import { consumeMousePutDown } from "./MouseInk";
+import {
+	armMouseInkQuietly,
+	consumeMousePutDown,
+	disarmMouseInkQuietly,
+	mouseInkEnabled,
+	setMouseInk,
+} from "./MouseInk";
 
 /**
  * Obsidian's real `setIcon` APPENDS an svg to the parent; it does not clear
@@ -60,9 +66,9 @@ const fakeHost = (over: Partial<MobileToolsHost> = {}): MobileToolsHost => ({
 	canRedo: () => false,
 	canPasteInk: () => false,
 	mouseInkOn: () => false,
-	setMouseInk: () => {},
 	armMouseInkQuietly: () => {},
 	disarmMouseInkQuietly: () => {},
+	toast: () => {},
 	recordingOn: () => false,
 	hasInkSelection: () => false,
 	palette: () => [],
@@ -983,9 +989,12 @@ describe("MobileTools: tapping the eraser while it is already active", () => {
  *   - `inline-tool-pen` calls markPenSeen() unconditionally (main.ts)
  *   - `mouse-ink-toggle` calls markPenSeen() whenever it turns ink ON,
  *     inside its own `if (on)` (main.ts)
- *   - the host's setMouseInk EXECS that command (InkOverlay.ts), which is
- *     where Alan's toast comes from - not from armMouseInkQuietly, which is
- *     genuinely silent and is on a branch he never reaches.
+ *   - a mouse click on the ACTIVE nib no longer execs that command at all
+ *     (1.4.10): it takes the quiet arm/release wrappers and says the loud
+ *     command's own words through `host.toast`. The rig models both halves
+ *     of what those wrappers do to the light - markPenSeen on the way in,
+ *     clearPenHardwareSeen on the way out - which is the whole reason this
+ *     test can still see the defect it was written for.
  */
 describe("MobileTools: the nib light follows mouse ink going off", () => {
 	beforeEach(() => resetPenToolsForTest());
@@ -1016,11 +1025,20 @@ describe("MobileTools: the nib light follows mouse ink going off", () => {
 			exec,
 			activeTool: () => "pen",
 			mouseInkOn: () => mouseInk.value,
-			setMouseInk: (on: boolean) => {
-				if (mouseInk.value !== on) exec("handwriting:mouse-ink-toggle");
-			},
+			// The two wrappers the surfaces wire (InkOverlay.ts): the arm half
+			// marks the pen seen and repaints every strip, the release half
+			// clears the hardware light with the mode. Modelled here rather
+			// than spied, because this test is about what the LIGHT does.
 			armMouseInkQuietly: () => {
 				mouseInk.value = true;
+				markPenSeen();
+			},
+			disarmMouseInkQuietly: () => {
+				mouseInk.value = false;
+				clearPenHardwareSeen();
+			},
+			toast: (message: string) => {
+				toasts.push(message);
 			},
 		});
 		new MobileTools(pane as unknown as HTMLElement, host);
@@ -1410,4 +1428,234 @@ describe("MobileTools: a mouse putting a tip tool down gets its cursor back", ()
 			});
 		}
 	}
+});
+
+/**
+ * A `saved` object the click chain can actually REACH, for the two describes
+ * below.
+ *
+ * The point of `saved` is that a regression which starts writing data.json
+ * again makes an assertion fail. A bare `const saved = { mouseInk: false }`
+ * does not do that: no production code can see it, so `expect(saved.mouseInk)
+ * .toBe(false)` is a claim about a literal and would pass against the very
+ * code these tests forbid (adversarial review, 2026-09-04).
+ *
+ * The regression has one shape - going back through the LOUD toggle command,
+ * where `settings.mouseInk = on` and `persistSettings()` live (main.ts) and
+ * which is how `host.setMouseInk` reached them before 1.4.10. So the fake
+ * host's `exec` MODELS that command, persist included: any click that routes
+ * to `handwriting:mouse-ink-toggle` writes `saved.mouseInk` here and the
+ * assertions catch it. `execs` records the ids for the same reason from the
+ * other side - a click that quietly stopped doing anything at all would pass
+ * a "nothing was written" assertion by doing nothing.
+ */
+interface LoudModel {
+	saved: { mouseInk: boolean };
+	toasts: string[];
+	execs: string[];
+	/** The loud command, persist and Notice included. True if it ran. */
+	loud(id: string): boolean;
+}
+const loudModel = (savedMouseInk: boolean): LoudModel => {
+	const m: LoudModel = {
+		saved: { mouseInk: savedMouseInk },
+		toasts: [],
+		execs: [],
+		loud: (id: string): boolean => {
+			if (id !== "handwriting:mouse-ink-toggle") return false;
+			const on = !mouseInkEnabled();
+			setMouseInk(on);
+			// The two lines that make this the LOUD path (main.ts).
+			m.saved.mouseInk = on;
+			if (on) markPenSeen();
+			m.toasts.push(on ? "Handwriting: pen" : "Handwriting: cursor");
+			return true;
+		},
+	};
+	return m;
+};
+
+/**
+ * The strip's own quiet edges, end to end through the real MouseInk module
+ * instead of a counter.
+ *
+ * The rigs above wire `armMouseInkQuietly`/`disarmMouseInkQuietly` to spies,
+ * which pins that the click chain CALLS them and says nothing about what they
+ * then do. Since alan's ruling (2026-09-04, "dont persist a quiet arm") what
+ * they do is the interesting half: arm this session and write nothing.
+ * QuietMouseInkFanout.test.ts pins that the module has no route to disk left;
+ * these two pin that the button a mouse user actually presses is wired to
+ * those functions and not to some second arming path of its own.
+ *
+ * The eraser is the tool under test because a mouse click on it is the case
+ * that falls all the way through to the generic exec branch - its own
+ * pop-reopen branch is `ptr !== "mouse"` - so this drives the same code path
+ * as lasso, insert space and pan.
+ */
+describe("MobileTools: the strip's quiet arm and put-down are for this session", () => {
+	beforeEach(() => {
+		resetPenToolsForTest();
+		setMouseInk(false);
+		consumeMousePutDown();
+	});
+	// The flag is a module global shared by every test in this file, so a
+	// describe that ends armed leaks an inking mouse into whatever runs next.
+	afterEach(() => setMouseInk(false));
+
+	const rig = (active: boolean, m: LoudModel): { btn: FakeEl; doc: FakeDoc } => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const state = { active };
+		const host = fakeHost({
+			eraserOn: () => state.active,
+			// The real flag, the way both surfaces wire it (InkOverlay.ts,
+			// PdfInkController.ts): `mouseInkOn: () => mouseInkEnabled()`.
+			mouseInkOn: () => mouseInkEnabled(),
+			exec: (id: string) => {
+				m.execs.push(id);
+				if (m.loud(id)) return;
+				if (id === "handwriting:inline-tool-eraser") {
+					// The command's own read-and-clear, so a put-down cannot
+					// leave the flag set for a later test.
+					consumeMousePutDown();
+					state.active = !state.active;
+				}
+			},
+			armMouseInkQuietly: () => armMouseInkQuietly(),
+			disarmMouseInkQuietly: () => disarmMouseInkQuietly(),
+		});
+		new MobileTools(pane as unknown as HTMLElement, host);
+		const btn = pane.findByTipLabel("Eraser");
+		if (!btn) throw new Error("no Eraser button was built");
+		return { btn, doc };
+	};
+
+	it("a mouse click on a tool it cannot use arms for the session and saves nothing", () => {
+		const m = loudModel(false); // data.json - and the click CAN reach it
+		setMouseInk(m.saved.mouseInk);
+		const { btn, doc } = rig(false, m);
+
+		btn.fire("click", { pointerType: "mouse" });
+		doc.flushFrames();
+
+		expect(mouseInkEnabled()).toBe(true);
+		// Catches a re-routed arm: through the toggle command, `m.loud` runs
+		// and writes this. No longer a claim about a literal.
+		expect(m.saved.mouseInk).toBe(false);
+		expect(m.execs).not.toContain("handwriting:mouse-ink-toggle");
+		// main.ts onload, replayed: the arm is not there to be found.
+		setMouseInk(m.saved.mouseInk);
+		expect(mouseInkEnabled()).toBe(false);
+	});
+
+	it("a mouse click putting that tool down releases the session and saves nothing", () => {
+		const m = loudModel(true); // turned on by name, by the command
+		setMouseInk(m.saved.mouseInk);
+		const { btn, doc } = rig(true, m);
+
+		btn.fire("click", { pointerType: "mouse" });
+		doc.flushFrames();
+
+		expect(mouseInkEnabled()).toBe(false);
+		expect(m.saved.mouseInk).toBe(true);
+		expect(m.execs).not.toContain("handwriting:mouse-ink-toggle");
+		setMouseInk(m.saved.mouseInk);
+		expect(mouseInkEnabled()).toBe(true);
+	});
+});
+
+/**
+ * THE ACTIVE NIB'S OWN MOUSE CLICK IS THE FOURTH QUIET PATH, and until 1.4.10
+ * it was the loudest thing on the strip.
+ *
+ * "Click the tool you are drawing with to hand the mouse back to text" (alan,
+ * 2026-09-02), and click it again to draw with it: both halves called
+ * `host.setMouseInk`, which both surfaces wired to `executeCommandById(
+ * "handwriting:mouse-ink-toggle")` - the LOUD command, `settings.mouseInk =
+ * on` and `persistSettings()` and all. So the ruling that took the persist
+ * off the eraser's quiet arm (2026-09-04, "dont persist a quiet arm") left
+ * the two buttons a mouse user presses most often writing data.json twice per
+ * round trip, in both directions - the same "mouse ink keeps turning on by
+ * itself" the ruling was about (adversarial review, 2026-09-04).
+ *
+ * Same rig shape as the describe above, on the nib rather than the eraser,
+ * because the nib takes its OWN branch: `isActive && ptr === "mouse"` is
+ * caught before the generic exec, so nothing about the eraser's path proves
+ * anything about this one.
+ */
+describe("MobileTools: a mouse click on the ACTIVE nib is for this session", () => {
+	beforeEach(() => {
+		resetPenToolsForTest();
+		setMouseInk(false);
+	});
+	afterEach(() => setMouseInk(false));
+
+	const rig = (m: LoudModel): { btn: FakeEl; doc: FakeDoc } => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const host = fakeHost({
+			activeTool: () => "pen",
+			mouseInkOn: () => mouseInkEnabled(),
+			exec: (id: string) => {
+				m.execs.push(id);
+				m.loud(id);
+			},
+			armMouseInkQuietly: () => armMouseInkQuietly(),
+			disarmMouseInkQuietly: () => disarmMouseInkQuietly(),
+			toast: (message: string) => m.toasts.push(message),
+		});
+		new MobileTools(pane as unknown as HTMLElement, host);
+		const btn = pane.findByTipLabel("Pen");
+		if (!btn) throw new Error("no Pen button was built");
+		return { btn, doc };
+	};
+
+	it("putting the nib down is session-only and leaves the saved value alone", () => {
+		const m = loudModel(true); // the mode was turned on BY NAME
+		setMouseInk(m.saved.mouseInk); // main.ts onload
+
+		const { btn, doc } = rig(m);
+		btn.fire("click", { pointerType: "mouse" });
+		doc.flushFrames();
+
+		expect(mouseInkEnabled()).toBe(false);
+		// The loud command's off wording, unchanged.
+		expect(m.toasts).toEqual(["Handwriting: cursor"]);
+		// The two that fail if the put-down goes back through the command:
+		// `m.loud` would have written `false` here and pushed the id.
+		expect(m.saved.mouseInk).toBe(true);
+		expect(m.execs).toEqual([]);
+
+		setMouseInk(m.saved.mouseInk); // the next launch, same one line
+		expect(mouseInkEnabled()).toBe(true);
+	});
+
+	it("picking it back up arms for the session only", () => {
+		const m = loudModel(false); // never turned on by name
+		setMouseInk(m.saved.mouseInk);
+
+		const { btn, doc } = rig(m);
+		// Click one: a cold mouse on the active nib - "give the mouse this
+		// tool", the only way in for someone with no pen.
+		btn.fire("click", { pointerType: "mouse" });
+		doc.flushFrames();
+
+		expect(mouseInkEnabled()).toBe(true);
+		// The loud command's ON wording, which named the tip the mouse now
+		// holds; `isActive` for a nib already means no tip mode is on, so
+		// that expression could only ever have come out as the nib.
+		expect(m.toasts).toEqual(["Handwriting: pen"]);
+		expect(m.saved.mouseInk).toBe(false);
+		expect(m.execs).toEqual([]);
+
+		// Click two: back to text, and still nothing written.
+		btn.fire("click", { pointerType: "mouse" });
+		doc.flushFrames();
+		expect(mouseInkEnabled()).toBe(false);
+		expect(m.toasts).toEqual(["Handwriting: pen", "Handwriting: cursor"]);
+		expect(m.saved.mouseInk).toBe(false);
+
+		setMouseInk(m.saved.mouseInk); // the next launch
+		expect(mouseInkEnabled()).toBe(false);
+	});
 });

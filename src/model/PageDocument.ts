@@ -467,7 +467,11 @@ export class PageDocument {
 				: this.frontmatter;
 			if (fm.length === 0) return body.replace(/^\r?\n/, "");
 			const eol = this.eol;
-			return `---${eol}${fm.join(eol)}${eol}---${eol}${body.startsWith(eol) ? "" : eol}${body}`;
+			// The closing fence already ends with `eol` - the body follows
+			// directly. A body that itself starts with `eol` (the user's own
+			// blank line) keeps it; nothing extra is manufactured on top (same
+			// defect, same fix, as InlineClaim.ts's claimMarkdown/reassignMarkdown).
+			return `---${eol}${fm.join(eol)}${eol}---${eol}${body}`;
 		}
 		return composeMarkdownPage({
 			pageId: this.pageId,

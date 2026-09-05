@@ -49,8 +49,11 @@ class FakeHost implements InlineInkHost {
 	async loadSidecar(pageId: string): Promise<ParseResult | null> {
 		return this.sidecars.get(pageId) ?? null;
 	}
-	scheduleSidecar(pageId: string): void {
+	/** The PAGE as well as the id: what a save actually puts on disk. */
+	scheduledPages: PageData[] = [];
+	scheduleSidecar(pageId: string, page: PageData): void {
 		this.scheduled.push(pageId);
+		this.scheduledPages.push(page);
 	}
 	notify(): void {}
 }
@@ -190,5 +193,34 @@ describe("InlineInkStore.reloadExternal", () => {
 		// The reload ran the normal load path, so the damage lock re-applied
 		// and a FURTHER reload refuses to touch the locked record.
 		expect(await store.reloadExternal("note.md")).toBe(false);
+	});
+
+	// The strokes were put back and the BASE PAGE was not, and the next save
+	// wrote that emptiness to disk. Nothing looks wrong at the moment of the
+	// failed re-read - the record still renders the kept strokes - so the
+	// loss (images, and any field a newer build wrote that this one only
+	// carries through unread) only shows up when the note is reopened
+	// somewhere the geometry is simply gone. Port of efea5c1 on the 1.5.0
+	// line, which pins the same guard for that build's text boxes.
+	it("a sidecar that has gone leaves the note's images and unknown fields alone too", async () => {
+		const page = pageWith("p1", "a");
+		page.images = [{ id: "img-1", x: 10, y: 20, width: 100, height: 80, z: 0 }];
+		page.unknownTop = { futureField: "keep-me" };
+		host.sidecars.set("p1", ok(page));
+		await store.ensureLoaded("note.md");
+
+		// The file is gone (a sync client deleted and recreated it), so the
+		// re-read reads nothing and the record has to be put back whole.
+		host.sidecars.delete("p1");
+		expect(await store.reloadExternal("note.md")).toBe(false);
+		expect(store.strokes("note.md").map((s) => s.id)).toEqual(["a"]);
+
+		// And the write that follows carries the image and the unknown field,
+		// rather than erasing them from a record whose basePage had been
+		// cleared and never put back.
+		store.save("note.md");
+		const written = host.scheduledPages.at(-1);
+		expect(written?.images.map((im) => im.id)).toEqual(["img-1"]);
+		expect(written?.unknownTop).toEqual({ futureField: "keep-me" });
 	});
 });

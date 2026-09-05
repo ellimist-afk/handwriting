@@ -135,7 +135,9 @@ palettes. Ink sticks to the page it was drawn on, scales with the viewer's
 zoom, and follows the document across devices.
 
 Ink on a page is stored in that page's own points, measured from its
-top-left corner - not screen pixels, not scroll position. Zoom, scroll,
+top-left corner - not screen pixels, not scroll position. The nib's width
+lives in page points too, so a line drawn at any zoom weighs the same on the
+page, and thickens along with the text when you zoom in. Zoom, scroll,
 resize, none of it moves a stroke once it's down. If the viewer rebuilds
 itself mid-stroke - a zoom, most often - the stroke commits what was drawn
 instead of vanishing; only the gesture ends. The same holds for a pinch

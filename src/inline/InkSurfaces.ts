@@ -71,14 +71,17 @@ export type InkSurfaceId = "note" | "pdf" | "canvas" | "penlab" | "demo";
 
 /**
  * Which pointer router a surface is built on. This is the fault line: `note`
- * and `pdf` share `InlinePenRouter`, which declares EIGHT callbacks and lets
+ * and `pdf` share `InlinePenRouter`, which declares TEN callbacks and lets
  * each surface answer them independently, so it is the pair that diverges.
  * `canvas` and `penlab` share `PointerRouter` and own their whole surface;
  * `demo` is on neither and wires its own pointer handlers.
  *
- * This said "seven callbacks" and so did INLINE_PEN_CALLBACKS's doc below.
- * Both were wrong: `claimBandContact?` is the eighth. See that array's own
- * comment for why seven is nonetheless the right number to require.
+ * This said "seven callbacks", then "EIGHT", and was wrong both times - the
+ * count went stale the moment an optional member was added and nobody
+ * recounted. Ten today: seven required, plus `claimBandContact?`,
+ * `describeChrome?` and `onStrokeAbandoned?`. Which of them BOTH surfaces owe
+ * an answer to is a separate question, and INLINE_PEN_CALLBACKS below is the
+ * one that gets executed.
  */
 export type InkRouterFamily = "InlinePenRouter" | "PointerRouter" | "none";
 
@@ -184,20 +187,71 @@ export const INK_SURFACES: readonly InkSurface[] = [
 ];
 
 /**
- * The seven REQUIRED callbacks `InlinePenRouter` declares. Named here rather
- * than left implicit in the interface because THIS is the duplication surface:
- * note and pdf each supply all seven, independently, and a rule implemented
- * inside two of these is a rule that can diverge. Kept in the declaration's
- * own order.
+ * The callbacks BOTH inline surfaces must wire. Named here rather than left
+ * implicit in the interface because THIS is the duplication surface: note and
+ * pdf each supply all of them, independently, and a rule implemented inside
+ * two of these is a rule that can diverge. Kept in the declaration's own order.
  *
- * `InlinePenCallbacks` declares EIGHT. The eighth is `claimBandContact?`, and
- * it is deliberately not in this list: it is optional and note-only - only the
- * overlay has a linked-mentions band rendering outside the scroller to claim a
- * contact on - so requiring it of both surfaces would report a legitimately
- * surface-specific member as a divergence, which is the false positive that
- * fills an allowlist with entries that mean nothing. The prose above and in
- * `InkRouterFamily` used to say the router declares seven; the ARRAY was right
- * all along and only the sentences were wrong.
+ * `InlinePenCallbacks` declares TEN members: seven required, and three
+ * optional. Membership here is not "is it required by the type" - it is "must
+ * both surfaces answer it", and the two questions have come apart:
+ *
+ *   - `claimBandContact?` is optional and note-ONLY. Only the overlay has a
+ *     linked-mentions band rendering outside the scroller to claim a contact
+ *     on, so requiring it of both would report a legitimately surface-specific
+ *     member as a divergence - the false positive that fills an allowlist with
+ *     entries that mean nothing.
+ *   - `describeChrome?` is optional and note-only for the same kind of reason:
+ *     it is trace-only, and it answers for a strip the router holds no
+ *     reference to. The pdf leaves it undefined.
+ *   - `onStrokeAbandoned?` is optional in the TYPE and required of both here.
+ *     Optional because a router may be built by something with no chrome to
+ *     stand down (the harnesses do); required of both because the thing it
+ *     reports - a live stroke torn down with no lift, by a path that cannot
+ *     commit what was drawn - happens identically on a note and on a pdf, and
+ *     a surface that skipped it would be left wearing `is-inking` (opacity 0,
+ *     visibility hidden) with no later switch able to repair it. That is
+ *     exactly the one-surface divergence this array exists to make loud.
+ *
+ *     A WINDOW BLUR is no longer such a path, and this entry named it as the
+ *     example until 2026-09-04. The owner's ruling that day ("alt tab mid
+ *     stroke - sure make it consistent") made a blur COMMIT: the router's blur
+ *     handler runs `finishActiveStroke()`, which reaches `onPenUp` exactly as
+ *     a lift does. What still abandons is a surface tearing its own stroke
+ *     down - the note switch (`InkOverlayPlugin.update`) and the pdf's
+ *     in-place document change (`PdfInkController.forgetHistory`) - each of
+ *     which calls `abandonActiveStroke()` itself and reads the boolean. The
+ *     pdf routes that into its own `strokeAbandoned`; the note's branch runs
+ *     the same teardown inline, so `InkOverlay.strokeAbandoned` is today
+ *     reached through this member alone.
+ *
+ * This header said "seven REQUIRED" and "declares EIGHT". The first is now a
+ * different claim, and the second was simply wrong before this edit:
+ * `describeChrome?` had been added and the sentence never counted it.
+ *
+ * WHAT THIS ARRAY DOES NOT PROVE, said here so the row cannot be read as
+ * coverage it is not. The check driven off it is a scan for `<name>:` in the
+ * surface's own source: it proves the identifier is WIRED and says nothing
+ * about what the body does, so replacing any of these bodies with an empty
+ * arrow keeps it green. That is not a flaw in the row - presence across two
+ * surfaces is exactly the divergence question it exists for - but for
+ * `onStrokeAbandoned` it was, for two releases, the ONLY thing asserted, while
+ * the body was the whole payload a user sees. The behaviour now lives where
+ * behaviour belongs: `PdfInkController.test.ts`'s "the in-place document
+ * switch stands down exactly the same things" drives `forgetHistory()` against
+ * the real router the pdf builds, and `AbandonedGestureStandsDown.test.ts`
+ * calls the note's body directly, because nothing in this repo can construct
+ * an InkOverlayPlugin - its mount wants real canvases and a 2d context - so
+ * the note's WIRING is still held by the scan alone. If that ever becomes
+ * possible, that test is where the missing half goes.
+ *
+ * `onStrokeAbandoned` is, since the blur became a commit, UNREACHABLE from the
+ * router itself: the one call site left (the blur handler's second branch)
+ * can only run when no stroke was live, and `abandonActiveStroke()` returns
+ * false in exactly that case. The row stays required all the same - the
+ * callback's contract is "a stroke was really torn down", a future caller of
+ * that branch could satisfy it, and the surfaces' `strokeAbandoned` bodies are
+ * live code reached by their own abandon calls.
  */
 export const INLINE_PEN_CALLBACKS = [
 	"onPenDown",
@@ -207,6 +261,7 @@ export const INLINE_PEN_CALLBACKS = [
 	"onPenRaw",
 	"onPenMove",
 	"onPenUp",
+	"onStrokeAbandoned",
 ] as const;
 
 export function inkSurface(id: InkSurfaceId): InkSurface {

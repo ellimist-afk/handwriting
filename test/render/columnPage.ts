@@ -144,7 +144,7 @@ function read(): ColumnReading {
 		contentLeft: c.left,
 		// The real production measurement, bundled from src. This is the
 		// whole point of the file: not a copy of the rule, the rule.
-		originLeft: contentOriginLeft(content),
+		originLeft: contentOriginLeft(content) ?? c.left,
 		textLeft: t.left,
 		wideLeft: wide.getBoundingClientRect().left,
 		markerLeft: m.left,

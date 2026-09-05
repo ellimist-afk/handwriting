@@ -4,7 +4,7 @@ import { PalmGate, paroleEarned } from "../input/PalmGate";
 import { PenSample, silentLift } from "../input/PointerRouter";
 import { visualToNote } from "./ZoomScale";
 import { hideProbeMarkers, markRawPointer } from "./PenProbe";
-import { hitProbeDown, hitProbeHover, isHitProbeEnabled } from "./PenHitProbe";
+import { describeEl, hitProbeDown, hitProbeHover, isHitProbeEnabled } from "./PenHitProbe";
 import { scrollProbeTouch } from "./ScrollProbe";
 import { DIAG_OFF_NOTE, diagnosticsEnabled } from "../diag/DiagSwitch";
 import { VelocitySample, flingStep, releaseVelocity } from "../input/Fling";
@@ -79,13 +79,67 @@ export interface InlinePenCallbacks {
 	onPenRaw(samples: PenSample[], ev: PointerEvent): void;
 	/** rAF-rate move, for metrics only (`coalescedCount`). */
 	onPenMove(ev: PointerEvent, coalescedCount: number): void;
-	onPenUp(ev: PointerEvent): void;
+	/**
+	 * The stroke ended. `ev` is the pointerup/pointercancel that ended it -
+	 * ABSENT when the stroke ended without one, which is the window-blur case
+	 * `finishActiveStroke()` serves (alt-tab, a system dialog, the on-screen
+	 * keyboard). Optional rather than synthesised: the one thing a surface
+	 * reads off this event is the lift POSITION, which it appends as the
+	 * stroke's final point (`PdfInkController.addFinalPoint`) because a
+	 * pointerup carries a position no `onPenRaw` sample does. A blur has no
+	 * lift, so there is no such position, and a made-up one would put a point
+	 * where the pen never was. Undefined says exactly that: end the stroke at
+	 * the last sample the router actually fed.
+	 */
+	onPenUp(ev?: PointerEvent): void;
 	/**
 	 * Should a contact OUTSIDE the scroller (the linked-mentions band renders
 	 * outside it, in the same view) be claimed as a Handwriting gesture? The
 	 * overlay answers yes only for eraser intent - see bandEraserIntent.
 	 */
 	claimBandContact?(ev: PointerEvent): boolean;
+	/**
+	 * Trace-only: describe the pen-toolbar chrome's hit-testability for
+	 * `target`, the deepest element a pen pointerdown actually hit. Called
+	 * ONLY by the window mirror below, and only while composing a trace line
+	 * for a pen pointerdown whose composed path missed every live scroller -
+	 * the strip is mounted as a SIBLING of the scroller (MobileTools.ts), so
+	 * a tap that lands on it, or near it, never reaches this router's own
+	 * scroller-attached listeners at all. This is the seam that lets a
+	 * trace-only caller reach chrome the router otherwise holds no reference
+	 * to, by design (see the window-mirror section below). The overlay
+	 * implements this by asking its MobileTools instance for a snapshot; the
+	 * pdf surface has no strip and leaves it undefined.
+	 */
+	describeChrome?(target: Element | null): string;
+	/**
+	 * A live stroke was torn down with no lift by a path that cannot commit
+	 * what was drawn, and the surface has pen-down chrome to put back.
+	 *
+	 * NOT the blur any more. This was written as "the blur half of the
+	 * abandoned-stroke fix" when a window blur DROPPED the stroke; the ruling
+	 * of 2026-09-04 made a blur commit instead, through
+	 * `finishActiveStroke()` and `onPenUp`, so the router's own remaining call
+	 * site (the blur handler's second branch) is unreachable: it runs only
+	 * when no stroke was live, and `abandonActiveStroke()` returns false in
+	 * exactly that case. The callback stays declared and stays wired, because
+	 * the paths that still DROP a stroke are the surfaces' own - the note
+	 * switch (`InkOverlayPlugin.update`) and the pdf's in-place document
+	 * change (`forgetHistory`) - and each of them calls `abandonActiveStroke()`
+	 * itself, reads the return value (`f5f2333`), and runs the very same
+	 * `strokeAbandoned` body this member is bound to.
+	 *
+	 * Fires ONLY when a claimed pen stroke was really torn down - never inside
+	 * the post-stroke tail (that stroke's own pointerup already ran the
+	 * surface's pen-up path) and never with nothing live. Deliberately NOT
+	 * `onPenUp`: that one commits ink, and a stroke being DROPPED must not be
+	 * half-committed through a path meant for a real lift. Chrome only.
+	 *
+	 * Optional so a router can be built by something with no chrome to stand
+	 * down; both real surfaces wire it, and `INLINE_PEN_CALLBACKS`
+	 * (InkSurfaces.ts) is what holds them to that.
+	 */
+	onStrokeAbandoned?(): void;
 }
 
 /**
@@ -151,6 +205,14 @@ export interface TraceEntry {
 
 const TRACE_MAX = 3000;
 const trace: TraceEntry[] = [];
+/**
+ * Native events the ownership guard's window-capture listener has eaten
+ * since the last trace clear. Module-level (like `trace` itself, not
+ * per-router): a bug report merges every live router's trace into one
+ * timeline, and this count rides along with it, printed in the SUMMARY and
+ * reset exactly when `clearInlinePenTrace()` starts a new recording.
+ */
+let suppressedNative = 0;
 
 function tr(type: string, e: PointerEvent | null, note = "", cs?: TraceSample[]): void {
 	if (!diagnosticsEnabled()) return;
@@ -218,7 +280,7 @@ export function formatInlinePenTrace(): string {
 	return [
 		`Handwriting pen trace: ${trace.length} event(s)`,
 		"",
-		`SUMMARY: ${s.delivered} pen contact(s) delivered to the page, ${s.claimed} claimed, ${s.ignored} ignored, ${s.cancelled} cancelled.`,
+		`SUMMARY: ${s.delivered} pen contact(s) delivered to the page, ${s.claimed} claimed, ${s.ignored} ignored, ${s.cancelled} cancelled, ${suppressedNative} native event(s) suppressed by the ownership guard.`,
 		s.pressedHover > 0
 			? `  *** ${s.pressedHover} hover sample(s) with the pen PRESSED and no pointerdown. Search "PRESSED BUT NO". ***`
 			: "  No pressed-but-undelivered hover samples.",
@@ -273,6 +335,15 @@ export function captureInlinePenTrace(env: TraceEnv): TraceCapture {
 
 export function clearInlinePenTrace(): void {
 	trace.length = 0;
+	suppressedNative = 0;
+	// And every live router's per-type de-dupe set (see `liveSuppressedTypes`
+	// below). The buffer and the counter were scoped to one recording and this
+	// was not: a type de-duped during the last capture stayed de-duped into
+	// this one, so the first suppressed click of a fresh recording - the strip
+	// tap this trace exists to explain - wrote nothing, and went on writing
+	// nothing until the next pen claim happened to call `armOwnership()`. A
+	// recording that starts is a recording that has seen no event yet.
+	for (const seen of liveSuppressedTypes) seen.clear();
 }
 
 // ---- window delivery mirror -------------------------------------------------
@@ -289,6 +360,28 @@ let mirrorFn: ((e: Event) => void) | null = null;
 const MIRRORED_TYPES = ["pointerdown", "pointercancel"] as const;
 /** Every live router's scroller, so the mirror can say "was this for us". */
 const liveScrollers = new Set<HTMLElement>();
+/**
+ * Every live router's `cb.describeChrome`, registered/unregistered exactly
+ * where `liveScrollers` is (constructor/dispose). The window mirror below
+ * calls these ONLY for a pen pointerdown whose composed path misses every
+ * scroller, to say what the pen-toolbar chrome looked like at that instant -
+ * see `InlinePenCallbacks.describeChrome`. A router whose overlay left the
+ * callback undefined (the pdf surface) never adds to this set.
+ */
+const liveChromeDescribers = new Set<(target: Element | null) => string>();
+/**
+ * Every live router's `suppressedTraced` set, registered/unregistered exactly
+ * where the two above are (constructor/dispose), so `clearInlinePenTrace()`
+ * can start a recording with all of them empty.
+ *
+ * The set itself rather than the router: this is the only thing the module
+ * needs from the instance, and handing over one field cannot grow into a
+ * second way to reach a router. Registration is once per router, so nothing
+ * here is paid per event, and the loop runs only when a recording starts -
+ * with diagnostics off, `traceSuppressed` returns before it can add to any of
+ * these and the sets stay empty for the loop to walk in nothing flat.
+ */
+const liveSuppressedTypes = new Set<Set<string>>();
 
 function armWindowMirror(scrollers: () => HTMLElement[]): void {
 	mirrorRefs++;
@@ -303,11 +396,22 @@ function armWindowMirror(scrollers: () => HTMLElement[]): void {
 		if (pe.pointerType !== "pen") return;
 		const path = typeof pe.composedPath === "function" ? pe.composedPath() : [];
 		const forUs = scrollers().some((el) => path.includes(el));
-		tr(
-			`window-${pe.type}`,
-			pe,
-			`PAGE RECEIVED IT; composed path ${forUs ? "includes" : "does NOT include"} a Handwriting editor scroller`
-		);
+		let note = `PAGE RECEIVED IT; composed path ${forUs ? "includes" : "does NOT include"} a Handwriting editor scroller`;
+		// A scroller-missing pen DOWN is exactly the shape this mirror could
+		// not otherwise explain: "the page got it and something upstream of
+		// the router ate it" (module doc, above) could mean it landed on the
+		// pen-toolbar strip - mounted OUTSIDE the scroller by design - or on
+		// nothing at all. Ask every live overlay what its chrome looked like
+		// right here, so a trace stops leaving those two indistinguishable.
+		// pointerdown only: a pointercancel is not a new hit-test, and the
+		// chrome cannot have changed since the down that preceded it.
+		if (!forUs && pe.type === "pointerdown" && liveChromeDescribers.size > 0) {
+			const target = (path[0] as Element | undefined) ?? (pe.target as Element | null) ?? null;
+			for (const describe of liveChromeDescribers) {
+				note += `; ${describe(target)}`;
+			}
+		}
+		tr(`window-${pe.type}`, pe, note);
 	};
 	mirrorFn = fn;
 	for (const type of MIRRORED_TYPES) {
@@ -322,6 +426,43 @@ function disarmWindowMirror(): void {
 		window.removeEventListener(type, mirrorFn, { capture: true });
 	}
 	mirrorFn = null;
+}
+
+/**
+ * Trace-only: a click reached somewhere inside the pen-toolbar strip's own
+ * DOM (root, pill, a button, or a slider pop). MobileTools calls this from
+ * a capture-phase click listener on its own pane, so a capture running
+ * after a scroller-missing `window-pointerdown` line (above) can tell two
+ * failures apart that otherwise look identical: no line at all means the
+ * pointerdown hit the strip but no click was ever synthesized; this line
+ * with nothing useful after it means the click arrived and the strip's own
+ * handler did nothing. Checked here, not left to `tr()`'s own gate, so
+ * `describeEl` never runs while tracing is off - the listener itself stays
+ * registered for the strip's whole lifetime, not just while recording.
+ */
+export function traceStripClick(target: Element | null): void {
+	if (!diagnosticsEnabled()) return;
+	tr("strip-click", null, `reached ${describeEl(target)}`);
+}
+
+/**
+ * Trace-only entry point for OTHER surfaces (pdf, ...) to append into the
+ * SAME ring `tr()` writes, so a bug report shows one merged, time-ordered
+ * timeline instead of two that have to be correlated by hand after the
+ * fact. The pdf controller has no trace of its own - every pdf bug report
+ * to date showed only the router's view of the pointer stream and nothing
+ * about what the controller did with it (2026-09-04).
+ *
+ * Same idiom as `traceStripClick`: gated here as the second line of
+ * defence, matching `tr()`'s own gate. THE CALL-SITE RULE (DiagSwitch.ts)
+ * still governs the CALLER - `note` must be built, and any DOM/computed
+ * read it needs must happen, only after the caller's own
+ * `diagnosticsEnabled()` check, or this gate is paid for after the cost
+ * already landed.
+ */
+export function traceSurface(type: string, e: PointerEvent | null, note: string): void {
+	if (!diagnosticsEnabled()) return;
+	tr(type, e, note);
 }
 
 // ---- gesture guard ---------------------------------------------------------
@@ -518,6 +659,12 @@ export class InlinePenRouter {
 	private mouseStrokeTrail: MouseTrail | null = null;
 	private readonly mouseTrail = new MouseTrail();
 	private cb: InlinePenCallbacks;
+	/**
+	 * `cb.describeChrome`, wrapped so `dispose()` can remove exactly this
+	 * closure from the shared `liveChromeDescribers` set; null when the
+	 * overlay left `describeChrome` undefined (the pdf surface).
+	 */
+	private describeChromeFn: ((target: Element | null) => string) | null = null;
 	private scaleProvider: () => number;
 	private gate = new PalmGate();
 
@@ -582,7 +729,6 @@ export class InlinePenRouter {
 	private ownershipDisarmTimer: number | null = null;
 	/** Event types suppressed this ownership window, traced once each. */
 	private suppressedTraced = new Set<string>();
-	suppressedNative = 0;
 
 	// Cold-contact diagnosis (M2 bug #2): when did the claimed stroke start,
 	// and how late did its first input-rate samples arrive?
@@ -632,6 +778,11 @@ export class InlinePenRouter {
 		this.scaleProvider = scaleProvider;
 		this.rect = rectEl.getBoundingClientRect();
 		liveScrollers.add(scrollEl);
+		liveSuppressedTypes.add(this.suppressedTraced);
+		if (cb.describeChrome) {
+			this.describeChromeFn = (target) => cb.describeChrome!(target);
+			liveChromeDescribers.add(this.describeChromeFn);
+		}
 		armWindowMirror(() => [...liveScrollers]);
 		// Standing guard: armed from birth, so even the very first contact of
 		// a session, with zero hover, meets a committed touch-action: none.
@@ -662,14 +813,95 @@ export class InlinePenRouter {
 			tr("lostpointercapture", e, this.activePenId !== null ? "DURING STROKE" : "");
 			this.endPenStroke(e, false);
 		});
+		// pointercancel and lostpointercapture already fold a lost stroke back
+		// through endPenStroke (above). The one loss neither covers: the OS
+		// takes focus away from the window mid-stroke (alt-tab, a system
+		// dialog, the on-screen keyboard) with no pointer event at all - the
+		// pen contact just goes quiet. Without this, activePenId stays set
+		// and the window-capture click suppressor (armOwnership) never comes
+		// down: the same failure mode as the note-switch bug abandonActiveStroke
+		// was added for, reached a different way.
+		{
+			const onBlur = () => {
+				if (this.activePenId !== null) tr("blur", null, "DURING STROKE: committing");
+				// COMMITS, it does not abandon (alan, 2026-09-04: "alt tab mid
+				// stroke - sure make it consistent"). A blur used to run
+				// `abandonActiveStroke()` and drop whatever had been drawn, so
+				// alt-tabbing away mid-word threw the word away - "it never
+				// landed", on hardware. The manual already states the opposite
+				// rule for the other teardown a writer can hit mid-stroke, the
+				// pdf viewer rebuilding under the pen: the stroke commits what
+				// was drawn instead of vanishing, and only the gesture ends.
+				// A blur is the same event from the writer's side and now has
+				// the same answer on both surfaces.
+				//
+				// `finishActiveStroke()` is the whole answer when a stroke was
+				// live: it ends the stroke exactly as a lift does, so the
+				// surface's own `penUp` commits the ink AND stands the chrome
+				// down, and there is nothing left for the abandon path to do.
+				//
+				// The second branch is not the same event and is not dead: a
+				// blur with NO stroke but an armed ownership guard or a
+				// running tail still needs that bookkeeping torn down, and
+				// `abandonActiveStroke()` is what does it. Its return value
+				// stays wired to `onStrokeAbandoned` because the callback's
+				// contract is "a stroke was really torn down" and a future
+				// caller of this branch could satisfy it; today it cannot,
+				// since a live stroke never reaches here. The surfaces keep
+				// their `strokeAbandoned` bodies for the paths that still DROP
+				// a stroke - the note switch (`InkOverlayPlugin.update`) and
+				// the pdf's in-place document change (`forgetHistory`), both of
+				// which call `abandonActiveStroke()` themselves.
+				//
+				// KNOWN, unchanged by the ruling, recorded for the design doc:
+				// a pen still ON THE GLASS across blur -> refocus. Its stroke
+				// ends here, so every later sample from that same contact takes
+				// the hover branch, and its eventual real pointerup is not a
+				// stroke end any more - it escapes natively once the 350 ms
+				// ownership tail has expired, which by then it has. So a caret
+				// placement or a click can follow the pen finally coming up.
+				// That is exactly what happened before this handler committed
+				// rather than abandoned; the ruling changed what the ink does,
+				// not what the contact does.
+				if (this.finishActiveStroke()) return;
+				if (this.abandonActiveStroke()) this.cb.onStrokeAbandoned?.();
+			};
+			this.winRef.addEventListener("blur", onBlur);
+			this.disposers.push(() => this.winRef.removeEventListener("blur", onBlur));
+		}
+		// A pen leaving takes the surface's reticle with it. So does an ARMED
+		// MOUSE, and that half was missing: this handler tested `pointerType
+		// === "pen"` and nothing else, so a mouse with mouse ink on hovered a
+		// PDF, painted the reticle, left the pane - and left the reticle
+		// behind with `display: block` and `handwriting-pdf-hover` still on
+		// the scroller, whose rule is `cursor: none` across the whole viewer
+		// (styles.css). The mouse is exactly the pointer that cannot recover
+		// from this on its own: both surfaces exempt it from the hover
+		// watchdog that hides a stranded reticle, on the correct grounds that
+		// a mouse is either over the pane or has sent this very event. The
+		// exemption and the event have to be the same rule, and they were not.
+		//
+		// `onPenLeave` is safe for a mouse on both surfaces and does nothing
+		// else: the note's `hidePenCursor` clears the hover watchdog, drops
+		// PEN_HOVER_CLASS and hides the reticle element; the pdf's
+		// `hideCursor` does the same three things with its own names. Neither
+		// touches stroke state - and the `activePenId === null` guard below,
+		// which is kept for both pointers, means a button held while the
+		// pointer leaves the pane delivers nothing at all.
+		//
+		// What stays PEN-ONLY is the trace line. `tr` writes into the shared
+		// pen trace a bug report is read from, whose lines are a pen's story;
+		// a mouse drifting off the pane is not an event that story is missing,
+		// and adding it would put a line in every report that has a mouse near
+		// the pane. The mouse takes the ONE action it needs and no bookkeeping.
 		on("pointerleave", (e) => {
-			if (e.pointerType === "pen") {
-				tr("pointerleave", e, this.activePenId !== null ? "DURING STROKE" : "");
-				const next = e.relatedTarget as Node | null;
-				const stillInside =
-					next !== null && typeof next.nodeType === "number" && this.scrollEl.contains(next);
-				if (this.activePenId === null && !stillInside) this.cb.onPenLeave();
-			}
+			const isPen = e.pointerType === "pen";
+			if (!isPen && !this.mouseActsAsPen(e)) return;
+			if (isPen) tr("pointerleave", e, this.activePenId !== null ? "DURING STROKE" : "");
+			const next = e.relatedTarget as Node | null;
+			const stillInside =
+				next !== null && typeof next.nodeType === "number" && this.scrollEl.contains(next);
+			if (this.activePenId === null && !stillInside) this.cb.onPenLeave();
 		});
 		// The linked-mentions band (`.embedded-backlinks`) renders in the SAME
 		// view but OUTSIDE the scroller, so a pen landing there was never
@@ -959,10 +1191,243 @@ export class InlinePenRouter {
 	}
 
 	private traceSuppressed(type: string): void {
-		this.suppressedNative++;
+		// Gate FIRST: the de-dupe bookkeeping below must never run while
+		// recording is off, or a type "already traced" while OFF stays silent
+		// forever after - even once recording turns back on - until the next
+		// armOwnership() happens to clear the set. Same call-site rule tr()
+		// itself follows (DiagSwitch.ts): nothing here costs more than the one
+		// boolean read when diagnostics are off.
+		if (!diagnosticsEnabled()) return;
+		suppressedNative++;
 		if (this.suppressedTraced.has(type)) return;
 		this.suppressedTraced.add(type);
 		tr("suppressed", null, `${type}: claimed pen gesture owns this interaction`);
+	}
+
+	/**
+	 * End a live pen stroke the way a LIFT would, with no pointer event to end
+	 * it. The blur half of `endPenStroke`, and `abandonActiveStroke`'s
+	 * opposite number.
+	 *
+	 * The owner's ruling (2026-09-04, "alt tab mid stroke - sure make it
+	 * consistent"): a window blur mid-stroke commits what was drawn instead of
+	 * dropping it, which is what `docs/manual.md` already promises for the pdf
+	 * viewer rebuilding under the pen - "the stroke commits what was drawn
+	 * instead of vanishing; only the gesture ends".
+	 *
+	 * Deliberately NOT routed through `abandonActiveStroke()`. That method's
+	 * contract is a stroke being DROPPED: it never calls `cb.onPenUp`, and it
+	 * tears down state a real lift leaves standing (the touch bookkeeping, the
+	 * ownership guard, and the resting touch-action guard whose removal was
+	 * the lit-nib regression `2e880b4` fixed). This one is `endPenStroke`'s
+	 * body instead, for the same reason a real pen-up is:
+	 *
+	 *   - the ownership tail is ARMED, not torn down, so the click/auxclick/
+	 *     contextmenu fallout that follows any stroke end is still eaten for
+	 *     the same 350 ms a normal lift eats it for;
+	 *   - `guardApplied` is untouched, because armed IS the resting state.
+	 *
+	 * The touch bookkeeping IS cleared, and that is the one place this method
+	 * cannot copy a real lift. A lift is a pointer event, so the fingers that
+	 * were down alongside it still report their own; a blur is precisely the
+	 * event that reports nothing, which is this handler's whole reason for
+	 * existing (see its header: "the pen contact just goes quiet"). That
+	 * argument was written about the pen and is exactly as true of a palm
+	 * resting beside it - its `pointerup` and its `touchend` never arrive
+	 * either, so `guardTouches.delete` and `manip.touchEnd` never run. Leave
+	 * the maps alone and they are stranded for the life of the router, which
+	 * makes `abandonActiveStroke`'s `hasLiveGesture` permanently true: every
+	 * later note switch and every pdf `forgetHistory` stops being the
+	 * `2e880b4` no-op and calls `restoreGuardStyle()` with nothing live,
+	 * stripping the standing `touch-action: none` from under the first contact
+	 * as a note opens. That is the lit-nib regression, reached the long way.
+	 *
+	 * Cleared, NOT released: no `restoreGuardStyle()`, no `manip.touchEnd()`,
+	 * because there is no lift to report and the guard's resting state is
+	 * armed. A contact that does report later finds nothing to delete and does
+	 * nothing - the "never saw this contact" state `abandonActiveStroke`'s own
+	 * header argues a stood-down router should be left in.
+	 *
+	 * Capture IS released, which `endPenStroke` does not do: a real pointerup
+	 * releases it implicitly and a blur delivers no pointerup at all, so
+	 * without this the scroller keeps an implicit capture for a pointer that
+	 * will never report again.
+	 *
+	 * `cb.onPenUp()` is called with NO event - see the callback's own header
+	 * for why nothing is synthesised in its place. Returns whether a live pen
+	 * stroke was actually finished, so the blur handler can tell this case
+	 * from "nothing live" and from "ownership bookkeeping only".
+	 */
+	finishActiveStroke(): boolean {
+		if (this.activePenId === null) return false;
+		// Null FIRST, then release. `releasePointerCapture` is what raises
+		// `lostpointercapture`, whose handler calls `endPenStroke(e, false)` -
+		// a second full commit, `cb.onPenUp` included - and the only thing
+		// stopping it is `endPenStroke`'s own `activePenId === null` test.
+		// Chromium dispatches that event asynchronously, so nothing re-enters
+		// here on a device, but that is the engine's scheduling holding the
+		// invariant up rather than this code, and it became load-bearing the
+		// moment this path started calling `onPenUp`.
+		const penId = this.activePenId;
+		this.activePenId = null;
+		try {
+			this.scrollEl.releasePointerCapture(penId);
+		} catch {
+			/* best-effort; capture may already be gone */
+		}
+		this.penUps++;
+		telemetry.bump("inline.penUp");
+		this.disarmEndBackstop();
+		this.inkFeed.strokeEnd();
+		this.gate.penStrokeEnded(performance.now());
+		this.touchesAtStrokeStart.clear();
+		// The contacts the blur orphans alongside the pen - see the header.
+		// liveTouchIds is NOT among them: unlike touchPos/guardTouches (OUR
+		// bookkeeping), it mirrors what the browser itself still thinks is
+		// down, fed only by real touchstart/touchend/touchcancel. A finger
+		// physically on the glass across the blur is still physically on the
+		// glass after it; clearing the mirror here would just make it wrong
+		// until that finger's own touchend/touchcancel arrives to correct
+		// it - and the NEXT stroke's touchesAtStrokeStart snapshot (see
+		// touchesPredateStroke) would read empty for a contact that has been
+		// down the whole time, so its later touchend gets eaten as if it
+		// were a fresh mid-stroke touch.
+		this.touchPos.clear();
+		this.guardTouches.clear();
+		this.gesturePanned = false;
+		this.cancelFling();
+		// Standing guard: no release. Armed IS the resting state.
+		hideProbeMarkers();
+		// A blur is not the end of the fallout. The window that took focus can
+		// hand it straight back (a dismissed dialog, the on-screen keyboard
+		// closing) and the trailing click lands here, so the tail is armed the
+		// same way `endPenStroke` arms it.
+		this.scheduleOwnershipDisarm();
+		this.cb.onPenUp();
+		return true;
+	}
+
+	/**
+	 * Called when the surface this router is bound to is about to show a
+	 * different note (or otherwise loses continuity with whatever pen/touch
+	 * contacts it was tracking): end any in-flight stroke and stand ownership
+	 * down immediately, not through the normal post-stroke tail.
+	 *
+	 * Unlike `dispose()` this does NOT remove the scroller listeners or drop
+	 * the router from `liveScrollers` - the router keeps routing for the new
+	 * note, it just cannot carry the old note's gesture into it. A lost
+	 * pointerup (finger resting through the switch, so its lift never reaches
+	 * this editor) must not leave `activePenId` set: that would keep the
+	 * window-capture click suppressor armed forever, eating every future pen
+	 * tap on the toolbar strip.
+	 *
+	 * Touch bookkeeping (`touchPos`/`liveTouchIds`/`guardTouches`) is cleared
+	 * rather than carried over. A brand-new `InlinePenRouter` (opening the
+	 * note in a fresh pane) starts with these collections empty even when a
+	 * finger is already resting on the glass at construction time, because
+	 * `pointerdown` only fires for contacts made AFTER the listener attaches
+	 * - a pre-existing finger is simply invisible to a fresh router until it
+	 * lifts and lands again. Standing ownership down should leave the router
+	 * in that same "never saw this contact" state, not a half-tracked one.
+	 *
+	 * Returns whether a live PEN STROKE was actually torn down (as opposed to
+	 * nothing live, or only touch/gesture bookkeeping with no claimed pen
+	 * contact). Only a claimed stroke could have told the strip chrome
+	 * `setInking(true)` (InkOverlay.penDown -> stripPenDown), and this path
+	 * - unlike a normal pointerup - never calls back into the overlay at all,
+	 * so the caller uses the return value to put that chrome down itself
+	 * (`stripPenUp`) exactly when there is a stale "mid-stroke" strip to
+	 * undo. Skipping that call the rest of the time keeps a routine switch
+	 * with nothing to abandon byte-for-byte the no-op it already was.
+	 */
+	abandonActiveStroke(): boolean {
+		// `guardApplied` is deliberately NOT part of this predicate. The
+		// resting state of a router is guard-ARMED (touch-action: none on
+		// the scroller, ManipulationGuard's header: "the resting state must
+		// already be touch-action: none BEFORE the pen exists") - every
+		// fresh router starts with guardApplied === true before any pen or
+		// touch has been seen. `restoreGuardStyle()` below un-arms it, which
+		// is correct cleanup for a stroke/ownership this method is actually
+		// tearing down, but firing it on a router that never armed anything
+		// ELSE (no stroke, no ownership, no touch) strips the baseline
+		// touch-action guard right as a note opens (`update()`'s path-change
+		// branch, unconditionally) or on any window blur (`dcf0254`, also
+		// unconditionally) - a frame or more before a pen can exist, which
+		// is exactly when Chromium needs that guard already committed to
+		// recognize pen contact/hover cleanly. That is the lit-nib
+		// regression: the light never gets the hardware event it is waiting
+		// on because the guard that was supposed to already be in place got
+		// pulled out from under the first contact.
+		//
+		// So: nothing live to abandon means no stroke, no armed ownership,
+		// no pending ownership tail/timer, no fling, no touch bookkeeping.
+		// "Abandon the active stroke" with none of that present must change
+		// NO state - guard style included. This predicate is every OTHER
+		// condition the block below can act on; keep it in sync as this
+		// method grows.
+		//
+		// `ownershipTailUntil` is read as the DEADLINE it is, not as a flag.
+		// It is set at every stroke end (`scheduleOwnershipDisarm`) and
+		// cleared nowhere but the teardown below, so `!== 0` - what this term
+		// said until now - was permanently true from the session's FIRST
+		// completed stroke onward. That made the whole predicate permanently
+		// true, which meant every later note switch and every later blur ran
+		// the full teardown including `restoreGuardStyle()`: the lit-nib
+		// regression this predicate was written to stop, back again after one
+		// stroke. Nothing WRITES the field differently, which is what keeps
+		// `suppressNativeFallout` (which reads the same deadline for the same
+		// 350ms) behaving exactly as it did inside a live tail.
+		const hasLiveGesture =
+			this.activePenId !== null ||
+			this.ownershipFn !== null ||
+			this.ownershipDisarmTimer !== null ||
+			performance.now() < this.ownershipTailUntil ||
+			this.flingRaf !== 0 ||
+			this.gesturePanned ||
+			this.touchesAtStrokeStart.size > 0 ||
+			this.touchPos.size > 0 ||
+			this.liveTouchIds.size > 0 ||
+			this.guardTouches.size > 0;
+		if (!hasLiveGesture) return false;
+		const hadStroke = this.activePenId !== null;
+		if (this.activePenId !== null) {
+			// Null FIRST, then release - same ordering as `finishActiveStroke`
+			// and for a sharper reason. `lostpointercapture` commits through
+			// `endPenStroke`, so a synchronous dispatch would make THIS method
+			// call `cb.onPenUp` for a stroke it is dropping, which is the one
+			// thing its contract promises it never does.
+			const penId = this.activePenId;
+			this.activePenId = null;
+			try {
+				this.scrollEl.releasePointerCapture(penId);
+			} catch {
+				/* best-effort; capture may already be gone */
+			}
+			this.disarmEndBackstop();
+			this.inkFeed.strokeEnd();
+			this.gate.penStrokeEnded(performance.now());
+			hideProbeMarkers();
+		}
+		this.touchesAtStrokeStart.clear();
+		this.touchPos.clear();
+		// Unlike finishActiveStroke, THIS clear stays: a note switch is
+		// defined to leave the router in the same "never saw this contact"
+		// state a brand-new router would start in (see this method's own
+		// header), so a resting finger is deliberately forgotten here even
+		// though it is still physically down - a blur is not a note switch
+		// and must not forget it.
+		this.liveTouchIds.clear();
+		this.guardTouches.clear();
+		this.gesturePanned = false;
+		this.cancelFling();
+		if (this.ownershipDisarmTimer !== null) {
+			window.clearTimeout(this.ownershipDisarmTimer);
+			this.ownershipDisarmTimer = null;
+		}
+		this.ownershipTailUntil = 0;
+		this.disarmOwnership();
+		this.restoreGuardStyle();
+		return hadStroke;
 	}
 
 	dispose(): void {
@@ -970,6 +1435,11 @@ export class InlinePenRouter {
 		this.touchPos.clear();
 		this.pinchLive = false;
 		liveScrollers.delete(this.scrollEl);
+		liveSuppressedTypes.delete(this.suppressedTraced);
+		if (this.describeChromeFn) {
+			liveChromeDescribers.delete(this.describeChromeFn);
+			this.describeChromeFn = null;
+		}
 		disarmWindowMirror();
 		for (const d of this.disposers) d();
 		this.disposers = [];

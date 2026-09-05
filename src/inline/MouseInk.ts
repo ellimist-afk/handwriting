@@ -42,19 +42,30 @@ export function mouseActsAsPen(pointerType?: string): boolean {
 }
 
 /**
- * Persistence hook, the eraser slider's pattern: main registers a writer so
- * the strip can arm mouse ink QUIETLY as part of a tool click - one click,
- * one toast (alan, 2026-08-31) - without losing the setting on restart.
- * The toggle command stays the loud path.
+ * Arm mouse ink QUIETLY: a mouse clicking a tool button it cannot yet use
+ * means "give the mouse this tool" (MobileTools.ts), and the exec beside this
+ * has already named what was picked - one click, one toast (alan,
+ * 2026-08-31). The toggle command stays the loud path.
+ *
+ * QUIET IS FOR THIS SESSION; LOUD IS FOR DISK. ALAN, 2026-09-04: "dont
+ * persist a quiet arm". This used to call a writer main.ts registered here,
+ * the eraser slider's pattern, so that a tool click would not "lose the
+ * setting on restart" - which turned out to be the defect rather than the
+ * feature. Users reported mouse ink "keeps turning on by itself": one click
+ * on the eraser in one note, and every launch afterwards came up with the
+ * mouse claimed and text selection gone, with nothing on screen to say why.
+ * Nobody asks for the MODE here - they ask for the eraser, and arming the
+ * mouse is only what that request needs in order to mean anything.
+ *
+ * So this flips the flag and stops. The two LOUD writers - the mouse-ink
+ * toggle command and the settings switch, the two places the mode is asked
+ * for by name - own `settings.mouseInk` between them, and main.ts's
+ * `setMouseInk(this.settings.mouseInk)` at load is unchanged: an explicit ON
+ * still comes back, and a quiet arm is simply not there to be found.
  */
-let persist: ((on: boolean) => void) | null = null;
-export function setPersistMouseInk(fn: (on: boolean) => void): void {
-	persist = fn;
-}
 export function armMouseInkQuietly(): void {
 	if (enabled) return;
 	enabled = true;
-	persist?.(true);
 }
 
 /**
@@ -73,6 +84,12 @@ export function armMouseInkQuietly(): void {
  * beside this already toasts, and one click owes one toast (alan,
  * 2026-08-31). The toggle command stays the loud path.
  *
+ * Session-only for the reason `armMouseInkQuietly` is, and under the same
+ * ruling (alan, 2026-09-04): this hands THIS session's pointer back to text
+ * and writes nothing. Someone who turned the mode on BY NAME still has it at
+ * the next launch - putting a tool down was never asked to be the off switch
+ * for their setting, only for the claim on the pointer in front of them.
+ *
  * Callers must also put the nib light out - turning mouse ink off darkens it
  * "at any point" - which is why the two are paired once in
  * `releaseMouseInkQuietly` (PenToolsMode.ts) rather than at each call site.
@@ -82,7 +99,6 @@ export function armMouseInkQuietly(): void {
 export function disarmMouseInkQuietly(): void {
 	if (!enabled) return;
 	enabled = false;
-	persist?.(false);
 }
 
 /**

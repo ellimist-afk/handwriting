@@ -61,9 +61,11 @@ import {
 	getInlineTool,
 	penReticleEnabled,
 	pickStripColor,
+	armMouseInkQuietlyEverywhere,
 	releaseMouseInkQuietlyEverywhere,
 } from "../inline/InkOverlay";
-import { InlinePenRouter } from "../inline/InlinePenRouter";
+import { InlinePenRouter, traceSurface } from "../inline/InlinePenRouter";
+import { describeEl } from "../inline/PenHitProbe";
 import { PenSample } from "../input/PointerRouter";
 import { InkOp } from "../inline/InkHistory";
 import { newStrokeId } from "../ink/Stroke";
@@ -81,7 +83,7 @@ import {
 	setEraserWholeStrokes,
 	setInkSizeMult,
 } from "../inline/InkOverlay";
-import { armMouseInkQuietly, mouseInkEnabled } from "../inline/MouseInk";
+import { mouseInkEnabled } from "../inline/MouseInk";
 import { MobileTools } from "../inline/MobileTools";
 import {
 	armStripPenFocus,
@@ -91,9 +93,21 @@ import {
 } from "../inline/StripPenChrome";
 import { clipboardSize } from "../inline/InkClipboard";
 import { colorsFor } from "../ink/InkColor";
-import { penContactIntent, releaseTipMode, tipMode, tipModeHeld } from "../inline/TipMode";
+import { PenContactIntent, penContactIntent, releaseTipMode, tipMode, tipModeHeld } from "../inline/TipMode";
 import { PdfInkHistory } from "./PdfInkHistory";
 import { PageBox, livePages, pageAt, snipViewport, toPagePoint } from "./PageMap";
+import {
+	Band,
+	PageBandBox,
+	bandBacking,
+	bandFor,
+	bandNeedsMove,
+	pageBandFor,
+	ScrollerSize,
+	scrollerSizeOf,
+	viewportAt,
+	wholePage,
+} from "./PageBand";
 import { findScaleFactor, ProbedViewer, probeViewer, viewerCanvasOf } from "./PdfViewerProbe";
 
 const OVERLAY_CLASS = "handwriting-pdf-ink";
@@ -106,6 +120,71 @@ const INK_OVER_CLASS = "handwriting-pdf-ink-over";
  * class, so a hovering pen defeated its own probe cache every time it moved.
  */
 const OWN_CLASSES = [OVERLAY_CLASS, INK_OVER_CLASS, "handwriting-pdf-cursor"];
+
+// ---- pdf trace --------------------------------------------------------------
+//
+// The bug-report recorder's timeline (`tr()` in InlinePenRouter.ts) had zero
+// lines from this surface: every pdf bug report to date showed only the
+// router's view of the pointer stream, never what this controller did with
+// it. Two investigations stalled on that blindness on 2026-09-04 - a mouse
+// eraser ring that reportedly freezes while erasing continues, and palm/pinch
+// reports with only a point-in-time snapshot (`describe()`) to go on. These
+// lines go through `traceSurface`, into the SAME ring, so a report merges
+// both surfaces into one time-ordered read.
+//
+// THE CALL-SITE RULE applies here exactly as it does in the router: every
+// site below reads `diagnosticsEnabled()` ONCE per call (`penDown`/`penRaw`/
+// `penUp` each compute it into a local) and every string, `describeEl` call
+// or reticle read happens only behind that boolean. Off, the added cost is
+// one boolean read per pointer event plus one integer increment per raw
+// batch - nothing heavier.
+
+/**
+ * Why `showCursor` (or one of its thin per-mode wrappers) did or did not
+ * repaint the reticle. Diagnostic only - every real caller already ignored
+ * the return value when it was `void`, and still does; this is read back
+ * only by the trace sites below.
+ */
+type ReticleOutcome = "wrote" | "off" | "no-probe" | "no-scale" | "no-cursor-el";
+
+/**
+ * A `penRaw` batch is traced once for the first 5 of a gesture, then every
+ * 25th - a long drag can run into the hundreds of batches, and a report
+ * with one line per batch is not one anybody reads. `penUp` forces one more
+ * line for whichever batch this rate limit last skipped, so the gesture's
+ * final state always reaches the report even when its index was not a
+ * multiple of 25.
+ */
+function pdfRawShouldEmitBatch(index: number): boolean {
+	return index <= 5 || index % 25 === 0;
+}
+
+/** Per-gesture trace bookkeeping. Reset at the top of every `penDown`. */
+interface PdfTraceGestureState {
+	/** Every `penRaw` call this gesture, traced or not. */
+	batchIndex: number;
+	/** The batch index the rate limit last actually emitted, 0 if none yet. */
+	lastEmittedIndex: number;
+	/** The note the rate limit would have printed for the current batch. */
+	lastNote: string;
+	/** The event that came with the current batch, for the forced pen-up line. */
+	lastEv: PointerEvent | null;
+	/** How many erase/draw batches this gesture asked the reticle for anything. */
+	reticleAttempts: number;
+	/** Outcome -> count, across this gesture's erase/draw batches. */
+	reticleOutcomeCounts: Record<string, number>;
+}
+
+function freshPdfTraceState(): PdfTraceGestureState {
+	return {
+		batchIndex: 0,
+		lastEmittedIndex: 0,
+		lastNote: "",
+		lastEv: null,
+		reticleAttempts: 0,
+		reticleOutcomeCounts: {},
+	};
+}
 
 /**
  * Is this event aimed at somewhere the user is typing?
@@ -121,8 +200,54 @@ function isTypingTarget(target: EventTarget | null): boolean {
 	return tag === "input" || tag === "textarea" || el.isContentEditable === true;
 }
 
-/** Device pixels one page overlay may hold, mirroring the note layer's bound. */
-const MAX_OVERLAY_PX = 4_000_000;
+/**
+ * Device pixels one page overlay may hold - a backstop, not a policy.
+ *
+ * It used to be 4M and it used to be the thing that decided resolution: the
+ * canvas covered the WHOLE page, so at high zoom the area it was asked for
+ * was tens of millions of css px, the cap divided the backing down to well
+ * under one device pixel per css pixel, and the ink was rasterised below
+ * screen resolution and stretched. pdf.js's own page canvas has a much larger
+ * budget, so the page stayed sharp underneath and only the ink went soft
+ * ("at max zoom, pretty blurry still" - alan, hardware, 2026-09-04).
+ *
+ * The canvases now cover a BAND (see `PageBand`), whose area is bounded by
+ * the viewport instead of by the zoom, so this number stops being reached in
+ * ordinary use and goes back to being what a cap is for: refusing an
+ * allocation the browser would refuse anyway, silently, leaving a blank
+ * canvas nobody can debug. Raised to the note surface's `MAX_BACKING_AREA`,
+ * because it is now guarding the same thing that budget guards and there is
+ * no reason for the two surfaces to disagree about how big a canvas may be.
+ */
+const MAX_OVERLAY_PX = 10_000_000;
+
+/**
+ * Device pixels a SNIP may hold - and a separate number on purpose.
+ *
+ * The two shared `MAX_OVERLAY_PX` while it was 4M, which was a coincidence of
+ * value rather than a shared reason, and raising the overlay cap silently
+ * raised this one with it: a lasso and a snip could produce a 10M px PNG, two
+ * and a half times what the feature ever shipped at, pasted into a note and
+ * synced. Nothing about the band argues for a bigger picture - the band cap is
+ * a backstop against an allocation the browser would refuse, while this one is
+ * a judgement about how big a file it is polite to put in someone's vault - so
+ * it keeps the number it was written with.
+ */
+const MAX_SNIP_PX = 4_000_000;
+
+/**
+ * The geometry a gesture froze at pen-down: every live page's box, the scale
+ * they were measured at, and the scroller they belong to. Named because
+ * `penUp` now hands it to `addFinalPoint` rather than leaving it on the field
+ * for it to read - the field is released above the mode branches, so nothing
+ * below that line may still believe it is there.
+ */
+type PenFrame = { boxes: PageBox[]; scale: number; scroller: HTMLElement };
+
+/** Is a canvas already covering exactly this box? Part of the repaint skip. */
+function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
+	return a !== null && a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
+}
 
 /** A snip: the PNG and the page it left, or the reason there is none. */
 export type SnipResult =
@@ -146,6 +271,27 @@ const PAN_CURSOR_RADIUS_PX = 11;
 const SPACE_CURSOR_HALF_PX = 24;
 
 /**
+ * The page scale at which a pdf nib weighs exactly its note width, in css px
+ * per page point. pdf.js calls this zoom "150%".
+ *
+ * A REFERENCE, never the live scale, and that distinction is the whole of the
+ * fix below: the stored width is divided by this fixed number once, so it is a
+ * constant in page points and the ink obeys the page rather than the pane.
+ * Dividing by the LIVE scale instead made every stroke the same number of css
+ * px whatever the zoom - draw at 3x and the line was a third of a nib on the
+ * page, invisible again the moment you zoomed back out (alan, hardware,
+ * 2026-09-04).
+ *
+ * 2 is chosen so an ordinary view lands where 2026-08-29 asked it to: a
+ * fit-width portrait page in a normal pane measured 1.87 css px/pt on
+ * hardware, at which a 2.2 note nib shows as 2.06 css px - within a few
+ * percent of note ink. It is the ONE number to turn if pdf ink should be
+ * heavier or lighter across the board; nothing else in the width path is a
+ * free constant.
+ */
+export const PDF_NIB_REFERENCE_SCALE = 2;
+
+/**
  * The pen's stored width on this surface, in PAGE units.
  *
  * One function because two call sites have to agree. The stroke stores this,
@@ -153,7 +299,20 @@ const SPACE_CURSOR_HALF_PX = 24;
  * width of the ink it is about to lay down. They drifted apart the moment the
  * stroke started dividing by the scale and the reticle did not: the dot came
  * out at nearly twice the width of the line (hardware, 2026-08-29).
+ *
+ * The scale is not an argument any more. Both sites multiply the result by the
+ * live scale themselves - the renderer does it for the stroke, `showCursor`
+ * for the dot - so a width that came in already divided by that same scale
+ * cancelled it out, and the ink stopped belonging to the page. On screen a
+ * stroke is now `baseWidth * sizeMult * liveScale / PDF_NIB_REFERENCE_SCALE`:
+ * it thickens with the text as you zoom in, and it weighs the same on the page
+ * whatever zoom it was drawn at, which is the law the note surface has always
+ * had (InkOverlay's activeStyle.baseWidth is never divided by anything).
  */
+export function pdfPenWidth(baseWidth: number, sizeMult: number): number {
+	return (baseWidth * sizeMult) / PDF_NIB_REFERENCE_SCALE;
+}
+
 /**
  * The scale a pointer sample is converted with: from the BOX, falling back to
  * the viewer's own number when the page has no measured size yet.
@@ -166,10 +325,6 @@ const SPACE_CURSOR_HALF_PX = 24;
  */
 export function pointerScale(boxWidthPx: number, pageWidthPt: number, fallback: number): number {
 	return pageWidthPt > 0 && boxWidthPx > 0 ? boxWidthPx / pageWidthPt : fallback;
-}
-
-export function pdfPenWidth(baseWidth: number, sizeMult: number, scale: number): number {
-	return (baseWidth * sizeMult) / scale;
 }
 
 /**
@@ -220,6 +375,15 @@ interface Attached {
 	/** What this canvas was last painted for, so an unchanged page is skipped. */
 	paintedScale: number;
 	paintedCount: number;
+	/**
+	 * And WHERE it was painted. The band joins the skip test because a band
+	 * move changes nothing else: same scale, same stroke count, different
+	 * pixels. Without it the scroll that repositions a canvas would leave the
+	 * old raster in the new place - the ink visibly sliding by the size of the
+	 * move - which is exactly the failure the note surface's `scheduleRepaint`
+	 * on a moved band prevents.
+	 */
+	paintedBand: PageBandBox | null;
 }
 
 /**
@@ -254,6 +418,53 @@ interface WetPair {
 export class PdfInkController {
 	private overlays = new Map<number, Attached>();
 	/**
+	 * The box every page's canvases are cut from, in the SCROLLER's content
+	 * coordinates - one band for the whole document, intersected per page.
+	 *
+	 * One rather than one-per-page because that is what makes the total honest:
+	 * the pages tile the scroller, so the sum of their bands is the band, and
+	 * the pixel cost of a hundred-page pdf at 800% is the same as a one-page
+	 * pdf at 100%. Null until the first sync measures the scroller.
+	 */
+	private band: Band | null = null;
+	/**
+	 * Device pixels per css pixel for every canvas the band touches - ONE
+	 * number, derived from the band above and not from any page's slice of it.
+	 *
+	 * It was per page, and that was wrong twice over. A page holding only the
+	 * band's top 400px measured 400px, found it fitted the cap with room to
+	 * spare and took a full `dpr`, while the page below it measured the whole
+	 * 1200 and was divided down: two pages side by side on screen rasterised
+	 * at different resolutions, with a visible seam at the join. And the cap
+	 * then bounded EACH canvas rather than the band, so N pages in one band
+	 * could hold N times the budget - which is the opposite of the claim this
+	 * whole change rests on, that the cost of a document is the band's area.
+	 *
+	 * Zero means "not derived yet". Recomputed when the band moves and when
+	 * the display changes underneath us (`bandBackingDpr`), which is the one
+	 * input that can change without the band moving at all.
+	 */
+	private bandBackingPx = 0;
+	/** The `devicePixelRatio` `bandBackingPx` was derived at. */
+	private bandBackingDpr = 0;
+	/**
+	 * The scroller's four size fields, measured at each `sync` and re-used by
+	 * every scroll event until the next one. See `ScrollerSize`: these are
+	 * layout reads and the scroll listener must not make them. Null until the
+	 * first sync, and dropped when the scroller is replaced.
+	 */
+	private scrollerSize: ScrollerSize | null = null;
+	/** The scroll listener, kept so add and remove pass the same function. */
+	private readonly onScroll = (): void => {
+		const scroller = this.boundScroller;
+		// The whole hot path. `syncBand` is a `bandNeedsMove` call and nothing
+		// else when the viewport is still inside the margin, which is the
+		// overwhelming majority of scroll events; only a scroll that has eaten
+		// into the margin reaches `schedule`, and only then does anything
+		// proportional to the ink on screen run.
+		if (scroller && this.syncBand(scroller)) this.schedule();
+	};
+	/**
 	 * The one wet/head pair, built on first use and kept for the life of the
 	 * controller. Two panes on one pdf are two controllers, so nothing here is
 	 * shared across panes.
@@ -268,6 +479,18 @@ export class PdfInkController {
 	 * have its own blank wet canvas.
 	 */
 	private wetHostPage = 0;
+	/**
+	 * The band `attachPair` last wrote into the pair's transform, so a pure
+	 * translation (same width/height, different origin - a tall page at high
+	 * zoom) can be told apart from a genuine resize or a page change. See the
+	 * clear condition in `attachPair`: the transform is rewritten on every
+	 * attach regardless, but the RASTER already on the pair does not move
+	 * with it, so a translation with neither condition true left standing
+	 * pixels (today: a lasso outline) to be re-presented displaced by the
+	 * band delta the next time anything drew. Null exactly when `pair` is
+	 * null or detached, same as `wetHostPage` tracks parentage.
+	 */
+	private pairBand: PageBandBox | null = null;
 	/** Whether the stroke on the wet layer right now is a highlighter. */
 	private wetHighlighter = false;
 	/**
@@ -403,7 +626,7 @@ export class PdfInkController {
 	private strokeStyle: PenStyle = { ...DEFAULT_PEN };
 	private router: InlinePenRouter | null = null;
 	/** Live geometry for the stroke, read once at pen-down and then frozen. */
-	private frame: { boxes: PageBox[]; scale: number; scroller: HTMLElement } | null = null;
+	private frame: PenFrame | null = null;
 	/** The last drawn point, in page units, for the wet segment. */
 	private wetFrom: { x: number; y: number; pressure: number } | null = null;
 	/**
@@ -446,6 +669,16 @@ export class PdfInkController {
 	/** Whether the reticle's single teardown is already registered. */
 	private cursorDisposed = false;
 	private cursorTimer: ReturnType<Window["setTimeout"]> | null = null;
+	/**
+	 * The exact transform string the last successful `showCursor` wrote, for
+	 * the `pdf-raw` trace to read back - never recomputed independently,
+	 * which would be a second copy of the cx/cy/r arithmetic to drift.
+	 */
+	private lastCursorTransform: string | null = null;
+	/** Trace-only: was the reticle hidden as of the last showCursor/hideCursor call? Drives the `pdf-hover` transition line - see `showCursor`. */
+	private cursorTraceHidden = true;
+	/** This gesture's `penRaw` trace bookkeeping. Reset at `penDown`. */
+	private pdfTrace: PdfTraceGestureState = freshPdfTraceState();
 	/** The floating pen strip, whenever the visibility rule says there is one. */
 	private tools: MobileTools | null = null;
 	/**
@@ -602,11 +835,9 @@ export class PdfInkController {
 			// strip lights follow the input here exactly as on notes.
 			mouseInkOn: () => mouseInkEnabled(),
 			recordingOn: () => diagnosticsEnabled(),
-			setMouseInk: (on) => {
-				if (mouseInkEnabled() !== on) this.exec("handwriting:mouse-ink-toggle");
-			},
-			armMouseInkQuietly: () => armMouseInkQuietly(),
+			armMouseInkQuietly: () => armMouseInkQuietlyEverywhere(),
 			disarmMouseInkQuietly: () => releaseMouseInkQuietlyEverywhere(),
+			toast: (message) => this.notify(message),
 			exec: (id) => this.stripExec(id),
 			activeTool: () => getInlineTool(),
 			eraserOn: () => getInlineEraserMode(),
@@ -808,6 +1039,7 @@ export class PdfInkController {
 		this.disposers.push(() => {
 			this.router?.dispose();
 			this.ro?.disconnect();
+			this.boundScroller?.removeEventListener("scroll", this.onScroll);
 		});
 
 		// Undo scoped to this view, not a global command. Obsidian's own undo
@@ -982,7 +1214,23 @@ export class PdfInkController {
 	private bindTo(scroller: HTMLElement): void {
 		this.router?.dispose();
 		this.ro?.disconnect();
+		this.boundScroller?.removeEventListener("scroll", this.onScroll);
 		this.boundScroller = scroller;
+		// A scroll listener, which this surface deliberately did not have.
+		//
+		// The note at the mutation observer says a scroll listener "would fire
+		// far more often and tell us less: page geometry does not move with
+		// scroll", and that is still true of GEOMETRY. It is no longer true of
+		// COVERAGE: the canvases cover a band around the viewport now, so
+		// where the viewport is is the one thing scroll - and only scroll -
+		// changes. The cost objection is answered by the listener's own body:
+		// passive, and a comparison against the current band before anything
+		// else happens.
+		this.band = null;
+		// A different element is a different size; the cached one belongs to
+		// the scroller that just went.
+		this.scrollerSize = null;
+		scroller.addEventListener("scroll", this.onScroll, { passive: true });
 		// This surface hands two-finger gestures to the viewer on purpose
 		// (see the touch-action note below), which means the pen-proximity
 		// gate cannot be the whole answer: a hand nudging the glass with no
@@ -1042,6 +1290,11 @@ export class PdfInkController {
 				// expensive defect shape rebuilt at small scale.
 				onPenMove: (_ev, count) => this.metrics.recordEvent("move", count, 0, false),
 				onPenUp: (ev) => this.penUp(ev),
+				// See `strokeAbandoned`. A named method rather than the body
+				// inline: the surface registry's check for this wiring is a
+				// scan of raw source text, which a comment satisfies, so the
+				// body needs to be somewhere a test can call.
+				onStrokeAbandoned: () => this.strokeAbandoned(),
 			},
 			() => 1,
 			// The viewer keeps its own pinch: nothing here implements one, and
@@ -1089,6 +1342,7 @@ export class PdfInkController {
 		this.tools = null;
 		this.dropOverlays();
 		this.boundScroller = null;
+		this.band = null;
 	}
 
 	/**
@@ -1100,6 +1354,60 @@ export class PdfInkController {
 	 * is a surprise with no upside.
 	 */
 	forgetHistory(): void {
+		// FIRST, before anything below can forget what the gesture was.
+		//
+		// This is the pdf's in-place file switch (main.ts, the branch that
+		// compares a non-empty path against `pdfFiles`), and the pane is
+		// REUSED - so is the router, and so is whatever contact it was
+		// tracking. `7c95c39` fixed exactly this on the note surface and this
+		// file never got it: a pen contact whose lift was lost across the
+		// switch (a finger resting on the glass, landing on a document the
+		// router never saw a pointerdown for) leaves `activePenId` set
+		// forever, which keeps `armOwnership`'s window-capture click
+		// suppressor armed forever, which eats every future pen tap on the
+		// strip. `f5f2333` is the other half, also missing here: the
+		// abandoned stroke already ran `stripPenDown` -> `setInking(true)`,
+		// and abandoning ends the stroke with no PointerEvent, so nothing
+		// reaches `penUp()` to put it back.
+		//
+		// Ahead of `resetGestureState()` below on purpose: that clears
+		// `builder` and `erasing`, and a teardown that wants to say what the
+		// gesture WAS has to run while they still say it. Harmless when
+		// nothing is live - `abandonActiveStroke` returns false and changes
+		// no state at all (its own header states that contract), and the
+		// stand-down is gated on true so a routine switch stays the no-op it
+		// already was.
+		//
+		// `strokeAbandoned` itself, not a hand-copied half of it. This line
+		// used to be `stripPenUp(this.tools)` alone, so the two ways into one
+		// teardown answered differently: the blur path (which abandoned too,
+		// until the 2026-09-04 ruling made it commit) put the reticle away and
+		// this did not, and the ring - with `handwriting-pdf-hover`'s `cursor:
+		// none` over the whole viewer - was carried onto the new document.
+		// That is the divergence this whole branch was written to close,
+		// reproduced inside the fix. One method; today one caller, and the
+		// callback wiring kept for the contract's sake (InkSurfaces.ts).
+		//
+		// WHAT THIS SWITCH NOW SHARES, AND WHAT IT DELIBERATELY DOES NOT.
+		// `abandonActiveStroke` is the note surface's teardown, whole, so an
+		// in-place document switch here now also wipes the router's touch
+		// BOOKKEEPING - `touchPos`, `liveTouchIds`, `guardTouches` - along
+		// with the stroke, the ownership tail and the fling. That is the
+		// point: those three maps name contacts of the OLD document, and a
+		// pane that keeps them across a switch answers questions about a
+		// gesture that no longer exists. Gated on the predicate either way,
+		// so a switch with nothing live still touches none of them (2e880b4:
+		// abandon is a true no-op with nothing live, `guardApplied` included).
+		// The ASSIST-PAN stand-down was left out of this round on purpose. It
+		// is the other thing a switch could plausibly reset, and resetting it
+		// would un-protect a contact that is still on the glass: the assist
+		// pan exists to carry a two-finger gesture that is mid-flight, and a
+		// document switch underneath one does not lift the fingers. Standing
+		// it down would hand a live contact straight back to the viewer's own
+		// scroll handling in the middle of the motion. Whether a switch should
+		// end an assist pan at all is a question about the gesture, not about
+		// this teardown, and it is not answered here.
+		if (this.router?.abandonActiveStroke()) this.strokeAbandoned();
 		this.history.clear();
 		this.pageSize.clear();
 		this.rotated.clear();
@@ -1109,6 +1417,111 @@ export class PdfInkController {
 		this.resetGestureState();
 		// A new document is a new wait, so it may say so once more.
 		this.warnedNoId = false;
+	}
+
+	/**
+	 * A live gesture was torn down inside the router with no pointerup.
+	 *
+	 * NOT THE WINDOW BLUR ANY MORE (alan, 2026-09-04: "alt tab mid stroke -
+	 * sure make it consistent"). A blur mid-stroke now COMMITS what was drawn,
+	 * through the router's `finishActiveStroke()` -> `penUp()`, the rule
+	 * `docs/manual.md` already states for the viewer rebuilding under the pen.
+	 * What still arrives here is the teardown that really does drop a stroke:
+	 * `forgetHistory()`, the in-place document change, where the pane is
+	 * showing a different file and committing the old one's fragment onto it
+	 * would be worse than losing it. The note surface's twin carries the same
+	 * split for the same reason.
+	 *
+	 * The strip first, and byte-for-byte the note's line. `stripPenDown` ran
+	 * at contact, and abandoning ends the stroke without a PointerEvent, so
+	 * nothing reaches `penUp()` to put it back - the strip and pill would
+	 * stand `is-inking` (styles.css: opacity 0 AND visibility hidden, so
+	 * unhit-testable, not merely invisible) until some later stroke completed.
+	 * Deliberately NOT `penUp()` itself, which commits ink, ends metrics and
+	 * closes an erase batch for a stroke that is being dropped.
+	 *
+	 * THE SURFACE'S OWN GESTURE STATE IS THE OTHER HALF, and for two releases
+	 * this method was the chrome half alone. `builder`, `erasing`, `lassoPts`,
+	 * `spaceLineY`, `dragFrom`, `frame` and `wetBegun` all stayed set, because
+	 * the one path that clears them is `resetGestureState()` and no teardown
+	 * without a lift reached it. `get idle` is computed from five of those,
+	 * and main.ts skips a pane that is not idle when reloading ink - so a
+	 * document switch mid-erase or mid-lasso left that pane silently refusing
+	 * another device's ink for the life of the view, with nothing on screen to
+	 * say so. `resetGestureState` names exactly that hazard in its own header.
+	 * `forgetHistory` calls it unconditionally afterwards for the state a
+	 * switch inherits with nothing live; this is the half that has to run
+	 * while `erasing` and `builder` still say what the gesture WAS.
+	 *
+	 * The reticle goes with it. Hover has gone quiet under a claimed contact,
+	 * and for a mouse there is deliberately no watchdog left to catch it
+	 * (a7eba85), so nothing else would take the ring - or
+	 * `handwriting-pdf-hover`'s `cursor: none` over the whole viewer - away.
+	 *
+	 * AND THE WET TRAIL, which `resetGestureState` cannot take off: it clears
+	 * `wetFrom` and `wetBegun` - the bookkeeping that says a wet stroke is in
+	 * progress - and the samples already painted on the canvas are not state,
+	 * they are pixels. The one path that clears them is `penUp`, and an
+	 * abandoned stroke by definition never reaches it, so a half-drawn stroke
+	 * stayed lit on the page across the switch - the OLD file's ink, painted
+	 * over the new one, never committed anywhere - until some later gesture
+	 * happened to draw on the same layer.
+	 * Cleared, not committed: `penUp()` would store the fragment, and a
+	 * stroke torn down with no lift is dropped on this surface exactly as it
+	 * is on the note's (InkOverlay.strokeAbandoned clears both its wet layers
+	 * and restores the highlighter element the same way).
+	 *
+	 * The file-switch path DOES come through here, as of this branch's
+	 * fix-up: `forgetHistory` reads `router.abandonActiveStroke()` itself -
+	 * it has its own reason to, and its own unconditional
+	 * `resetGestureState()` for the state a switch inherits with nothing live
+	 * - and calls this when the boolean says a stroke was really torn down.
+	 * It carried a hand-copied `stripPenUp` before that, and the copy had
+	 * already drifted: no reticle, and no wet clear either.
+	 */
+	private strokeAbandoned(): void {
+		stripPenUp(this.tools);
+		this.hideCursor();
+		// Before `resetGestureState()`, which zeroes `strokePageNumber`: the
+		// page the trail was painted on is what says which canvas to clear
+		// and at what size.
+		this.clearWetTrail(this.strokePageNumber);
+		this.resetGestureState();
+	}
+
+	/**
+	 * Take a gesture's wet trail off the page it was drawn on, and put the
+	 * shared layer back to its resting dress.
+	 *
+	 * `penUp`'s empty-stroke branch, lifted out for its second caller: an
+	 * abandoned stroke is the same event as a stroke that finished with
+	 * nothing to commit - there is no committed ink coming to replace what is
+	 * painted, so this is the only thing that can take it off.
+	 *
+	 * The COMMIT branch at the end of `penUp` deliberately does not call
+	 * this. It measures the page before `emit`/`sync` and clears afterwards,
+	 * so the box it clears at is the one the wet ink was drawn at rather than
+	 * whatever the repaint left behind; that ordering is the handoff, and it
+	 * is not this method's to hold.
+	 *
+	 * `wetOn` answers null when the pair has moved on to another page, which
+	 * is the right answer: a pair the DOM says is somewhere else is holding
+	 * nothing of this gesture's. `undressWet` runs either way - the wash is
+	 * this controller's state, not the canvas's.
+	 */
+	private clearWetTrail(page: number): void {
+		const pair = this.wetOn(page);
+		const box = this.frameBox(page);
+		if (pair && box) {
+			if (predictionEinkOn()) {
+				pair.wet.clearStroke(box.widthPx, box.heightPx);
+				pair.tail.clear();
+			} else {
+				pair.wet.clear(box.widthPx, box.heightPx);
+				pair.tail.clearAll(box.widthPx, box.heightPx);
+			}
+		}
+		this.undressWet(this.overlays.get(page));
 	}
 
 	/**
@@ -1292,6 +1705,18 @@ export class PdfInkController {
 			`  overlays detached by the viewer: ${this.orphanCount}`,
 			`  pages refused as rotated: ${[...this.rotated].join(", ") || "(none)"}`,
 			`  palm touches shielded: ${this.palmShield.rejected}`,
+			`  recent touch contacts (radius px, shield verdict):` +
+				(this.palmShield.recent.length > 0
+					? "\n" +
+						this.palmShield.recent
+							.map(
+								(c, i) =>
+									`    ${i + 1}. rX=${c.radiusX.toFixed(1)} rY=${c.radiusY.toFixed(1)} -> ${
+										c.swallowed ? "swallowed (palm)" : "let through"
+									}`
+							)
+							.join("\n")
+					: " (none this session)"),
 			`  pinches bridged: ${this.pinchBridge.bridged}`,
 			`  ribbon cache (all surfaces): ${ribbonCacheStats().hits} hit / ${ribbonCacheStats().misses} miss`,
 			`  ink metrics (${this.metrics.summaries.length} stroke(s) this session):` +
@@ -1303,6 +1728,7 @@ export class PdfInkController {
 							.join("\n")
 					: " (none yet - draw a stroke first)"),
 			`  last pen-down:${this.lastDownDebug ? "\n" + this.lastDownDebug : " (none this session)"}`,
+			`  pen trace: this surface writes pdf-pendown / pdf-raw / pdf-penup / pdf-hover lines into the shared handwriting pen trace above (Diagnostics: begin recording, then Bug report: show as text) - search for "pdf-" there, not here.`,
 		].join("\n");
 	}
 
@@ -1324,7 +1750,7 @@ export class PdfInkController {
 	 * it is about to take, so its ring is the real nib. A dot that lies about
 	 * the eraser's reach is worse than no dot.
 	 */
-	private showCursor(sample: PenSample, pointerType?: string): void {
+	private showCursor(sample: PenSample, pointerType?: string): ReticleOutcome {
 		// Both marks sit ahead of the reticle gate below - audit doc §5k/(d):
 		// turning "Pen reticle" off, or Boox mode, which turns it off for you,
 		// must not also stop the pointer being noticed.
@@ -1367,9 +1793,33 @@ export class PdfInkController {
 		// before the watchdog timer below is armed: an invisible dot that
 		// still costs a timer per move defeats the e-ink point as much as a
 		// visible one would.
-		if (!penReticleEnabled()) return;
+		if (!penReticleEnabled()) return "off";
+		// IS THE POINTER IN HAND A MOUSE? Two of the decisions below turn on
+		// that and not on which caller asked, and the callers do not all say.
+		//
+		// The four in-stroke wrappers - showEraserCursor, showLassoCursor,
+		// showPanCursor, showSpaceCursor - pass NO pointerType, deliberately
+		// and permanently: the marks above are claims about a pen approaching
+		// or landing, not about every sample of a gesture already in flight.
+		// So a MOUSE erasing, lassoing or panning arrived here looking
+		// exactly like a pen, inherited the watchdog it is meant to be exempt
+		// from, and had its ring taken away by any stall over a second while
+		// the button was held (alan, hardware, 2026-09-04, mouse ink armed).
+		// `mouseStroke` is what penDown already wrote down about the pointer
+		// that is drawing, so it answers for the callers that cannot.
+		//
+		// AND ONLY FOR THOSE CALLERS. `mouseStroke` is written at pen-down
+		// and never cleared at pen-up - only unmount and a document change
+		// reset it - so `pointerType === "mouse" || this.mouseStroke` would
+		// hand the next PEN hover after any mouse stroke the mouse's
+		// exemption, deleting the pen's only guard against a reticle stranded
+		// by a pointerleave that never came. An explicit "pen" says pen and
+		// is believed; the field only speaks where nothing else does.
+		const mousePointer =
+			pointerType === "mouse" || (pointerType === undefined && this.mouseStroke);
 		const probed = this.probe();
-		if (!probed || probed.scaleFactor === null) return;
+		if (!probed) return "no-probe";
+		if (probed.scaleFactor === null) return "no-scale";
 		this.ensureTools();
 		// Re-created whenever it is not in the CURRENT scroller. It lives in
 		// that scroller's subtree, so a viewer rebuild took it away and left
@@ -1378,6 +1828,17 @@ export class PdfInkController {
 		// for the rest of the session. pdf.js rebuilds its viewer often
 		// enough that this is an ordinary Tuesday, not an edge case.
 		if (this.cursorEl?.parentElement !== probed.scroller) {
+			// Trace-only, and only on this rebuild transition, not per move -
+			// this is the "ordinary Tuesday" path the comment above names,
+			// and a palm/pinch investigation needs to see it happen without
+			// wading through a hover line for every sample.
+			if (diagnosticsEnabled()) {
+				traceSurface(
+					"pdf-hover",
+					null,
+					`reticle rebuilt: old parent ${describeEl(this.cursorEl?.parentElement ?? null)} -> new scroller ${describeEl(probed.scroller)}`
+				);
+			}
 			this.cursorEl?.remove();
 			if (this.win.getComputedStyle(probed.scroller).position === "static") {
 				probed.scroller.setCssStyles({ position: "relative" });
@@ -1396,6 +1857,13 @@ export class PdfInkController {
 				});
 			}
 		}
+		// Trace-only, and only on THIS transition: the first hover after a
+		// pen-up or a hide, not every move - a move-by-move line is exactly
+		// the flood item 4 of the brief forbids.
+		if (diagnosticsEnabled() && this.cursorTraceHidden) {
+			traceSurface("pdf-hover", null, "reticle resumed: first hover after hide/pen-up");
+		}
+		this.cursorTraceHidden = false;
 		const content = this.toContent(sample, probed.scroller);
 		const cx = content.x;
 		const cy = content.y;
@@ -1404,12 +1872,16 @@ export class PdfInkController {
 		// blob: page units are css px at scale 1, so the nib's on-screen width
 		// is its width times the scale. A dot that is the same size whatever
 		// the pen is set to tells you nothing about what you are about to draw.
+		//
+		// Times the LIVE scale, and the stroke is rendered times that same live
+		// scale, which is the only reason the dot can promise the line. Times
+		// the reference instead and the dot would be honest at exactly one
+		// zoom and a lie at every other.
 		const tool = getInlineTool();
 		const nib =
 			(pdfPenWidth(
 				tool === "highlighter" ? HIGHLIGHTER_PEN.baseWidth : DEFAULT_PEN.baseWidth,
-				getInkSizeMult(tool),
-				probed.scaleFactor
+				getInkSizeMult(tool)
 			) *
 				probed.scaleFactor) /
 			2;
@@ -1431,7 +1903,18 @@ export class PdfInkController {
 		// speck and it is the only pointer on screen, so it gets a locator
 		// ring of fixed size - obviously not the ink width, because it never
 		// changes when the ink width does.
-		this.cursorEl.classList.toggle("handwriting-pdf-cursor-mouse", pointerType === "mouse");
+		//
+		// FOLLOWS THE GESTURE TOO, decided with the watchdog above and for
+		// the same reason: nothing about "a mouse has no hand" stops being
+		// true once the button goes down. On `pointerType === "mouse"` alone
+		// the in-stroke refresh - which passes none - toggled the ring OFF at
+		// the first erase/lasso/pan sample, so the mouse lost the mark it was
+		// steering by exactly while it was steering, and lost it in only two
+		// of the three cases: the wet-draw loop passes "mouse" explicitly, so
+		// a mouse DRAWING kept its ring while the same mouse ERASING did not.
+		// One rule for both, and the pen is untouched either way -
+		// `mouseStroke` is false for the whole of every pen gesture.
+		this.cursorEl.classList.toggle("handwriting-pdf-cursor-mouse", mousePointer);
 		// Dimmed while there is no id: the pen is about to refuse, and the
 		// reticle is the only thing on screen that can say so.
 		this.cursorEl.classList.toggle("handwriting-pdf-cursor-waiting", !this.documentId());
@@ -1443,13 +1926,15 @@ export class PdfInkController {
 		// instead of a radius.
 		if (mode === "space") {
 			this.cursorEl.classList.add("handwriting-pdf-cursor-space");
+			const transform = `translate(${cx - SPACE_CURSOR_HALF_PX}px, ${cy}px)`;
 			this.cursorEl.setCssStyles({
 				display: "block",
 				width: `${SPACE_CURSOR_HALF_PX * 2}px`,
 				height: "0px",
-				transform: `translate(${cx - SPACE_CURSOR_HALF_PX}px, ${cy}px)`,
+				transform,
 				backgroundColor: "transparent",
 			});
+			this.lastCursorTransform = transform;
 		} else {
 			const r =
 				mode === "eraser"
@@ -1469,13 +1954,15 @@ export class PdfInkController {
 			// one of the dashed marking tools, matching the note surface's own
 			// rule for PAN_CURSOR_CLASS.
 			this.cursorEl.classList.toggle("handwriting-pdf-cursor-pan", mode === "pan");
+			const transform = `translate(${cx - r}px, ${cy - r}px)`;
 			this.cursorEl.setCssStyles({
 				display: "block",
 				width: `${r * 2}px`,
 				height: `${r * 2}px`,
-				transform: `translate(${cx - r}px, ${cy - r}px)`,
+				transform,
 				backgroundColor: mode === "nib" ? getInkColorHex(tool) : "transparent",
 			});
+			this.lastCursorTransform = transform;
 		}
 		// The system cursor is drawn too, and two dots near each other read as
 		// one being wrong. The note surface hides it the same way while a pen
@@ -1488,13 +1975,22 @@ export class PdfInkController {
 		// A MOUSE cannot leave hover range - it is either over the pane or it
 		// has sent pointerleave - so the watchdog has nothing to protect
 		// against there, and firing it just took the pointer away from anyone
-		// who paused for a second before drawing.
+		// who paused for a second before drawing. That is as true of a mouse
+		// mid-gesture as it is of one hovering, which is why this reads
+		// `mousePointer` (see its definition above) rather than the argument.
 		if (this.cursorTimer !== null) this.win.clearTimeout(this.cursorTimer);
-		this.cursorTimer =
-			pointerType === "mouse" ? null : this.win.setTimeout(() => this.hideCursor(), 1000);
+		this.cursorTimer = mousePointer ? null : this.win.setTimeout(() => this.hideCursor(), 1000);
+		return "wrote";
 	}
 
-	private hideCursor(): void {
+	/**
+	 * Not private: `hidePenCursorsEverywhere` (InkOverlay.ts) calls it on
+	 * every open controller when mouse ink goes off, through the
+	 * `addStripSurface` registration in main.ts - the same access
+	 * `refreshStrip` and `dissolveSelection` already have for their own
+	 * fan-outs on that registration.
+	 */
+	hideCursor(): void {
 		if (this.cursorTimer !== null) {
 			this.win.clearTimeout(this.cursorTimer);
 			this.cursorTimer = null;
@@ -1502,6 +1998,22 @@ export class PdfInkController {
 		this.cursorEl?.setCssStyles({ display: "none" });
 		const probed = this.probe();
 		probed?.scroller.classList.remove("handwriting-pdf-hover");
+		// AND the scroller the class was actually put on. `showCursor` adds it
+		// to whatever the probe returned at the time; this used to take it off
+		// whatever the probe returns now, and those are not the same element
+		// after pdf.js rebuilds its viewer - "an ordinary Tuesday", in that
+		// method's own words - nor is there one at all when the probe has gone
+		// null. Either way the class stayed, and its rule is `cursor: none` on
+		// the container and every descendant (styles.css), so the pointer was
+		// invisible over the whole viewer with nothing on screen to explain
+		// it. The disposer has always cleaned up from `boundScroller` for this
+		// exact reason; the hide path now does the same. Removing a class an
+		// element does not carry is a no-op, so the common case where the two
+		// agree costs one call and changes nothing.
+		this.boundScroller?.classList.remove("handwriting-pdf-hover");
+		// One boolean write, always: arms the next showCursor's `pdf-hover`
+		// "resumed" transition line. See `cursorTraceHidden`.
+		this.cursorTraceHidden = true;
 	}
 
 	/**
@@ -1521,7 +2033,7 @@ export class PdfInkController {
 	 * the defect it exists to catch. `showEraserCursor(` is only here because
 	 * the erase path drives the ring, and deleting that makes the row fail.
 	 */
-	private showEraserCursor(sample: PenSample): void {
+	private showEraserCursor(sample: PenSample): ReticleOutcome {
 		// REUSE the reticle, never build one mid-stroke. The note surface can
 		// style unconditionally because its `eraserEl` is created once at
 		// mount and lives as long as the overlay; this surface's `cursorEl` is
@@ -1535,8 +2047,12 @@ export class PdfInkController {
 		// next hover restores it. A digitizer sees a pen approaching, so hover
 		// has effectively always happened by the time a nib touches - the case
 		// that loses the ring is a finger in eraser mode, which never had one.
-		if (!this.cursorEl) return;
-		this.showCursor(sample);
+		//
+		// Returns the outcome rather than void, same seam as `showCursor`
+		// itself: the pdf-raw trace of an erase batch reports THIS reason
+		// ("no-cursor-el") when it is the one that fired, not showCursor's.
+		if (!this.cursorEl) return "no-cursor-el";
+		return this.showCursor(sample);
 	}
 
 	/** Put the eraser's ring away. The note surface's name for the same act. */
@@ -1601,6 +2117,33 @@ export class PdfInkController {
 	}
 
 	/**
+	 * `pdf-pendown`: one line, at the point in `penDown` where every field
+	 * below is already in scope and decided - `probed` has already been
+	 * checked non-null with a real `scaleFactor` (the early returns above
+	 * this call site cover "no viewer"/"no id"/"no box"/"rotated page" with
+	 * their own user-facing notices, so this line does not chase them; see
+	 * the report's "Unfinished" section for that gap, named rather than
+	 * silently dropped). Caller already gated on `diagnosticsEnabled()`.
+	 */
+	private tracePenDown(
+		ev: PointerEvent | undefined,
+		box: PageBox,
+		scale: number,
+		intent: PenContactIntent,
+		probed: ProbedViewer
+	): void {
+		const tool = getInlineTool();
+		const cursorParentIsScroller = this.cursorEl?.parentElement === probed.scroller;
+		const note =
+			`ptr=${ev?.pointerType ?? "?"} intent=${intent} mouseStroke=${this.mouseStroke} ` +
+			`erasing=${this.erasing} tip=${tipMode()} tool=${tool} page=${box.pageNumber} ` +
+			`scale=${scale.toFixed(6)} probe=ok scaleFactor=${probed.scaleFactor?.toFixed(6) ?? "null"} ` +
+			`scroller=${describeEl(probed.scroller)} cursorEl=${this.cursorEl ? "present" : "none"} ` +
+			`cursorParentIsScroller=${cursorParentIsScroller} reticleEnabled=${penReticleEnabled()}`;
+		traceSurface("pdf-pendown", ev ?? null, note);
+	}
+
+	/**
 	 * Bind the stroke to one page, once, and freeze the geometry it will use.
 	 *
 	 * Read once here and never again during the stroke: re-reading per sample
@@ -1609,6 +2152,11 @@ export class PdfInkController {
 	 * pen-down for exactly this reason.
 	 */
 	private penDown(sample: PenSample, ev?: PointerEvent): void {
+		// A fresh gesture starts here, whichever one it turns out to be -
+		// so its trace bookkeeping resets here too, before any early return
+		// below can leave a later `penRaw`/`penUp` reading a stale count
+		// left over from the last gesture. Field write only; no gate needed.
+		this.pdfTrace = freshPdfTraceState();
 		// A pen on the glass is proof of a pen, and on much hardware it is the
 		// ONLY proof: an Apple Pencil without hover support never fires
 		// onPenHover, so a strip built only from the hover path was never built
@@ -1709,7 +2257,7 @@ export class PdfInkController {
 		// can draw on it: the lasso's loop and the space divider both return
 		// early and both live on the wet layer (§5h/H1).
 		const strokePageEl = this.pageElement(scroller, box.pageNumber);
-		if (strokePageEl) this.attachPair(strokePageEl, box.pageNumber);
+		if (strokePageEl) this.attachPair(strokePageEl, box);
 		this.mouseStroke = ev?.pointerType === "mouse";
 		// Under a pen the dot comes off at contact: the hand is at the nib
 		// and a dot under it reads as a smudge. Under a mouse the dot IS the
@@ -1733,6 +2281,13 @@ export class PdfInkController {
 		// own "no button changed" value, and 0 would be the primary button.
 		const intent = penContactIntent(ev?.buttons ?? 0, ev?.button ?? -1, tipMode());
 		this.erasing = intent === "erase";
+		// One line per contact that gets this far - past the no-viewer,
+		// no-id, no-box and rotated-page refusals above, which have their
+		// own notices already and are not this ticket's job. This is the
+		// setup the mouse-eraser-ring investigation needed and did not
+		// have: what the controller decided BEFORE the first `penRaw`
+		// batch, in the same timeline as the router's own pointerdown line.
+		if (diagnosticsEnabled()) this.tracePenDown(ev, box, scale, intent, probed);
 		if (intent === "lasso") {
 			this.lassoDown(box, scale, sample, probed.scroller);
 			return;
@@ -1846,19 +2401,29 @@ export class PdfInkController {
 		this.strokeStyle = {
 			...(tool === "highlighter" ? HIGHLIGHTER_PEN : DEFAULT_PEN),
 			color: getInkColorHex(tool),
-			// Divided by the page scale, because widths here are stored in PAGE
-			// units and the renderer multiplies by that same scale. Undivided, a
-			// note's 2.2 landed as 4.1 css px on a page shown at 1.87: pdf ink was
-			// close to twice as thick as note ink at a document's ordinary view.
-			// The taper is proportional to width, so it ate twice the share of a
-			// stroke too - measured at 27% of a short stroke against 14% on a
-			// note, which is the end looking clipped. Storing it in page units
-			// keeps the ink locked to the page, so it still scales with zoom the
-			// way the text does.
+			// Divided by a fixed reference, because widths here are stored in
+			// PAGE units and the renderer multiplies by the live scale.
+			// Undivided, a note's 2.2 landed as 4.1 css px on a page shown at
+			// 1.87: pdf ink was close to twice as thick as note ink at a
+			// document's ordinary view. The taper is proportional to width, so
+			// it ate twice the share of a stroke too - measured at 27% of a
+			// short stroke against 14% on a note, which is the end looking
+			// clipped.
+			//
+			// The divisor was the LIVE scale for a while, which fixed that
+			// reading and inverted the law it was supposed to serve: the scale
+			// cancelled against the renderer's, so a stroke was `baseWidth`
+			// css px at the instant it was drawn and nothing else. Drawn zoomed
+			// to 3x it stored a third of a nib, so it was a hairline while you
+			// wrote it and still a hairline zoomed back out (alan, hardware,
+			// 2026-09-04). A FIXED reference keeps the width constant in page
+			// points, which is what "stored in page units" was always meant to
+			// say: ink weighs the same on the page whatever zoom it was laid
+			// down at, and thickens with the text when you zoom in - the note
+			// surface's law, on this surface at last.
 			baseWidth: pdfPenWidth(
 				tool === "highlighter" ? HIGHLIGHTER_PEN.baseWidth : DEFAULT_PEN.baseWidth,
-				getInkSizeMult(tool),
-				scale
+				getInkSizeMult(tool)
 			),
 		};
 		// Fifth argument, past `minDistWorld`'s default: it sets `stroke.device`,
@@ -1912,10 +2477,57 @@ export class PdfInkController {
 		this.penRaw([sample], ev);
 	}
 
+	/**
+	 * `pdf-raw`: one line for a `penRaw` batch, rate-limited by
+	 * `pdfRawShouldEmitBatch` so a long drag does not flood the report.
+	 * Every batch still updates `pdfTrace.lastNote`/`lastEv` regardless of
+	 * the rate limit, so `penUp` can force out whichever batch this limit
+	 * last skipped - the gesture's final state always reaches the report.
+	 */
+	private traceRawBatch(branch: string, sampleCount: number, ev: PointerEvent | undefined, reticleNote: string): void {
+		const index = this.pdfTrace.batchIndex;
+		const note = `batch=${index} n=${sampleCount} branch=${branch} ${reticleNote}`;
+		this.pdfTrace.lastNote = note;
+		this.pdfTrace.lastEv = ev ?? null;
+		if (pdfRawShouldEmitBatch(index)) {
+			this.pdfTrace.lastEmittedIndex = index;
+			traceSurface("pdf-raw", ev ?? null, note);
+		}
+	}
+
+	/**
+	 * The human half of a `ReticleOutcome`: `wrote` reads back
+	 * `lastCursorTransform` (never recomputes it), everything else names
+	 * the reason. `null` means the branch never asked the reticle for
+	 * anything this batch - a pen draw, which hides its dot by design - and
+	 * that is reported as a fact, not folded into "skipped".
+	 */
+	private describeReticleOutcome(outcome: ReticleOutcome | null): string {
+		if (outcome === null) return "reticle=not-attempted";
+		if (outcome === "wrote") return `reticle=wrote transform=${this.lastCursorTransform ?? "?"}`;
+		return `reticle=skipped reason=${outcome}`;
+	}
+
+	/** Tallies this gesture's erase/draw reticle outcomes for `pdf-penup`'s "dominant reason". */
+	private recordReticleOutcome(outcome: ReticleOutcome | null): void {
+		this.pdfTrace.reticleAttempts++;
+		const key = outcome ?? "not-attempted";
+		this.pdfTrace.reticleOutcomeCounts[key] = (this.pdfTrace.reticleOutcomeCounts[key] ?? 0) + 1;
+	}
+
 	private penRaw(samples: PenSample[], ev?: PointerEvent): void {
 		const frame = this.frame;
 		const builder = this.builder;
-		if (!frame) return;
+		// Read once per call, not once per branch below: THE CALL-SITE RULE
+		// (DiagSwitch.ts) says the gate must sit ahead of every string this
+		// batch's trace line would build, and one boolean read shared by all
+		// eight branches costs less than eight.
+		const diagOn = diagnosticsEnabled();
+		if (diagOn) this.pdfTrace.batchIndex++;
+		if (!frame) {
+			if (diagOn) this.traceRawBatch("dropped-no-frame", samples.length, ev, "reticle=n/a");
+			return;
+		}
 		// No probe here. The scroller was frozen with the rest of the geometry
 		// at pen-down, and probeViewer reads clientWidth, offsetTop and a rect
 		// off EVERY page div - which pdf.js does not virtualise, so a hundred
@@ -1942,10 +2554,14 @@ export class PdfInkController {
 			// the drag.
 			const lastPan = samples[samples.length - 1];
 			if (lastPan) this.showPanCursor(lastPan);
+			if (diagOn) this.traceRawBatch("pan", samples.length, ev, "reticle=n/a");
 			return;
 		}
 		const box = frame.boxes.find((b) => b.pageNumber === this.strokePageNumber);
-		if (!box) return;
+		if (!box) {
+			if (diagOn) this.traceRawBatch("dropped-no-box", samples.length, ev, "reticle=n/a");
+			return;
+		}
 		if (this.spaceLineY !== null) {
 			const id = this.documentId();
 			for (const s of samples) {
@@ -1973,6 +2589,7 @@ export class PdfInkController {
 			// Last sample only, same reasoning as pan and erase.
 			const lastSpace = samples[samples.length - 1];
 			if (lastSpace) this.showSpaceCursor(lastSpace);
+			if (diagOn) this.traceRawBatch("space", samples.length, ev, "reticle=n/a");
 			return;
 		}
 		// A lasso runs with no builder and no eraser, so it has to be routed
@@ -1985,9 +2602,13 @@ export class PdfInkController {
 			// Last sample only, same reasoning as pan and erase.
 			const lastLasso = samples[samples.length - 1];
 			if (lastLasso) this.showLassoCursor(lastLasso);
+			if (diagOn) this.traceRawBatch("lasso", samples.length, ev, "reticle=n/a");
 			return;
 		}
-		if (!builder && !this.erasing) return;
+		if (!builder && !this.erasing) {
+			if (diagOn) this.traceRawBatch("dropped-no-builder", samples.length, ev, "reticle=n/a");
+			return;
+		}
 		if (this.erasing) {
 			for (const s of samples) this.eraseAt(box, frame.scale, s, scroller);
 			// The LAST sample only, matching the note surface's erase branch:
@@ -1997,13 +2618,22 @@ export class PdfInkController {
 			// is also what holds the watchdog off for the length of the
 			// stroke, since every call re-arms that timer.
 			const last = samples[samples.length - 1];
-			if (last) this.showEraserCursor(last);
+			const outcome = last ? this.showEraserCursor(last) : null;
+			if (diagOn) {
+				this.recordReticleOutcome(outcome);
+				this.traceRawBatch("erase", samples.length, ev, this.describeReticleOutcome(outcome));
+			}
 			return;
 		}
 		if (!builder) return;
 		const t0 = performance.now();
 		if (ev) this.metrics.recordEvent("raw", samples.length, t0 - ev.timeStamp, true);
 		let accepted = 0;
+		// Only a mouse stroke ever calls the reticle in this loop (below) -
+		// a pen's hand covers the dot, so `penDown` hid it for the gesture
+		// and nothing here reshows it. `null` stays "not attempted" for a
+		// pen draw, which is a real, honest outcome and not a skip.
+		let lastDrawOutcome: ReticleOutcome | null = null;
 		for (const s of samples) {
 			const content = this.toContent(s, scroller);
 			// Converted against the STROKE'S page, whatever page the sample is
@@ -2028,7 +2658,7 @@ export class PdfInkController {
 				accepted++;
 			}
 			// The dot rides the newest sample, so a mouse always has a nib.
-			if (this.mouseStroke) this.showCursor(s, "mouse");
+			if (this.mouseStroke) lastDrawOutcome = this.showCursor(s, "mouse");
 		}
 		// The predicted tail rides on top of the head, from the newest real
 		// sample outward. Fed in PAGE units like everything else here: the
@@ -2050,6 +2680,14 @@ export class PdfInkController {
 				recordPresentAge(presentAge);
 				this.metrics.recordPresent(presentAge);
 			});
+		}
+		if (diagOn) {
+			// Only tallied for a mouse stroke: a pen draw never asked the
+			// reticle for anything this batch (see `lastDrawOutcome` above),
+			// and counting that as a "skip" would blame the wrong branch for
+			// the eraser-ring investigation this exists to serve.
+			if (this.mouseStroke) this.recordReticleOutcome(lastDrawOutcome);
+			this.traceRawBatch("draw", samples.length, ev, this.describeReticleOutcome(lastDrawOutcome));
 		}
 	}
 
@@ -2473,9 +3111,11 @@ export class PdfInkController {
 	 * The page comes off the viewer's own canvas rather than re-rendered:
 	 * rendering the PDF is the viewer's job, and observation is this whole
 	 * integration's contract. The ink is NOT copied from the overlay,
-	 * whose backing store is capped (MAX_OVERLAY_PX) and can be softer
-	 * than the viewer's pixels; the strokes are redrawn at the snip's own
-	 * scale instead, through the same `drawCommitted` paint() uses.
+	 * whose backing store is capped (MAX_OVERLAY_PX), covers only the BAND
+	 * rather than the page, and can be softer than the viewer's pixels; the
+	 * strokes are redrawn at the snip's own scale instead, through the same
+	 * `drawCommitted` paint() uses. The snip's own cap is MAX_SNIP_PX, which
+	 * is a different number for a different reason - see both.
 	 *
 	 * A page the viewer has not rendered yet snips as paper white with the
 	 * ink on it - honest about what is known, rather than failing.
@@ -2516,7 +3156,7 @@ export class PdfInkController {
 		const pageCanvas = viewerCanvasOf(pageEl);
 		const k = pageCanvas && pageCanvas.width > 0 ? pageCanvas.width / wPt : null;
 		const pxPerPt = k ?? (wPx / wPt) * (this.win.devicePixelRatio || 1);
-		const vp = snipViewport(b, 8, wPt, size.hPt, pxPerPt, MAX_OVERLAY_PX);
+		const vp = snipViewport(b, 8, wPt, size.hPt, pxPerPt, MAX_SNIP_PX);
 		if (!vp) return { ok: false, reason: "the selection lies off the page" };
 		const out = createEl("canvas");
 		try {
@@ -2681,6 +3321,53 @@ export class PdfInkController {
 		if (box) this.drawLasso(box);
 	}
 
+	/**
+	 * `pdf-penup`, plus the forced `pdf-raw` line for whichever batch the
+	 * rate limit in `traceRawBatch` last skipped - so the gesture's final
+	 * batch always reaches the report even when its index was not one of
+	 * the first 5 or a multiple of 25. Caller already gated on
+	 * `diagnosticsEnabled()`.
+	 */
+	private tracePenUp(ev: PointerEvent | undefined): void {
+		if (this.pdfTrace.batchIndex > 0 && this.pdfTrace.lastEmittedIndex !== this.pdfTrace.batchIndex) {
+			traceSurface(
+				"pdf-raw",
+				this.pdfTrace.lastEv,
+				`${this.pdfTrace.lastNote} (forced at pen-up, rate limit had skipped it)`
+			);
+		}
+		const wasErasing = this.erasing;
+		// Mirrors the GUARD each branch below already checks, not its body:
+		// every one of these branches calls its own hide*Cursor before it
+		// can return, and the plain draw/ink path (none of them) is the one
+		// case with no unconditional hide.
+		const cursorHidden =
+			wasErasing ||
+			this.panLast !== null ||
+			this.spaceLineY !== null ||
+			this.dragFrom !== null ||
+			this.lassoPts.length > 0;
+		const counts = this.pdfTrace.reticleOutcomeCounts;
+		const wrote = counts["wrote"] ?? 0;
+		const skipped = this.pdfTrace.reticleAttempts - wrote;
+		let dominant = "n/a";
+		let dominantCount = 0;
+		for (const key of Object.keys(counts)) {
+			if (key === "wrote") continue;
+			const n = counts[key] ?? 0;
+			if (n > dominantCount) {
+				dominant = key;
+				dominantCount = n;
+			}
+		}
+		traceSurface(
+			"pdf-penup",
+			ev ?? null,
+			`wasErasing=${wasErasing} cursorHidden=${cursorHidden} batches=${this.pdfTrace.batchIndex} ` +
+				`reticleSkipped=${skipped}/${this.pdfTrace.reticleAttempts} dominantSkipReason=${dominant}`
+		);
+	}
+
 	private penUp(ev?: PointerEvent): void {
 		this.endMetrics();
 		// Whatever the gesture was, it is over: the strip returns, the same
@@ -2689,6 +3376,26 @@ export class PdfInkController {
 		// two manual call sites below also route through this one method, so
 		// one call covers every teardown.
 		stripPenUp(this.tools);
+		// One line per gesture end, whichever branch below actually closes
+		// it out - traced here, before any of them can return, so pan and
+		// space (which return before `wasErasing` would otherwise be read)
+		// get one too. `this.erasing` is still this gesture's value; it is
+		// not cleared until the erase branch below runs.
+		if (diagnosticsEnabled()) this.tracePenUp(ev);
+		// The frozen frame is released HERE, above every branch, because two
+		// of them return before the release that used to sit further down.
+		// `frame` is set unconditionally at pen-down, so a pan or an
+		// insert-space left it set for the life of the view; nothing else
+		// clears it but `resetGestureState` (a file switch, an abandoned
+		// stroke, a viewer rebuild). It is read by `penRaw` as the gate that
+		// says a gesture is live, so a stale one also made the NEXT pan's
+		// samples look like a stroke's.
+		//
+		// Handed to `addFinalPoint` rather than left on the field for it: the
+		// lift's own position still has to map through the frame the stroke
+		// was drawn in, and that is the only reader below this line.
+		const frame = this.frame;
+		this.frame = null;
 		if (this.panLast !== null) {
 			this.panLast = null;
 			// Put the pan reticle away with the gesture, exactly as the erase
@@ -2726,12 +3433,11 @@ export class PdfInkController {
 		// SAMPLED point and the tail between there and where the pen actually
 		// left the glass is missing - visible as ends being cut off
 		// (hardware, 2026-08-29). The note surface closes the same gap.
-		if (ev && this.builder && !this.erasing) this.addFinalPoint(ev);
+		if (ev && frame && this.builder && !this.erasing) this.addFinalPoint(ev, frame);
 		const builder = this.builder;
 		const page = this.strokePageNumber;
 		const id = this.documentId();
 		this.builder = null;
-		this.frame = null;
 		this.wetFrom = null;
 		this.wetBegun = false;
 		const wasErasing = this.erasing;
@@ -2780,17 +3486,11 @@ export class PdfInkController {
 		const attached = this.overlays.get(page);
 		const pair = this.wetOn(page);
 		const box = this.frameBox(page);
+		// Nothing to hand off to, so the trail is simply taken off - the same
+		// clear an abandoned stroke needs, which is why it is a method now
+		// (`clearWetTrail`) rather than a block here and a copy there.
 		if (!stroke) {
-			if (pair && box) {
-				if (predictionEinkOn()) {
-					pair.wet.clearStroke(box.widthPx, box.heightPx);
-					pair.tail.clear();
-				} else {
-					pair.wet.clear(box.widthPx, box.heightPx);
-					pair.tail.clearAll(box.widthPx, box.heightPx);
-				}
-			}
-			this.undressWet(attached);
+			this.clearWetTrail(page);
 			return;
 		}
 		// The page is the stroke's, from pen-down. Everything downstream - the
@@ -2875,10 +3575,9 @@ export class PdfInkController {
 	 * in one place - client px minus the scroller's box, then into content
 	 * and page units exactly like every other sample.
 	 */
-	private addFinalPoint(ev: PointerEvent): void {
-		const frame = this.frame;
+	private addFinalPoint(ev: PointerEvent, frame: PenFrame): void {
 		const builder = this.builder;
-		if (!frame || !builder) return;
+		if (!builder) return;
 		// The stroke's own frozen scroller, like every other sample.
 		const scroller = frame.scroller;
 		const box = frame.boxes.find((b) => b.pageNumber === this.strokePageNumber);
@@ -3316,6 +4015,33 @@ export class PdfInkController {
 			}
 		}
 
+		// Before the paints, so they all see one band and cut the same box out
+		// of it.
+		//
+		// A zoom arrives here through the ResizeObserver, and this used to
+		// claim `bandNeedsMove` catches it: the page boxes changed, so
+		// `scrollHeight` and `clientHeight` changed, so the size branch takes
+		// it. Only `clientHeight` does not change under a zoom - the pane is
+		// the same size, the document inside it is not - and `bandNeedsMove`'s
+		// size branch compares the BAND's own width and height, which are
+		// derived from `clientWidth`/`clientHeight` alone. `scrollHeight`
+		// moves the band's clamped bottom at the very end of a document and
+		// nowhere else. So a zoom in the middle of a pdf can leave the band
+		// exactly where it was and `syncBand` can honestly answer false.
+		//
+		// What actually keeps the canvases correct through a zoom is `zoomed`
+		// below - `scale !== this.lastScale` - which defeats the repaint skip
+		// in `paint` for every page. The band does not need to move for a
+		// zoom; the raster inside it does, because the ink is drawn at the
+		// page's new scale.
+		//
+		// The one place the scroller's size is measured. `sync` has already
+		// forced layout by this point (the probe reads every page div), so the
+		// four reads are free here in a way they never are in a scroll
+		// listener - and a resize or a zoom cannot reach the band without
+		// coming through here first.
+		this.scrollerSize = scrollerSizeOf(probed.scroller);
+		this.syncBand(probed.scroller);
 		const zoomed = scale !== this.lastScale;
 		this.lastScale = scale;
 		for (const box of live) {
@@ -3424,29 +4150,201 @@ export class PdfInkController {
 	}
 
 	/**
-	 * Backing-store size for a canvas stretched over this page element.
+	 * Where this page's canvases sit and how big their backing stores are.
 	 *
 	 * One law, two callers: the committed canvas in `paint` and the shared
 	 * pair in `attachPair`. Both must agree or the wet stroke is drawn at a
-	 * different resolution from the committed one that replaces it. The css
-	 * size is read from the element, never written into it - see `paint`.
+	 * different resolution, or in a different place, from the committed one
+	 * that replaces it - and both of those are visible the instant the pen
+	 * lifts.
+	 *
+	 * Two sizes come back and the distinction is load-bearing:
+	 *
+	 * - `pageW`/`pageH` is the page div, read from the element and never
+	 *   written into it, exactly as before. Everything that thinks in PAGE
+	 *   coordinates - the drawing scale, the clears, `pageWidthPt` - keeps
+	 *   using it, so page units stay page units.
+	 * - `band` is the sub-rectangle of that page the canvas actually covers,
+	 *   and it IS written into the element, which is the one contract this
+	 *   change breaks. The stylesheet's `inset: 0; width/height: 100%` is
+	 *   overridden per canvas; the note left here used to say the size was
+	 *   never written, and the three bugs it warned about were all numbers
+	 *   going stale under a re-render. The protection against that is
+	 *   unchanged in kind: the band is recomputed from a fresh probe on every
+	 *   paint and rewritten, never remembered across one.
+	 *
+	 * A page outside the band gets null, which drops its canvas - the same
+	 * answer an evicted page gets, and the reason the total pixel count across
+	 * every page is now the band's area rather than the sum of the pages'.
 	 */
 	private backingFor(
-		pageEl: HTMLElement
-	): { wPx: number; hPx: number; w: number; h: number; backing: number } | null {
-		const wPx = pageEl.clientWidth;
-		const hPx = pageEl.clientHeight;
-		if (wPx <= 0 || hPx <= 0) return null;
+		pageEl: HTMLElement,
+		box: PageBox
+	): {
+		pageW: number;
+		pageH: number;
+		band: PageBandBox;
+		w: number;
+		h: number;
+		backing: number;
+	} | null {
+		const pageW = pageEl.clientWidth;
+		const pageH = pageEl.clientHeight;
+		if (pageW <= 0 || pageH <= 0) return null;
+		// The probe reports the page's box in content coordinates; the element
+		// reports its own size. They agree when the viewer is settled and the
+		// element is the one that must be believed about its own pixels, so
+		// the band is cut against the element's size at the probe's offset.
+		const band = this.bandBoxFor({
+			leftPx: box.leftPx,
+			topPx: box.topPx,
+			widthPx: pageW,
+			heightPx: pageH,
+		});
+		if (!band) return null;
 		const dpr = this.win.devicePixelRatio || 1;
-		const px = wPx * hPx;
-		const backing = px * dpr * dpr <= MAX_OVERLAY_PX ? dpr : Math.sqrt(MAX_OVERLAY_PX / px);
+		// The SURFACE's backing, not this page's. See `bandBackingPx`. The
+		// fallback is the pre-band law and belongs only to the pre-band case:
+		// no measured band means `bandBoxFor` handed back the whole page, and
+		// the whole page is what the cap then has to hold.
+		const surface = this.surfaceBacking(dpr);
+		const backing = surface > 0 ? surface : bandBacking(band.width, band.height, dpr, MAX_OVERLAY_PX);
 		return {
-			wPx,
-			hPx,
-			w: Math.max(1, Math.round(wPx * backing)),
-			h: Math.max(1, Math.round(hPx * backing)),
+			pageW,
+			pageH,
+			band,
+			w: Math.max(1, Math.round(band.width * backing)),
+			h: Math.max(1, Math.round(band.height * backing)),
 			backing,
 		};
+	}
+
+	/**
+	 * The band for one page, in that page's own css px.
+	 *
+	 * While ink is live the FROZEN band is handed back, because `syncBand`
+	 * refuses to move it (see `wetGestureLive`). The pen froze its frame at
+	 * pen-down and every sample maps through that frame; moving the canvas
+	 * under it would shear the stroke being drawn, and re-sizing it would
+	 * throw away the wet pixels drawn so far. The note surface refuses the same
+	 * reason (`syncBand`: "skipped while a stroke owns the frame"), and it
+	 * accepts the same quiet failure in exchange - a stroke dragged past the
+	 * band's edge runs off the drawn area until pen-up, when the committed
+	 * repaint on a fresh band puts all of it back. Ink briefly missing at an
+	 * edge is a far quieter kind of wrong than ink that shears.
+	 */
+	private bandBoxFor(page: {
+		leftPx: number;
+		topPx: number;
+		widthPx: number;
+		heightPx: number;
+	}): PageBandBox | null {
+		const band = this.band;
+		// NOT MEASURED YET is not the same answer as MEASURED EMPTY, and
+		// conflating them was worth 200MB.
+		//
+		// Null means no sync has read the scroller: we do not know what is on
+		// screen, so the honest degradation is the whole page - precisely what
+		// shipped before the band existed. Soft ink at high zoom is the defect
+		// being fixed; no ink at all would be a worse one.
+		if (!band) return wholePage(page);
+		// A band with no area is a MEASUREMENT, and a deliberate one:
+		// `bandFor` answers `emptyBand()` for a scroller reporting zero
+		// clientWidth/clientHeight, which is how a pane in a background tab
+		// releases its canvases instead of holding them on an invisible
+		// surface (ScrollBand.ts). Reading that as "unknown" and painting
+		// whole pages inverted it - five live pages at the raised 10M cap is
+		// 200MB of backing store for a tab nobody is looking at.
+		if (band.width <= 0 || band.height <= 0) return null;
+		return pageBandFor(band, page);
+	}
+
+	/**
+	 * The one backing every canvas in the current band is drawn at.
+	 *
+	 * Zero when there is no measured band, which is the caller's signal to
+	 * fall back to the per-page law - the only case where per-page is the
+	 * honest answer, because that is also the case where the canvases cover
+	 * whole pages.
+	 *
+	 * Cached because `bandBacking` is a multiply and a square root and this is
+	 * asked once per page per paint, and invalidated on the two inputs that
+	 * can change it: the band (in `syncBand`) and the display's dpr.
+	 */
+	private surfaceBacking(dpr: number): number {
+		const band = this.band;
+		if (!band || band.width <= 0 || band.height <= 0) return 0;
+		if (this.bandBackingPx > 0 && this.bandBackingDpr === dpr) return this.bandBackingPx;
+		this.bandBackingPx = bandBacking(band.width, band.height, dpr, MAX_OVERLAY_PX);
+		this.bandBackingDpr = dpr;
+		return this.bandBackingPx;
+	}
+
+	/**
+	 * Is a gesture holding pixels on the wet layer right now?
+	 *
+	 * This, and not `frame`, is what the band freeze is allowed to test.
+	 * `frame` is set at pen-down for EVERY gesture including the two that are
+	 * not ink - a pan and an insert-space - so gating on it froze the band on
+	 * the one gesture whose entire purpose is to move the viewport. Worse, it
+	 * outlived the gesture (see `penUp`), and a frozen band is not merely
+	 * stale: every page outside it fails `pageBandFor`, so `paint` DROPS the
+	 * committed canvas of every page scrolled to afterwards. One pan and the
+	 * document went blank for the life of the view.
+	 *
+	 * The set is "who owns live pixels on the shared wet/head pair", which is
+	 * exactly who a reposition would shear: a stroke (`builder`), an erase, a
+	 * selection drag, a lasso loop being traced, an insert-space divider. A
+	 * pan is deliberately absent - it scrolls, so the band must follow it.
+	 *
+	 * Field-for-field `!idle` (see its own header just above this one) - the
+	 * same five things that would be torn by a store swap underneath them are
+	 * exactly the ones a band reposition would shear out from under a live
+	 * gesture. One field list, read two ways, rather than a second one to
+	 * drift out of sync with it.
+	 */
+	private wetGestureLive(): boolean {
+		return !this.idle;
+	}
+
+	/**
+	 * Put the band where this viewport needs it. True when it actually moved.
+	 *
+	 * Lazy on purpose, and this is the whole of the hot-path rule: a scroll
+	 * that stays inside the margin answers false out of `bandNeedsMove` -
+	 * O(1), one short-lived object, no content scaling - and nothing else
+	 * runs. Only a scroll that has eaten into the margin costs a reposition,
+	 * and a reposition costs a re-raster of every stroke on every page the
+	 * band touches, which is why it is bought this reluctantly.
+	 */
+	private syncBand(scroller: HTMLElement): boolean {
+		// Frozen while ink is live; see `bandBoxFor`.
+		if (this.wetGestureLive()) return false;
+		// O(1) and cheap, which is the whole hot-path claim - not free of
+		// layout. The four size fields are layout reads - `clientWidth`,
+		// `clientHeight`, `scrollWidth`, `scrollHeight` all flush pending
+		// layout when it is dirty - and in Blink so are `scrollLeft` and
+		// `scrollTop`: reading either kind goes through the same layout
+		// update. What makes the two offsets cheap here is that the size
+		// fields already forced layout clean earlier in the frame (they
+		// change only on a resize or a zoom, both of which are already
+		// observed and both of which reach `sync`, where the cache is
+		// refreshed) - so a scroll event reads two offsets against an
+		// already-clean layout, then calls `viewportAt` and a
+		// `bandNeedsMove` comparison: O(1), two short-lived objects at most
+		// (`viewportAt` always, `bandFor` only when the band actually
+		// moves), no content scaling. It used to read all six fields off the
+		// element, which is four layout reads per scroll event on a surface
+		// that fires them continuously.
+		const size = this.scrollerSize ?? (this.scrollerSize = scrollerSizeOf(scroller));
+		const viewport = viewportAt(size, scroller.scrollLeft, scroller.scrollTop);
+		if (!bandNeedsMove(this.band, viewport)) return false;
+		this.band = bandFor(viewport);
+		// A new band is a new area, so the one backing derived from it is
+		// stale. Dropped rather than recomputed: nothing needs it until the
+		// first `backingFor` of the repaint this move is about to trigger.
+		this.bandBackingPx = 0;
+		return true;
 	}
 
 	/**
@@ -3467,8 +4365,9 @@ export class PdfInkController {
 	 * (styles.css), so DOM order is what puts the wet ink above the committed
 	 * ink.
 	 */
-	private attachPair(pageEl: HTMLElement, pageNumber: number): WetPair | null {
-		const size = this.backingFor(pageEl);
+	private attachPair(pageEl: HTMLElement, box: PageBox): WetPair | null {
+		const pageNumber = box.pageNumber;
+		const size = this.backingFor(pageEl, box);
 		if (!size) return this.pair;
 		let pair = this.pair;
 		if (!pair) {
@@ -3519,17 +4418,102 @@ export class PdfInkController {
 			pair.wet.applyDpr(size.backing);
 			pair.tail.applyDpr(size.backing);
 		}
+		this.placeBanded(pair.wetCanvas, size.band, size.pageW, size.pageH);
+		this.placeBanded(pair.headCanvas, size.band, size.pageW, size.pageH);
+		// The band, into the context transform, on EVERY attach and not only
+		// on a resize: the pair keeps its backing store across pages and
+		// gestures, so a same-sized band at a different offset would otherwise
+		// inherit the previous gesture's translation and draw the whole stroke
+		// displaced by the difference.
+		//
+		// This is also the entire reason nothing above `drawWet` had to
+		// change. Every wet caller - the stroke, the head, the lasso loop, the
+		// insert-space divider - keeps working in the page's own css px, and
+		// the one place that knows a band exists is this transform. `cameraFor`
+		// is untouched, so hit-testing, erase and selection could not drift
+		// even if this arithmetic were wrong.
+		this.bandTransform(pair.wetCanvas, size.band, size.backing);
+		this.bandTransform(pair.headCanvas, size.band, size.backing);
 		// A different page is a different, blank canvas as far as anything on
 		// screen is concerned - that is what a pair per page gave for free.
 		// The same page keeps its pixels: the lasso's outline lives on the wet
 		// layer between gestures, and grabbing a selection must not blink it
 		// off before the first move redraws it.
-		if (this.wetHostPage !== pageNumber) {
-			pair.wet.clear(size.wPx, size.hPx);
-			pair.tail.clearAll(size.wPx, size.hPx);
+		//
+		// Cleared at the PAGE's size, not the band's. The context is in page
+		// coordinates now, so the band occupies `left..left+width` there; a
+		// clear of `0..width` would miss most of it on any page scrolled into
+		// from the left. Over-clearing costs nothing - a clearRect past the
+		// canvas is clipped away.
+		//
+		// `!sameBand(this.pairBand, size.band)` alongside the page check: the
+		// transform above is rewritten unconditionally, but the pixels already
+		// on the pair are not - they stay wherever they were rasterised. A
+		// same-sized band that has simply translated (a tall page at high
+		// zoom, pen landing on the same page) hit neither the size check above
+		// nor the page check here, so the transform moved on ahead while any
+		// standing pixels (a lasso outline) stayed put in canvas space and
+		// were re-presented displaced by exactly the band's delta the next
+		// time anything drew. Harmless today only because every wet writer
+		// this surface has begins its own gesture with a full clearRect.
+		if (this.wetHostPage !== pageNumber || !sameBand(this.pairBand, size.band)) {
+			pair.wet.clear(size.pageW, size.pageH);
+			pair.tail.clearAll(size.pageW, size.pageH);
 		}
 		this.wetHostPage = pageNumber;
+		this.pairBand = size.band;
 		return pair;
+	}
+
+	/**
+	 * Write a canvas's box inside the page div.
+	 *
+	 * The stylesheet stretches `.handwriting-pdf-ink` over the whole page with
+	 * `inset: 0; width: 100%; height: 100%`. Inline `left/top/width/height`
+	 * beat it, and `right`/`bottom` are then over-constrained and dropped by
+	 * the box model - but only in one writing direction, so both are set to
+	 * `auto` rather than relying on that.
+	 *
+	 * PERCENTAGES of the page, not px, and that is the whole of what this
+	 * method decides. Absolute px detach the canvas from the page div the
+	 * instant the viewer resizes it, and our repaint is behind the viewer by
+	 * up to `SYNC_MIN_GAP_MS` (120) because it arrives through
+	 * `scheduleThrottled`. A ctrl+wheel zoom is a burst of such resizes, and
+	 * between each one and our catching up the ink sat at the wrong offset AND
+	 * the wrong scale - for a tenth of a second, per step, which on a zoom
+	 * gesture is the whole gesture. A percentage box stretches with the page
+	 * exactly as the stylesheet's `inset: 0` did, so a stale band is merely
+	 * slightly the wrong size instead of somewhere else entirely.
+	 *
+	 * The band stays integer-edged for the TRANSFORM (`bandTransform`), which
+	 * is what the integer rounding in `pageBandFor` was for: the backing store
+	 * is a whole number of device pixels and the raster inside it must line up
+	 * with them. The percentage is derived from those same integers at paint
+	 * time, so a settled page resolves it back to the integer it came from.
+	 */
+	private placeBanded(canvas: HTMLCanvasElement, band: PageBandBox, pageW: number, pageH: number): void {
+		const pct = (v: number, of: number): string => `${of > 0 ? (v / of) * 100 : 0}%`;
+		canvas.setCssStyles({
+			left: pct(band.left, pageW),
+			top: pct(band.top, pageH),
+			right: "auto",
+			bottom: "auto",
+			width: pct(band.width, pageW),
+			height: pct(band.height, pageH),
+		});
+	}
+
+	/**
+	 * Point a canvas's context at PAGE coordinates, wherever its band sits.
+	 *
+	 * The translation is applied in device pixels (`-left * backing`) because
+	 * `setTransform` replaces the matrix rather than composing with it, so the
+	 * offset is expressed after the scale, not before it.
+	 */
+	private bandTransform(canvas: HTMLCanvasElement, band: PageBandBox, backing: number): void {
+		const ctx = canvas.getContext("2d");
+		if (!ctx) return;
+		ctx.setTransform(backing, 0, 0, backing, -band.left * backing, -band.top * backing);
 	}
 
 	/**
@@ -3543,6 +4527,7 @@ export class PdfInkController {
 		this.pair?.wetCanvas.remove();
 		this.pair?.headCanvas.remove();
 		this.wetHostPage = 0;
+		this.pairBand = null;
 	}
 
 	/** Destroy the pair: unmount, or a viewer rebuild that took our subtree. */
@@ -3551,6 +4536,35 @@ export class PdfInkController {
 		this.pair?.headCanvas.remove();
 		this.pair = null;
 		this.wetHostPage = 0;
+		this.pairBand = null;
+	}
+
+	/**
+	 * Put a live selection's outline back on a page that has just re-entered
+	 * the band.
+	 *
+	 * The outline is drawn on the wet layer, and the wet layer is ONE pair for
+	 * the whole surface. A page leaving the band takes `detachPairFrom` with
+	 * it, which un-parents the pair and zeroes `wetHostPage` - but `selected`
+	 * and `selectionPage` are untouched, because they are a statement about
+	 * ink and not about pixels. So the selection stayed live, the toolbar
+	 * stayed lit, delete and snip still worked, and the dashed box around the
+	 * chosen ink was simply gone: scroll away from your selection and back and
+	 * you could not see what you had picked up.
+	 *
+	 * REDRAWN rather than cleared, and that is the choice. Clearing on scroll
+	 * would be quieter to implement and much worse to use - a selection is an
+	 * object the reader made deliberately, and scrolling is not a decision to
+	 * throw it away. Nothing else about a selection depends on being in view.
+	 *
+	 * Never while a gesture is live: there is one pair, the gesture owns it,
+	 * and yanking it to another page mid-stroke would strand the wet ink.
+	 */
+	private restoreSelectionOutline(pageEl: HTMLElement, box: PageBox): void {
+		if (this.selected.length === 0 || this.selectionPage !== box.pageNumber) return;
+		if (this.wetHostPage === box.pageNumber || this.wetGestureLive()) return;
+		this.attachPair(pageEl, box);
+		this.drawLasso(box);
 	}
 
 	private paint(pageEl: HTMLElement, box: PageBox, scale: number, zoomed: boolean): void {
@@ -3590,10 +4604,56 @@ export class PdfInkController {
 			this.overlays.delete(box.pageNumber);
 			attached = undefined;
 		}
+		// Measured BEFORE the canvas exists, and before the skip test.
+		//
+		// Before the skip test because the band is part of what makes a canvas
+		// correct: a scroll that repositions it changes neither the scale nor
+		// the stroke count, and skipping on those alone would leave the old
+		// raster sitting in the new place. The measurement is a `clientWidth`
+		// read on an element this method has already forced layout on
+		// (`getComputedStyle`, above), so it adds no new class of cost - and
+		// the skip below still fires whenever the band is where it was, which
+		// is every sync that is not a scroll past the margin.
+		//
+		// Before the canvas because most pages of a zoomed pdf are OFF the
+		// band, and the answer for those is null. Creating the canvas first
+		// meant every one of them was built, given an attribute, appended -
+		// two childList mutations on a page div our own observer cannot tell
+		// from the viewer's writes - and then discovered to be off band and
+		// removed, per page, per sync. Asking first costs nothing and the
+		// off-band page never touches the DOM at all.
+		const size = this.backingFor(pageEl, box);
+		if (!size) {
+			// The page is outside the band entirely, or the surface has been
+			// measured and has no area at all (a pane in a background tab).
+			// Drop its canvas rather than hold a full backing store for
+			// something nobody can see - this is what makes the total pixel
+			// count across a document the band's area instead of the sum of
+			// every live page's. Unless a gesture is on it, for the reason the
+			// empty-page branch above gives.
+			if (attached && !this.owns(box.pageNumber)) {
+				// Sized to nothing before it goes. A detached canvas is
+				// collectible, but its backing store is held until the
+				// collector gets to it, and the whole point of dropping it
+				// here is the memory - the snip's own `finally` releases the
+				// same way for the same reason.
+				attached.canvas.width = 0;
+				attached.canvas.height = 0;
+				attached.canvas.remove();
+				this.detachPairFrom(box.pageNumber);
+				this.overlays.delete(box.pageNumber);
+			}
+			return;
+		}
+		// A page that had no canvas is a page that had left the band (or has
+		// only just become live). Remembered because a live selection's
+		// outline lives on the wet layer, which went with it; see
+		// `restoreSelectionOutline` at the end of this method.
+		const rebuilt = !attached;
 		if (!attached) {
 			const canvas = pageEl.createEl("canvas", { cls: OVERLAY_CLASS });
 			canvas.setAttribute("aria-hidden", "true");
-			attached = { canvas, paintedScale: 0, paintedCount: -1 };
+			attached = { canvas, paintedScale: 0, paintedCount: -1, paintedBand: null };
 			this.overlays.set(box.pageNumber, attached);
 			// The committed canvas was just appended, so it is on top of a
 			// pair that is already on this page - the first stroke on a clean
@@ -3605,39 +4665,50 @@ export class PdfInkController {
 				pageEl.appendChild(this.pair.headCanvas);
 			}
 		}
-		if (!zoomed && attached.paintedScale === scale && attached.paintedCount === strokes.length) {
+		if (
+			!zoomed &&
+			attached.paintedScale === scale &&
+			attached.paintedCount === strokes.length &&
+			sameBand(attached.paintedBand, size.band)
+		) {
 			return; // already correct; the commonest case while scrolling
 		}
 
-		// The overlay's size is read from the box it is filling, NOT written
-		// into it. The stylesheet stretches it over the page div; all this
-		// does is give the backing store enough pixels for that size. Writing
-		// left/top/width/height was three separate bugs in one afternoon,
-		// every one of them a number going stale while the viewer re-rendered
-		// underneath us.
-		const size = this.backingFor(pageEl);
-		if (!size) return;
-		const { wPx, hPx, w, h, backing } = size;
+		// The overlay's PAGE size is read from the box it is filling, never
+		// written into it - the stylesheet stretches it and three separate
+		// bugs in one afternoon came from writing numbers that then went stale
+		// under a re-render. What IS written is the band: which part of that
+		// page this canvas covers. The staleness argument is answered the same
+		// way it always was, by never remembering the value - the band is
+		// recomputed from the element on every paint and rewritten here.
+		const { pageW, pageH, band, w, h, backing } = size;
 		const canvas = attached.canvas;
 		if (canvas.width !== w || canvas.height !== h) {
 			canvas.width = w;
 			canvas.height = h;
 		}
+		this.placeBanded(canvas, band, pageW, pageH);
 		const ctx = canvas.getContext("2d");
 		if (!ctx) return;
-		ctx.setTransform(backing, 0, 0, backing, 0, 0);
-		ctx.clearRect(0, 0, wPx, hPx);
+		// Page coordinates, offset to the band's origin. Everything below this
+		// line - the clear, the camera, `drawCommitted` - is written exactly as
+		// it was when the canvas covered the whole page, which is the point:
+		// page units stay page units and only where the pixels live moved.
+		ctx.setTransform(backing, 0, 0, backing, -band.left * backing, -band.top * backing);
+		ctx.clearRect(0, 0, pageW, pageH);
 		// The drawing scale comes from the box we are filling divided by the
 		// page's size in points - NOT from `--scale-factor` directly. The two
 		// agree when the viewer is settled, and during a zoom they do not:
 		// the scale factor updates on its own schedule while the box is
 		// whatever it is right now. Deriving from the box means the ink always
 		// fills the same fraction of the page it is drawn on, settled or not.
-		const pageWidthPt = this.pageWidthPt(box.pageNumber, wPx, hPx, scale);
+		const pageWidthPt = this.pageWidthPt(box.pageNumber, pageW, pageH, scale);
 		if (pageWidthPt <= 0) return;
-		this.drawCommitted(ctx, { x: 0, y: 0, zoom: wPx / pageWidthPt }, strokes);
+		this.drawCommitted(ctx, { x: 0, y: 0, zoom: pageW / pageWidthPt }, strokes);
 		attached.paintedScale = scale;
 		attached.paintedCount = strokes.length;
+		attached.paintedBand = band;
+		if (rebuilt) this.restoreSelectionOutline(pageEl, box);
 	}
 
 	/**

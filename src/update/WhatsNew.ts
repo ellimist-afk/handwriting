@@ -80,6 +80,11 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"toolbar fixes",
 		"bug fixes",
 	],
+	"1.4.10": [
+		"mouse ink session bug fix",
+		"even more pdf fixes",
+		"bug fixes",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

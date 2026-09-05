@@ -56,6 +56,26 @@ function subtreeRuleBody(sheet: string): string | null {
 	return codeOnly(sheet).match(rule)?.[1] ?? null;
 }
 
+/**
+ * The pdf half of the same guard. `PdfInkController` hands `armGuardStyle`
+ * whichever element `PdfViewerProbe`'s scroller resolved to - one of four
+ * selector candidates, not determinable from source alone - so the rule must
+ * reach descendants of any of them, not just `.cm-scroller`. Unlike the
+ * editor rule this one carries `pinch-zoom`, matching the value the pdf
+ * surface arms with (see GuardStyle's `guardTouchAction` param), so two-finger
+ * pinch inside a nested pdf.js scroll container survives while single-finger
+ * pan does not.
+ */
+function pdfSubtreeRuleBodies(sheet: string): string[] {
+	const selectors = [".pdf-viewer-container", ".pdfViewer", "#viewerContainer", ".pdf-content-container"];
+	const code = codeOnly(sheet);
+	return selectors.map((sel) => {
+		const escaped = sel.replace(/[.#]/, (m) => `\\${m}`);
+		const rule = new RegExp(`${escaped}\\.${GUARD_SUBTREE_CLASS}[\\s,][^{]*\\{([^}]*)\\}`);
+		return code.match(rule)?.[1] ?? "";
+	});
+}
+
 function unguardedEditorTouchActionSelectors(sheet: string): string[] {
 	const blocks = codeOnly(sheet).match(/[^{}]+\{[^}]*touch-action[^}]*\}/g) ?? [];
 	return blocks
@@ -152,6 +172,20 @@ describe("styles.css — the subtree half of the standing guard", () => {
 		// direction is a false alarm rather than a false all-clear, but it is
 		// the same fault and it is fixed by the same call.
 		expect(unguardedEditorTouchActionSelectors(css)).toEqual([]);
+	});
+
+	it("also reaches every descendant of a guarded pdf scroller, whichever selector matched it", () => {
+		// A rule scoped only to `.cm-scroller` (the editor) leaves the pdf
+		// surface's nested pdf.js scroll containers free to re-enable
+		// single-finger panning the same way the backlinks pane once did in
+		// the editor - the resting-finger drift reported on hardware
+		// (Surface, 2026-09-03). All four PdfViewerProbe candidates must be
+		// covered since which one wins on a live view is not fixed here.
+		const bodies = pdfSubtreeRuleBodies(css);
+		for (const body of bodies) {
+			expect(body, "pdf subtree rule present in the cascade, not merely in the file").not.toBe("");
+			expect(body).toMatch(/touch-action:\s*pinch-zoom\s*!important/);
+		}
 	});
 });
 

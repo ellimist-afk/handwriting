@@ -19,6 +19,15 @@
  *
  * `enterTipMode` is the two halves in one place, in the order the order
  * matters in. This is the first test in the repo to import `src/main.ts`.
+ *
+ * WHAT THE ARM IS WORTH ON DISK: nothing (alan, 2026-09-04, "dont persist a
+ * quiet arm"). It used to write `settings.mouseInk = true` and save, so one
+ * press of ctrl+shift+E was the reason mouse ink came up armed at every
+ * launch from then on - the user report that mouse ink "keeps turning on by
+ * itself". Nobody asked for the MODE here; they asked for the eraser, and
+ * arming the mouse is only what that request needs to mean anything. The two
+ * LOUD writers - the mouse-ink toggle command and the settings switch, where
+ * the mode is asked for by name - are the only ones that write it down.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -45,11 +54,19 @@ const proto = HandwritingPlugin.prototype as unknown as {
  * `Object.create` skips the field initialisers, so the two members
  * `armTipModeInput` reaches are supplied by hand.
  */
-function fakePlugin(): { settings: { mouseInk: boolean } } {
+function fakePlugin(): { settings: { mouseInk: boolean }; saves: number } {
 	const plugin = Object.create(HandwritingPlugin.prototype) as Record<string, unknown>;
 	plugin.settings = { mouseInk: false };
-	plugin.persistSettings = () => Promise.resolve();
-	return plugin as unknown as { settings: { mouseInk: boolean } };
+	// A COUNT, not just the end value. `settings.mouseInk` could stay false
+	// while a save still ran, and a save that writes the same value is still
+	// a write to data.json - the thing the session-only rule forbids. Both
+	// are asserted, so a half-reverted change cannot pass.
+	plugin.saves = 0;
+	plugin.persistSettings = (): Promise<void> => {
+		plugin.saves = (plugin.saves as number) + 1;
+		return Promise.resolve();
+	};
+	return plugin as unknown as { settings: { mouseInk: boolean }; saves: number };
 }
 
 describe("entering a tip mode from a command", () => {
@@ -64,9 +81,29 @@ describe("entering a tip mode from a command", () => {
 		proto.enterTipMode.call(plugin, true);
 
 		expect(mouseInkEnabled()).toBe(true);
-		// Persisted, not just armed for the session: the setting is the thing
-		// the router reads on the next launch too.
-		expect(plugin.settings.mouseInk).toBe(true);
+		// ARMED FOR THIS SESSION AND NOT PERSISTED (alan, 2026-09-04: "dont
+		// persist a quiet arm"). The inverse of this assertion is what shipped
+		// through 1.4.9 and is what "mouse ink keeps turning on by itself"
+		// was: the tool hotkey wrote the mode to disk, and every launch after
+		// it started with the mouse claimed by a mode nobody named.
+		expect(plugin.settings.mouseInk).toBe(false);
+		expect(plugin.saves).toBe(0);
+	});
+
+	it("is gone at the next launch - the arm was only for this session", () => {
+		const plugin = fakePlugin();
+
+		proto.enterTipMode.call(plugin, true);
+		expect(mouseInkEnabled()).toBe(true);
+
+		// main.ts's onload in one line: the mode at startup is the SAVED
+		// setting and nothing else (`setMouseInk(this.settings.mouseInk)`,
+		// unchanged by this rule - it is what still brings an explicit ON
+		// back). Replayed here because the whole point of the change is what
+		// this line finds waiting for it.
+		setMouseInk(plugin.settings.mouseInk);
+
+		expect(mouseInkEnabled()).toBe(false);
 	});
 
 	it("leaves a pen user's mouse alone", () => {

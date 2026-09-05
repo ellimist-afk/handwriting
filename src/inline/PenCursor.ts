@@ -14,6 +14,17 @@ const PEN_COMPAT_MOUSE_WINDOW_MS = 120;
 const PEN_COMPAT_MOUSE_DISTANCE_PX = 4;
 export const PEN_HOVER_CLASS = "handwriting-pen-hover";
 
+/**
+ * No hover sample for this long means the pen is gone; see
+ * `InkOverlay.armHoverWatchdog`, which is the one thing that arms a timer on
+ * it. It lives HERE rather than in that file because the router needs the
+ * same number - a mouse leaving the pane must not take a reticle down that a
+ * pen still owns, and "still owns" is exactly this window - and `InkOverlay`
+ * imports the router, so importing back would close a cycle. This module is
+ * the reticle's own, and both already read from it.
+ */
+export const HOVER_GHOST_MS = 1000;
+
 export interface PenCursorLayoutInput {
 	x: number;
 	y: number;

@@ -9,6 +9,7 @@ import {
 import { HANDWRITING_PEN_LAB_VIEW_TYPE, PenLabView } from "./view/PenLabView";
 import {
 	addStripSurface,
+	hidePenCursorsEverywhere,
 	copyInlineInkMetrics,
 	copyInlineZoomReport,
 	copyPresentationReport,
@@ -77,10 +78,10 @@ import {
 } from "./diag/DiagSwitch";
 import { traceGuardVerdict } from "./diag/TraceGuard";
 import {
+	armMouseInkQuietly,
 	consumeMousePutDown,
 	mouseInkEnabled,
 	setMouseInk,
-	setPersistMouseInk,
 } from "./inline/MouseInk";
 import { setPrediction, setPredictionEink } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
@@ -1264,6 +1265,12 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			callback: () => {
 				const on = !mouseInkEnabled();
 				setMouseInk(on);
+				// THE LOUD PATH, and one of only two that write this down (the
+				// settings switch is the other). Asking for the mode BY NAME is
+				// what earns a place in data.json; the strip's quiet arm and
+				// put-down do not, and no longer get one - alan, 2026-09-04,
+				// "dont persist a quiet arm". See MouseInk.ts for the reports
+				// that ruling came out of.
 				this.settings.mouseInk = on;
 				runDetached(this.persistSettings(), "save the mouse ink setting");
 				// Turning mouse ink on IS declaring yourself a pen person: the
@@ -1921,6 +1928,13 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 						booxMode: this.settings.booxMode,
 						pressureSensitivity: this.settings.pressureSensitivity,
 						mouseInk: this.settings.mouseInk,
+						// Both, because since the quiet arm stopped being written
+						// down these two disagree: a mouse click on a tool arms
+						// the mode for the session over a stored `false`, and a
+						// trace that reported only the setting said the mouse was
+						// not inking while the strokes in the same file came off
+						// a mouse.
+						mouseInkLive: mouseInkEnabled(),
 						eraserMode: this.settings.eraserMode,
 						eraserRadiusPx: this.settings.eraserRadiusPx,
 					},
@@ -2335,6 +2349,15 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 						const view = leaf.view;
 						if (view instanceof HandwritingPageView) view.repaintInk();
 					}
+				},
+				// And mouse ink going OFF strands the reticle on a PDF the
+				// same way it does on a note: the pointer is still over the
+				// pane, so neither pointerleave nor the watchdog the mouse is
+				// exempt from will ever take the ring down. See
+				// `hidePenCursorsEverywhere` (InkOverlay.ts), which is what
+				// calls this.
+				() => {
+					for (const c of this.pdfInk.values()) c.hideCursor();
 				}
 			)
 		);
@@ -2855,6 +2878,14 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			clearPenHardwareSeen();
 		}
 		refreshAllStrips();
+		// OFF also strands a reticle. The pointer that raised it is a mouse,
+		// still sitting over the pane - no pointerleave is coming, and both
+		// surfaces exempt an armed mouse from the hover watchdog that would
+		// otherwise hide it. So the ring, and `cursor: none` with it, outlived
+		// the mode that justified them until something unrelated repainted.
+		// See `hidePenCursorsEverywhere` for the whole reasoning; it is the
+		// hide half of exactly the fan-out this function is the light half of.
+		if (!on) hidePenCursorsEverywhere();
 	}
 
 	/**
@@ -2893,6 +2924,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	 * left alone - they did not ask for it, and claiming the mouse costs them
 	 * text selection.
 	 *
+	 * FOR THIS SESSION ONLY (alan, 2026-09-04: "dont persist a quiet arm").
+	 * This used to write `settings.mouseInk = true` and save, so one press of
+	 * ctrl+shift+E was the reason mouse ink came up armed at every launch from
+	 * then on - part of what users reported as mouse ink "keeps turning on by
+	 * itself". The hotkey's user asked for the ERASER; the arm is the least
+	 * that request needs to work at all, and it is not an answer to the
+	 * question the mouse-ink toggle command asks. The load line
+	 * (`setMouseInk(this.settings.mouseInk)`) is unchanged, so this is gone at
+	 * the next launch and an explicit ON is not.
+	 *
 	 * Returns whether it turned mouse ink on. NOTHING READS THAT TODAY -
 	 * `enterTipMode` discards it, and the `(mouse ink on)` notice suffix this
 	 * sentence was written for was removed by the toast-wording pass. The
@@ -2901,9 +2942,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	 */
 	private armTipModeInput(): boolean {
 		if (mouseInkEnabled() || penSeenThisSession()) return false;
-		setMouseInk(true);
-		this.settings.mouseInk = true;
-		runDetached(this.persistSettings(), "save the mouse ink setting");
+		// `armMouseInkQuietly`, not the raw setter, and not because the two
+		// differ today: since the persist came off this path they are the
+		// same two lines, guard included, and a rule implemented twice is
+		// this project's most expensive recurring defect. The quiet arm's
+		// meaning - and every sentence about why it writes nothing - lives in
+		// MouseInk.ts; this reads as the caller of that rule rather than a
+		// second copy of it that a later change could silently fork. The raw
+		// `setMouseInk` import stays for the loud writers below, which is what
+		// MouseInkWriterInvariant.test.ts pins this file as.
+		armMouseInkQuietly();
 		markPenSeen();
 		refreshPenToolsAll();
 		return true;
@@ -3411,10 +3459,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 			this.settings.eraserMode = on ? "stroke" : "reticle";
 			runDetached(this.persistSettings(), "save the eraser mode");
 		});
-		setPersistMouseInk((on) => {
-			this.settings.mouseInk = on;
-			runDetached(this.persistSettings(), "save the mouse ink setting");
-		});
+		// No writer for mouse ink beside these four, and its absence is the
+		// rule rather than an omission: a quiet arm is for this session only
+		// (alan, 2026-09-04) and the two places that DO write it - the
+		// mouse-ink toggle command and the settings switch - write
+		// `settings.mouseInk` themselves. See MouseInk.ts.
 		setPersistInkColor((tool, hex) => {
 			this.settings.inkColors[tool] = hex;
 			runDetached(this.persistSettings(), "save the ink color");
@@ -3873,6 +3922,17 @@ class HandwritingSettingTab extends PluginSettingTab {
 
 	getControlValue(key: string): unknown {
 		if (this.overriddenByBoox(key)) return this.BOOX_OVERRIDES[key as SettingKey];
+		// Mouse ink is the one row whose LIVE value can differ from the saved
+		// one, and it started to the day a quiet arm stopped being written
+		// down (alan, 2026-09-04). A mouse click on a tool button turns the
+		// mode on for this session; the stored `false` beside it is then not
+		// what is in force, and a switch showing "off" over a mouse that is
+		// inking is worse than wrong - its first press would ask for the state
+		// it already has and look broken. Same reasoning as BOOX_OVERRIDES
+		// just above: the row reports what is in force. `apply` still writes
+		// the user's explicit answer, which is what makes it survive a
+		// restart.
+		if (key === "mouseInk") return mouseInkEnabled();
 		return key in this.plugin.settings ? this.plugin.settings[key as SettingKey] : undefined;
 	}
 

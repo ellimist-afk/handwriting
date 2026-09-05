@@ -51,7 +51,10 @@ export function reassignMarkdown(content: string, newId: string): ClaimResult {
 	const fm = updateFrontmatter(parsed.frontmatter, newId, { version: false });
 	const body = parsed.rawBody;
 	const eol = parsed.eol;
-	const next = `---${eol}${fm.join(eol)}${eol}---${eol}${body.startsWith(eol) ? "" : eol}${body}`;
+	// The closing fence already ends with `eol` - the body follows directly.
+	// A body that itself starts with `eol` (the user's own blank line) keeps
+	// it; nothing extra is manufactured on top.
+	const next = `---${eol}${fm.join(eol)}${eol}---${eol}${body}`;
 	return { content: next, pageId: newId, changed: true };
 }
 
@@ -73,6 +76,12 @@ export function claimMarkdown(content: string, pageId: string): ClaimResult {
 	// rewritten to LF for the sake of one added frontmatter line
 	// (audit-fixes-design.md 5i I5).
 	const eol = parsed.eol;
-	const next = `---${eol}${fm.join(eol)}${eol}---${eol}${body.startsWith(eol) ? "" : eol}${body}`;
+	// The closing fence already ends with `eol` - the body follows directly.
+	// A body that itself starts with `eol` (the user's own blank line) keeps
+	// it; nothing extra is manufactured on top (regression: this used to add
+	// a second `eol` here, which Obsidian's Live Preview hides properties, so
+	// the user saw the extra blank line as an empty first row above their
+	// text on the very first stroke on a fresh note).
+	const next = `---${eol}${fm.join(eol)}${eol}---${eol}${body}`;
 	return { content: next, pageId, changed: true };
 }
