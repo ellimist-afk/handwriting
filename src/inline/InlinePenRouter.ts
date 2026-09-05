@@ -93,6 +93,40 @@ export interface InlinePenCallbacks {
 	 */
 	onPenUp(ev?: PointerEvent): void;
 	/**
+	 * Is the pen OFF on this surface? (PenInk.ts, design §5.)
+	 *
+	 * The one gate for the pen-off state, asked at every point this router
+	 * would otherwise take the pen away from the app. True means: do not
+	 * claim, do not preventDefault, do not capture, do not arm a guard, do
+	 * not eat the parallel touch stream, do not paint a reticle - the pen
+	 * reaches CodeMirror exactly as it would if this plugin were not
+	 * installed, so a tap places the caret and the software keyboard comes up
+	 * with it. Two e-ink reports asked for precisely that; PenInk.ts carries
+	 * them and the two decisions behind the state.
+	 *
+	 * A PREDICATE and not a flag, because the state is session state living
+	 * in a module and this router must not import it: the pdf surface shares
+	 * this class and keeps inking while a note's pen is off. The note overlay
+	 * passes `() => !penInkEnabled()`; the pdf passes nothing.
+	 *
+	 * OPTIONAL for that reason - an undefined member reads as "the pen is
+	 * never off here", which is the pdf's answer and the answer for any
+	 * future surface built before it has an opinion. It is deliberately NOT
+	 * in `INLINE_PEN_CALLBACKS` (InkSurfaces.ts), which is the list both ink
+	 * surfaces must wire: this one is note-only by design, and listing it
+	 * would make the pdf owe an implementation of a rule that does not apply
+	 * to it.
+	 *
+	 * REFUSES A CLAIM; NEVER BREAKS ONE. Every site below asks this only
+	 * where no stroke of ours is live, so flipping the state with the nib on
+	 * the glass cannot freeze a half-drawn stroke with `activePenId` set and
+	 * the ownership guard armed - the failure mode `abandonActiveStroke` was
+	 * written for. Ending that live stroke is the toggle's own job (main.ts's
+	 * `pen-ink-toggle` -> `endLiveNoteStrokes`, which COMMITS it the way a
+	 * window blur does); this router only stops claiming the next contact.
+	 */
+	penOff?: () => boolean;
+	/**
 	 * Should a contact OUTSIDE the scroller (the linked-mentions band renders
 	 * outside it, in the same view) be claimed as a Handwriting gesture? The
 	 * overlay answers yes only for eraser intent - see bandEraserIntent.
@@ -975,6 +1009,23 @@ export class InlinePenRouter {
 						if (typeof id === "number") this.liveTouchIds.delete(id);
 					}
 				}
+				// PEN OFF: nothing below this line may eat a touch. The three
+				// rules under it exist to keep the pen's SECOND event stream
+				// off the editor - the stylus touches WebKit synthesizes for a
+				// Pencil, the untagged ones Chromium delivers on Android
+				// tablets, and the palm that rises the keyboard before a
+				// stroke - and every one of them is written to stop the
+				// keyboard coming up. With the pen off the keyboard coming up
+				// is the point: that touch stream is how iPadOS and Android
+				// place the caret at all, so eating it would take the caret
+				// with it and leave the pen doing nothing whatsoever.
+				//
+				// AFTER the bookkeeping above, never before it. `liveTouchIds`
+				// mirrors what the browser thinks is down and is what
+				// `touchesAtStrokeStart` is snapshotted from; a contact that
+				// went down while the pen was off and lifted after it came
+				// back on would otherwise leave a stale id in the set forever.
+				if (this.penOff()) return;
 				if (stylusOnlyTouches(te.changedTouches)) {
 					te.preventDefault();
 					te.stopPropagation();
@@ -1087,6 +1138,20 @@ export class InlinePenRouter {
 				// The first click ate the menu (orion 2026-08-26); the mouse
 				// keeps its menu, and only its own stroke/tail suppress it.
 				const pt = (ev as PointerEvent).pointerType;
+				// PEN OFF, and PEN ONLY. `contextMenuSuppressed` answers true
+				// for every pen-sourced menu unconditionally, on the grounds
+				// that a claimed pen's long-press is ours; while the pen is
+				// off it is nobody's but the app's, and a pen that can place a
+				// caret but cannot open the menu a finger opens is not the
+				// native pointer this feature promises.
+				//
+				// The other two pointers keep their rules exactly. A mouse
+				// matters here: mouse ink is untouched by pen off, so a live
+				// mouse-ink stroke must still suppress its own menu, which a
+				// blanket return would have handed back mid-stroke. Touch
+				// keeps `stabilizingHand` because that is a rule about the
+				// hand steadying the glass, not about who owns the pen.
+				if (pt === "pen" && this.penOff()) return;
 				// A finger planted to stabilize the hand BEFORE the pen
 				// arrives long-presses into a right-click on windows (orion
 				// 2026-08-26: switch note, plant finger, menu). Chromium
@@ -1728,6 +1793,19 @@ export class InlinePenRouter {
 		return mouseActsAsPen(e.pointerType);
 	}
 
+	/**
+	 * The pen-off gate (see `InlinePenCallbacks.penOff`), read once per site
+	 * so the surfaces keep the state and this file keeps the rule.
+	 *
+	 * PEN ONLY at every call site, spelled `pointerType === "pen"` there
+	 * rather than folded in here: a mouse standing in for a pen is a
+	 * different mode with a different owner (MouseInk.ts), and the one thing
+	 * this must never do is quietly take mouse ink down with it.
+	 */
+	private penOff(): boolean {
+		return this.cb.penOff?.() ?? false;
+	}
+
 	private sampleFrom(e: PointerEvent): PenSample {
 		const scale = this.scaleProvider();
 		return {
@@ -1804,6 +1882,23 @@ export class InlinePenRouter {
 					d.touchAction === "" ? "touch passthrough (native window)" : "touch (guard held)"
 				);
 			}
+			return;
+		}
+		// PEN OFF on this surface: hand the contact back before anything is
+		// spent on it. Above this line only `cancelFling()` has run, which any
+		// new contact earns whoever it belongs to; below it every branch
+		// claims - preventDefault, stopPropagation, setPointerCapture, the
+		// standing guard, the end backstop. So the answer has to be given
+		// here, and given by RETURNING rather than by suppressing: the tap
+		// this refuses is a caret placement, and on a touch device the
+		// keyboard that comes up with it is the entire feature (PenInk.ts).
+		//
+		// Reached by the linked-mentions band listener too, which calls this
+		// method directly for an eraser-intent contact outside the scroller -
+		// a backlink row is one more thing the pen should just click while it
+		// is off.
+		if (e.pointerType === "pen" && this.penOff()) {
+			tr("pointerdown", e, "pen NOT CLAIMED: pen off on this surface");
 			return;
 		}
 		// Mouse: never touched, unless mouse-ink mode is on - then the left
@@ -2028,6 +2123,19 @@ export class InlinePenRouter {
 		}
 		if (e.pointerType !== "pen" && !this.mouseActsAsPen(e)) return;
 		if (this.activePenId === null) {
+			// PEN OFF: a hovering pen is not our pen. Everything below this
+			// line is preparation for a claim that is never coming - the palm
+			// gate's "pen near" window, the standing guard's pen signal, and
+			// the reticle the surface paints from `onPenHover` - and each of
+			// them costs the user something while the pen is off. The gate is
+			// the sharpest: it blocks NEW touch contacts while a pen is near
+			// the glass, so a Boox user resting the pen an inch above the
+			// screen could not tap at all. The reticle is the other half of
+			// step 5 - no hover call, no ring, on desktop and Surface alike.
+			//
+			// Only here, where no stroke is live. A claimed stroke runs to its
+			// own lift; see `InlinePenCallbacks.penOff`.
+			if (e.pointerType === "pen" && this.penOff()) return;
 			// Hovering keeps the palm gate warm ("palm placed before pen") and
 			// re-arms the standing guard instantly if a touch window was open.
 			this.lastPenHoverAt = performance.now();
@@ -2124,6 +2232,13 @@ export class InlinePenRouter {
 		// session and keeps the move handler out of the ink business.
 		this.inkFeed.noteRawChannel();
 		if (this.activePenId === null) {
+			// PEN OFF, the raw stream's half of the hover gate above and for
+			// the same three reasons. `noteRawChannel()` stays ABOVE it: that
+			// records only that this engine HAS a raw channel, a fact about
+			// the machine rather than about the pen, and losing it while the
+			// pen is off would put the first stroke after it comes back on
+			// the slower move-fed path for no reason.
+			if (e.pointerType === "pen" && this.penOff()) return;
 			this.lastPenHoverAt = performance.now();
 			this.gate.penHoverSeen(performance.now());
 			this.applyGuard(this.manip.penSignal(), "pen-hover");

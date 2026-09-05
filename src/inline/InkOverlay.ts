@@ -129,7 +129,7 @@ import {
 } from "./MetadataVisibility";
 import { handoffFinishedStroke } from "./StrokeHandoff";
 import { InlineInkStore } from "./InlineInkStore";
-import { focusClaimedPenEditor } from "./InlineFocus";
+import { focusClaimedPenEditor, setKeyboardFocus } from "./InlineFocus";
 import { HOVER_GHOST_MS, PEN_HOVER_CLASS, penCursorLayout } from "./PenCursor";
 import { normalizeInlinePenPressure } from "./PenPressure";
 import { observeStrokeMax, strokeGain } from "../ink/PressureGain";
@@ -154,6 +154,7 @@ import {
 } from "./PenProbe";
 import { InlinePenRouter, bandEraserIntent } from "./InlinePenRouter";
 import { armMouseInkQuietly, mouseInkEnabled } from "./MouseInk";
+import { penInkEnabled } from "./PenInk";
 import { describeEl, setHitProbeContext } from "./PenHitProbe";
 import { Extent, inkFrontier, isScrollableOverflow, ScrollAxisGuard, spacerPosition, surfaceExtents, surfaceOriginInScroller, writeFrontier, ZERO_EXTENT, zoomFrontier } from "./SurfaceExtent";
 import { ProbeBox, capturePresented, parseHexColor, regionCensus } from "./PresentProbe";
@@ -573,6 +574,38 @@ export function overlayForPath(path: string): InkOverlayPlugin | null {
 /** Re-evaluate the pen-tools strip on every open editor (mode command). */
 export function refreshPenToolsAll(): void {
 	for (const p of instances) p.ensurePenTools();
+}
+
+/**
+ * The pen just went off (or on): end any live stroke on every open NOTE.
+ *
+ * The state can be flipped with the nib on the glass - a hotkey, the palette,
+ * or the other hand on the strip - and the router's gate deliberately refuses
+ * only NEW claims (see `InlinePenCallbacks.penOff`). Without this, a stroke
+ * claimed a moment earlier would keep `activePenId` set with the window-
+ * capture click suppressor armed behind it, which is the note-switch failure
+ * `abandonActiveStroke` was written for, reached a different way.
+ *
+ * COMMITS, it does not drop. `finishActiveStroke()` ends the stroke exactly
+ * as a lift does - the surface's own `penUp` commits the ink and stands the
+ * strip chrome down - which is the ruling already settled for the other
+ * teardown a writer hits mid-stroke (alan, 2026-09-04, on a window blur:
+ * "alt tab mid stroke - sure make it consistent"). Turning the pen off is not
+ * a request to throw away the word being written, and a toggle that ate it
+ * would be a worse bug than the one this feature fixes.
+ *
+ * Nothing live means nothing done: `finishActiveStroke()` returns false and
+ * changes no state at all. Deliberately NOT `abandonActiveStroke()`, whose
+ * teardown also runs `restoreGuardStyle()` whenever an ownership tail is
+ * still open - that would strip the standing touch-action guard off the
+ * scroller on every toggle made just after a stroke, which is the lit-nib
+ * regression its own header spells out.
+ *
+ * NOTES ONLY, like the state itself: the pdf keeps inking while the pen is
+ * off, so there is nothing there to end.
+ */
+export function endLiveNoteStrokes(): void {
+	for (const p of instances) p.endLiveStroke();
 }
 
 /**
@@ -1321,6 +1354,15 @@ export class InkOverlayPlugin {
 				onPenRaw: (samples, ev) => this.penRaw(samples, ev),
 				onPenMove: (_ev, count) => metrics.recordEvent("move", count, 0, false),
 				onPenUp: () => this.penUp(),
+			// PEN OFF (PenInk.ts, design §5): the note surface is the only
+			// one that answers this. Off means the router claims nothing, so
+			// the pen is a native pointer here - taps place the caret and
+			// raise the keyboard on a touch device, which is what two e-ink
+			// users asked for. `PdfInkController` leaves this member
+			// undefined, which reads as "never off", because there is no
+			// keyboard use case on a pdf and taking the pen away there would
+			// answer a request nobody made.
+			penOff: () => !penInkEnabled(),
 			claimBandContact: (ev) =>
 				bandEraserIntent(
 					ev.pointerType,
@@ -1632,6 +1674,21 @@ export class InkOverlayPlugin {
 				setInkSizeMult(tool as InkTool, mult);
 				if (commit) persistInkSize?.(tool as InkTool, getInkSizeMult(tool as InkTool));
 			},
+			// The pen-off button's other half: focus this editor inside the
+			// button's own click so the software keyboard rises, blur it when
+			// the pen comes back. `setKeyboardFocus` (InlineFocus.ts) rather
+			// than a `.focus()` here - the note's focus rules live in that
+			// module and StripPenChrome.test.ts's sweep is what keeps them
+			// there.
+			setEditorFocus: (focused) => setKeyboardFocus(this.view, focused),
+			// The note is the one surface PenInk.ts actually gates: the flag
+			// says whether the pen inks here, so the button and pill read it
+			// straight (MobileTools.ts's `penInksHere`, design §5).
+			penInksHere: () => penInkEnabled(),
+			// The note is where the Keyboard button means something: PenInk.ts's
+			// flag is real here, so there is a genuine off switch to build the
+			// button for (MobileTools.ts's `penCanTurnOff`).
+			penCanTurnOff: () => true,
 		});
 		// A strip born mid-session starts in the configured corner, not the
 		// default one: ensurePenTools creates it on the first pen contact,
@@ -1946,6 +2003,17 @@ export class InkOverlayPlugin {
 	/** The live overlay container, for the census's ghost detection. */
 	containerEl(): Element | null {
 		return this.container;
+	}
+
+	/**
+	 * End a stroke that is live right now, committing it. The per-editor half
+	 * of `endLiveNoteStrokes`, whose header carries the whole reasoning; a
+	 * no-op when nothing is live, and no chrome call of its own because
+	 * `finishActiveStroke` reaches `penUp()` through `onPenUp` and that is
+	 * where the strip already comes down.
+	 */
+	endLiveStroke(): void {
+		this.router?.finishActiveStroke();
 	}
 
 	routerCounters(): {

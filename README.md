@@ -56,7 +56,7 @@ Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 * pen toolbar with auto-hide
 * pinch to zoom
 * ink prediction + smoothing
-* lined and grid paper background
+* lined, grid, and dotted paper background
 * export ink as svg or pdf
 * infinite canvas
 * ink embeds
@@ -108,7 +108,7 @@ Obsidian 1.12.3 or newer. please send reports.
 
 ### the toolbar
 
-tap any tool in the toolbar to use it: pen, highlighter, eraser, lasso, insert space, pan. hover to see the slider.
+tap any tool in the toolbar to use it: pen, highlighter, eraser, lasso, insert space, pan. hover to see the slider. the keyboard button turns the pen off so a tap places the caret and the on-screen keyboard comes up - `Pen: on / off` does the same from the palette, notes only, and pdfs keep inking.
 
 (mouse users only) run `Handwriting: Mouse` to activate the toolbar, or go into settings and set Pen toolbar's dropdown menu to Show. once it's up, click any tool and the mouse picks it up; click the tool you're using again and the mouse goes back to your cursor.
 

@@ -34,6 +34,7 @@ import {
 import { stripEscapeVerdict } from "./StripEscape";
 import { penHardwareSeen } from "./PenToolsMode";
 import { markMousePutDown } from "./MouseInk";
+import { penInkEnabled } from "./PenInk";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN } from "../ink/PenStyle";
 import { describeEl } from "./PenHitProbe";
 import { traceStripClick } from "./InlinePenRouter";
@@ -100,6 +101,57 @@ export interface MobileToolsHost {
 	palette(): ReadonlyArray<{ name: string; hex: string }>;
 	/** A swatch was tapped: apply the color, pick up its nib, toast it. */
 	pickColor(name: string, hex: string): void;
+	/**
+	 * Give the editor the keyboard, or take it away: the pen-off button's
+	 * other half (PenInk.ts, design §5).
+	 *
+	 * This is the one thing the strip does that no command can do for it.
+	 * `pen-ink-toggle` flips the state from the palette, a hotkey or this
+	 * button alike, but iOS and Android raise the software keyboard only for
+	 * a programmatic focus made INSIDE A USER GESTURE - so the focus has to
+	 * happen in the button's own click handler, where a gesture exists,
+	 * rather than inside the command it execs. Turning the pen off focuses;
+	 * turning it back on blurs, so the keyboard goes back down.
+	 *
+	 * A host method rather than a `.focus()` here for the reason
+	 * StripPenChrome.test.ts's sweep names: the strip has no view to focus
+	 * and must not learn about one. The note overlay routes it through
+	 * `setKeyboardFocus` (InlineFocus.ts); the pdf surface has no editor and
+	 * implements it as a no-op.
+	 */
+	setEditorFocus(focused: boolean): void;
+	/**
+	 * Whether the pen actually inks on THIS surface right now, for the
+	 * keyboard button's light and the pill's "Pen off" label - a display
+	 * read, not the state itself. PenInk.ts's flag is NOTE SURFACES ONLY
+	 * (design §5): the note overlay answers `penInkEnabled()`, but the pdf
+	 * surface answers `true` unconditionally, because the pdf router never
+	 * gates on that flag and the pen keeps inking there regardless of what
+	 * the note toggle says. Reading the global directly, as the button used
+	 * to, made the pdf strip light the keyboard icon and wear "Pen off"
+	 * while its own pen was still inking - true for the note, false for the
+	 * surface actually on screen. A host read gives each surface its own
+	 * honest answer instead of one global standing in for both.
+	 */
+	penInksHere(): boolean;
+	/**
+	 * Whether this surface has an off switch for the pen AT ALL, for
+	 * whether the Keyboard button gets BUILT - a capability, not a live
+	 * reading. `penInksHere()` answers "is it off right now"; this answers
+	 * "could it ever be", read ONCE, at strip construction (see
+	 * `ButtonSpec.shownOn`).
+	 *
+	 * The note answers true: PenInk.ts's flag is real there, and the
+	 * keyboard button is the note's other half of it. The pdf surface
+	 * answers false - not merely "not lit", ABSENT. The owner pressed the
+	 * button on a pdf and got the toast "pen off" while his pen kept
+	 * inking regardless: `penInksHere()` above already kept the light and
+	 * the pill honest, but the button itself still sat there promising an
+	 * off switch the pdf router has never read. There is no keyboard use
+	 * case on a pdf - nothing to type into - so the fix is not a truer
+	 * light on a button that should not exist, it is no button.
+	 */
+	penCanTurnOff(): boolean;
 }
 
 /**
@@ -214,6 +266,20 @@ interface ButtonSpec {
 	glyph: string;
 	label: string;
 	commandId: string;
+	/**
+	 * Whether this button belongs on the strip AT ALL - evaluated ONCE, at
+	 * build time, against the host that strip was built for; omitted =
+	 * always shown. Unlike `isActive`/`isLit`/`isEnabled`, which are LIVE
+	 * reads re-run on every refresh, this runs once when the buttons are
+	 * created and never again for the life of the strip - there is no live
+	 * case, because what a surface can honour does not change mid-session.
+	 *
+	 * A button a surface cannot honour is not DISABLED, it is ABSENT: the
+	 * Keyboard button on a pdf strip is not a dimmed promise of an off
+	 * switch the pdf router will never read, it is not there to promise
+	 * anything (`MobileToolsHost.penCanTurnOff`).
+	 */
+	shownOn?: (host: MobileToolsHost) => boolean;
 	/** Marks the button active from current state; omitted = never marked. */
 	isActive?: (host: MobileToolsHost) => boolean;
 	/**
@@ -249,6 +315,17 @@ interface ButtonSpec {
 	 * important distinction in the whole strip was invisible.
 	 */
 	startsGroup?: boolean;
+	/**
+	 * HIDE rather than grey when `isEnabled` says no (owner's ruling,
+	 * 2026-09-05, "too many icons" - thirteen buttons at rest). Undo and
+	 * Redo keep the old greying: a disabled Undo is telling you something -
+	 * there is nothing to undo yet - and that is worth seeing even dim. A
+	 * disabled Paste ink when there is no ink on the clipboard says nothing
+	 * anyone needed to know; on a strip already thirteen wide it is only
+	 * another icon to scan past. So Delete selection, Copy selected ink and
+	 * Paste ink set this bit and the two history buttons do not.
+	 */
+	hideWhenDisabled?: boolean;
 }
 
 /**
@@ -256,7 +333,21 @@ interface ButtonSpec {
  * its colour, the other things the tip can be, what to do with a selection,
  * and the note's history. Colour is an action sitting among modes on
  * purpose - it changes whichever nib is active, so it belongs beside them.
+ *
+ * Keyboard closes the second group and is the odd one in it: every other
+ * entry there makes the tip do something ELSE, and this one makes the tip do
+ * NOTHING - the pen goes back to the app and taps place a caret (PenInk.ts).
+ * It belongs with them anyway, because from the writer's side it answers the
+ * same question the eraser and the pan answer, "what happens when I touch the
+ * page", and it is the last answer on that list: none of ours.
  */
+/**
+ * Named once: the click handler and the collapsed pill both single this
+ * button out, and a third spelling of the id is a third chance to mistype it
+ * into a branch that then silently never runs.
+ */
+const PEN_INK_TOGGLE = "handwriting:pen-ink-toggle";
+
 const BUTTONS: ButtonSpec[] = [
 	{
 		icon: "pen",
@@ -323,12 +414,39 @@ const BUTTONS: ButtonSpec[] = [
 		isActive: (h) => h.panOn(),
 	},
 	{
+		icon: "keyboard",
+		glyph: "K",
+		label: "Keyboard",
+		commandId: PEN_INK_TOGGLE,
+		// NOT SHOWN AT ALL where there is nothing to turn off. There is no
+		// keyboard use case on a pdf - nothing to type into - so a surface
+		// that cannot honour the button does not get a dimmed or mis-lit
+		// one, it gets none (MobileToolsHost.penCanTurnOff).
+		shownOn: (h) => h.penCanTurnOff(),
+		// LIT WHILE THE PEN IS OFF - the light means "the keyboard has the
+		// note", not "this button is armed to do something". Every other
+		// light on the strip is a tool the tip is holding; this one is the
+		// absence of all of them, and it is lit precisely when nothing else
+		// on this row can be.
+		//
+		// THROUGH THE HOST, not straight off the module: PenInk.ts's flag is
+		// NOTE SURFACES ONLY (design §5) and the pdf router never gates on
+		// it, so the pdf pen keeps inking regardless of what the flag says.
+		// A direct module read lit this button (and the pill) on the pdf
+		// strip while its own pen was still inking - right for the note,
+		// wrong for the surface actually on screen. `penInksHere()` lets
+		// each host give its own honest answer instead of one global
+		// standing in for both.
+		isActive: (h) => !h.penInksHere(),
+	},
+	{
 		icon: "trash-2",
 		glyph: "D",
 		label: "Delete selection",
 		startsGroup: true,
 		commandId: "handwriting:delete-selected-ink",
 		isEnabled: (h) => h.hasInkSelection(),
+		hideWhenDisabled: true,
 	},
 	{
 		icon: "copy",
@@ -336,6 +454,7 @@ const BUTTONS: ButtonSpec[] = [
 		label: "Copy selected ink",
 		commandId: "handwriting:copy-selected-ink",
 		isEnabled: (h) => h.hasInkSelection(),
+		hideWhenDisabled: true,
 	},
 	{
 		icon: "clipboard-paste",
@@ -343,6 +462,7 @@ const BUTTONS: ButtonSpec[] = [
 		label: "Paste ink",
 		commandId: "handwriting:paste-ink",
 		isEnabled: (h) => h.canPasteInk(),
+		hideWhenDisabled: true,
 	},
 	{
 		icon: "undo-2",
@@ -365,6 +485,17 @@ let collapsedSession = false;
 export class MobileTools {
 	private el: HTMLElement;
 	private buttons: Array<{ el: HTMLElement; spec: ButtonSpec }> = [];
+	/**
+	 * A `startsGroup` divider and the buttons drawn after it, up to the next
+	 * one. When every member of a group hides itself (`hideWhenDisabled`,
+	 * above), the divider that opens the group has nothing left to separate
+	 * and must hide with them - otherwise the selection group vanishing
+	 * leaves its hairline sitting flush against the Undo group's own,
+	 * reading as one double-width divider where a single group boundary
+	 * used to be. A group with no hiding member (Undo|Redo's) always has at
+	 * least one visible button, so its divider is never touched by this.
+	 */
+	private dividerGroups: Array<{ divider: HTMLElement; members: HTMLElement[] }> = [];
 	private slider!: SliderParts;
 	private penSlider!: SliderParts;
 	private hlSlider!: SliderParts;
@@ -683,9 +814,21 @@ export class MobileTools {
 			ev.preventDefault();
 			this.setCollapsed(true);
 		});
+		let currentGroup: { divider: HTMLElement; members: HTMLElement[] } | null = null;
 		for (const spec of BUTTONS) {
+			// Absent, not disabled: a surface this host can't honour a button
+			// on doesn't get it built at all (ButtonSpec.shownOn). Checked
+			// ahead of the divider below on purpose - a skipped button that
+			// also started a group must not leave an orphan divider behind
+			// it. The Keyboard button today starts no group of its own (it
+			// closes the second one; Delete Selection starts the third), so
+			// this currently changes nothing about the dividers, but the
+			// check is written for whichever button is next to need it.
+			if (spec.shownOn && !spec.shownOn(this.host)) continue;
 			if (spec.startsGroup) {
-				this.el.createDiv({ cls: "handwriting-mobile-tools-divider" });
+				const divider = this.el.createDiv({ cls: "handwriting-mobile-tools-divider" });
+				currentGroup = { divider, members: [] };
+				this.dividerGroups.push(currentGroup);
 			}
 			const b = this.el.createEl("button", {
 				cls: "handwriting-mobile-tool",
@@ -1004,6 +1147,28 @@ export class MobileTools {
 						markMousePutDown();
 					}
 					this.host.exec(spec.commandId);
+					// THE KEYBOARD, INSIDE THE GESTURE. The exec above has
+					// already flipped the state, so `penInkEnabled()` now
+					// reads the NEW answer: off means the user asked to type,
+					// and focusing the editor here - in a click handler, which
+					// is a user gesture - is the only thing that raises the
+					// soft keyboard on iOS and Android. The command cannot do
+					// it: reached from a hotkey or the palette it has no
+					// gesture behind it and both platforms ignore the focus.
+					// On means the pen is writing again, so the keyboard is
+					// dismissed and the glass goes back to the ink.
+					//
+					// This is the one place the strip does something its
+					// command does not, and the file's header says it invents
+					// nothing - so the exception is stated rather than
+					// smuggled: the STATE is still the command's, and only the
+					// focus, which is not state at all, is the button's.
+					// `noFocus`'s pointerdown preventDefault (above) is what
+					// keeps every OTHER button off the editor, and this call
+					// deliberately steps past it for this one.
+					if (spec.commandId === PEN_INK_TOGGLE) {
+						this.host.setEditorFocus(!penInkEnabled());
+					}
 					if (claimsTip && !wasActive && ptr === "mouse" && !this.host.mouseInkOn()) {
 						// Quietly: the exec above already toasted the tool.
 						// One click, one toast (alan, 2026-08-31).
@@ -1046,6 +1211,7 @@ export class MobileTools {
 			});
 			this.attachTip(b);
 			this.buttons.push({ el: b, spec });
+			currentGroup?.members.push(b);
 		}
 		// Drop-down sliders. No noFocus here: a range input needs its native
 		// pointerdown to start a drag on webkit. Focus loss is tolerable for
@@ -1219,6 +1385,16 @@ export class MobileTools {
 			// keyboard and stops firing hover, and the tooltip explaining WHY
 			// it is unavailable is the part worth keeping.
 			el.setAttribute("aria-disabled", enabled ? "false" : "true");
+			// hideWhenDisabled buttons (Delete selection, Copy selected ink,
+			// Paste ink) go all the way to `hidden` instead of stopping at the
+			// dimming above - the owner's ruling on a strip already thirteen
+			// wide. `is-disabled`/`aria-disabled` are left exactly as set
+			// above so nothing else that reads them changes; this is purely
+			// additive. `el.hidden`, not a style write, so CSS never fights
+			// this over display.
+			if (spec.hideWhenDisabled) {
+				el.hidden = !enabled;
+			}
 			// The palette button answers "which color" by BEING it.
 			if (spec.commandId === "handwriting:ink-color-cycle") {
 				const hex = this.host.activeColor();
@@ -1236,6 +1412,19 @@ export class MobileTools {
 					if (sr) sr.textContent = label;
 				}
 			}
+		}
+		// A group's own divider hides once every button after it has hidden
+		// itself: today that is only the selection group (Delete selection,
+		// Copy selected ink, Paste ink, all `hideWhenDisabled`), which
+		// vanishes whole with nothing lasso'd and nothing on the ink
+		// clipboard. Without this the hairline that opens an empty group
+		// sits flush against the next group's own, and the strip shows what
+		// reads as one double-width divider where a single boundary belongs.
+		// A group that keeps at least one always-visible member (Undo|Redo,
+		// neither of which hides) never has every member hidden, so this
+		// never touches that divider.
+		for (const group of this.dividerGroups) {
+			group.divider.hidden = group.members.every((m) => m.hidden);
 		}
 		// The collapsed pill wears the tool in hand.
 		//
@@ -1257,9 +1446,34 @@ export class MobileTools {
 			// has handed the mouse back to text and no nib is actually
 			// inking - it falls through to the generic "Pen tools" default
 			// below, same as when eraser/lasso/space/pan all read false.
-			const active = this.buttons.find(({ spec }) => (spec.isLit ?? spec.isActive)?.(this.host));
+			//
+			// PEN OFF WINS IT OUTRIGHT, and it is the one state that gets to.
+			// The scan below finds the first LIT button, and the two nibs come
+			// first: `nibIsLit` keeps reading true while the pen is off,
+			// correctly - the nominal tool really is still the pen and
+			// `penHardwareSeen` is deliberately not cleared, so the strip can
+			// be found again. But the pill is what is on screen while the
+			// strip is folded, which is exactly when someone wonders why their
+			// pen stopped drawing, and a pen icon is then the single most
+			// misleading thing it could wear. Design §5 asks for the keyboard
+			// icon there for that reason. The label says the state rather than
+			// naming a tool - "Keyboard tools" would read as one more tool -
+			// so a hover or a screen reader gets the answer in two words.
+			//
+			// Through the host, same reason as the button's own isActive: the
+			// pdf surface always inks, so its pill must not borrow the note's
+			// "Pen off" wording. (On a surface that never builds the Keyboard
+			// button at all - penCanTurnOff() false - `find` below would
+			// yield undefined anyway; this short-circuits first because
+			// penInksHere() is already true there, but either read lands on
+			// the same undefined.)
+			const penOffBtn = this.host.penInksHere()
+				? undefined
+				: this.buttons.find(({ spec }) => spec.commandId === PEN_INK_TOGGLE);
+			const active =
+				penOffBtn ?? this.buttons.find(({ spec }) => (spec.isLit ?? spec.isActive)?.(this.host));
 			const icon = active?.spec.icon ?? "pen";
-			const label = active ? `${active.spec.label} tools` : "Pen tools";
+			const label = penOffBtn ? "Pen off" : active ? `${active.spec.label} tools` : "Pen tools";
 			if (this.pill.dataset.icon !== icon) {
 				this.pill.dataset.icon = icon;
 				// Emptied FIRST: setIcon APPENDS an svg, it does not replace

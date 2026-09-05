@@ -879,6 +879,29 @@ export class PdfInkController {
 				setInkSizeMult(tool as InkTool, mult);
 				void commit;
 			},
+			// A NO-OP, and the honest one. The pen-off state is note-only
+			// (PenInk.ts): this surface keeps inking while it is off, so
+			// there is nothing here for the keyboard to take - and there is
+			// no editor either. `armStripPenFocus` gives this root a
+			// `tabindex="-1"` so the pen's own gestures can claim the keys,
+			// but that is not a contenteditable and focusing it would raise
+			// no software keyboard even if one were wanted. The button on
+			// this strip still toggles the state for the notes, which is
+			// where it means something.
+			setEditorFocus: () => {},
+			// ALWAYS TRUE: the pen-off flag (PenInk.ts) is note-only and this
+			// router never gates on it, so the pdf pen keeps inking no matter
+			// what the note's toggle says. Answering true here keeps the
+			// keyboard button and pill from wearing "Pen off" on a surface
+			// where the pen never actually turned off.
+			penInksHere: () => true,
+			// ALWAYS FALSE: there is no keyboard use case on a pdf - nothing
+			// to type into - and no amount of a truer light fixes a button
+			// that promises an off switch this router will never read. The
+			// owner pressed it on a pdf, got "pen off", and his pen kept
+			// inking; answering false here keeps the button from being BUILT
+			// on this strip at all (MobileTools.ts's `penCanTurnOff`).
+			penCanTurnOff: () => false,
 		});
 		this.tools.setCorner(getToolbarCorner());
 	}

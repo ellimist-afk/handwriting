@@ -106,6 +106,9 @@ const fakeHost = (): MobileToolsHost => ({
 	hasInkSelection: () => false,
 	palette: () => [],
 	pickColor: () => {},
+	setEditorFocus: () => {},
+	penInksHere: () => true,
+	penCanTurnOff: () => true,
 });
 
 /** One measured sweep of one slider. */

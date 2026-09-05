@@ -18,6 +18,7 @@ import {
 	mouseInkEnabled,
 	setMouseInk,
 } from "./MouseInk";
+import { penInkEnabled, resetPenInkForTest, setPenInk } from "./PenInk";
 
 /**
  * Obsidian's real `setIcon` APPENDS an svg to the parent; it does not clear
@@ -73,6 +74,16 @@ const fakeHost = (over: Partial<MobileToolsHost> = {}): MobileToolsHost => ({
 	hasInkSelection: () => false,
 	palette: () => [],
 	pickColor: () => {},
+	setEditorFocus: () => {},
+	// Note-surface default: most of this file's hosts stand in for the
+	// overlay, where PenInk.ts's flag is the real answer. Tests exercising
+	// the pdf surface's `() => true` override pass their own.
+	penInksHere: () => penInkEnabled(),
+	// Note-surface default, same reasoning: most of this file's hosts stand
+	// in for the overlay, which has a genuine off switch to build the
+	// Keyboard button for. Tests exercising the pdf surface's `() => false`
+	// override pass their own.
+	penCanTurnOff: () => true,
 	...over,
 });
 
@@ -228,6 +239,10 @@ class FakeEl {
 	readonly listeners = new Map<string, Array<(ev: unknown) => void>>();
 	textContent = "";
 	value = "";
+	/** `el.hidden`, as the strip's `hideWhenDisabled` path writes it directly
+	 * (`refreshNow`, MobileTools.ts) - not a class, so it needs its own field
+	 * rather than riding `classes`. */
+	hidden = false;
 	readonly offsetWidth = 0;
 	readonly offsetLeft = 0;
 	readonly classList = {
@@ -1657,5 +1672,281 @@ describe("MobileTools: a mouse click on the ACTIVE nib is for this session", () 
 
 		setMouseInk(m.saved.mouseInk); // the next launch
 		expect(mouseInkEnabled()).toBe(false);
+	});
+});
+
+/**
+ * The Keyboard button: the pen-off switch on the strip (design §5, PenInk.ts).
+ *
+ * Two e-ink reports behind it - "I couldn't see how to toggle it off or
+ * activate the keyboard input when I needed it", and the pen fighting the
+ * keyboard in live preview. Every other button on the strip picks what the
+ * tip DOES; this one takes the tip away and gives the note back to the
+ * keyboard, so the three things worth pinning are where it sits, when it
+ * lights, and the focus call that only a click can make.
+ */
+describe("MobileTools: the Keyboard button hands the note to the keyboard", () => {
+	beforeEach(() => {
+		resetPenToolsForTest();
+		resetPenInkForTest();
+	});
+	afterEach(() => resetPenInkForTest());
+
+	const build = (): {
+		doc: FakeDoc;
+		pane: FakeEl;
+		strip: MobileTools;
+		execed: string[];
+		focused: boolean[];
+	} => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const execed: string[] = [];
+		const focused: boolean[] = [];
+		const host = fakeHost({
+			// Stands in for main.ts's `pen-ink-toggle` callback, whose only
+			// part that matters here is the flip: the button reads the state
+			// back AFTER exec to decide which way to move the keyboard, so a
+			// fake that did not flip would test nothing.
+			exec: (id: string) => {
+				execed.push(id);
+				if (id === "handwriting:pen-ink-toggle") setPenInk(!penInkEnabled());
+			},
+			setEditorFocus: (on: boolean) => void focused.push(on),
+		});
+		const strip = new MobileTools(pane as unknown as HTMLElement, host);
+		return { doc, pane, strip, execed, focused };
+	};
+
+	/** Labels and dividers of the strip's own row, in the order they were built. */
+	const row = (pane: FakeEl): string[] => {
+		const el = pane.querySelector(".handwriting-mobile-tools");
+		if (!el) throw new Error("no strip was built");
+		return el.children
+			.filter(
+				(k) =>
+					k.classes.has("handwriting-mobile-tools-divider") ||
+					k.dataset.tipLabel !== undefined
+			)
+			.map((k) =>
+				k.classes.has("handwriting-mobile-tools-divider") ? "|" : k.dataset.tipLabel ?? ""
+			);
+	};
+
+	it("closes the tip group: after Pan, before the selection divider", () => {
+		const { pane } = build();
+		const labels = row(pane);
+		const at = labels.indexOf("Keyboard");
+		expect(at, "the Keyboard button was not built").toBeGreaterThan(-1);
+		// Its own group, not a new one: no divider between Pan and it, and
+		// the next divider is the selection group's.
+		expect(labels[at - 1]).toBe("Pan");
+		expect(labels[at + 1]).toBe("|");
+		expect(labels[at + 2]).toBe("Delete selection");
+	});
+
+	it("is dark while the pen inks and lit while the pen is off", () => {
+		const { doc, pane, strip } = build();
+		const btn = pane.findByTipLabel("Keyboard");
+		if (!btn) throw new Error("no Keyboard button was built");
+		// The light means "the keyboard has the note", so it is the one button
+		// that is lit precisely when nothing else on its row can be.
+		expect(btn.classes.has("is-active")).toBe(false);
+		setPenInk(false);
+		strip.refreshNow();
+		doc.flushFrames();
+		expect(btn.classes.has("is-active")).toBe(true);
+	});
+
+	it("reads penInksHere from the host, not the global - pdf's pen stays dark whatever the note's flag says", () => {
+		// The pdf surface answers `penInksHere: () => true` unconditionally
+		// (PdfInkController.ts): the flag PenInk.ts carries is note-only, and
+		// this is the regression it guards - the button used to read the
+		// global straight and lit "pen off" on the pdf strip while its own
+		// pen kept inking.
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const alwaysInks = fakeHost({ penInksHere: () => true });
+		const strip = new MobileTools(pane as unknown as HTMLElement, alwaysInks);
+		const btn = pane.findByTipLabel("Keyboard");
+		if (!btn) throw new Error("no Keyboard button was built");
+
+		setPenInk(false);
+		strip.refreshNow();
+		doc.flushFrames();
+		expect(btn.classes.has("is-active")).toBe(false);
+
+		const doc2 = new FakeDoc();
+		const pane2 = new FakeEl("div", doc2);
+		const neverInks = fakeHost({ penInksHere: () => false });
+		const strip2 = new MobileTools(pane2 as unknown as HTMLElement, neverInks);
+		const btn2 = pane2.findByTipLabel("Keyboard");
+		if (!btn2) throw new Error("no Keyboard button was built");
+
+		strip2.refreshNow();
+		doc2.flushFrames();
+		expect(btn2.classes.has("is-active")).toBe(true);
+	});
+
+	it("is not built at all on a surface with no off switch to give it - no keyboard use case on a pdf", () => {
+		// penCanTurnOff answers a different question than penInksHere above:
+		// not "is the pen off right now" but "could this surface ever turn it
+		// off". The pdf host answers false (PdfInkController.ts) - not a
+		// dimmed button, an absent one, per the owner's ruling after he
+		// pressed it on a pdf and got "pen off" while his pen kept inking.
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const canToggle = fakeHost();
+		new MobileTools(pane as unknown as HTMLElement, canToggle);
+		const withButton = row(pane).filter((l) => l !== "|");
+
+		const doc2 = new FakeDoc();
+		const pane2 = new FakeEl("div", doc2);
+		const cannotToggle = fakeHost({ penCanTurnOff: () => false });
+		new MobileTools(pane2 as unknown as HTMLElement, cannotToggle);
+		const withoutButton = row(pane2).filter((l) => l !== "|");
+
+		expect(withButton).toContain("Keyboard");
+		expect(pane2.findByTipLabel("Keyboard")).toBeNull();
+		expect(withoutButton).not.toContain("Keyboard");
+		// One button fewer, nothing else disturbed: no button starts a group
+		// where the Keyboard button stood, so it leaves no divider behind it
+		// either (row() above already excludes dividers from this count, but
+		// the point is nothing else in the row moved).
+		expect(withoutButton.length).toBe(withButton.length - 1);
+		expect(withoutButton).toEqual(withButton.filter((l) => l !== "Keyboard"));
+	});
+
+	it("execs the toggle and takes the keyboard inside the same click", () => {
+		const { doc, pane, execed, focused } = build();
+		const btn = pane.findByTipLabel("Keyboard");
+		if (!btn) throw new Error("no Keyboard button was built");
+
+		// Off: the user asked to type, and the focus has to happen HERE - a
+		// programmatic focus raises the soft keyboard on iOS and Android only
+		// inside a user gesture, which the command reached from a hotkey or
+		// the palette does not have.
+		btn.fire("click", { pointerType: "touch" });
+		doc.flushFrames();
+		expect(execed).toEqual(["handwriting:pen-ink-toggle"]);
+		expect(penInkEnabled()).toBe(false);
+		expect(focused).toEqual([true]);
+		expect(btn.classes.has("is-active")).toBe(true);
+
+		// On again: the keyboard goes down and the glass goes back to the ink.
+		btn.fire("click", { pointerType: "touch" });
+		doc.flushFrames();
+		expect(penInkEnabled()).toBe(true);
+		expect(focused).toEqual([true, false]);
+		expect(btn.classes.has("is-active")).toBe(false);
+	});
+
+	it("puts the keyboard on the collapsed pill, over the nib that is still nominally held", () => {
+		// The pill is what is on screen while the strip is folded, which is
+		// exactly when someone wonders why their pen stopped drawing. The pen
+		// nib stays LIT underneath - `penHardwareSeen` is deliberately not
+		// cleared, so the strip can be found again - so a pill that simply
+		// took the first lit button would wear a pen icon over a pen that
+		// does nothing, which is the most misleading thing it could say.
+		markPenHardwareSeen();
+		const { doc, pane, strip } = build();
+		const pill = pane.querySelector(".handwriting-pen-pill");
+		if (!pill) throw new Error("no pen pill was built");
+		expect(pill.dataset.icon).toBe("pen");
+
+		setPenInk(false);
+		strip.refreshNow();
+		doc.flushFrames();
+		expect(pill.dataset.icon).toBe("keyboard");
+		expect(pill.dataset.tipLabel).toBe("Pen off");
+		expect(pill.querySelector(".handwriting-sr-only")?.textContent).toBe("Pen off");
+
+		setPenInk(true);
+		strip.refreshNow();
+		doc.flushFrames();
+		expect(pill.dataset.icon).toBe("pen");
+		expect(pill.dataset.tipLabel).toBe("Pen tools");
+	});
+});
+
+/**
+ * Delete selection, Copy selected ink and Paste ink HIDE when they cannot
+ * act, rather than greying (owner's ruling, 2026-09-05: "too many icons" -
+ * thirteen buttons at rest). Undo and Redo, the strip's other two
+ * `isEnabled` buttons, keep the old greying instead - covered above in "a
+ * dimmed button's refused click corrects the stale class" - because a
+ * disabled Undo is telling you something (there is nothing to undo yet)
+ * where a disabled Paste with nothing on the ink clipboard is only another
+ * icon to scan past on a strip already thirteen wide.
+ */
+describe("MobileTools: the selection group hides rather than greys", () => {
+	beforeEach(() => resetPenToolsForTest());
+
+	const build = (over: Partial<MobileToolsHost>): { pane: FakeEl; strip: MobileTools } => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const strip = new MobileTools(pane as unknown as HTMLElement, fakeHost(over));
+		return { pane, strip };
+	};
+
+	/** The divider drawn immediately before the named button, in the strip's
+	 * own child order - `startsGroup` (MobileTools.ts) draws it right there,
+	 * so this is the one that must hide alongside an emptied group. */
+	const dividerBefore = (pane: FakeEl, label: string): FakeEl => {
+		const el = pane.querySelector(".handwriting-mobile-tools");
+		if (!el) throw new Error("no strip was built");
+		const at = el.children.findIndex((k) => k.dataset.tipLabel === label);
+		if (at < 1) throw new Error(`no ${label} button, or nothing before it`);
+		const divider = el.children[at - 1];
+		if (!divider || !divider.classes.has("handwriting-mobile-tools-divider")) {
+			throw new Error(`element before ${label} is not the group's divider`);
+		}
+		return divider;
+	};
+
+	it("hides Delete, Copy, Paste and their divider with no selection and nothing to paste - Undo stays visible and only greys", () => {
+		const { pane } = build({ hasInkSelection: () => false, canPasteInk: () => false });
+		const del = pane.findByTipLabel("Delete selection");
+		const copy = pane.findByTipLabel("Copy selected ink");
+		const paste = pane.findByTipLabel("Paste ink");
+		const undo = pane.findByTipLabel("Undo");
+		if (!del || !copy || !paste || !undo) {
+			throw new Error("the selection group or Undo was not built");
+		}
+		expect(del.hidden).toBe(true);
+		expect(copy.hidden).toBe(true);
+		expect(paste.hidden).toBe(true);
+		expect(dividerBefore(pane, "Delete selection").hidden).toBe(true);
+
+		// Undo/Redo's own ruling, untouched: greyed, never hidden. `canUndo`
+		// defaults false in `fakeHost`, so this strip's Undo is disabled too -
+		// the case the two behaviours must tell apart.
+		expect(undo.hidden).toBe(false);
+		expect(undo.classes.has("is-disabled")).toBe(true);
+		expect(undo.getAttribute("aria-disabled")).toBe("true");
+	});
+
+	it("shows Delete, Copy and their divider once ink is selected - Paste stays hidden", () => {
+		const { pane } = build({ hasInkSelection: () => true, canPasteInk: () => false });
+		const del = pane.findByTipLabel("Delete selection");
+		const copy = pane.findByTipLabel("Copy selected ink");
+		const paste = pane.findByTipLabel("Paste ink");
+		if (!del || !copy || !paste) throw new Error("the selection group was not built");
+		expect(del.hidden).toBe(false);
+		expect(copy.hidden).toBe(false);
+		expect(paste.hidden).toBe(true);
+		expect(dividerBefore(pane, "Delete selection").hidden).toBe(false);
+	});
+
+	it("shows Paste and the divider with a full ink clipboard alone - Delete and Copy stay hidden", () => {
+		const { pane } = build({ hasInkSelection: () => false, canPasteInk: () => true });
+		const del = pane.findByTipLabel("Delete selection");
+		const copy = pane.findByTipLabel("Copy selected ink");
+		const paste = pane.findByTipLabel("Paste ink");
+		if (!del || !copy || !paste) throw new Error("the selection group was not built");
+		expect(del.hidden).toBe(true);
+		expect(copy.hidden).toBe(true);
+		expect(paste.hidden).toBe(false);
+		expect(dividerBefore(pane, "Delete selection").hidden).toBe(false);
 	});
 });

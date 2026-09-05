@@ -256,8 +256,8 @@ const FOCUS_ALLOWED: Readonly<Record<string, Exemption>> = {
 		why: "stripPenFocus, the shared keyboard claim for a non-editor ink surface - the pdf half of the pair the note gets from InlineFocus",
 	},
 	"/src/inline/InlineFocus.ts": {
-		max: 1,
-		why: "focusClaimedPenEditor, the note half of the same pair: one module, one call, both note paths route through it. This is a shared claim helper, not a hand-rolled one - the thing this assertion wants surfaces to call",
+		max: 2,
+		why: "focusClaimedPenEditor, the note half of the same pair: one module, one call, both note paths route through it. This is a shared claim helper, not a hand-rolled one - the thing this assertion wants surfaces to call. The SECOND is setKeyboardFocus, the pen-off toggle's opposite request (PenInk.ts): turning the pen off focuses the editor inside the strip's click so the soft keyboard rises, which is the feature. Same module on purpose - the sweep exists so a surface cannot hand-roll a focus rule, and InkOverlay.ts calling contentDOM.focus() itself is exactly the shape it forbids",
 	},
 	"/src/view/HandwritingPageView.ts": {
 		max: 1,

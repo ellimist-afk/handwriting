@@ -5,6 +5,8 @@ import {
 	embedInkLayerCount,
 	embedInkMarker,
 	embedInkNeedsPaint,
+	embedInkRootFor,
+	embedInkRootIsEmbed,
 	embedInkScale,
 	teardownEmbedInk,
 } from "./EmbedInk";
@@ -101,6 +103,60 @@ describe("embedInkNeedsPaint (reading view drops the canvas, keeps the marker)",
 });
 
 /**
+ * A minimal stand-in for the one DOM method `embedInkRoot` calls: `closest`,
+ * walking a `parent` chain and matching a single class per fake element. No
+ * jsdom in this suite (see the teardown fakes below), and `closest` is all
+ * either function touches, so a real element would only add ceremony.
+ */
+function fakeNode(cls: string | null, parent: { closest(sel: string): unknown } | null = null) {
+	const node = {
+		closest(sel: string): unknown {
+			const wanted = sel.replace(/^\./, "");
+			return cls === wanted ? node : (parent?.closest(sel) ?? null);
+		},
+	};
+	return node;
+}
+
+describe("embedInkRootFor (the renderer loads a section before inserting it)", () => {
+	it("climbs from a detached section's container to the embed content around it", () => {
+		// The virtualised renderer's own case: the section is not in any
+		// tree yet, but the sizer it will eventually sit in already is.
+		const embedContent = fakeNode("markdown-embed-content");
+		const sizer = fakeNode("markdown-preview-sizer", embedContent);
+		const detachedSection = fakeNode(null); // no class, no parent: unreachable via closest
+		expect(embedInkRootFor(detachedSection as unknown as HTMLElement, sizer as unknown as HTMLElement)).toBe(
+			embedContent
+		);
+	});
+
+	it("falls back to a bare sizer when there is no embed content above it", () => {
+		// Plain reading view: no `.markdown-embed-content` ancestor at all,
+		// so the sizer itself is the root, same as before this bug.
+		const sizer = fakeNode("markdown-preview-sizer");
+		const detachedSection = fakeNode(null);
+		expect(embedInkRootFor(detachedSection as unknown as HTMLElement, sizer as unknown as HTMLElement)).toBe(
+			sizer
+		);
+	});
+
+	it("prefers the section's own root when it is already attached, ignoring the container", () => {
+		const embedContent = fakeNode("markdown-embed-content");
+		const attachedSection = fakeNode(null, embedContent);
+		const unrelatedContainer = fakeNode("markdown-preview-sizer");
+		expect(
+			embedInkRootFor(attachedSection as unknown as HTMLElement, unrelatedContainer as unknown as HTMLElement)
+		).toBe(embedContent);
+	});
+
+	it("returns null when the section is detached and there is no container to fall back to", () => {
+		const detachedSection = fakeNode(null);
+		expect(embedInkRootFor(detachedSection as unknown as HTMLElement, null)).toBeNull();
+		expect(embedInkRootFor(detachedSection as unknown as HTMLElement, undefined)).toBeNull();
+	});
+});
+
+/**
  * Unload takes the layers back out of the DOM (audit, 2026-09-01).
  *
  * These layers live in rendered views, hover previews and exported panes -
@@ -120,6 +176,9 @@ function fakeRoot() {
 		removed,
 		attrs,
 		isConnected: true,
+		// Not an embed content box: these tests exercise teardown's generic
+		// canvas/marker/position cleanup, which runs the same regardless.
+		classList: { contains: () => false },
 		style: {
 			position: "relative",
 			removeProperty(name: string) {
@@ -175,5 +234,122 @@ describe("teardownEmbedInk", () => {
 		teardownEmbedInk();
 		expect(gone.removed).toEqual([]);
 		expect(embedInkLayerCount()).toBe(0);
+	});
+});
+
+describe("embedInkRootIsEmbed", () => {
+	it("recognizes an embed's content box", () => {
+		expect(embedInkRootIsEmbed({ classList: { contains: (c) => c === "markdown-embed-content" } })).toBe(
+			true
+		);
+	});
+
+	it("does not mistake a plain reading view's sizer for an embed", () => {
+		expect(embedInkRootIsEmbed({ classList: { contains: (c) => c === "markdown-preview-sizer" } })).toBe(
+			false
+		);
+	});
+});
+
+/**
+ * An embed's content box sizes itself to its TEXT and clips the ink hanging
+ * below it (measured: a 24px-tall box against 368px of ink). `paint` grows
+ * `.markdown-embed-content` roots to the ink's own height so nothing is lost;
+ * a plain reading view's sizer is left alone (its own describe block below).
+ *
+ * `querySelector` always answers "no canvas yet", same trick as `fakeRoot`
+ * above but pushed one step further: it means `paint` never thinks a canvas
+ * is already there, so every call re-enters the paint path regardless of
+ * marker state, without this suite having to reach into `embedInkChanged`'s
+ * revision bookkeeping just to force a second paint.
+ */
+function fakeEmbedRoot(cls: string) {
+	const attrs = new Map<string, string>();
+	return {
+		isConnected: true,
+		classList: { contains: (c: string) => c === cls },
+		style: {
+			position: "static",
+			minHeight: "",
+			removeProperty(this: { position: string; minHeight: string }, name: string) {
+				if (name === "position") this.position = "";
+				if (name === "min-height") this.minHeight = "";
+			},
+		},
+		setCssStyles(this: { style: { position: string; minHeight: string } }, styles: Record<string, string>) {
+			if ("position" in styles) this.style.position = styles.position;
+			if ("minHeight" in styles) this.style.minHeight = styles.minHeight;
+		},
+		querySelector: () => null,
+		getAttribute: (k: string) => attrs.get(k) ?? null,
+		setAttribute: (k: string, v: string) => void attrs.set(k, v),
+		removeAttribute: (k: string) => void attrs.delete(k),
+		createEl: () => ({
+			style: {} as Record<string, string>,
+			width: 0,
+			height: 0,
+			setCssStyles(this: { style: Record<string, string> }, styles: Record<string, string>) {
+				Object.assign(this.style, styles);
+			},
+			getContext: () => ({
+				setTransform() {},
+				clearRect() {},
+				globalAlpha: 1,
+			}),
+			remove() {},
+		}),
+		ownerDocument: {
+			defaultView: {
+				addEventListener() {},
+				removeEventListener() {},
+				getComputedStyle: (el: { style: { position: string } }) => ({ position: el.style.position }),
+				devicePixelRatio: 1,
+			},
+		},
+	};
+}
+
+describe("embed min-height (the embed grows to hold ink that would otherwise clip)", () => {
+	it("grows an embed root's min-height to the ink's extent after painting strokes", () => {
+		const root = fakeEmbedRoot("markdown-embed-content");
+		attachEmbedInk(root as unknown as HTMLElement, "note.md", [strokeWithBBox(0, 0, 100, 368)]);
+		expect(root.style.minHeight).toBe("368px");
+		teardownEmbedInk();
+	});
+
+	it("clears the min-height once the last stroke is erased", () => {
+		const root = fakeEmbedRoot("markdown-embed-content");
+		attachEmbedInk(root as unknown as HTMLElement, "note.md", [strokeWithBBox(0, 0, 100, 368)]);
+		expect(root.style.minHeight).toBe("368px");
+		attachEmbedInk(root as unknown as HTMLElement, "note.md", []);
+		expect(root.style.minHeight).toBe("");
+		teardownEmbedInk();
+	});
+
+	it("never touches min-height on a plain reading view's sizer", () => {
+		const root = fakeEmbedRoot("markdown-preview-sizer");
+		attachEmbedInk(root as unknown as HTMLElement, "note.md", [strokeWithBBox(0, 0, 100, 368)]);
+		expect(root.style.minHeight).toBe("");
+		teardownEmbedInk();
+	});
+
+	it("teardown clears the min-height it set", () => {
+		const root = fakeEmbedRoot("markdown-embed-content");
+		attachEmbedInk(root as unknown as HTMLElement, "note.md", [strokeWithBBox(0, 0, 100, 368)]);
+		expect(root.style.minHeight).toBe("368px");
+		teardownEmbedInk();
+		expect(root.style.minHeight).toBe("");
+	});
+
+	it("leaves a foreign min-height alone: paint never wrote it, so teardown won't clear it", () => {
+		// Mirrors the `position` revert test above: a value we never recorded
+		// as ours (MIN_HEIGHT_ATTR unset) is not ours to remove, whatever it
+		// is set to. Zero strokes means `paint` returns before touching
+		// min-height at all, so this root's own value stands.
+		const root = fakeEmbedRoot("markdown-embed-content");
+		root.style.minHeight = "500px";
+		attachEmbedInk(root as unknown as HTMLElement, "note.md", []);
+		teardownEmbedInk();
+		expect(root.style.minHeight).toBe("500px");
 	});
 });

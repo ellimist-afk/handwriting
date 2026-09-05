@@ -12,12 +12,30 @@
  * than the editor did (narrower embed, different padding), and the ink does
  * not chase the text - it never does.
  *
- * Mechanics: markdown post-processors run once per SECTION, and the section
- * element is not attached to the document yet when the processor runs. So
- * each section registers a MarkdownRenderChild; on load (now attached) it
- * walks up to the rendered document's root and attaches ONE ink layer
- * there, keyed by a data attribute so the other sections' children see it
- * and stand down.
+ * An `![[embed]]`'s content box sizes itself to its TEXT, not to the ink
+ * drawn on top of it, and clips whatever falls outside with `overflow: auto`
+ * - measured at 24px tall against 368px of ink, and total for a note holding
+ * only ink. So `.markdown-embed-content` roots get their `min-height` grown
+ * to the ink's own extent; reading view is deliberately left alone (see
+ * `teardownEmbedInk`).
+ *
+ * Mechanics: markdown post-processors run once per SECTION, and each section
+ * registers a MarkdownRenderChild to defer past processing. On load it walks
+ * up to the rendered document's root and attaches ONE ink layer there, keyed
+ * by a data attribute so the other sections' children see it and stand down.
+ *
+ * That walk used to assume onload runs after the section is attached to the
+ * document, because that used to be when Obsidian called ctx.addChild. The
+ * virtualised preview renderer changed it: it calls addChild on a component
+ * that is ALREADY loaded, so onload now fires synchronously during
+ * post-processing, before the section is inserted into the sizer. Climbing
+ * from a detached section finds nothing. The post-processor context also
+ * carries a containerEl - undocumented, but present in both the old and new
+ * renderers - naming the renderer's own element (the sizer, or the
+ * `.markdown-preview-view` div) whether or not the section has landed yet,
+ * so the walk tries the section first and falls back to that container. If
+ * a future build drops containerEl too, the caller in main.ts retries across
+ * a few animation frames once the section is actually connected.
  *
  * Staleness (1.0.5): ink saves touch the sidecar and never the .md, so a
  * rendered embed used to keep its picture until Obsidian happened to
@@ -52,6 +70,15 @@ import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
  */
 const MAX_LAYER_PX = 4_000_000;
 const MARKER_ATTR = "data-handwriting-embed-ink";
+/**
+ * Records the `min-height` value WE last wrote on an embed root, so it can be
+ * told apart from one the theme or Obsidian set. Same discipline as the
+ * `position: relative` revert below, just with a value instead of a fixed
+ * sentinel: `position` only ever becomes "relative" under us, but the
+ * min-height we set moves with the ink's own height, so remembering "relative"
+ * would not be enough to recognise it later.
+ */
+const MIN_HEIGHT_ATTR = "data-handwriting-embed-min-height";
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** Windows whose print swap is already wired; popouts each get their own. */
@@ -102,6 +129,46 @@ export function embedInkRoot(sectionEl: HTMLElement): HTMLElement | null {
 		sectionEl.closest<HTMLElement>(".markdown-preview-view") ??
 		sectionEl.closest<HTMLElement>(".markdown-rendered")
 	);
+}
+
+/**
+ * The root for a section, or for the renderer's container when the section
+ * is not yet in a tree.
+ *
+ * The virtualised preview renderer loads a section's MarkdownRenderChild
+ * before inserting the section element into the sizer, so `embedInkRoot` on
+ * the section alone often has nothing to climb from. The one thing the
+ * renderer hands the post-processor for certain, attached or not, is its OWN
+ * container - the sizer in the new renderer, the `.markdown-preview-view`
+ * div in the old one - so that becomes the fallback anchor. Climbing from it
+ * lands on the same root this returned before the renderer changed:
+ * `embedInkRoot` on an embed's sizer still reaches `.markdown-embed-content`
+ * (`closest()` includes the element itself, and the sizer sits inside it),
+ * and on a plain reading view it returns the sizer, exactly what an already
+ * -attached section would have resolved to.
+ *
+ * `containerEl` is not declared on MarkdownPostProcessorContext - read off
+ * the shipped bundle, not the public API - so the caller passes it in only
+ * after its own duck check that it is actually an element, and this stays a
+ * pure fallback rather than assuming anything about its shape.
+ */
+export function embedInkRootFor(
+	sectionEl: HTMLElement,
+	containerEl: HTMLElement | null | undefined
+): HTMLElement | null {
+	return embedInkRoot(sectionEl) ?? (containerEl ? embedInkRoot(containerEl) : null);
+}
+
+/**
+ * Pure: is this rendered root an embed's content box?
+ *
+ * Only `.markdown-embed-content` gets grown to fit its ink (see `paint`) - a
+ * plain reading view's `.markdown-preview-sizer` is a scroller whose sizing
+ * the virtualised renderer already owns, and forcing a min-height onto it
+ * would fight that renderer rather than fix a clip.
+ */
+export function embedInkRootIsEmbed(root: { classList: { contains(cls: string): boolean } }): boolean {
+	return root.classList.contains("markdown-embed-content");
 }
 
 /** Pure: the css extent that covers every stroke. Never clipped. */
@@ -276,6 +343,7 @@ export function teardownEmbedInk(): void {
 		root.querySelector(":scope > svg.handwriting-embed-ink")?.remove();
 		root.removeAttribute(MARKER_ATTR);
 		if (root.style.position === "relative") root.style.removeProperty("position");
+		clearEmbedMinHeight(root);
 	}
 	layers.clear();
 	revisions.clear();
@@ -335,6 +403,24 @@ function inkPathEl(root: HTMLElement, run: InkSvgRun): SVGPathElement {
 	return el;
 }
 
+/**
+ * Remove a min-height we set, if it is still there and still ours.
+ *
+ * "Still ours" means the inline value matches what we recorded in
+ * `MIN_HEIGHT_ATTR` the last time we wrote one. If it does not match, someone
+ * else (the theme, a snippet, the user) has since taken over that property,
+ * and clearing it would be clobbering layout that is no longer ours to touch
+ * - the same rule `teardownEmbedInk` already applies to `position`, just
+ * carrying a remembered value instead of a fixed sentinel.
+ */
+function clearEmbedMinHeight(root: HTMLElement): void {
+	const ours = root.getAttribute(MIN_HEIGHT_ATTR);
+	if (ours !== null && root.style.minHeight === ours) {
+		root.style.removeProperty("min-height");
+	}
+	root.removeAttribute(MIN_HEIGHT_ATTR);
+}
+
 function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): void {
 	const marker = embedInkMarker(path, revisions.get(path) ?? 0);
 	let canvas = root.querySelector<HTMLCanvasElement>(
@@ -345,12 +431,26 @@ function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): 
 	const view = root.ownerDocument.defaultView ?? window;
 	const { w, h } = embedInkExtent(strokes);
 	if (strokes.length === 0 || w <= 0 || h <= 0) {
-		// The last stroke was erased: the picture goes too.
+		// The last stroke was erased: the picture goes too, and so does any
+		// room we grew the embed by to hold it.
 		canvas?.remove();
+		if (embedInkRootIsEmbed(root)) clearEmbedMinHeight(root);
 		return;
 	}
 	if (view.getComputedStyle(root).position === "static") {
 		root.setCssStyles({ position: "relative" });
+	}
+	if (embedInkRootIsEmbed(root)) {
+		// An embed's content box sizes itself to its TEXT and clips the ink
+		// hanging below it (measured: 24px box, 368px of ink). Growing the box
+		// to the ink's own height fixes that. Reading view's sizer is left
+		// alone on purpose - it is a scroller whose scroll range the
+		// absolutely positioned canvas already extends, and it is resized by
+		// the virtualised renderer itself; forcing a min-height onto it would
+		// fight that renderer rather than fix a clip.
+		const minHeight = `${h}px`;
+		root.setCssStyles({ minHeight });
+		root.setAttribute(MIN_HEIGHT_ATTR, minHeight);
 	}
 	if (!canvas) {
 		canvas = root.createEl("canvas", { cls: "handwriting-embed-ink" });

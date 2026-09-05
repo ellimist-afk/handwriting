@@ -85,6 +85,12 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"even more pdf fixes",
 		"bug fixes",
 	],
+	"1.4.11": [
+		"keyboard mode button on the toolbar for boox users",
+		"ink shows in embeds",
+		"dotted paper",
+		"bug fixes",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

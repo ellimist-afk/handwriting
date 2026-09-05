@@ -440,6 +440,18 @@ body.handwriting-paper-grid .markdown-source-view .cm-scroller {
 	background-attachment: local, local;
 }
 
+/* Dots read quieter than the grid - a single mark per cell instead of two
+   crossing rules - which is the point: it is the ruling canvas apps (Obsidian's
+   own, the ipad drawing apps) reach for when they want a page that still shows
+   through the ink. Same 28px pitch as lines and grid so switching between the
+   three doesn't shift anything on the page, same border token, same local
+   attachment so the dots are paper and not a window decal. */
+body.handwriting-paper-dots .markdown-source-view .cm-scroller {
+	background-image: radial-gradient(circle, var(--background-modifier-border) 1px, transparent 1.5px);
+	background-size: 28px 28px;
+	background-attachment: local;
+}
+
 /* Toolbar corner (settings): the strip and its collapsed pill are the same
    control in two sizes, so one class positions both. Top-right is the default
    and the historical position - the writing palm owns the bottom of the glass,

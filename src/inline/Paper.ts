@@ -5,12 +5,13 @@
  * note or sidecar. `background-attachment: local` makes the ruling scroll
  * with the text, so lines behave like paper instead of like a window decal.
  *
- * One style at a time, cycled by a single command: none -> lines -> grid.
+ * One style at a time, cycled by a single command: none -> lines -> grid ->
+ * dots.
  */
 
-export type PaperStyle = "none" | "lines" | "grid";
+export type PaperStyle = "none" | "lines" | "grid" | "dots";
 
-export const PAPER_STYLES: readonly PaperStyle[] = ["none", "lines", "grid"];
+export const PAPER_STYLES: readonly PaperStyle[] = ["none", "lines", "grid", "dots"];
 
 export function nextPaperStyle(cur: PaperStyle): PaperStyle {
 	const i = PAPER_STYLES.indexOf(cur);
@@ -21,10 +22,11 @@ export function nextPaperStyle(cur: PaperStyle): PaperStyle {
 export function paperClass(style: PaperStyle): string | null {
 	if (style === "lines") return "handwriting-paper-lines";
 	if (style === "grid") return "handwriting-paper-grid";
+	if (style === "dots") return "handwriting-paper-dots";
 	return null;
 }
 
 /** Normalize a persisted value; anything unrecognized is none. */
 export function normalizePaperStyle(raw: unknown): PaperStyle {
-	return raw === "lines" || raw === "grid" ? raw : "none";
+	return raw === "lines" || raw === "grid" || raw === "dots" ? raw : "none";
 }

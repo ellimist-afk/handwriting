@@ -9,6 +9,7 @@ import {
 import { HANDWRITING_PEN_LAB_VIEW_TYPE, PenLabView } from "./view/PenLabView";
 import {
 	addStripSurface,
+	endLiveNoteStrokes,
 	hidePenCursorsEverywhere,
 	copyInlineInkMetrics,
 	copyInlineZoomReport,
@@ -83,10 +84,11 @@ import {
 	mouseInkEnabled,
 	setMouseInk,
 } from "./inline/MouseInk";
+import { penInkEnabled, setPenInk } from "./inline/PenInk";
 import { setPrediction, setPredictionEink } from "./inline/StrokePrediction";
 import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./inline/Paper";
 import { inkToSvg } from "./ink/SvgExport";
-import { InkTool } from "./ink/Stroke";
+import { InkStroke, InkTool } from "./ink/Stroke";
 import { appendInkToPdf, flattenedPdfPath } from "./ink/InkPdfAppend";
 import { inkToPdf } from "./ink/InkPdf";
 import { bytesOf } from "./pdf/PdfSyntax";
@@ -97,7 +99,7 @@ import {
 	disarmPrintSwaps,
 	teardownEmbedInk,
 	embedInkChanged,
-	embedInkRoot,
+	embedInkRootFor,
 	initEmbedInkRefresh,
 } from "./inline/EmbedInk";
 import { notifyInkChanged, onInkChanged } from "./inline/InkEvents";
@@ -218,7 +220,7 @@ interface HandwritingSettings {
 	mouseInk: boolean;
 	strokePrediction: boolean;
 	booxMode: boolean;
-	/** Ruled paper background (v0.13.16): none, lines or grid. Per device. */
+	/** Ruled paper background (v0.13.16): none, lines, grid or dots. Per device. */
 	paperStyle: PaperStyle;
 	/** Pen tools strip (v0.13.16): auto (pen summons it), show, or hide. */
 	penTools: PenToolsMode;
@@ -286,6 +288,52 @@ const DEFAULT_SETTINGS: HandwritingSettings = {
  */
 function reloadStride(quietTicks: number): number {
 	return Math.min(5, 1 + Math.floor(quietTicks / 5));
+}
+
+/**
+ * Attach ink to a rendered section once its root can be found, retrying
+ * across animation frames when it cannot be found immediately.
+ *
+ * The synchronous case - a root found on the first try - is the common one
+ * and stays synchronous on purpose: an export renders the note and then
+ * serializes it right away, and a picture taken before a promise resolves
+ * has already lost its ink. The retry only exists as a safety net for a
+ * build of Obsidian that hands the post-processor no containerEl at all, so
+ * embedInkRootFor has nothing but the section itself to climb from and the
+ * section is not attached yet. Rather than give up, this waits for the
+ * section to land in the tree - up to 30 frames, about half a second - and
+ * tries again once it has. Returns a canceller for child.onunload, so a
+ * section that unloads mid-wait does not go on scheduling frames forever.
+ */
+function attachEmbedInkOnceReady(
+	el: HTMLElement,
+	container: HTMLElement | null,
+	path: string,
+	strokes: () => readonly InkStroke[]
+): () => void {
+	const root = embedInkRootFor(el, container);
+	if (root) {
+		attachEmbedInk(root, path, strokes());
+		return () => {};
+	}
+	const view = el.ownerDocument.defaultView ?? window;
+	let handle: number | null = null;
+	let frame = 0;
+	const tick = () => {
+		handle = null;
+		if (el.isConnected) {
+			const lateRoot = embedInkRootFor(el, container);
+			if (lateRoot) attachEmbedInk(lateRoot, path, strokes());
+			return;
+		}
+		frame++;
+		if (frame >= 30) return;
+		handle = view.requestAnimationFrame(tick);
+	};
+	handle = view.requestAnimationFrame(tick);
+	return () => {
+		if (handle !== null) view.cancelAnimationFrame(handle);
+	};
 }
 
 /** The slice of node's `fs` this needs, typed locally to avoid node typings. */
@@ -1080,13 +1128,28 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		this.registerEditorExtension(inkOverlayExtension());
 
 		// Ink in rendered markdown: embeds and reading view (roadmap). Each
-		// section defers via a render child (the element is not in the
-		// document during processing); on load it finds the rendered root and
-		// the first one attaches the single ink layer. See EmbedInk.ts.
+		// section defers via a render child; on load it finds the rendered
+		// root and the first one attaches the single ink layer. See
+		// EmbedInk.ts for why "on load" no longer means "attached to the
+		// document" - the virtualised preview renderer loads a section's
+		// child before inserting the section, so the root is resolved from
+		// the section OR the renderer's own container, whichever is usable.
 		this.registerMarkdownPostProcessor((el, ctx) => {
 			const path = ctx.sourcePath;
 			if (!path || !path.endsWith(".md")) return;
+			// containerEl is not on MarkdownPostProcessorContext's declared
+			// type - it is read off the shipped bundle - so it is duck-typed
+			// rather than trusted, and instanceof is avoided on purpose:
+			// against a popout's own window it would reject an element that
+			// is perfectly real, just not an instance of THIS window's
+			// HTMLElement.
+			const containerEl = (ctx as { containerEl?: unknown }).containerEl;
+			const container =
+				containerEl && typeof (containerEl as HTMLElement).closest === "function"
+					? (containerEl as HTMLElement)
+					: null;
 			const child = new MarkdownRenderChild(el);
+			let cancelRetry: (() => void) | null = null;
 			child.onload = () => {
 				// Synchronously when the ink is already in the session, which
 				// it is whenever the note is open. An export renders the note
@@ -1095,20 +1158,23 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				// that had nothing to do would lose the page its ink for the
 				// sake of a microtask.
 				if (inlineInk.isLoaded(path)) {
-					const root = embedInkRoot(el);
 					// Registered even with zero strokes: a note drawn on
 					// AFTER its embed rendered still gains ink live.
-					if (root) attachEmbedInk(root, path, inlineInk.strokes(path));
+					cancelRetry = attachEmbedInkOnceReady(el, container, path, () =>
+						inlineInk.strokes(path)
+					);
 					return;
 				}
 				runDetached(
 					inlineInk.ensureLoaded(path).then(() => {
-						const root = embedInkRoot(el);
-						if (root) attachEmbedInk(root, path, inlineInk.strokes(path));
+						cancelRetry = attachEmbedInkOnceReady(el, container, path, () =>
+							inlineInk.strokes(path)
+						);
 					}),
 					"render ink into an embed"
 				);
 			};
+			child.onunload = () => cancelRetry?.();
 			ctx.addChild(child);
 		});
 		// Embed layers stop going stale: every persisted gesture repaints the
@@ -1302,6 +1368,50 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 				new Notice(on ? `Handwriting: ${tip}` : "Handwriting: cursor");
 			},
 		});
+		// The pen itself, on or off. Not a tool: `InkTool` has no off value and
+		// should not grow one (PenInk.ts). Off hands the pen back to the app
+		// on NOTES - taps place the caret, and on a touch device that is what
+		// raises the software keyboard, which is the whole of what two e-ink
+		// users asked for. PDFs keep inking.
+		this.addCommand({
+			id: "pen-ink-toggle",
+			name: "Pen: on / off",
+			callback: () => {
+				const on = !penInkEnabled();
+				setPenInk(on);
+				// SESSION ONLY. Nothing is written to data.json, deliberately
+				// and unlike `mouse-ink-toggle` beside it: the state defaults
+				// to ON at every launch so nobody opens the app tomorrow to a
+				// plugin that looks broken (design §5). This is the one tool
+				// command with no `persistSettings` call, and that absence is
+				// the decision rather than an omission.
+				//
+				// The live stroke FIRST, before any chrome: the toggle can be
+				// hit with the nib on the glass, and the router's gate refuses
+				// new claims without breaking the one it already made. See
+				// `endLiveNoteStrokes` for why it commits rather than drops.
+				endLiveNoteStrokes();
+				// Asking for the pen BY NAME raises the pen UI, the same rule
+				// every tool command follows - and it matters more here than
+				// anywhere else, because the strip is the way BACK. Someone
+				// who turns the pen off on a desktop that has never seen pen
+				// hardware would otherwise have no visible switch to turn it
+				// on again. `markPenSeen` never gets cleared by this feature
+				// for the same reason.
+				markPenSeen();
+				refreshPenToolsAll();
+				refreshAllStrips();
+				// OFF strands a reticle, exactly as mouse ink going off does:
+				// the pen may be hovering right now, the surface will get no
+				// further hover samples to redraw from, and the ring plus
+				// `cursor: none` would sit there until the hover watchdog
+				// happened to fire. See `hidePenCursorsEverywhere`.
+				if (!on) hidePenCursorsEverywhere();
+				new Notice(
+					on ? "Handwriting: pen on" : "Handwriting: pen off - the pen types now"
+				);
+			},
+		});
 		this.addCommand({
 			id: "pen-tools-cycle",
 			name: "Toolbar: auto / show / hide",
@@ -1324,7 +1434,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		});
 		this.addCommand({
 			id: "paper-cycle",
-			name: "Paper: none / lines / grid",
+			name: "Paper: none / lines / grid / dots",
 			callback: () => {
 				const next = nextPaperStyle(this.settings.paperStyle);
 				this.settings.paperStyle = next;
@@ -3320,7 +3430,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 	}
 
 	private applyPaperTo(doc: Document, style: PaperStyle): void {
-		doc.body.classList.remove("handwriting-paper-lines", "handwriting-paper-grid");
+		doc.body.classList.remove(
+			"handwriting-paper-lines",
+			"handwriting-paper-grid",
+			"handwriting-paper-dots"
+		);
 		const cls = paperClass(style);
 		if (cls) doc.body.classList.add(cls);
 	}
@@ -3756,11 +3870,11 @@ class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Paper background",
-						desc: "Lined or grid paper. Default none.",
+						desc: "Lined, grid, or dotted paper. Default none.",
 						control: {
 							type: "dropdown",
 							key: "paperStyle",
-							options: { none: "None", lines: "Lines", grid: "Grid" },
+							options: { none: "None", lines: "Lines", grid: "Grid", dots: "Dots" },
 						},
 					},
 					{
