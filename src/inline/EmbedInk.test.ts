@@ -5,6 +5,7 @@ import {
 	embedInkLayerCount,
 	embedInkMarker,
 	embedInkNeedsPaint,
+	embedInkAnchor,
 	embedInkRootFor,
 	embedInkRootIsEmbed,
 	embedInkScale,
@@ -130,14 +131,32 @@ describe("embedInkRootFor (the renderer loads a section before inserting it)", (
 		);
 	});
 
-	it("falls back to a bare sizer when there is no embed content above it", () => {
-		// Plain reading view: no `.markdown-embed-content` ancestor at all,
-		// so the sizer itself is the root, same as before this bug.
+	it("prefers the preview view over the sizer inside it, in a plain reading view", () => {
+		// The sizer is nearer the section and used to win, but the renderer
+		// evicts a canvas appended to it. The view survives a re-render.
+		const view = fakeNode("markdown-preview-view");
+		const sizer = fakeNode("markdown-preview-sizer", view);
+		const section = fakeNode(null, sizer);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBe(view);
+	});
+
+	it("still falls back to a bare sizer when nothing recognisable sits above it", () => {
+		// An evicted canvas is a better failure than no root at all.
 		const sizer = fakeNode("markdown-preview-sizer");
 		const detachedSection = fakeNode(null);
 		expect(embedInkRootFor(detachedSection as unknown as HTMLElement, sizer as unknown as HTMLElement)).toBe(
 			sizer
 		);
+	});
+
+	it("keeps an embed on its own content box, never the view inside it", () => {
+		// An embed holds a preview view of its own; the content box must keep
+		// winning, or every embed's ink would move by that view's margins.
+		const embedContent = fakeNode("markdown-embed-content");
+		const view = fakeNode("markdown-preview-view", embedContent);
+		const sizer = fakeNode("markdown-preview-sizer", view);
+		const section = fakeNode(null, sizer);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBe(embedContent);
 	});
 
 	it("prefers the section's own root when it is already attached, ignoring the container", () => {
@@ -234,6 +253,42 @@ describe("teardownEmbedInk", () => {
 		teardownEmbedInk();
 		expect(gone.removed).toEqual([]);
 		expect(embedInkLayerCount()).toBe(0);
+	});
+});
+
+/** A root for `embedInkAnchor`: a class list and one optional child sizer. */
+function fakeAnchorRoot(
+	cls: string,
+	sizer: { offsetLeft: number; offsetTop: number; offsetParent: unknown } | null
+) {
+	return {
+		classList: { contains: (c: string) => c === cls },
+		querySelector: (sel: string) => (sel.includes("markdown-preview-sizer") ? sizer : null),
+	};
+}
+
+describe("embedInkAnchor", () => {
+	it("offsets a reading view's layer by its sizer, so the ink does not move", () => {
+		const sizer = { offsetLeft: 32, offsetTop: 32, offsetParent: null as unknown };
+		const root = fakeAnchorRoot("markdown-preview-view", sizer);
+		sizer.offsetParent = root;
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 32 });
+	});
+
+	it("leaves an embed's layer where the stylesheet puts it", () => {
+		const embed = fakeAnchorRoot("markdown-embed-content", null);
+		expect(embedInkAnchor(embed as unknown as HTMLElement)).toBeNull();
+	});
+
+	it("keeps the last offset for a reading view that is not laid out", () => {
+		// `display: none` gives every offset the value 0, which is a real
+		// coordinate and not a missing one.
+		const root = fakeAnchorRoot("markdown-preview-view", {
+			offsetLeft: 0,
+			offsetTop: 0,
+			offsetParent: null,
+		});
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toBeNull();
 	});
 });
 
