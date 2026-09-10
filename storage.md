@@ -108,7 +108,8 @@ page it was drawn on - which must never be read as note-surface geometry.
 
 ## the sidecar format
 
-JSON, one object, with `schemaVersion` first. Version 1 is current.
+JSON, one object, with `schemaVersion` first. This build writes version 1
+and reads up to version 2.
 
 Stable fields, safe to depend on:
 
@@ -131,8 +132,10 @@ Internal, and subject to change without a schema bump:
 top level or on an individual stroke or box, is preserved verbatim through a
 load and save. This is deliberate: an older Handwriting must not delete a
 newer Handwriting's data, and in a synced vault both versions are live at
-once. A sidecar that declares a `schemaVersion` higher than this build
-understands is never written to at all; the note opens read-only for ink.
+once. A sidecar written by a newer build that still declares a `schemaVersion`
+this build can read — 1 or 2 today — opens normally. A sidecar declaring 3
+or higher is never written to at all; the note opens read-only for ink so the
+newer build's data cannot be overwritten.
 
 Coordinates are note-space CSS pixels at zoom 1. Zoom is a view transform.
 No stroke is ever rewritten or rescaled when you zoom.
@@ -175,7 +178,7 @@ times, 1.5 seconds apart, before telling you once.
 the temporary file is loaded and you are told it was recovered.
 
 **Corrupt main file with a good temporary file.** If `<id>.json` cannot be
-parsed and its own `.tmp` is a complete, current-schema page for the same id,
+parsed and its own `.tmp` is a complete, readable-schema page (version 1 or 2) for the same id,
 the corrupt bytes are moved to `.handwriting/<id>.damaged-<mtime>.json`, the
 temporary file is promoted, and you are told what happened and where the
 damaged bytes went. Every condition is re-checked immediately before either
