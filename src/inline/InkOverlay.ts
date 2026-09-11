@@ -4518,7 +4518,7 @@ export class InkOverlayPlugin {
 		}
 		if (this.pinchRefScale === null || this.pinchAnchor === null) return;
 		const next = pinchScale(this.pinchRefScale, ratio);
-		if (next === this.pinchScaleNow) return;
+		if (next === this.pinchScaleNow && this.pinchPending === null) return;
 		// Coalesce to one update per FRAME. Two fingers deliver pointermoves
 		// faster than the display refreshes, and the work below is not the
 		// kind you do twice for one frame.
@@ -4534,10 +4534,9 @@ export class InkOverlayPlugin {
 	/**
 	 * Apply the pinch that this frame is owed.
 	 *
-	 * Live frames write ONLY the compositor transform and the anchored scroll.
-	 * The expensive half - resizing the counter-scaled box, which reflows the
-	 * whole editor, and `handleResize`, which reallocates the canvases and
-	 * re-rasterizes every stroke - waits for the fingers to leave.
+	 * Live frames keep the physical viewport fixed with a counter-sized box,
+	 * transform and anchored scroll. The fixed text column does not rewrap.
+	 * `handleResize`, canvas allocation and rerasterization wait for lift.
 	 *
 	 * Doing all of it per pointermove is what made the gesture jagged and
 	 * laggy on hardware (alan, 2026-08-27): a forced layout read, a full
@@ -4594,11 +4593,9 @@ export class InkOverlayPlugin {
 			this.cssScale = effective;
 			this.scale = effective * this.fontZoom;
 			this.router?.cameraTransformChanged();
-			// No counter-scaled width/height, extent pass or canvas allocation here.
-			this.view.dom.setCssStyles({
-				transform: `${layout.baseTransform !== "none" ? layout.baseTransform + " " : ""}scale(${next})`,
-				transformOrigin: "0 0",
-			});
+			// Keep the scroller's physical viewport fixed while magnifying its
+			// contents. Reuse the raster; observers cannot allocate it mid-move.
+			this.applyViewportBox(next);
 		}
 		this.setViewportScroll(nextLeft,nextTop);
 		// Stamp AFTER the writes: the scroll events they queue are the ones
@@ -4695,6 +4692,15 @@ export class InkOverlayPlugin {
   this.scrollExpansion?.rebase(scroller.scrollLeft,scroller.scrollTop);
  }
 
+ private applyViewportBox(next:number):void {
+  const layout=this.viewportLayout!,host=this.view.dom;
+  host.classList.add("handwriting-note-viewport");layout.parent.classList.add("handwriting-note-viewport-pane");
+  host.style.setProperty("--handwriting-note-column-width",`${layout.column}px`);
+  host.style.setProperty("--handwriting-note-column-margin-left",layout.left);
+  host.style.setProperty("--handwriting-note-column-margin-right",layout.right);
+  host.setCssStyles({width:`${layout.width/next}px`,height:`${layout.height/next}px`,transform:`${layout.baseTransform!=="none"?layout.baseTransform+" ":""}scale(${next})`,transformOrigin:"0 0"});
+ }
+
  private updatePaperSpacing():void {
   if(!this.viewportLayout||!Number.isFinite(this.cssScale)||this.cssScale<=0)return;
   // Keep every power-of-two rule at low CSS zoom. Font size does not
@@ -4764,15 +4770,10 @@ export class InkOverlayPlugin {
   const target=scroll??{left:this.view.scrollDOM.scrollLeft,top:this.view.scrollDOM.scrollTop};
   if(![width,height,target.left,target.top].every(n=>Number.isFinite(n)&&n>=0&&n<=MAX_VIEWPORT_LAYOUT)||width===0||height===0)return false;
   if(next!==previous)this.router?.cameraTransformChanged();
-  const host=this.view.dom;
   const generation=++this.viewportGeneration,path=this.filePath();
   this.pinchScaleNow=next;this.cssScale=effective;this.scale=effective*this.fontZoom;
   this.updatePaperSpacing();
-  host.classList.add("handwriting-note-viewport");layout.parent.classList.add("handwriting-note-viewport-pane");
-  host.style.setProperty("--handwriting-note-column-width",`${layout.column}px`);
-  host.style.setProperty("--handwriting-note-column-margin-left",layout.left);
-  host.style.setProperty("--handwriting-note-column-margin-right",layout.right);
-  host.setCssStyles({width:`${width}px`,height:`${height}px`,transform:`${layout.baseTransform!=="none"?layout.baseTransform+" ":""}scale(${next})`,transformOrigin:"0 0"});
+  this.applyViewportBox(next);
   this.scrollExpansion?.rebase(this.view.scrollDOM.scrollLeft,this.view.scrollDOM.scrollTop);
   this.handleResize();this.updateExtent(true);this.setViewportScroll(target.left,target.top);
   const settledLeft=this.view.scrollDOM.scrollLeft,settledTop=this.view.scrollDOM.scrollTop;

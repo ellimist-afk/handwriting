@@ -13,12 +13,17 @@ let view: EditorView;
 const settle = async () => { for(let i=0;i<8;i++) await new Promise<void>(r=>requestAnimationFrame(()=>r())); };
 const save = (_id: string, data: PageData) => { saved = serializePage(data); };
 inlineInk.attachHost({ readPageId:()=>id, claimId:async()=>({pageId:id}), loadSidecar:async()=>{loads++;return parsePage(saved,id);}, scheduleSidecar:save, scheduleSidecarNow:async(i,p)=>save(i,p), notify:()=>{} });
-async function setup(bytes?: string) {
+async function setup(bytes?: string, obsidianWrappers = false) {
  const data=emptyPage(id); data.surface="inline";
  data.strokes=[{id:"old",tool:"pen",color:"#000000",width:2,createdAt:1,points:[{x:300,y:300,pressure:.5,t:0},{x:320,y:310,pressure:.5,t:10}],bbox:{x:298,y:298,width:24,height:14}}];
  saved=bytes??serializePage(data);
- const host=document.body.appendChild(document.createElement("div"));host.className="markdown-source-view drift-host";
+ const host=document.body.appendChild(document.createElement("div"));host.className="markdown-source-view mod-cm6 drift-host";
  view=new EditorView({parent:host,state:EditorState.create({doc:Array.from({length:80},(_,i)=>`line ${i} anchor text`).join("\n"),extensions:[history(),editorInfoField.init(()=>({app:{commands:{executeCommandById:()=>false}},file:{path},editor:{}})),inkOverlayExtension(),EditorView.theme({".cm-content":{fontFamily:"monospace",fontSize:"16px",lineHeight:"24px"}})]})});
+ if(obsidianWrappers){
+  const sizer=document.createElement("div"),container=document.createElement("div");
+  sizer.className="cm-sizer";container.className="cm-contentContainer";
+  view.scrollDOM.insertBefore(sizer,view.contentDOM);sizer.appendChild(container);container.appendChild(view.contentDOM);
+ }
  setScrollExpansionEnabled(true);setPenInk(true);await settle();return {...snapshot(),pixels:pixels()};
 }
 function snapshot(){return {saved,loads,strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),scaleY:view.scaleY};}
@@ -38,7 +43,8 @@ async function write(scale:number,measured:boolean,pinch:boolean,cancel:boolean)
  if(measured)await settle();
  // Independent physical origin: the first text line's DOM top/left, never camera helpers.
  const line=view.contentDOM.querySelector(".cm-line")!.getBoundingClientRect();
- const actual=view.dom.getBoundingClientRect().width/view.dom.offsetWidth;
+ // Keep fractional counter-sized layout width; offsetWidth rounds and biases the physical oracle.
+ const actual=view.dom.getBoundingClientRect().width/parseFloat(getComputedStyle(view.dom).width);
  const x=line.left+400*actual,y=line.top+200*actual;
  const before={scale:actual,cached:view.scaleY,expected:{x:400,y:200},scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop}};
  point("pointerdown",x,y);point("pointermove",x+8,y+4);point("pointerup",x+12,y+6);
@@ -51,7 +57,7 @@ function pixels(displace = 0){
  if(displace){const original=ctx.getImageData(0,0,canvas.width,canvas.height);ctx.clearRect(0,0,canvas.width,canvas.height);ctx.putImageData(original,0,Math.round(displace*canvas.height/rect.height));}
  const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;
  const line=view.contentDOM.querySelector(".cm-line")!.getBoundingClientRect();
- const scale=view.dom.getBoundingClientRect().width/view.dom.offsetWidth;
+ const scale=view.dom.getBoundingClientRect().width/parseFloat(getComputedStyle(view.dom).width);
  const bounds=()=>({minX:Infinity,minY:Infinity,maxX:-Infinity,maxY:-Infinity,count:0});
  const blue=bounds(),black=bounds();
  for(let y=0;y<canvas.height;y++)for(let x=0;x<canvas.width;x++){
@@ -88,15 +94,24 @@ function dense(count: number) {
 }
 async function continuousPinch(target: number, cancel: boolean) {
  const overlay=overlayForPath(path)! as any;
+ // At small scales use a corner gesture so the requested scroll stays
+ // nonnegative. The maximum horizontal range can still clamp independently.
+ const cx=target<.5?60:400,cy=target<.5?40:220,startHalf=target<.5?40:100;
  view.scrollDOM.scrollLeft=160;view.scrollDOM.scrollTop=160;await settle();
  const before=snapshot(),column=view.contentDOM.offsetWidth;
  let live=true,backingWrites=0,liveClears=0,liveTransactions=0,finalTransactions=0;
- const liveAnchors:{x:number;y:number;column:number}[]=[];
+ const liveAnchors:{x:number;y:number;column:number;viewportWidth:number;viewportHeight:number;boundaryX:number}[]=[];
+ const pane=view.dom.parentElement!.getBoundingClientRect();
  let anchor:{x:number;y:number;worldX:number;worldY:number}|null=null;
+ let originX=0;
+ const boundaryX=(scale:number)=>{
+  const a=anchor!,wanted=a.worldX-(a.x-originX)/scale,max=Math.max(0,view.scrollDOM.scrollWidth-view.scrollDOM.clientWidth);
+  return (wanted-Math.max(0,Math.min(wanted,max)))*scale;
+ };
  const commit=overlay.commitCameraScale,pinch=overlay.pinch;
  overlay.commitCameraScale=function(...args:any[]){if(live)liveTransactions++;else finalTransactions++;return commit.apply(this,args);};
  overlay.pinch=function(phase:string,ratio:number,centroid:{x:number;y:number}) {
-  if(phase==="start") {const r=view.contentDOM.getBoundingClientRect();anchor={...centroid,worldX:centroid.x-r.left,worldY:centroid.y-r.top};}
+  if(phase==="start") {const r=view.contentDOM.getBoundingClientRect();anchor={...centroid,worldX:centroid.x-r.left,worldY:centroid.y-r.top};originX=r.left+view.scrollDOM.scrollLeft;}
   return pinch.call(this,phase,ratio,centroid);
  };
  const canvasProto=HTMLCanvasElement.prototype;
@@ -105,23 +120,25 @@ async function continuousPinch(target: number, cancel: boolean) {
  const clear=CanvasRenderingContext2D.prototype.clearRect;
  CanvasRenderingContext2D.prototype.clearRect=function(...args:Parameters<typeof clear>){if(live&&(this===overlay.committedCtx||this===overlay.highlightCtx))liveClears++;return clear.apply(this,args);};
  try {
-  point("pointerdown",300,220,"touch",501);point("pointerdown",500,220,"touch",502);
+  point("pointerdown",cx-startHalf,cy,"touch",501);point("pointerdown",cx+startHalf,cy,"touch",502);
   for(let i=1;i<=60;i++) {
    await new Promise<void>(r=>requestAnimationFrame(()=>r()));
-   if(anchor) {const a=anchor as {x:number;y:number;worldX:number;worldY:number},r=view.contentDOM.getBoundingClientRect();liveAnchors.push({x:r.left+a.worldX*overlay.pinchScaleNow-a.x,y:r.top+a.worldY*overlay.pinchScaleNow-a.y,column:view.contentDOM.offsetWidth});}
-   const half=100*(1+(target-1)*i/60);
-   point("pointermove",400-half,220,"touch",501);point("pointermove",400+half,220,"touch",502);
+   if(anchor) {const a=anchor as {x:number;y:number;worldX:number;worldY:number},r=view.contentDOM.getBoundingClientRect(),viewport=view.scrollDOM.getBoundingClientRect();liveAnchors.push({x:r.left+a.worldX*overlay.pinchScaleNow-a.x,y:r.top+a.worldY*overlay.pinchScaleNow-a.y,column:view.contentDOM.offsetWidth,viewportWidth:viewport.width,viewportHeight:viewport.height,boundaryX:boundaryX(overlay.pinchScaleNow)});}
+   const half=startHalf*(1+(target-1)*i/60);
+   point("pointermove",cx-half,cy,"touch",501);point("pointermove",cx+half,cy,"touch",502);
   }
   await new Promise<void>(r=>requestAnimationFrame(()=>r()));
   const liveScale=overlay.pinchScaleNow;
   live=false;
-  point(cancel?"pointercancel":"pointerup",400-100*target,220,"touch",501);
-  point("pointerup",400+100*target,220,"touch",502);
+  point(cancel?"pointercancel":"pointerup",cx-startHalf*target,cy,"touch",501);
+  point("pointerup",cx+startHalf*target,cy,"touch",502);
   await settle();
   const rect=view.contentDOM.getBoundingClientRect(),a=anchor!;
+  const viewport=view.scrollDOM.getBoundingClientRect();
   return {backingWrites,liveClears,liveTransactions,finalTransactions,liveScale,liveAnchors,
+   pane:{width:pane.width,height:pane.height},viewport:{width:viewport.width,height:viewport.height},
    finalScale:overlay.pinchScaleNow,columnBefore:column,columnAfter:view.contentDOM.offsetWidth,
-   anchorError:{x:rect.left+a.worldX*target-a.x,y:rect.top+a.worldY*target-a.y},
+   anchorError:{x:rect.left+a.worldX*target-a.x,y:rect.top+a.worldY*target-a.y,boundaryX:boundaryX(target)},
    before,after:snapshot(),pixels:pixels(),preview:overlay.pinchPreview};
  } finally {
   overlay.commitCameraScale=commit;overlay.pinch=pinch;

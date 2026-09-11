@@ -2959,8 +2959,10 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
 
 /* The camera changes the viewport, never the normal text wrapping column. */
 .handwriting-note-viewport-pane { overflow: hidden; }
-.cm-editor.handwriting-note-viewport { flex: none; max-width: none; max-height: none; }
-.cm-editor.handwriting-note-viewport > .cm-scroller > .cm-content {
+.cm-editor.handwriting-note-viewport,
+.markdown-source-view.mod-cm6 .cm-editor.handwriting-note-viewport { flex: none; max-width: none; max-height: none; }
+.cm-editor.handwriting-note-viewport > .cm-scroller > .cm-content,
+.cm-editor.handwriting-note-viewport > .cm-scroller > .cm-sizer > .cm-contentContainer > .cm-content {
  box-sizing: border-box;
  width: var(--handwriting-note-column-width);
  min-width: var(--handwriting-note-column-width);

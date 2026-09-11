@@ -77,6 +77,7 @@ function makeRig() {
 	overlay.getNoteViewportState = () => ({ busy: false });
 	overlay.prepareViewportLayout = () => true;
 	overlay.viewportLayout = {width:640,height:480,baseTransform:"none"};
+	overlay.applyViewportBox = (next:number) => host.setCssStyles({transform:`scale(${next})`,transformOrigin:"0 0"});
 	overlay.commitCameraScale = (next: number) => {
 		overlay.pinchScaleNow = next;
 		overlay.cssScale = next;
@@ -112,6 +113,15 @@ function makeRig() {
 }
 
 describe("InkOverlay pinch end with a coalesced move still pending", () => {
+	it("the last sample replaces a pending zoom when it returns to the rendered scale", () => {
+		const rig=makeRig(),centroid={x:100,y:80};
+		rig.onPinch("start",1,centroid);
+		rig.onPinch("move",2,centroid);
+		rig.onPinch("move",1,centroid);
+		rig.onPinch("end",1,centroid);
+		expect(rig.scale()).toBe(1);
+		expect(rig.pendingFrames()).toBe(0);
+	});
 	it("settles after returning to the starting scale", () => {
 		const rig=makeRig(),centroid={x:100,y:80};
 		rig.onPinch("start",1,centroid);
