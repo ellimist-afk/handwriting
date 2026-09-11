@@ -1,5 +1,6 @@
 body { margin:0; }
 .camera-proof { position:relative; width:640px; height:480px; overflow:hidden; }
 .camera-proof .cm-scroller { overflow:auto; }
-.camera-proof .cm-content { padding:0; }
+/* Native CodeMirror padding is part of the normal camera contract. */
+.camera-proof.zero-padding-control .cm-content { padding:0; }
 .camera-proof .cm-line { padding:0; }

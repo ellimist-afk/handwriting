@@ -51,8 +51,9 @@ async function run(zoom:number,candidate:boolean,axis: "x" | "y" = "y",font=1,ca
 	}
 	const strokes=JSON.parse(JSON.stringify(inlineInk.strokes(path)));
 	const contentRect=view.contentDOM.getBoundingClientRect();
-	const errors=strokes.map((s:any,i:number)=>({x:s.points[0].x-(corners[i]!.x-contentRect.left)/(zoom*font),y:s.points[0].y-(corners[i]!.y-contentRect.top)/(zoom*font)}));
-	const measured={fontZoom:(overlay as any).fontZoom,scaleX:view.scaleX,overlayScale:(overlay as any).cssScale,rect:scroller.getBoundingClientRect().toJSON(),contentWidth:view.contentDOM.offsetWidth,backings:[...host.querySelectorAll("canvas")].map(c=>({w:c.width,h:c.height}))};
+	const textTop=view.contentDOM.querySelector(".cm-line")!.getBoundingClientRect().top;
+	const errors=strokes.map((s:any,i:number)=>({x:s.points[0].x-(corners[i]!.x-contentRect.left)/(zoom*font),y:s.points[0].y-(corners[i]!.y-textTop)/(zoom*font)}));
+	const measured={paddingTop:Number.parseFloat(getComputedStyle(view.contentDOM).paddingTop),fontZoom:(overlay as any).fontZoom,scaleX:view.scaleX,overlayScale:(overlay as any).cssScale,rect:scroller.getBoundingClientRect().toJSON(),contentWidth:view.contentDOM.offsetWidth,backings:[...host.querySelectorAll("canvas")].map(c=>({w:c.width,h:c.height}))};
 	// Real routed touch after pen contact: observe whether this is assist/parole.
 	const touchTrace:any[]=[];
 	const router=(overlay as any).router;
@@ -128,6 +129,7 @@ async function setup(id:string,kind="far",font=1,external=1) {
   ids.set(path,pageId);pages.set(pageId,serializePage(data));
  }
  const host=document.body.appendChild(document.createElement("div"));host.className="markdown-source-view camera-proof";host.dataset.rig=id;
+ if(kind==="zero-padding")host.classList.add("zero-padding-control");
  if(kind==="theme") {document.body.classList.add("handwriting-paper-grid");document.body.style.setProperty("--background-modifier-border","#aaaaaa");const style=document.createElement("style");style.textContent=`[data-rig="${id}"] .cm-content {max-width:500px;margin:0 auto;padding:20px 24px;} [data-rig="${id}"] .cm-line {padding:0 12px;}`;host.appendChild(style);}
  if(external!==1){host.style.transform=`scale(${external})`;host.style.transformOrigin="0 0";}
  const doc="alpha beta gamma delta ".repeat(30)+"\n# Heading\n- list item\nsecond line";
@@ -140,7 +142,7 @@ function snap(id:string) {
  const {host,view,overlay,path}=rigs.get(id)!;
  const cr=view.contentDOM.getBoundingClientRect(),sr=view.scrollDOM.getBoundingClientRect(),scale=overlay.cssScale,font=overlay.fontZoom;
  const paperStyle=getComputedStyle(view.scrollDOM);
- return {paper:{image:paperStyle.backgroundImage,attachment:paperStyle.backgroundAttachment},state:overlay.getNoteViewportState(),doc:view.state.doc.toString(),writes,history:undoDepth(view.state),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),extent:surfaceExtents.get(path),scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop,width:view.scrollDOM.scrollWidth,height:view.scrollDOM.scrollHeight},viewport:{x:sr.x,y:sr.y,width:sr.width,height:sr.height},ink:inlineInk.strokes(path).map(s=>({id:s.id,x:cr.left+s.bbox.x*scale*font,y:view.documentTop+s.bbox.y*scale*font,right:cr.left+(s.bbox.x+s.bbox.width)*scale*font,bottom:view.documentTop+(s.bbox.y+s.bbox.height)*scale*font})),layout:Array.from({length:100},(_,i)=>{const c=view.coordsAtPos(i)!;return[(c.left-cr.left)/scale,(c.top-cr.top)/scale];}),buttons:[...host.querySelectorAll(".handwriting-note-viewport-controls button")].map(b=>b.getBoundingClientRect().toJSON()),backings:[...host.querySelectorAll("canvas")].map(c=>c.width*c.height),selection:view.state.selection.main.toJSON(),selected:overlay.selection.strokeIds,handles:host.querySelectorAll(".handwriting-selection-handle").length};
+ return {paddingTop:Number.parseFloat(getComputedStyle(view.contentDOM).paddingTop),paper:{image:paperStyle.backgroundImage,attachment:paperStyle.backgroundAttachment},state:overlay.getNoteViewportState(),doc:view.state.doc.toString(),writes,history:undoDepth(view.state),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),extent:surfaceExtents.get(path),scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop,width:view.scrollDOM.scrollWidth,height:view.scrollDOM.scrollHeight},viewport:{x:sr.x,y:sr.y,width:sr.width,height:sr.height},ink:inlineInk.strokes(path).map(s=>({id:s.id,x:cr.left+s.bbox.x*scale*font,y:view.documentTop+s.bbox.y*scale*font,right:cr.left+(s.bbox.x+s.bbox.width)*scale*font,bottom:view.documentTop+(s.bbox.y+s.bbox.height)*scale*font})),layout:Array.from({length:100},(_,i)=>{const c=view.coordsAtPos(i)!;return[(c.left-cr.left)/scale,(c.top-cr.top)/scale];}),buttons:[...host.querySelectorAll(".handwriting-note-viewport-controls button")].map(b=>b.getBoundingClientRect().toJSON()),backings:[...host.querySelectorAll("canvas")].map(c=>c.width*c.height),selection:view.state.selection.main.toJSON(),selected:overlay.selection.strokeIds,handles:host.querySelectorAll(".handwriting-selection-handle").length};
 }
 async function fit(id:string) {const r=rigs.get(id)!.overlay.fitHandwriting();await settle();return {result:r,...snap(id)};}
 async function growEmpty(id:string){surfaceExtents.grow(rigs.get(id)!.path,{x:500000,y:600000});rigs.get(id)!.overlay.updateExtent(true);await settle();return snap(id);}

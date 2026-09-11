@@ -30,7 +30,7 @@ it.each(cases)("camera %s axis%s font%s cancel%s",async(zoom,axis,font,cancel)=>
   evidence.push(r);expect(pageErrors).toEqual([]);
   for(let i=0;i<r.layoutBefore.length;i++)for(let a=0;a<2;a++)expect(Math.abs(r.layoutAfter[i][a]-r.layoutBefore[i][a])).toBeLessThan(.03);
   expect(r.before).toEqual(r.after);expect(r.corners.every((c:any)=>c.inside)).toBe(true);expect(r.strokes).toHaveLength(4);
-  expect(r.measured.overlayScale).toBeCloseTo(zoom,5);expect(r.measured.fontZoom).toBeCloseTo(font,5);
+  expect(r.measured.paddingTop).toBe(4);expect(r.measured.overlayScale).toBeCloseTo(zoom,5);expect(r.measured.fontZoom).toBeCloseTo(font,5);
   for(const e of r.errors){expect(Math.abs(e.x)).toBeLessThan(1);expect(Math.abs(e.y)).toBeLessThan(1);}
   for(const c of r.measured.backings)expect(c.w*c.h).toBeLessThan(8_000_000);
   expect(r.touchTrace.some((s:any)=>s.parole===81)).toBe(true);expect(r.touchTrace.some((s:any)=>s.assist)).toBe(true);
@@ -214,4 +214,17 @@ it("Chromium touch input pans without native coast; wheel scrolling remains avai
 
 it("uses the exact Infinite Canvas settings explanation",()=>{
  expect(readFileSync(fileURLToPath(new URL("../../src/main.ts",import.meta.url)),"utf8")).toContain('desc: "Scroll to the right or down infinitely. Momentum is turned off when this setting is toggled on."');
+});
+
+
+it.each([["far",4],["theme",20],["zero-padding",0]] as const)("camera fixture retains %s padding (%spx)",async(kind,padding)=>{
+ const page=await browser.newPage({viewport:{width:1400,height:1100}});
+ try{
+  await page.setContent("<!doctype html><body></body>");await page.addStyleTag({content:css+readFileSync(fileURLToPath(new URL("./noteViewportCamera.css",import.meta.url)),"utf8")});await page.addScriptTag({content:script});
+  const before=await page.evaluate(kind=>(window as any).viewportFixture.setup("padding",kind),kind);
+  expect(before.paddingTop).toBe(padding);
+  await page.getByRole("button",{name:"Zoom out",exact:true}).click();await page.evaluate(()=>(window as any).viewportFixture.settle());
+  const after=await page.evaluate(()=>(window as any).viewportFixture.snap("padding"));
+  expect(after.paddingTop).toBe(padding);expect(after.strokes).toEqual(before.strokes);
+ }finally{await page.close();}
 });
