@@ -146,4 +146,27 @@ async function continuousPinch(target: number, cancel: boolean) {
   CanvasRenderingContext2D.prototype.clearRect=clear;
  }
 }
-(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch};
+async function pendingPinchPen(measured:boolean,cancel:boolean){
+ const overlay=overlayForPath(path)! as any;
+ view.dispatch({changes:{from:0,to:view.state.doc.length,insert:Array.from({length:600},(_,i)=>`line ${i} anchor`).join("\n")}});
+ await settle();view.scrollDOM.scrollTop=5000;await settle();
+ const coverage=()=>{
+  const c=overlay.committedCanvas.getBoundingClientRect(),v=view.scrollDOM.getBoundingClientRect();
+  let bluePixels=0;
+  for(const canvas of view.dom.querySelectorAll("canvas")){
+   const data=canvas.getContext("2d")!.getImageData(0,0,canvas.width,canvas.height).data;
+   for(let i=0;i<data.length;i+=4)if(data[i+3]!>10&&data[i+2]!>data[i]!+40&&data[i+2]!>data[i+1]!+10)bluePixels++;
+  }
+  return {top:c.top-v.top,bottom:c.bottom-v.bottom,bluePixels,locked:overlay.frame.locked,band:{...overlay.band}};
+ };
+ point("pointerdown",300,240,"touch",501);point("pointerdown",500,240,"touch",502);
+ point("pointermove",367.8,240,"touch",501);point("pointermove",432.2,240,"touch",502);
+ point(cancel?"pointercancel":"pointerup",367.8,240,"touch",501);point("pointerup",432.2,240,"touch",502);
+ if(measured)await settle();
+ const before=coverage();
+ point("pointerdown",150,20);point("pointermove",160,25);
+ await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
+ const held=coverage();point("pointerup",170,30);await settle();
+ return {before,held,after:coverage(),stroke:snapshot().strokes.at(-1)};
+}
+(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen};

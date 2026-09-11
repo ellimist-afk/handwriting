@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { build } from "esbuild";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 const root=fileURLToPath(new URL("../../",import.meta.url));
@@ -15,10 +15,7 @@ beforeAll(async()=>{
  bundle=(await build({entryPoints:[root+"test/render/zoomWrittenInkPage.ts"],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:root+"test/render/iphoneObsidianStub.ts"}})).outputFiles[0]!.text;
 });
 afterAll(async()=>{await browser?.close();});
-for(const [count,target,cancel,dpr] of [[0,1.75,false,1],[250,1.75,true,2],[250,.75,false,1],[250,.75,true,2],[250,.322,false,1],[250,.322,true,2]] as const) {
- it(`reuses live raster: ${count} strokes, ${target} scale, cancel=${cancel}, DPR=${dpr}`,async()=>{
-  const page=await browser.newPage({viewport:{width:900,height:700},deviceScaleFactor:dpr});
-  try {
+async function mount(page:Page,count:number){
    await page.setContent("<body></body>");await page.addStyleTag({content:readFileSync(root+"styles.css","utf8")});
    await page.addStyleTag({content:`html,body{margin:0;width:100%;height:100%;overflow:hidden}body{display:flex}.drift-host{position:relative;display:flex;flex:1;min-width:0;min-height:0;height:480px;overflow:hidden}.drift-host .cm-editor{display:flex;flex:1;min-width:0;min-height:0;height:480px}.drift-host .cm-scroller{flex:1;min-height:0;overflow:auto}.drift-host .cm-content{padding:8px 0!important}.drift-host .cm-line{padding:0}`});
    // Installed Obsidian1.13.7 app.css: a column flex host and this three-class
@@ -27,6 +24,12 @@ for(const [count,target,cancel,dpr] of [[0,1.75,false,1],[250,1.75,true,2],[250,
    await page.addStyleTag({content:`.markdown-source-view.mod-cm6 .cm-sizer{display:flex;flex-direction:column;align-items:stretch;width:100%;min-height:100%}.markdown-source-view.mod-cm6 .cm-contentContainer{flex:1 1 auto;display:flex;align-items:stretch;overflow-x:visible}.markdown-source-view.mod-cm6 .cm-content{flex-basis:unset!important;width:0;min-height:unset}`});
    await page.addScriptTag({content:bundle});
    await page.evaluate(count=>(window as any).zoomDrift.setup((window as any).zoomDrift.dense(count),true),count);
+}
+for(const [count,target,cancel,dpr] of [[0,1.75,false,1],[250,1.75,true,2],[250,.75,false,1],[250,.75,true,2],[250,.322,false,1],[250,.322,true,2]] as const) {
+ it(`reuses live raster: ${count} strokes, ${target} scale, cancel=${cancel}, DPR=${dpr}`,async()=>{
+  const page=await browser.newPage({viewport:{width:900,height:700},deviceScaleFactor:dpr});
+  try {
+   await mount(page,count);
    const r=await page.evaluate(([target,cancel])=>(window as any).zoomDrift.continuousPinch(target,cancel),[target,cancel]);
    expect.soft(r.backingWrites).toBe(0);expect.soft(r.liveClears).toBe(0);expect.soft(r.liveTransactions).toBe(0);
    expect(r.finalTransactions).toBe(1);
@@ -44,5 +47,24 @@ for(const [count,target,cancel,dpr] of [[0,1.75,false,1],[250,1.75,true,2],[250,
    expect(r.after.strokes).toEqual(r.before.strokes);expect(r.after.saved).toBe(r.before.saved);
    if(count)expect(r.pixels.black.count).toBeGreaterThan(0);
   }finally{await page.close();}
+ });
+}
+for(const cancel of [false,true]){
+ it(`covers immediate held ink after a pending pinch, cancel=${cancel}`,async()=>{
+  const results=[];
+  for(const measured of [false,true]){
+   const page=await browser.newPage({viewport:{width:900,height:700}});
+   try{
+    await mount(page,0);
+    const r=await page.evaluate(([measured,cancel])=>(window as any).zoomDrift.pendingPinchPen(measured,cancel),[measured,cancel]);
+    expect(r.before.top).toBeLessThanOrEqual(0);expect(r.before.bottom).toBeGreaterThanOrEqual(0);
+    expect(r.held.locked).toBe(true);expect(r.held.bluePixels).toBeGreaterThan(0);
+    expect(r.held.band).toEqual(r.before.band);
+    expect(r.held.top).toBeLessThanOrEqual(0);expect(r.held.bottom).toBeGreaterThanOrEqual(0);
+    results.push(r);
+   }finally{await page.close();}
+  }
+  expect(results[0].stroke.points[0].x).toBeCloseTo(results[1].stroke.points[0].x,5);
+  expect(results[0].stroke.points[0].y).toBeCloseTo(results[1].stroke.points[0].y,5);
  });
 }

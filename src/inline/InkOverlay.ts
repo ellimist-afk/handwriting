@@ -4776,16 +4776,23 @@ export class InkOverlayPlugin {
   this.applyViewportBox(next);
   this.scrollExpansion?.rebase(this.view.scrollDOM.scrollLeft,this.view.scrollDOM.scrollTop);
   this.handleResize();this.updateExtent(true);this.setViewportScroll(target.left,target.top);
+  // The target scroll can leave the old raster band, especially on zoom-out.
+  // Finish its coverage before the router can map and lock the next pen down.
+  if(this.syncBand()!=="none")this.handleResize();
   const settledLeft=this.view.scrollDOM.scrollLeft,settledTop=this.view.scrollDOM.scrollTop;
   this.view.requestMeasure({key:this,read:()=>generation===this.viewportGeneration&&path===this.filePath()&&!!this.container&&this.view.scrollDOM.scrollLeft===settledLeft&&this.view.scrollDOM.scrollTop===settledTop,write:valid=>{
    if(!valid||generation!==this.viewportGeneration||path!==this.filePath()||this.frame.locked)return;
-   this.handleResize();this.updateExtent(true);this.setViewportScroll(target.left,target.top);this.scheduleRepaint();
+   this.handleResize();this.updateExtent(true);this.setViewportScroll(target.left,target.top);
+   if(this.syncBand()!=="none")this.handleResize();
+   this.scheduleRepaint();
    // CodeMirror adjusts its text scroll anchor after measurement writes.
    // Finish this explicit camera navigation after that adjustment, before
    // the next input event, retaining the same note/gesture ownership guards.
    queueMicrotask(()=>{
     if(generation!==this.viewportGeneration||path!==this.filePath()||!this.container||this.frame.locked)return;
-    this.setViewportScroll(target.left,target.top);this.scheduleRepaint();
+    this.setViewportScroll(target.left,target.top);
+    if(this.syncBand()!=="none")this.handleResize();
+    this.scheduleRepaint();
    });
   }});
   this.mobileTools?.refresh();
