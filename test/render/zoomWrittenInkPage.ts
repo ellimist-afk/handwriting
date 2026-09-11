@@ -169,4 +169,42 @@ async function pendingPinchPen(measured:boolean,cancel:boolean){
  const held=coverage();point("pointerup",170,30);await settle();
  return {before,held,after:coverage(),stroke:snapshot().strokes.at(-1)};
 }
-(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen};
+function focusSeed(){
+ const page=emptyPage(id);page.surface="inline";
+ page.strokes=[{id:"focus-seed",tool:"pen",color:"#000000",width:20,createdAt:1,points:[{x:300,y:300,pressure:1,t:0},{x:375,y:325,pressure:1,t:10},{x:450,y:350,pressure:1,t:20}],bbox:{x:280,y:280,width:190,height:90}}];
+ return serializePage(page);
+}
+async function focusReturn(changed:boolean,zoom:number){
+ const overlay=overlayForPath(path)! as any,host=view.dom.parentElement!;
+ const box=(e:HTMLElement)=>{const r=e.getBoundingClientRect();return {width:r.width,height:r.height};};
+ const read=()=>({valid:overlay.scaleGeometryValid,scale:overlay.pinchScaleNow,viewport:box(view.scrollDOM),pane:box(host),viewportClass:view.dom.classList.contains("handwriting-note-viewport"),width:overlay.committedCanvas.width,height:overlay.committedCanvas.height,black:overlay.committedCanvas.width&&overlay.committedCanvas.height?pixels().black.count:0,hit:view.scrollDOM.contains(document.elementFromPoint(700,350)),column:view.contentDOM.offsetWidth,cachedColumn:overlay.viewportLayout?.column,styleDirty:!!overlay.viewportStyleDirty});
+ overlay.commitCameraScale(zoom);await settle();
+ const before=read(),bytes=snapshot().saved;
+ window.dispatchEvent(new Event("blur"));host.style.display="none";view.requestMeasure();await settle();
+ const hidden=read(),returns:ReturnType<typeof read>[]=[];
+ const resize=overlay.handleResize;let scheduled=false,contact:null|ReturnType<typeof read>=null,error:string|null=null;
+ overlay.handleResize=function(...args:any[]){
+  const wasHidden=this.scaleGeometryValid===false;
+  const result=resize.apply(this,args);
+  if(host.clientWidth>0&&host.clientHeight>0){
+   returns.push(read());
+   // Deliver contact between recovery callbacks, through actual hit testing.
+   // Waiting eight frames would mask the failed first recovery transaction.
+   if(wasHidden&&!scheduled){scheduled=true;queueMicrotask(()=>{
+    contact=read();
+    try{
+     point("pointerdown",660,350,"touch",501);point("pointerdown",700,350,"touch",502);
+     point("pointermove",650,350,"touch",501);point("pointermove",710,350,"touch",502);
+     point("pointerup",650,350,"touch",501);point("pointerup",710,350,"touch",502);
+    }catch(e){error=String(e)}
+   });}
+  }
+  return result;
+ };
+ try{
+  if(changed){host.style.width="740px";host.style.height="420px";host.style.flex="none";}
+  host.style.display="";window.dispatchEvent(new Event("focus"));view.requestMeasure();await settle();
+  return {before,hidden,returns,scheduled,contact,error,after:read(),bytesBefore:bytes,bytesAfter:snapshot().saved};
+ }finally{overlay.handleResize=resize;}
+}
+(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen,focusSeed,focusReturn};

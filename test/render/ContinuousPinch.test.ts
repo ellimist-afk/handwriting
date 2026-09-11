@@ -15,7 +15,7 @@ beforeAll(async()=>{
  bundle=(await build({entryPoints:[root+"test/render/zoomWrittenInkPage.ts"],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:root+"test/render/iphoneObsidianStub.ts"}})).outputFiles[0]!.text;
 });
 afterAll(async()=>{await browser?.close();});
-async function mount(page:Page,count:number){
+async function mount(page:Page,count:number,focus=false){
    await page.setContent("<body></body>");await page.addStyleTag({content:readFileSync(root+"styles.css","utf8")});
    await page.addStyleTag({content:`html,body{margin:0;width:100%;height:100%;overflow:hidden}body{display:flex}.drift-host{position:relative;display:flex;flex:1;min-width:0;min-height:0;height:480px;overflow:hidden}.drift-host .cm-editor{display:flex;flex:1;min-width:0;min-height:0;height:480px}.drift-host .cm-scroller{flex:1;min-height:0;overflow:auto}.drift-host .cm-content{padding:8px 0!important}.drift-host .cm-line{padding:0}`});
    // Installed Obsidian1.13.7 app.css: a column flex host and this three-class
@@ -23,7 +23,7 @@ async function mount(page:Page,count:number){
    await page.addStyleTag({content:`.markdown-source-view.mod-cm6{height:100%;display:flex;flex-direction:column}.markdown-source-view.mod-cm6 .cm-editor{flex:1 1;min-height:0}.drift-host.markdown-source-view{height:480px}`});
    await page.addStyleTag({content:`.markdown-source-view.mod-cm6 .cm-sizer{display:flex;flex-direction:column;align-items:stretch;width:100%;min-height:100%}.markdown-source-view.mod-cm6 .cm-contentContainer{flex:1 1 auto;display:flex;align-items:stretch;overflow-x:visible}.markdown-source-view.mod-cm6 .cm-content{flex-basis:unset!important;width:0;min-height:unset}`});
    await page.addScriptTag({content:bundle});
-   await page.evaluate(count=>(window as any).zoomDrift.setup((window as any).zoomDrift.dense(count),true),count);
+   await page.evaluate(([count,focus])=>(window as any).zoomDrift.setup(focus?(window as any).zoomDrift.focusSeed():(window as any).zoomDrift.dense(count),true),[count,focus]);
 }
 for(const [count,target,cancel,dpr] of [[0,1.75,false,1],[250,1.75,true,2],[250,.75,false,1],[250,.75,true,2],[250,.322,false,1],[250,.322,true,2]] as const) {
  it(`reuses live raster: ${count} strokes, ${target} scale, cancel=${cancel}, DPR=${dpr}`,async()=>{
@@ -66,5 +66,25 @@ for(const cancel of [false,true]){
   }
   expect(results[0].stroke.points[0].x).toBeCloseTo(results[1].stroke.points[0].x,5);
   expect(results[0].stroke.points[0].y).toBeCloseTo(results[1].stroke.points[0].y,5);
+ });
+}
+for(const changed of [false,true])for(const zoom of [.322,.1]){
+ it(`restores visible ink and contact targets after focus, resized=${changed}, zoom=${zoom}`,async()=>{
+  const page=await browser.newPage({viewport:{width:900,height:700}});
+  try{
+   await mount(page,0,true);
+   const r=await page.evaluate(([changed,zoom])=>(window as any).zoomDrift.focusReturn(changed,zoom),[changed,zoom]);
+   expect(r.before.black).toBeGreaterThan(0);expect(r.hidden.valid).toBe(false);expect(r.hidden.width).toBe(0);
+   expect(r.hidden.cachedColumn).toBe(r.before.cachedColumn);expect(r.hidden.styleDirty).toBe(true);
+   expect(r.scheduled).toBe(true);expect(r.returns.length).toBeGreaterThan(0);
+   for(const state of r.returns){
+    expect.soft(state.valid).toBe(true);expect.soft(state.viewportClass).toBe(true);
+    expect.soft(Math.abs(state.viewport.width-state.pane.width)).toBeLessThan(.1);
+    expect.soft(Math.abs(state.viewport.height-state.pane.height)).toBeLessThan(.1);
+    expect.soft(state.width).toBeGreaterThan(0);expect.soft(state.height).toBeGreaterThan(0);
+   }
+   expect(r.contact.hit).toBe(true);expect(r.contact.black).toBeGreaterThan(0);expect(r.error).toBeNull();
+   expect(r.after.scale).toBeCloseTo(zoom*1.5,4);expect(r.bytesAfter).toBe(r.bytesBefore);expect(r.after.styleDirty).toBe(false);
+  }finally{await page.close();}
  });
 }

@@ -2694,6 +2694,7 @@ export class InkOverlayPlugin {
   this.mobileTools?.refresh();
   this.scrollExpansion?.rebase(this.view.scrollDOM.scrollLeft,this.view.scrollDOM.scrollTop);
   const layout=this.viewportLayout;
+  if(layout&&layout.parent.clientWidth>0&&layout.parent.clientHeight>0&&this.viewportStyleDirty)this.scheduleViewportStyleRefresh();
   if(layout && !this.frame.locked && layout.parent.clientWidth>0 && layout.parent.clientHeight>0 &&
    (layout.parent.clientWidth!==layout.paneWidth||layout.parent.clientHeight!==layout.paneHeight)) {
    const width=layout.width+layout.parent.clientWidth-layout.paneWidth;
@@ -2704,9 +2705,13 @@ export class InkOverlayPlugin {
     host.classList.remove("handwriting-note-viewport");
     host.setCssStyles({width:`${width}px`,height:`${height}px`});
     const style=this.winRef.getComputedStyle(this.view.contentDOM);
-    layout.column=this.view.contentDOM.offsetWidth;layout.left=style.marginLeft;layout.right=style.marginRight;
-    this.commitCameraScale(this.pinchScaleNow);
-    return;
+    const column=this.view.contentDOM.offsetWidth;
+    if(column>0){layout.column=column;layout.left=style.marginLeft;layout.right=style.marginRight;}
+    // Hidden editors release their backings and invalidate geometry. Restore
+    // the full physical viewport before navigation can reject that stale state,
+    // then let the common resize path measure and rebuild the visible surface.
+    this.applyViewportBox(this.pinchScaleNow);
+    if(this.scaleGeometryValid!==false&&this.commitCameraScale(this.pinchScaleNow))return;
    }
   }
 		this.clearSnapPreview();
@@ -4665,25 +4670,25 @@ export class InkOverlayPlugin {
    if(!dirty)return;
    if(dirty.path!==this.filePath()||dirty.container!==this.container){this.viewportStyleDirty=null;return;}
    // Keep one dirty marker; pen-up schedules the single retry, never a loop.
-   if(this.frame.locked||this.deferPinchRaster())return;
-   this.viewportStyleDirty=null;
-   this.refreshViewportColumn();
+   if(this.frame.locked||this.deferPinchRaster()||!this.viewportLayout?.parent.clientWidth||!this.viewportLayout.parent.clientHeight)return;
+   if(this.refreshViewportColumn())this.viewportStyleDirty=null;
   });
  }
 
  /** Re-measure the ordinary column when a theme changes at constant pane size. */
- private refreshViewportColumn():void {
+ private refreshViewportColumn():boolean {
   const layout=this.viewportLayout;
-  if(!layout||this.frame.locked||!this.container)return;
+  if(!layout||this.frame.locked||!this.container)return false;
   const host=this.view.dom;
   host.classList.remove("handwriting-note-viewport");
   host.setCssStyles({width:`${layout.width}px`,height:`${layout.height}px`});
   const style=this.winRef.getComputedStyle(this.view.contentDOM);
   const column=this.view.contentDOM.offsetWidth,left=style.marginLeft,right=style.marginRight;
   const changed=column!==layout.column||left!==layout.left||right!==layout.right;
-  host.classList.add("handwriting-note-viewport");
-  host.setCssStyles({width:`${layout.width/this.pinchScaleNow}px`,height:`${layout.height/this.pinchScaleNow}px`});
-  if(changed){layout.column=column;layout.left=left;layout.right=right;this.commitCameraScale(this.pinchScaleNow);}
+  if(column>0&&changed){layout.column=column;layout.left=left;layout.right=right;}
+  this.applyViewportBox(this.pinchScaleNow);
+  if(column>0&&changed)this.commitCameraScale(this.pinchScaleNow);
+  return column>0;
  }
 
  private setViewportScroll(left:number,top:number):void {
