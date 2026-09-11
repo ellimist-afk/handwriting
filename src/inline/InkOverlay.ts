@@ -188,7 +188,7 @@ import { DWELL_MS, snapStroke } from "../ink/ShapeSnap";
 import { beginUndoWindow, discardUndoTrace, isUndoRedoKey, registerUndoTraceView, unregisterUndoTraceView } from "../diag/UndoHistoryTrace";
 
 const sessionStartMs = Date.now();
-import { anchoredScroll, pinchScale, fitInkBounds, MAX_VIEWPORT_LAYOUT, type InkFitBounds } from "./PinchScale";
+import { anchoredScroll, pinchScale, fitInkBounds, clampToReachable, MAX_VIEWPORT_LAYOUT, type InkFitBounds } from "./PinchScale";
 import { ERASER_CURSOR_CLASS } from "./PenCursor";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius } from "../ink/EraserSize";
 import {
@@ -4740,27 +4740,48 @@ export class InkOverlayPlugin {
   if(this.getNoteViewportState().busy) return "busy";
   const refuse=()=>{new Notice("Handwriting: this ink cannot fit in the current view.");return "unrepresentable" as const;};
   const path=this.filePath()!;
-  let bounds:InkFitBounds|null=null;
-  for(const stroke of inlineInk.strokes(path)) {
-   // Loaded and freshly built bboxes already include width*2 allowance.
-   const b=stroke.bbox;
-   if(![b.x,b.y,b.width,b.height].every(Number.isFinite)||b.width<0||b.height<0) return refuse();
-   const x=b.x,y=b.y,right=b.x+b.width,bottom=b.y+b.height;
-   if(!bounds) bounds={x,y,width:right-x,height:bottom-y};
-   else {const endX=Math.max(bounds.x+bounds.width,right),endY=Math.max(bounds.y+bounds.height,bottom);bounds.x=Math.min(bounds.x,x);bounds.y=Math.min(bounds.y,y);bounds.width=endX-bounds.x;bounds.height=endY-bounds.y;}
-  }
   const scroller=this.view.scrollDOM,rect=scroller.getBoundingClientRect();
   const external=this.viewportLayout?.externalScale??this.cssScale/this.pinchScaleNow;
   const screenWidth=this.viewportLayout?this.viewportLayout.width*external:rect.width;
   const screenHeight=this.viewportLayout?this.viewportLayout.height*external:rect.height;
+  // The surface grows right and bottom only, so ink above or left of the origin
+  // cannot be scrolled to. Frame the reachable part instead of refusing the whole
+  // note: one stroke above the first line used to disable Fit forever.
+  //
+  // Clip EACH stroke before the union, not the finished union. A stroke that is
+  // wholly unreachable must contribute nothing at all; clamping afterwards lets
+  // its other dimension still drag the union outward, so Fit zooms away to
+  // accommodate ink it can never display.
+  const origin=surfaceOriginInScroller({contentLeftVisual:this.columnLeft(),documentTopVisual:this.view.documentTop,scrollRectLeft:rect.left,scrollRectTop:rect.top,scrollLeft:scroller.scrollLeft,scrollTop:scroller.scrollTop,scale:this.cssScale});
+  const f=Number.isFinite(this.fontZoom)&&this.fontZoom>0?this.fontZoom:1;
+  const reach={originLeftNote:-origin.left/f,originTopNote:-origin.top/f};
+  let bounds:InkFitBounds|null=null,sawStroke=false;
+  for(const stroke of inlineInk.strokes(path)) {
+   // Loaded and freshly built bboxes already include width*2 allowance.
+   const b=stroke.bbox;
+   if(![b.x,b.y,b.width,b.height].every(Number.isFinite)||b.width<0||b.height<0) return refuse();
+   sawStroke=true;
+   const clipped=clampToReachable({x:b.x,y:b.y,width:b.width,height:b.height},reach);
+   if(!clipped) continue;
+   const right=clipped.x+clipped.width,bottom=clipped.y+clipped.height;
+   if(!bounds) bounds={x:clipped.x,y:clipped.y,width:clipped.width,height:clipped.height};
+   else {const endX=Math.max(bounds.x+bounds.width,right),endY=Math.max(bounds.y+bounds.height,bottom);bounds.x=Math.min(bounds.x,clipped.x);bounds.y=Math.min(bounds.y,clipped.y);bounds.width=endX-bounds.x;bounds.height=endY-bounds.y;}
+  }
+  // Strokes exist but not one of them is reachable: the only remaining refusal.
+  // No strokes at all stays "empty", which resets to 100% rather than refusing.
+  if(sawStroke&&!bounds) return refuse();
   const plan=fitInkBounds({bounds,viewportWidthScreen:screenWidth,viewportHeightScreen:screenHeight,externalScale:external,fontZoom:this.fontZoom,marginScreen:24});
   if(plan.kind==="unrepresentable") return refuse();
   if(!bounds) return this.commitCameraScale(1,{left:0,top:0})?"empty":refuse();
-  const origin=surfaceOriginInScroller({contentLeftVisual:this.columnLeft(),documentTopVisual:this.view.documentTop,scrollRectLeft:rect.left,scrollRectTop:rect.top,scrollLeft:scroller.scrollLeft,scrollTop:scroller.scrollTop,scale:this.cssScale});
   const scale=external*plan.zoom;
-  const left=Math.max(0,origin.left+(bounds.x+bounds.width/2)*this.fontZoom-screenWidth/scale/2);
-  const top=Math.max(0,origin.top+(bounds.y+bounds.height/2)*this.fontZoom-screenHeight/scale/2);
-  if(origin.left+bounds.x*this.fontZoom<0||origin.top+bounds.y*this.fontZoom<0) return refuse();
+  // `f`, not raw fontZoom: the same guarded value the reachable region above
+  // was built from, so a stroke placed with it lands exactly where the
+  // reachability test thought it was. (Today the two never actually differ -
+  // fitInkBounds already refused above whenever fontZoom fails the same
+  // finite/>0 test that makes f fall back - but that agreement is worth
+  // keeping explicit rather than relying on a guard two calls away.)
+  const left=Math.max(0,origin.left+(bounds.x+bounds.width/2)*f-screenWidth/scale/2);
+  const top=Math.max(0,origin.top+(bounds.y+bounds.height/2)*f-screenHeight/scale/2);
   return this.commitCameraScale(plan.zoom,{left,top})?"fit":refuse();
  }
 

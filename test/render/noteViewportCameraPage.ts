@@ -126,6 +126,42 @@ async function setup(id:string,kind="far",font=1,external=1) {
   const long=kind!=="point"&&kind!=="edge";const width=long?32:2,dx=long?800:10,dy=long?600:8;
   data.strokes=points.map(([x,y],i)=>({id:`seed-${i}`,tool:"pen" as const,color:"#000000",width,createdAt:1,points:[{x:x!,y:y!,pressure:.5,t:0},{x:x!+dx,y:y!+dy,pressure:.5,t:10}],bbox:{x:x!-width,y:y!-width,width:dx+2*width,height:dy+2*width}}));
   if(kind==="thick-dot"||kind==="negative")data.strokes=[{id:"seed-0",tool:"pen",color:"#000000",width:kind==="thick-dot"?1000:2,createdAt:1,points:[{x:kind==="thick-dot"?3000:-100,y:3000,pressure:.5,t:0}],bbox:{x:0,y:0,width:0,height:0}}]; // Parse recomputes the stored bbox.
+  // Geometry below reproduces R2's mounted-review receipt exactly (bboxes
+  // 92,92 / 92,-60 / -508,99992 / 99992,-508, all 36x36), so the fixtures
+  // match the exact configuration R2 verified rather than an invented one.
+  // A single reachable stroke: x/y 96..124, pen width 2 -> bbox {x:92,y:92,width:36,height:36}.
+  if(kind==="reachable-body-only")data.strokes=[
+   {id:"body",tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:96,y:96,pressure:.5,t:0},{x:124,y:124,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}},
+  ];
+  // Disjoint: the same reachable body plus TWO outliers, one left-and-below
+  // the origin (x<0, y huge positive) and one right-and-above (x huge
+  // positive, y<0). This is the pair the old combined-bbox clamp got wrong:
+  // each outlier is wholly unreachable on its OWN axis, but its OTHER axis
+  // sits well inside the reachable range, so a union taken before clipping
+  // fabricates a huge box neither outlier's reachable extent supports.
+  if(kind==="disjoint")data.strokes=[
+   {id:"outlierLeftBelow",tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:-504,y:99996,pressure:.5,t:0},{x:-476,y:100024,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}},
+   {id:"outlierRightAbove",tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:99996,y:-504,pressure:.5,t:0},{x:100024,y:-476,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}},
+   {id:"body",tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:96,y:96,pressure:.5,t:0},{x:124,y:124,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}},
+  ];
+  // Ink above the first line (wholly unreachable) plus a separate reachable
+  // body below it - the shape of Alan's real note. The unreachable stroke
+  // must still let the reachable one produce "fit".
+  if(kind==="negative-y-with-body")data.strokes=[
+   {id:"aboveLine",tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:96,y:-56,pressure:.5,t:0},{x:124,y:-28,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}},
+   {id:"body",tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:96,y:96,pressure:.5,t:0},{x:124,y:124,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}},
+  ];
+  // Exactly R2's "disjoint-unreachable" case: the same two outliers with NO
+  // reachable body - distinct from "empty" (no strokes at all), which must
+  // still reset to 100% rather than refuse.
+  if(kind==="wholly-unreachable-multi")data.strokes=[
+   {id:"outlierLeftBelow",tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:-504,y:99996,pressure:.5,t:0},{x:-476,y:100024,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}},
+   {id:"outlierRightAbove",tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:99996,y:-504,pressure:.5,t:0},{x:100024,y:-476,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}},
+  ];
+  if(kind==="negative-width-padding"||kind==="partial-negative-y"){
+   const x=kind==="negative-width-padding"?0:100,y=kind==="partial-negative-y"?-4:100;
+   data.strokes=[{id:"edge-body",tool:"pen",color:"#000000",width:2,createdAt:1,points:[{x,y,pressure:.5,t:0},{x:x+20,y:y+28,pressure:.5,t:10}],bbox:{x:0,y:0,width:0,height:0}}];
+  }
   ids.set(path,pageId);pages.set(pageId,serializePage(data));
  }
  const host=document.body.appendChild(document.createElement("div"));host.className="markdown-source-view camera-proof";host.dataset.rig=id;
@@ -145,6 +181,33 @@ function snap(id:string) {
  return {paddingTop:Number.parseFloat(getComputedStyle(view.contentDOM).paddingTop),paper:{image:paperStyle.backgroundImage,attachment:paperStyle.backgroundAttachment},state:overlay.getNoteViewportState(),doc:view.state.doc.toString(),writes,history:undoDepth(view.state),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),extent:surfaceExtents.get(path),scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop,width:view.scrollDOM.scrollWidth,height:view.scrollDOM.scrollHeight},viewport:{x:sr.x,y:sr.y,width:sr.width,height:sr.height},ink:inlineInk.strokes(path).map(s=>({id:s.id,x:cr.left+s.bbox.x*scale*font,y:view.documentTop+s.bbox.y*scale*font,right:cr.left+(s.bbox.x+s.bbox.width)*scale*font,bottom:view.documentTop+(s.bbox.y+s.bbox.height)*scale*font})),layout:Array.from({length:100},(_,i)=>{const c=view.coordsAtPos(i)!;return[(c.left-cr.left)/scale,(c.top-cr.top)/scale];}),buttons:[...host.querySelectorAll(".handwriting-note-viewport-controls button")].map(b=>b.getBoundingClientRect().toJSON()),backings:[...host.querySelectorAll("canvas")].map(c=>c.width*c.height),selection:view.state.selection.main.toJSON(),selected:overlay.selection.strokeIds,handles:host.querySelectorAll(".handwriting-selection-handle").length};
 }
 async function fit(id:string) {const r=rigs.get(id)!.overlay.fitHandwriting();await settle();return {result:r,...snap(id)};}
+/**
+ * Pixels the user can actually SEE after Fit: the committed ink canvas
+ * cropped to the scroller's on-screen viewport. Same shape as
+ * `visibleCommitted` in blankNotePastePage.ts - canvases stack
+ * highlight/highlightWet/committed/wet/tail, so index 2 is committed ink,
+ * and an oversized backing store (the surface grows right/bottom) must not
+ * count pixels that are painted but scrolled out of view.
+ */
+function visiblePainted(id:string):number {
+ const {host,view}=rigs.get(id)!;
+ const canvas=host.querySelectorAll<HTMLCanvasElement>(".handwriting-ink-layer canvas")[2];
+ if(!canvas) throw new Error("committed canvas missing");
+ const ctx=canvas.getContext("2d");
+ if(!ctx) throw new Error("committed context missing");
+ const canvasRect=canvas.getBoundingClientRect(),viewportRect=view.scrollDOM.getBoundingClientRect();
+ const left=Math.max(canvasRect.left,viewportRect.left),top=Math.max(canvasRect.top,viewportRect.top);
+ const right=Math.min(canvasRect.right,viewportRect.right),bottom=Math.min(canvasRect.bottom,viewportRect.bottom);
+ if(right<=left||bottom<=top||canvasRect.width<=0||canvasRect.height<=0) return 0;
+ const sx=Math.max(0,Math.floor((left-canvasRect.left)/canvasRect.width*canvas.width));
+ const sy=Math.max(0,Math.floor((top-canvasRect.top)/canvasRect.height*canvas.height));
+ const ex=Math.min(canvas.width,Math.ceil((right-canvasRect.left)/canvasRect.width*canvas.width));
+ const ey=Math.min(canvas.height,Math.ceil((bottom-canvasRect.top)/canvasRect.height*canvas.height));
+ const pixels=ctx.getImageData(sx,sy,Math.max(1,ex-sx),Math.max(1,ey-sy)).data;
+ let count=0;for(let i=3;i<pixels.length;i+=4)if(pixels[i]!==0)count++;
+ return count;
+}
+async function fitVisible(id:string) {const r=rigs.get(id)!.overlay.fitHandwriting();await settle();return {result:r,visiblePainted:visiblePainted(id),...snap(id)};}
 async function growEmpty(id:string){surfaceExtents.grow(rigs.get(id)!.path,{x:500000,y:600000});rigs.get(id)!.overlay.updateExtent(true);await settle();return snap(id);}
 async function reopen(id:string) {const r=rigs.get(id)!;r.view.destroy();r.host.remove();await setup(id);return snap(id);}
 function penEvent(type:string,x:number,y:number,pointerId=120){document.elementFromPoint(x,y)?.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:"pen",pointerId,isPrimary:true,clientX:x,clientY:y,buttons:type==="pointerup"?0:1,pressure:.5}));}
@@ -167,7 +230,8 @@ async function stale(id:string) {
  r.view.dispatch({changes:{from:0,to:r.view.state.doc.length,insert:"replacement untouched"},effects:StateEffect.reconfigure.of([history(),editorInfoField.init(()=>({app:{commands:{executeCommandById:()=>false}},file:{path:next},editor:{}})),inkOverlayExtension()])});
  await settle();return {doc:r.view.state.doc.toString(),scroll:[r.view.scrollDOM.scrollLeft,r.view.scrollDOM.scrollTop],transform:r.view.dom.style.transform,flashes:r.host.querySelectorAll(".handwriting-ink-flash").length};
 }
-(window as any).viewportFixture={setup,snap,fit,growEmpty,reopen,gesture,stale,settle,
+(window as any).viewportFixture={setup,snap,fit,fitVisible,growEmpty,reopen,gesture,stale,settle,
+ hiddenFit:async(id:string)=>{const r=rigs.get(id)!;r.host.style.display="none";r.view.requestMeasure();await settle();const valid=r.overlay.scaleGeometryValid,result=r.overlay.fitHandwriting();return {valid,result,writes,strokes:JSON.parse(JSON.stringify(inlineInk.strokes(r.path)))};},
  caret:(id:string,pos:number)=>rigs.get(id)!.view.coordsAtPos(pos),
  keyboard:()=>setPenInk(false),
  hold:(id:string,on:boolean)=>{setPenInk(true);setInlineEraserMode(false);setInlineLassoMode(false);penEvent(on?"pointerdown":"pointerup",100,180,991);return snap(id).state.busy;},

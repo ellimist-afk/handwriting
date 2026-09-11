@@ -26,6 +26,21 @@ export function clampPinchScale(scale: number): number {
  return validCameraScale(scale) ? Math.min(MAX_PINCH_SCALE, scale) : 1;
 }
 
+/** Intersect one stroke with the reachable right/down surface; never mutate it. */
+export function clampToReachable(
+ bounds: InkFitBounds | null,
+ origin: { originLeftNote: number; originTopNote: number },
+): InkFitBounds | null {
+ if (!bounds) return null;
+ const { originLeftNote: minX, originTopNote: minY } = origin;
+ if (![bounds.x, bounds.y, bounds.width, bounds.height, minX, minY].every(Number.isFinite)) return null;
+ if (bounds.width < 0 || bounds.height < 0) return null;
+ const right = bounds.x + bounds.width, bottom = bounds.y + bounds.height;
+ const x = Math.max(bounds.x, minX), y = Math.max(bounds.y, minY);
+ if (right < x || bottom < y) return null;
+ return { x, y, width: right - x, height: bottom - y };
+}
+
 export interface InkFitBounds { x:number; y:number; width:number; height:number; }
 export type InkFitPlan = { kind:"fit"; zoom:number } | { kind:"empty"; zoom:1 } | { kind:"unrepresentable" };
 /** Native Chromium layout has a finite range; refuse before saturating it. */
