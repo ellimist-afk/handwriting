@@ -19,7 +19,7 @@ async function setup(bytes?: string) {
  saved=bytes??serializePage(data);
  const host=document.body.appendChild(document.createElement("div"));host.className="markdown-source-view drift-host";
  view=new EditorView({parent:host,state:EditorState.create({doc:Array.from({length:80},(_,i)=>`line ${i} anchor text`).join("\n"),extensions:[history(),editorInfoField.init(()=>({app:{commands:{executeCommandById:()=>false}},file:{path},editor:{}})),inkOverlayExtension(),EditorView.theme({".cm-content":{fontFamily:"monospace",fontSize:"16px",lineHeight:"24px"}})]})});
- setScrollExpansionEnabled(true);setPenInk(true);await settle();return snapshot();
+ setScrollExpansionEnabled(true);setPenInk(true);await settle();return {...snapshot(),pixels:pixels()};
 }
 function snapshot(){return {saved,loads,strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),scaleY:view.scaleY};}
 function point(type:string,x:number,y:number,pointerType="pen",pointerId=741){
@@ -42,16 +42,38 @@ async function write(scale:number,measured:boolean,pinch:boolean,cancel:boolean)
  const x=line.left+400*actual,y=line.top+200*actual;
  const before={scale:actual,cached:view.scaleY,expected:{x:400,y:200},scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop}};
  point("pointerdown",x,y);point("pointermove",x+8,y+4);point("pointerup",x+12,y+6);
- await settle();return {...before,...snapshot()};
+ await settle();return {...before,...snapshot(),pixels:pixels()};
+}
+function pixels(displace = 0){
+ const overlay=overlayForPath(path)! as any;
+ const canvas=overlay.committedCanvas as HTMLCanvasElement,rect=canvas.getBoundingClientRect();
+ const ctx=canvas.getContext("2d")!;
+ if(displace){const original=ctx.getImageData(0,0,canvas.width,canvas.height);ctx.clearRect(0,0,canvas.width,canvas.height);ctx.putImageData(original,0,Math.round(displace*canvas.height/rect.height));}
+ const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;
+ const line=view.contentDOM.querySelector(".cm-line")!.getBoundingClientRect();
+ const scale=view.dom.getBoundingClientRect().width/view.dom.offsetWidth;
+ const bounds=()=>({minX:Infinity,minY:Infinity,maxX:-Infinity,maxY:-Infinity,count:0});
+ const blue=bounds(),black=bounds();
+ for(let y=0;y<canvas.height;y++)for(let x=0;x<canvas.width;x++){
+  const i=(y*canvas.width+x)*4;if(data[i+3]!<=10)continue;
+  const b=data[i+2]!>data[i]!+40&&data[i+2]!>data[i+1]!+10?blue:data[i]!<30&&data[i+1]!<30&&data[i+2]!<30?black:null;
+  if(!b)continue;const px=(rect.left+x*rect.width/canvas.width-line.left)/scale,py=(rect.top+y*rect.height/canvas.height-line.top)/scale;
+  b.count++;b.minX=Math.min(b.minX,px);b.minY=Math.min(b.minY,py);b.maxX=Math.max(b.maxX,px);b.maxY=Math.max(b.maxY,py);
+ }
+ return {blue,black};
 }
 async function raster(){
  const overlay=overlayForPath(path)! as any;
  if(!overlay.commitCameraScale(1,{left:0,top:0}))throw Error("reset refused");await settle();
- const canvas=overlay.committedCanvas as HTMLCanvasElement,rect=canvas.getBoundingClientRect();
- const pixels=canvas.getContext("2d")!.getImageData(0,0,canvas.width,canvas.height).data;
- let minX=Infinity,minY=Infinity,count=0;
- for(let y=0;y<canvas.height;y++)for(let x=0;x<canvas.width;x++){const i=(y*canvas.width+x)*4;if(pixels[i+3]!>10&&pixels[i+2]!>pixels[i]!+40&&pixels[i+2]!>pixels[i+1]!+10){count++;minX=Math.min(minX,rect.left+x*rect.width/canvas.width);minY=Math.min(minY,rect.top+y*rect.height/canvas.height);}}
- const line=view.contentDOM.querySelector(".cm-line")!.getBoundingClientRect();
- return {count,minX,minY,expectedX:line.left+400,expectedY:line.top+200,...snapshot()};
+ return {...pixels(),...snapshot()};
 }
-(window as any).zoomDrift={setup,write,raster};
+function reference(){
+ // Same stroke shape/style/pressure as captured, placed at the independently
+ // specified physical anchor. This removes cap and antialiasing bias.
+ const page=parsePage(saved,id).data;
+ const stroke=page.strokes.at(-1)!;
+ const dx=400-stroke.points[0]!.x,dy=200-stroke.points[0]!.y;
+ for(const point of stroke.points){point.x+=dx;point.y+=dy;}
+ return serializePage(page);
+}
+(window as any).zoomDrift={setup,write,raster,reference,pixels};
