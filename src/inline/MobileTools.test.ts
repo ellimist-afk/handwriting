@@ -3061,7 +3061,9 @@ describe("styles.css - the [hidden] override, kept for any future el.hidden use"
 	it("`.handwriting-mobile-tool[hidden]` forces display:none, outranking the button's own display:flex", () => {
 		const body = hiddenToolOverrideBody(css);
 		expect(body, "[hidden] override present in the cascade, not merely in the file").not.toBeNull();
-		expect(body!).toMatch(/display:\s*none\s*!important/);
+		// Normal specificity beats the owned display:flex rule; browser coverage
+		// in ScorecardCssResidual.test.ts verifies the computed hidden state.
+		expect(body!).toMatch(/display:\s*none\s*;/);
 	});
 });
 

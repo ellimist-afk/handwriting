@@ -92,14 +92,14 @@ export class SnapPreviewCanvas {
 		const right = Math.min(width, Math.ceil(end.x + 2));
 		const bottom = Math.min(height, Math.ceil(end.y + 2));
 		if (![left, top, right, bottom, backing].every(Number.isFinite) || right <= left || bottom <= top || backing <= 0) return false;
-		const canvas = parent.ownerDocument.createElement("canvas");
+		const canvas = parent.createEl("canvas");
 		canvas.className = "handwriting-snap-preview";
 		canvas.setAttribute("aria-hidden", "true");
 		Object.assign(canvas.style, { position: "absolute", left: `${left}px`, top: `${top}px`, width: `${right-left}px`, height: `${bottom-top}px`, pointerEvents: "none", opacity: "0.45", zIndex: "4" });
 		canvas.width = Math.ceil((right-left) * backing);
 		canvas.height = Math.ceil((bottom-top) * backing);
 		const ctx = canvas.getContext("2d");
-		if (!ctx) return false;
+		if (!ctx) { canvas.remove(); return false; }
 		ctx.setTransform(backing, 0, 0, backing, 0, 0);
 		drawStroke(ctx, { ...cam, x: cam.x+left/cam.zoom, y: cam.y+top/cam.zoom }, stroke, undefined, true, false);
 		parent.appendChild(canvas);

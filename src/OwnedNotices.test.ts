@@ -13,7 +13,7 @@
  *
  * WHY PART OF THIS IS SOURCE TEXT, for the reason PenToggleNotice.test.ts
  * spells out at length: `test/obsidian-stub.ts`'s `Notice` is
- * `export class Notice {}`, an empty class with no `noticeEl` and no `hide`,
+ * `export class Notice {}`, an empty class with no `messageEl` and no `hide`,
  * so there is no live Notice in this repo to put down and a hider that ran
  * here would have nothing to probe. What IS executable is the registry
  * itself - a plain array of callbacks with no Obsidian in it at all - and
@@ -48,7 +48,7 @@ describe("the owned-notice registry is one array, walked once", () => {
 			for (const hide of ownedNoticeHiders.slice(before)) hide();
 			expect(order).toEqual(["first", "second"]);
 			// Hiding a slot that is already down is a no-op by construction -
-			// each real `clear` probes `noticeEl?.isConnected` first - so a
+			// each real `clear` probes `messageEl?.isConnected` first - so a
 			// second walk must not be a special case anywhere.
 			for (const hide of ownedNoticeHiders.slice(before)) hide();
 			expect(order).toEqual(["first", "second", "first", "second"]);
@@ -74,7 +74,7 @@ describe("hide-all reaches the quick-pen preset notice, not only the six toggles
 	it("the preset slot's rewrite and its unload hide are the same act, written once", () => {
 		// Two copies of the hide-if-showing rule are two things that can
 		// drift apart - the same reason main.ts's factory has one `clear`.
-		expect(occurrences(hostCode, "notice?.noticeEl?.isConnected")).toBe(1);
+		expect(occurrences(hostCode, "notice?.messageEl?.isConnected")).toBe(1);
 		expect(occurrences(hostCode, "clear();")).toBe(1);
 	});
 

@@ -1024,6 +1024,11 @@ afterEach(() => {
 });
 
 class FakeEl {
+	createEl(tag: string): FakeEl {
+		const child = this.ownerDocument.createElement(tag);
+		this.appendChild(child);
+		return child;
+	}
 	readonly style: Record<string, string> = { position: "", touchAction: "" };
 	readonly children: FakeEl[] = [];
 	className = "";

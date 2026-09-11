@@ -970,6 +970,7 @@ export class InlinePenRouter {
 	private fingerInkPreparationPending = false;
 	private savedTouchAction = "";
 	private savedTouchActionKnown = false;
+	private savedTouchActionPriority = "";
 	/** Non-palm touches currently counted by the guard's touch window. */
 	private guardTouches = new Set<number>();
 	/**
@@ -1890,6 +1891,7 @@ export class InlinePenRouter {
 	}
 
 	dispose(): void {
+		this.canvasMomentumDisabled = false;
 		this.scrollEl.classList.remove("handwriting-no-momentum");
 		this.cancelFling();
 		this.touchPos.clear();
@@ -1943,10 +1945,7 @@ export class InlinePenRouter {
 		}
 		const wantNone = d.touchAction === "none";
 		if (wantNone && !this.guardApplied) {
-			if (!this.savedTouchActionKnown) {
-				this.savedTouchAction = this.scrollEl.style.touchAction;
-				this.savedTouchActionKnown = true;
-			}
+			this.captureRootTouchAction();
 			this.guardApplied = true;
 			armGuardStyle(this.scrollEl, this.guardTouchAction);
 			tr("guard", null, `touch-action: none (${why})`);
@@ -1955,6 +1954,7 @@ export class InlinePenRouter {
 			disarmGuardStyle(this.scrollEl, this.savedTouchAction);
 			tr("guard", null, `touch-action restored (${why})`);
 		}
+		this.syncRootTouchAction();
 	}
 
 	private restoreGuardStyle(): void {
@@ -1967,6 +1967,23 @@ export class InlinePenRouter {
 			disarmGuardStyle(this.scrollEl, this.savedTouchAction);
 			tr("guard", null, "touch-action restored (guard disabled/disposed)");
 		}
+		this.syncRootTouchAction();
+	}
+
+	private captureRootTouchAction(): void {
+		if (this.savedTouchActionKnown) return;
+		this.savedTouchAction = this.scrollEl.style.touchAction;
+		this.savedTouchActionPriority = this.scrollEl.style.getPropertyPriority?.("touch-action") ?? "";
+		this.savedTouchActionKnown = true;
+	}
+
+	/** One root policy; subtree guard classes retain their existing ownership. */
+	private syncRootTouchAction(): void {
+		if (!this.savedTouchActionKnown) return;
+		const owned = this.canvasMomentumDisabled || this.guardApplied;
+		const touchAction = this.canvasMomentumDisabled ? "none" : this.guardApplied ? this.guardTouchAction : this.savedTouchAction;
+		if (this.scrollEl.style.touchAction !== touchAction) this.scrollEl.setCssStyles({ touchAction });
+		if (!owned && this.savedTouchActionPriority) this.scrollEl.style.setProperty("touch-action", this.savedTouchAction, this.savedTouchActionPriority);
 	}
 
 	/** The transition gesture: 1:1 pan while Chromium's snapshot said none. */
@@ -2092,8 +2109,10 @@ export class InlinePenRouter {
 	/** Inline-note policy: own touch pan from contact start, without a release glide. */
 	setCanvasMomentumDisabled(on: boolean): void {
 		if (on === this.canvasMomentumDisabled) return;
+		if (on) this.captureRootTouchAction();
 		this.canvasMomentumDisabled = on;
 		this.scrollEl.classList.toggle("handwriting-no-momentum", on);
+		this.syncRootTouchAction();
 		if (on) {
 			this.cancelFling();
 			// Request an immediate stop of any native scroll animation already running.

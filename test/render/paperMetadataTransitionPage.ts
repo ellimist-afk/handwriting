@@ -46,7 +46,7 @@ export async function paperMetadataTransitionProbe(shippedCss: string): Promise<
 	let container = document.createElement("div");
 	const root = document.createElement("div");
 	container.className = "view-content";
-	root.className = "markdown-source-view";
+	root.className = "markdown-source-view is-live-preview show-properties";
 	const scroller = document.createElement("div");
 	scroller.className = "cm-scroller";
 	root.append(scroller);
@@ -98,7 +98,7 @@ export async function paperMetadataTransitionProbe(shippedCss: string): Promise<
 	container = document.createElement("div");
 	container.className = "view-content";
 	const remountRoot = document.createElement("div");
-	remountRoot.className = "markdown-source-view";
+	remountRoot.className = "markdown-source-view is-live-preview show-properties";
 	const remountScroller = document.createElement("div");
 	remountScroller.className = "cm-scroller";
 	const remountProperties = document.createElement("div");
@@ -123,7 +123,7 @@ export async function paperMetadataTransitionProbe(shippedCss: string): Promise<
 	const referenceHost = document.createElement("div");
 	referenceHost.className = "view-content";
 	const referenceRoot = document.createElement("div");
-	referenceRoot.className = "markdown-source-view";
+	referenceRoot.className = "markdown-source-view is-live-preview show-properties";
 	const referenceScroller = document.createElement("div");
 	referenceScroller.className = "cm-scroller";
 	referenceScroller.textContent = "mounted note";

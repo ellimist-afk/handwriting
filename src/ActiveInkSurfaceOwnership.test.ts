@@ -163,6 +163,7 @@ type Surface = { kind: "inline"; overlay: InkOverlayPlugin } | { kind: "pdf"; co
  */
 const methods = build(`class Lifted { ${SURFACE_BLOCK}\n${PDF_SELECTION_BLOCK} }\nreturn Lifted.prototype;`, {
 	...InkOverlayModule,
+	View: class {},
 }) as {
 	activeInkSurface(this: unknown): Surface;
 	pdfControllerWithSelection(this: unknown, path: string): PdfController | null;
@@ -397,7 +398,7 @@ describe("the registered ink commands act on the ACTIVE editor", () => {
 				workspace: {
 					getActiveFile: () => opts.activeFile,
 					activeEditor: opts.activeEditor ?? null,
-					activeLeaf: opts.activeLeafRoot ? { view: { containerEl: opts.activeLeafRoot } } : undefined,
+					getActiveViewOfType: () => opts.activeLeafRoot ? { containerEl: opts.activeLeafRoot } : null,
 				},
 			},
 			pdfFiles,

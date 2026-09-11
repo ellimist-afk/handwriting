@@ -111,7 +111,7 @@ function ownedPresetNotice(): (message: string, routine?: boolean) => void {
 		// The same dead-Notice probe main.ts documents at length: a hidden or
 		// timed-out Notice has had its element detached, and hiding it again
 		// is what would throw.
-		if (notice?.noticeEl?.isConnected) notice.hide();
+		if (notice?.messageEl?.isConnected) notice.hide();
 		notice = null;
 	};
 	ownedNoticeHiders.push(clear);

@@ -1,4 +1,4 @@
-import { requestUrl, App, Command, MarkdownRenderChild, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, TAbstractFile, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { requestUrl, App, Command, MarkdownRenderChild, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, TAbstractFile, TFile, View, WorkspaceLeaf, normalizePath } from "obsidian";
 import {
 	clearGatedCommandAction,
 	clearGatedCommandActions,
@@ -174,7 +174,6 @@ import { notifyInkChanged, onInkChanged } from "./inline/InkEvents";
 import {
 	PenToolsMode,
 	clearPenHardwareSeen,
-	getPenToolsMode,
 	markPenSeen,
 	penHardwareSeen,
 	penSeenThisSession,
@@ -623,27 +622,9 @@ export function penToggleNoticeText(on: boolean): string {
  * presses. The fix is not a queue to drain faster; it is a toggle that owns
  * exactly one Notice and overwrites it.
  *
- * DEAD-NOTICE DETECTION: `notice?.noticeEl?.isConnected`, the ordinary DOM
- * answer to "is this element still attached to the document". Obsidian's
- * Notice carries no "am I still showing" flag of its own, and real Obsidian
- * detaches `noticeEl` from the document when a Notice's timeout fires or it
- * is dismissed by hand - so a disconnected `noticeEl` means the Notice is
- * already gone, and rewriting it would show nothing at all, which is worse
- * than the bug this is fixing. `noticeEl` is documented `@deprecated Use
- * messageEl instead` (obsidian.d.ts) for writing a message, but it is still
- * the element Obsidian attaches and removes, so it remains the right thing
- * to ask whether it is connected.
- *
- * THE PROBE ITSELF MUST NOT THROW: `notice?.noticeEl?.isConnected`, not
- * `notice && notice.noticeEl.isConnected`. `noticeEl` is the deprecated half
- * of the type - exactly the property a future Obsidian drops - and this
- * repo's own test double (test/obsidian-stub.ts's `Notice`) already has no
- * `noticeEl` at all today. The callback on the other side of this check is a
- * toggle button, so a read that throws does not just cost one toast, it
- * leaves the button looking broken. Optional-chained, a missing `noticeEl`
- * reads as `undefined` - falsy - so `hide()` is skipped and a fresh Notice is
- * still constructed: today's stacking behaviour for that one case, never an
- * exception in front of a user.
+ * The supported messageEl is connected only while its Notice is attached.
+ * Optional chaining also handles older test doubles with no DOM element.
+ * Hiding an already detached notice is skipped; a new notice gets a fresh timer.
  *
  * RESTARTING THE TIMEOUT: this does not call `setMessage`. obsidian.d.ts
  * documents it only as "Change the message of this notice", nothing about
@@ -683,7 +664,7 @@ function ownedNotice(): (message: string) => void {
 	// The rewrite half and the unload half are the same act - put down
 	// whatever this slot is still showing - so they are the same function.
 	const clear = (): void => {
-		if (notice?.noticeEl?.isConnected) notice.hide();
+		if (notice?.messageEl?.isConnected) notice.hide();
 		notice = null;
 	};
 	ownedNoticeHiders.push(clear);
@@ -1648,7 +1629,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		const file = this.app.workspace.getActiveFile();
 		if (!file) return null;
 		if (file.extension.toLowerCase() === "pdf") {
-			const root = (this.app.workspace.activeLeaf?.view as unknown as { containerEl?: HTMLElement } | undefined)
+			const root = this.app.workspace.getActiveViewOfType(View)
 				?.containerEl;
 			if (root && this.pdfFiles.get(root) === file.path) {
 				const focused = this.pdfInk.get(root);
@@ -4156,11 +4137,11 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// A CONFIRMED CALL WITHOUT ITS ORIGINAL CAPTURE IS INVALID, and that is
 		// not permission to reacquire one by path: the whole point of the
 		// capture is that the path may no longer mean what it meant.
-		if (!this.sameDeleteAllTarget(target)) {
+		if (!target || !this.sameDeleteAllTarget(target)) {
 			new Notice(DELETE_ALL_REFUSED);
 			return;
 		}
-		runDetached(this.deleteAllInk(target!), `delete all ink on ${target!.path}`);
+		runDetached(this.deleteAllInk(target), `delete all ink on ${target.path}`);
 	}
 
 	/**
@@ -4175,7 +4156,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// (0) THE TARGET, BEFORE THE READINESS. A confirmed call arriving
 		// without its original capture is invalid, and reacquiring one from the
 		// path would defeat the capture's whole purpose.
-		if (!this.sameDeleteAllTarget(target)) {
+		if (!target || !this.sameDeleteAllTarget(target)) {
 			reportDeleteAllRefusal("target-lost");
 			return;
 		}
@@ -4325,7 +4306,7 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// The backup already produced STAYS, and is neither retargeted nor
 		// removed: it is a real generation of this note's real ink, and the
 		// note having moved does not make it less so.
-		if (!this.sameDeleteAllTarget(target)) {
+		if (!target || !this.sameDeleteAllTarget(target)) {
 			// `target-lost`, NOT `readiness-lost`. Both refuse and both keep the
 			// backup, but they say different things, and only one of them is
 			// true here: the note is not coming back in a moment.
@@ -6381,7 +6362,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 	private rerender(): void {
 		const self = this as unknown as { update?: () => void };
 		if (typeof self.update === "function") self.update();
-		else this.display();
+		else this.renderLegacySettings();
 	}
 
 	/**
@@ -6531,6 +6512,10 @@ export class HandwritingSettingTab extends PluginSettingTab {
 	 * the definitions themselves.
 	 */
 	display(): void {
+		this.renderLegacySettings();
+	}
+
+	private renderLegacySettings(): void {
 		const { containerEl } = this;
 		containerEl.empty();
 		this.paint(containerEl, this.getSettingDefinitions());

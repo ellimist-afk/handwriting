@@ -297,13 +297,13 @@
  * separation from whatever ink is under it, and both are theme variables so
  * light and dark are the same rule rather than two.
  *
- * `cursor: pointer` with `!important`: the scroller wears `cursor: none` over
- * itself AND every descendant while the pen or an inking mouse hovers (the
- * rule directly above), which is exactly the state this chip appears in.
- * Without the override the button would be the one control in the plugin you
- * cannot see your pointer on.
+ * `cursor: pointer` uses a deliberately more specific selector: the scroller
+ * wears `cursor: none` over itself AND every descendant while the pen or an
+ * inking mouse hovers (the rule directly above), which is exactly the state
+ * this chip appears in. Without the specificity bump the chip would be the
+ * one control in the plugin you cannot see your pointer on.
  */
-.handwriting-snap-chip {
+div.handwriting-snap-chip.handwriting-snap-chip {
 	position: absolute;
 	z-index: 13;
 	padding: 3px 9px;
@@ -315,7 +315,7 @@
 	border: 1px solid var(--text-muted);
 	border-radius: 9px;
 	box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.15));
-	cursor: pointer !important;
+	cursor: pointer;
 	/* Kills the double-tap zoom delay if a finger ever reaches one. */
 	touch-action: manipulation;
 	/* Never a focus stop (tabindex is -1), so it never wears a focus ring
@@ -1139,16 +1139,16 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]) .markdown-sou
    source order, so without this override a hidden button would stay
    laid out and painted - dimmed, hoverable, a not-allowed cursor on
    hover - exactly what shipped to vault test 2 on 1.4.12-dev before this
-   override existed. `!important` outranks that `display: flex` outright
-   rather than relying on source order (source order alone would be
-   fragile against the block above being reordered later). */
+   override existed. The scoped selector is more specific than the plugin's
+   own `display: flex` rule, so this stays robust without a blanket `[hidden]`
+   reset or a cascade-wide `!important`. */
 /* Scoped to `.handwriting-mobile-tool` only - not a general `[hidden]`
    reset. `MobileTools.test.ts` pins this exact selector against the live
    cascade, so widening it to a bare `[hidden]` rule would need that test
    updated too. The near-identical twin below (`.handwriting-fold-reset`)
    is scoped the same way, for its own class, for the same reason. */
 .handwriting-mobile-tool[hidden] {
-	display: none !important;
+	display: none;
 }
 
 /*
@@ -2318,20 +2318,18 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]) .markdown-sou
  * block whose ONLY property is handwriting-page-id is hidden as one unit.
  * User properties are untouched: any other key keeps the block visible.
  */
-/*
- * `!important` because Obsidian 1.13.7 sets display on these with higher
- * specificity (verified live: the class applied and computed display still
- * block), and themes stack more rules on top. Hiding the id is an
- * invariant, so it must win every cascade, same as touch-action above.
- */
+/* Match the host's editing, reading and Bases popover scopes with the
+ * maintained id-only class. Normal specificity wins their display rules. */
 .metadata-property[data-property-key="handwriting-page-id"],
 .metadata-property[data-property-key="handwriting-paper"] {
-	display: none !important;
+	display: none;
 }
-.metadata-container.handwriting-metadata-id-only {
-	display: none !important;
+.metadata-container.handwriting-metadata-id-only,
+.markdown-source-view.is-live-preview.show-properties .metadata-container.handwriting-metadata-id-only:not(.mod-error),
+.markdown-preview-view.show-properties .metadata-container.handwriting-metadata-id-only,
+.hover-popover.bases-new-item-popover .markdown-source-view.is-live-preview .metadata-container.handwriting-metadata-id-only {
+	display: none;
 }
-
 /*
  * Obsidian's status bar (word count, backlink/property counts, plugin
  * items like Custom sort) is a fixed overlay in the bottom-right corner.
@@ -2509,7 +2507,10 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
 
 .handwriting-gated-group {
 	padding-left: 1em;
-	text-indent: -1em;
+}
+
+.handwriting-gated-group > .handwriting-gated-label:first-child {
+	margin-left: -1em;
 }
 
 .handwriting-gated-group + .handwriting-gated-group {
@@ -2844,7 +2845,7 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
    rather than dimming - see FoldOrderControl.ts. A third button that
    needs this shape gets its own scoped copy the same way. */
 .handwriting-fold-reset[hidden] {
-	display: none !important;
+	display: none;
 }
 
 /* ---- the preview ---- */
@@ -2955,18 +2956,18 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
 
 /* The camera changes the viewport, never the normal text wrapping column. */
 .handwriting-note-viewport-pane { overflow: hidden; }
-.cm-editor.handwriting-note-viewport { flex: none !important; max-width: none !important; max-height: none !important; }
+.cm-editor.handwriting-note-viewport { flex: none; max-width: none; max-height: none; }
 .cm-editor.handwriting-note-viewport > .cm-scroller > .cm-content {
- box-sizing: border-box !important;
- width: var(--handwriting-note-column-width) !important;
- min-width: var(--handwriting-note-column-width) !important;
- max-width: var(--handwriting-note-column-width) !important;
- flex: 0 0 var(--handwriting-note-column-width) !important;
- margin-left: var(--handwriting-note-column-margin-left) !important;
- margin-right: var(--handwriting-note-column-margin-right) !important;
+ box-sizing: border-box;
+ width: var(--handwriting-note-column-width);
+ min-width: var(--handwriting-note-column-width);
+ max-width: var(--handwriting-note-column-width);
+ flex: 0 0 var(--handwriting-note-column-width);
+ margin-left: var(--handwriting-note-column-margin-left);
+ margin-right: var(--handwriting-note-column-margin-right);
 }
 .handwriting-note-viewport-controls { position:absolute; top:52px; right:8px; z-index:30; display:flex; gap:2px; padding:3px; border:1px solid var(--background-modifier-border); border-radius:8px; background:var(--background-primary); box-shadow:0 2px 8px #0002; }
 .handwriting-note-viewport-controls button { min-width:30px; height:30px; padding:0 6px; font-size:12px; }
 
 /* Only Infinite Canvas note routers opt in; wheel input remains native. */
-.handwriting-no-momentum { touch-action: none !important; }
+.handwriting-no-momentum { touch-action: none; }

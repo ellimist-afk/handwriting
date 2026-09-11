@@ -4560,7 +4560,6 @@ export class InkOverlayPlugin {
 	private applyPinchScale(next: number, settle: boolean): void {
 		const anchor = this.pinchAnchor;
 		if (!anchor) return;
-		const scroller = this.view.scrollDOM;
 		// Both scales come from the GESTURE, not from the previous frame: the
 		// reference the gesture started at, and where it is being asked to go.
 		const from = this.pinchRefScale ?? this.pinchScaleNow;

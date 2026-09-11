@@ -1,3 +1,4 @@
+import { timerHost } from "../util/RuntimeScheduler";
 /**
  * When the floating pen-tools strip shows (roadmap wishlist: pen GUI).
  *
@@ -412,7 +413,7 @@ let persistScheduled = false;
 function schedulePersistPenHardwareSeen(): void {
 	if (persistScheduled) return;
 	persistScheduled = true;
-	setTimeout(() => {
+	timerHost().setTimeout(() => {
 		try {
 			persistPenHardwareSeen?.();
 		} catch (err) {

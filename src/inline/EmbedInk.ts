@@ -1,3 +1,4 @@
+import { timerHost } from "../util/RuntimeScheduler";
 /**
  * Ink in rendered markdown (roadmap: ink showing in embeds).
  *
@@ -672,7 +673,7 @@ function watchBodyForSections(
  */
 function setTimer(view: Window | null, fn: () => void, ms: number): number {
 	if (view && typeof view.setTimeout === "function") return view.setTimeout(fn, ms);
-	return setTimeout(fn, ms);
+	return timerHost().setTimeout(fn, ms);
 }
 
 function clearTimer(view: Window | null, handle: number): void {
@@ -680,7 +681,7 @@ function clearTimer(view: Window | null, handle: number): void {
 		view.clearTimeout(handle);
 		return;
 	}
-	clearTimeout(handle);
+	timerHost().clearTimeout(handle);
 }
 
 /** Cancel every pending wait. Called by teardown; safe to call twice. */

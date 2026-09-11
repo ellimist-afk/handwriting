@@ -29,7 +29,7 @@
  * ORDER IS CREATION ORDER, which is module-evaluation order and therefore not
  * something any caller should depend on. Nothing does: unload hides all of
  * them, and hiding a slot that is already down is a no-op by construction
- * (each `clear` probes `noticeEl?.isConnected` first).
+ * (each `clear` probes `messageEl?.isConnected` first).
  *
  * NOT CLEARED ON UNLOAD. The slots are module scope and live as long as the
  * module does, so the array must keep pointing at them: a re-enable inside

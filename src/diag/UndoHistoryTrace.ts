@@ -1,3 +1,4 @@
+import { timerHost, animationHost } from "../util/RuntimeScheduler";
 import { diagnosticsEnabled, diagnosticsEpoch } from "./DiagSwitch";
 
 export type UndoGesture = "undo" | "redo";
@@ -87,6 +88,7 @@ export interface UndoHistoryCapture {
 }
 
 interface ActiveTrace {
+    timers: ReturnType<typeof timerHost>;
 	epoch: number;
 	identity: object;
 	windowToken: string;
@@ -109,7 +111,8 @@ let instanceSeq = 0;
 let windowSeq = 0;
 let blockedIdentityEpoch: number | null = null;
 const viewIdentities = new WeakMap<object, object>();
-const deferredFrames = new Set<number>();
+const identityWindows = new WeakMap<object, Window>();
+const deferredFrames = new Map<() => void, number>();
 
 function now(): number {
 	return typeof performance !== "undefined" && typeof performance.now === "function"
@@ -126,21 +129,21 @@ function token(prefix: string, n: number): string {
 }
 
 function clearTimers(trace: ActiveTrace, clearDeadline = true): void {
-	if (trace.quietTimer !== null) clearTimeout(trace.quietTimer);
-	if (clearDeadline && trace.deadlineTimer !== null) clearTimeout(trace.deadlineTimer);
+	if (trace.quietTimer !== null) trace.timers.clearTimeout(trace.quietTimer);
+	if (clearDeadline && trace.deadlineTimer !== null) trace.timers.clearTimeout(trace.deadlineTimer);
 	trace.quietTimer = null;
 	if (clearDeadline) trace.deadlineTimer = null;
 }
 
 function cancelDeferredFrames(): void {
-	for (const frame of deferredFrames) cancelAnimationFrame(frame);
+	for (const cancel of deferredFrames.keys()) cancel();
 	deferredFrames.clear();
 }
 
 function scheduleQuiet(trace: ActiveTrace): void {
-	if (trace.quietTimer !== null) clearTimeout(trace.quietTimer);
+	if (trace.quietTimer !== null) trace.timers.clearTimeout(trace.quietTimer);
 	const { epoch, identity, windowToken } = trace;
-	trace.quietTimer = setTimeout(() => {
+	trace.quietTimer = trace.timers.setTimeout(() => {
 		if (active !== trace || trace.epoch !== epoch || trace.identity !== identity || trace.windowToken !== windowToken) return;
 		finish("quiet");
 	}, 250);
@@ -237,6 +240,7 @@ export function beginUndoWindow(
 	}
 	if (!active) {
 		active = {
+			timers: timerHost(identityWindows.get(identity)),
 			epoch,
 			identity,
 			windowToken: token("w", ++windowSeq),
@@ -253,7 +257,7 @@ export function beginUndoWindow(
 		};
 		const trace = active;
 		const { epoch: timerEpoch, identity: timerIdentity } = trace;
-		active.deadlineTimer = setTimeout(() => {
+		active.deadlineTimer = trace.timers.setTimeout(() => {
 			if (active !== trace || trace.epoch !== timerEpoch || trace.identity !== timerIdentity) return;
 			finish("hard-deadline");
 		}, 2000);
@@ -328,10 +332,14 @@ export function registerUndoTraceView(view: object, identity: object): object {
 	const existing = viewIdentities.get(view);
 	if (existing) return existing;
 	viewIdentities.set(view, identity);
+    const owner = (view as { ownerDocument?: Document }).ownerDocument?.defaultView;
+    if (owner) identityWindows.set(identity, owner);
 	return identity;
 }
 
 export function unregisterUndoTraceView(view: object): void {
+	const identity = viewIdentities.get(view);
+	if (identity) identityWindows.delete(identity);
 	viewIdentities.delete(view);
 }
 
@@ -346,8 +354,10 @@ export function queueUndoPostObservation(
 ): void {
 	if (!diagnosticsEnabled() || epoch !== diagnosticsEpoch() || !active || !!active.endReason || !sameIdentity(active, identity)) return;
 	const windowToken = active.windowToken;
-	const frame = requestAnimationFrame(() => {
-		deferredFrames.delete(frame);
+	const scheduler = animationHost(identityWindows.get(identity));
+    const cancel = () => scheduler.cancelAnimationFrame(frame);
+    const frame = scheduler.requestAnimationFrame(() => {
+		deferredFrames.delete(cancel);
 		if (!diagnosticsEnabled() || epoch !== diagnosticsEpoch() || !active || !!active.endReason || active.windowToken !== windowToken || !sameIdentity(active, identity)) return;
 		if (now() >= active.deadline) {
 			finish("hard-deadline");
@@ -355,5 +365,5 @@ export function queueUndoPostObservation(
 		}
 		recordUndoObservation(identity, read(), epoch);
 	});
-	deferredFrames.add(frame);
+	deferredFrames.set(cancel, frame);
 }

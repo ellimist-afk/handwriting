@@ -3,6 +3,8 @@ import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { launch, type Browser, type BrowserEngine } from "./harness";
 import css from "../../styles.css?raw";
+import { readFileSync } from "node:fs";
+const hostCss = readFileSync(fileURLToPath(new URL("./obsidianMetadataHost.css", import.meta.url)), "utf8");
 
 describe.each(["chromium", "webkit"] satisfies BrowserEngine[])("mounted paper metadata transitions in %s", engine => {
 	let browser: Browser;
@@ -25,7 +27,7 @@ describe.each(["chromium", "webkit"] satisfies BrowserEngine[])("mounted paper m
 			page.on("pageerror", error => errors.push(error.message));
 			await page.setContent("<!doctype html><html><body></body></html>");
 			await page.addScriptTag({ content: script });
-			const result = await page.evaluate(cssText => window.paperMetadataTransitionProbe(cssText), css);
+			const result = await page.evaluate(cssText => window.paperMetadataTransitionProbe(cssText), css + "\n" + hostCss);
 			expect(result.transitions.map(item => item.choice)).toEqual(["none", "lines", "grid", "dots", "default", "none", "lines", "grid", "dots", "default"]);
 			expect(result.transitions.slice(0, 5).map(item => item.state.paper)).toEqual(["none", "lines", "grid", "dots", null]);
 			expect(result.transitions.slice(0, 5).every(item => item.state.idOnly)).toBe(true);

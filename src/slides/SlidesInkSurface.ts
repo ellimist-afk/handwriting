@@ -1,3 +1,4 @@
+import { timerHost } from "../util/RuntimeScheduler";
 /**
  * Slides ink: the pen writes on Obsidian's core Slides presentation, and the
  * ink is still there the next time the note is presented.
@@ -2731,7 +2732,7 @@ export class SlidesDeck {
 		const doc = this.revealEl.ownerDocument;
 		const win = doc.defaultView ?? window;
 		const make = (cls: string, z: string): HTMLCanvasElement => {
-			const canvas = doc.createElement("canvas");
+			const canvas = this.revealEl.createEl("canvas");
 			canvas.className = cls;
 			// `pointer-events:none` is not an optimisation, it is the routing
 			// design: input is claimed on `.reveal`, never on a canvas. A
@@ -4612,7 +4613,7 @@ function isTextEntryElement(el: Element): el is HTMLElement {
 
 /** The document the presentation would be built in (popout-aware, S1). */
 function presentationDoc(): Document {
-	const active = (globalThis as { activeDocument?: Document }).activeDocument;
+	const active = typeof activeDocument === "undefined" ? undefined : activeDocument;
 	return active ?? document;
 }
 
@@ -4715,7 +4716,8 @@ export async function settleSlidesInk(maxWaitMs = 2000): Promise<boolean> {
 	const deadline = new Promise<boolean>((r) => {
 		expire = r;
 	});
-	const timer = setTimeout(() => expire(true), maxWaitMs);
+	const scheduler = timerHost();
+    const timer = scheduler.setTimeout(() => expire(true), maxWaitMs);
 	try {
 		for (let pass = 0; pass < 4; pass++) {
 			const inFlight: Promise<unknown>[] = [...drains, ...(deck?.inFlightWork() ?? [])];
@@ -4728,7 +4730,7 @@ export async function settleSlidesInk(maxWaitMs = 2000): Promise<boolean> {
 		}
 		return false;
 	} finally {
-		clearTimeout(timer);
+		scheduler.clearTimeout(timer);
 	}
 }
 

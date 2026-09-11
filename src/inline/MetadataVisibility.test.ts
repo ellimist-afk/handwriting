@@ -29,6 +29,9 @@
 import { describe, expect, it } from "vitest";
 import { chromium } from "playwright";
 import css from "../../styles.css?raw";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+const hostCss = readFileSync(fileURLToPath(new URL("../../test/render/obsidianMetadataHost.css", import.meta.url)), "utf8");
 import { codeOnly } from "../CodeOnly";
 import {
 	frontmatterPropertyKeys,
@@ -85,8 +88,9 @@ describe("metadata visibility", () => {
 		const browser = await chromium.launch({ headless: true });
 		try {
 			const page = await browser.newPage();
-			await page.setContent('<div class="metadata-container"><div class="metadata-property" data-property-key="handwriting-paper" style="display:flex">paper</div><div class="metadata-property" data-property-key="tags" style="display:flex">tags</div><div class="metadata-property" data-property-key="handwriting-text" style="display:flex">text</div><div class="metadata-property" data-property-key="handwriting-paper-other" style="display:flex">other</div><div class="metadata-property" style="display:flex">editing</div></div>');
-			await page.addStyleTag({ content: css });
+			await page.setContent('<div class="metadata-container"><div class="metadata-property" data-property-key="handwriting-paper">paper</div><div class="metadata-property" data-property-key="tags">tags</div><div class="metadata-property" data-property-key="handwriting-text">text</div><div class="metadata-property" data-property-key="handwriting-paper-other">other</div><div class="metadata-property">editing</div></div>');
+			// The installed host supplies normal stylesheet display:flex, not inline styles.
+			await page.addStyleTag({ content: css + "\n" + hostCss });
 			const display = await page.locator(".metadata-property").evaluateAll(rows => rows.map(row => getComputedStyle(row).display));
 			expect(display).toEqual(["none", "flex", "flex", "flex", "flex"]);
 		} finally { await browser.close(); }

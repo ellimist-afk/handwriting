@@ -166,6 +166,7 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"notification bug fix",
 		"zoom and fit to ink",
 	],
+	"1.4.17": ["compatibility bug fixes", "build verification bug fix"],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

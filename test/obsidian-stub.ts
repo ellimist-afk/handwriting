@@ -17,6 +17,7 @@ export class Plugin {}
 export class PluginSettingTab {}
 export class Modal {}
 export class Setting {}
+export class View {}
 export class ItemView {}
 export class TextFileView {}
 export class MarkdownRenderChild {}

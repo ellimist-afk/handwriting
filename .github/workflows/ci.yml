@@ -86,6 +86,9 @@ jobs:
       - name: production build
         run: node esbuild.config.mjs production
 
+      - name: build reproducibility
+        run: npm run check:build
+
   provenance:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     needs: check

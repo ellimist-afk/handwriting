@@ -25,7 +25,7 @@
  * DeferredUnloadGuard.test.ts and TipModeCommand.test.ts hit the same wall
  * before this file did. On top of that, `test/obsidian-stub.ts` - the only
  * `Notice` this repo's test run can construct - is `export class Notice {}`,
- * an empty class with no `noticeEl`, no `setMessage`, no `hide`, so even a
+ * an empty class with no `messageEl`, no `setMessage`, no `hide`, so even a
  * callback that could run would be probing properties the stub does not
  * have (exactly the case `ownedNotice`'s optional chaining is now written to
  * survive rather than throw on - see its doc comment in main.ts). So this
@@ -230,16 +230,16 @@ describe("ownedNotice: the only place any of the six toggles constructs a Notice
 		expect(occurrences(factory, "new Notice(")).toBe(1);
 	});
 
-	it("checks noticeEl.isConnected before reusing one - a dead Notice is never rewritten", () => {
-		expect(occurrences(factory, "notice?.noticeEl?.isConnected")).toBe(1);
+	it("checks messageEl.isConnected before reusing one - a dead Notice is never rewritten", () => {
+		expect(occurrences(factory, "notice?.messageEl?.isConnected")).toBe(1);
 	});
 
-	it("the isConnected probe is optional-chained - a missing noticeEl must not throw inside a command callback", () => {
+	it("the isConnected probe is optional-chained - a missing messageEl must not throw inside a command callback", () => {
 		// The exact guard this describe block's sibling test pins is the safe
 		// form; this pins that the unsafe form (which would throw on
 		// test/obsidian-stub.ts's Notice, and on any future Obsidian that
-		// drops the deprecated noticeEl) is not what shipped.
-		expect(occurrences(factory, "notice && notice.noticeEl.isConnected")).toBe(0);
+		// provides no message element) is not what shipped.
+		expect(occurrences(factory, "notice && notice.messageEl.isConnected")).toBe(0);
 	});
 
 	it("does not call setMessage - not verifiable against this repo's Notice surfaces (see the doc comment above ownedNotice)", () => {
@@ -273,7 +273,7 @@ describe("the owned Notices come down with the plugin", () => {
 	 *
 	 * Source text again, for this file's own reason: `test/obsidian-stub.ts`'s
 	 * `Notice` is an empty class, so a hider that ran here would find no
-	 * `noticeEl` to probe and no `hide` to call - there is no live Notice in
+	 * `messageEl` to probe and no `hide` to call - there is no live Notice in
 	 * this repo to put down. What is pinnable is that every slot registers a
 	 * hider and that unload calls them all.
 	 */
@@ -290,7 +290,7 @@ describe("the owned Notices come down with the plugin", () => {
 		// `clear()` is both what the shower calls before constructing a fresh
 		// Notice and what unload calls on its own; two copies of the
 		// hide-if-showing rule are two things that can drift apart.
-		expect(occurrences(factory, "notice?.noticeEl?.isConnected")).toBe(1);
+		expect(occurrences(factory, "notice?.messageEl?.isConnected")).toBe(1);
 		expect(occurrences(factory, "clear();")).toBe(1);
 	});
 

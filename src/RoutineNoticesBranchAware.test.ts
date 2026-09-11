@@ -17,14 +17,14 @@ vi.mock("obsidian", async (importOriginal) => {
 	return {
 		...actual,
 		Notice: class {
-			noticeEl = { isConnected: true };
+			messageEl = { isConnected: true };
 			private msg: string;
 			constructor(message: string) {
 				this.msg = message;
 				notices.said.push(message);
 			}
 			hide(): void {
-				this.noticeEl.isConnected = false;
+				this.messageEl.isConnected = false;
 				notices.hidden.push(this.msg);
 			}
 			setMessage(): void {}

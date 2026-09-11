@@ -9,6 +9,8 @@ beforeAll(async()=>{
  browser=await launch();
  const result=await build({stdin:{contents:`
  import {SnapPreviewCanvas} from './src/inline/SnapPreview';
+ import {installObsidianDom} from './test/render/obsidianDom';
+ installObsidianDom();
  import {StrokeBuilder} from './src/ink/StrokeBuilder';
  import {snapStroke} from './src/ink/ShapeSnap';
  import {drawStroke} from './src/ink/StrokeRenderer';

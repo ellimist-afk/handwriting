@@ -306,7 +306,7 @@ export class FoldOrderControl {
 	/** Guards the measure pass against re-entering itself; see `measure`. */
 	private measuring = false;
 	private resizeWatch: { disconnect(): void } | null = null;
-	private readonly win: (Window & typeof globalThis) | null;
+	private readonly win: Window | null;
 
 	constructor(
 		parent: HTMLElement,

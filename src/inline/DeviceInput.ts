@@ -48,15 +48,11 @@ let forced: boolean | null = null;
  */
 export function deviceHasTouch(): boolean {
 	if (forced !== null) return forced;
-	// `globalThis`, not a bare `navigator`: this file is imported by the
-	// strip, the strip is constructed by both surfaces, and the suite that
-	// exercises both runs on node with no DOM at all. A ReferenceError here
-	// would be a chrome failure taking the ink down with it, which is the one
-	// thing every strip path in this plugin is written not to do.
-	const nav = (globalThis as { navigator?: { maxTouchPoints?: number } }).navigator;
+	// Node-based geometry tests have no browser window or navigator.
+	const nav = typeof navigator === "undefined" ? undefined : navigator;
 	const points = nav?.maxTouchPoints;
 	if (typeof points === "number") return points > 0;
-	return "ontouchstart" in globalThis;
+	return typeof window !== "undefined" && "ontouchstart" in window;
 }
 
 /**

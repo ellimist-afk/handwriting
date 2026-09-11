@@ -22,6 +22,15 @@ const pre = {
 };
 
 describe("UndoHistoryTrace", () => {
+	it("schedules and cancels a popout trace on its owning window", () => {
+		clearUndoTrace();setDiagnosticsEnabled(true);resetUndoTrace();
+		const timers=new Set<number>(),frames=new Set<number>();let next=0;
+		const owner={setTimeout:vi.fn(()=>{const id=++next;timers.add(id);return id;}),clearTimeout:vi.fn((id:number)=>timers.delete(id)),requestAnimationFrame:vi.fn(()=>{const id=++next;frames.add(id);return id;}),cancelAnimationFrame:vi.fn((id:number)=>frames.delete(id))};
+		const popoutIdentity={};registerUndoTraceView({ownerDocument:{defaultView:owner}},popoutIdentity);
+		beginUndoWindow(popoutIdentity,pre);expect(owner.setTimeout).toHaveBeenCalledTimes(2);queueUndoPostObservation(popoutIdentity,diagnosticsEpoch(),()=>({phase:"post"}));
+		expect(owner.setTimeout).toHaveBeenCalledTimes(2);expect(owner.requestAnimationFrame).toHaveBeenCalledTimes(1);
+		clearUndoTrace();expect(timers.size).toBe(0);expect(frames.size).toBe(0);expect(owner.cancelAnimationFrame).toHaveBeenCalledTimes(1);
+	});
 	beforeEach(() => {
 		vi.useRealTimers();
 		setDiagnosticsEnabled(false);

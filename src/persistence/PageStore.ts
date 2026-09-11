@@ -261,7 +261,7 @@ export function recoverExactPage(parsed: PageData): PageData {
  * quietly reintroduce, between devices, exactly the overwrite this prevents.
  */
 function adoptionToken(): string {
-	const source = (globalThis as { crypto?: { getRandomValues?: (a: Uint8Array) => Uint8Array } }).crypto;
+	const source = typeof crypto === "undefined" ? undefined : crypto;
 	if (!source || typeof source.getRandomValues !== "function") {
 		throw new Error("Handwriting: no secure random source for the recovery copies");
 	}

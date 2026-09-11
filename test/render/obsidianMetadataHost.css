@@ -1,0 +1,105 @@
+/* Display rules extracted from installed Obsidian app.css.
+ * SHA256 f612f1e8f36486fa57f3b8bd45f0c848409d5b168002e757a13c6d286a7b4c41. Read-only archive extraction, not live computed style.
+ */
+:root { --metadata-display-editing: block; --metadata-display-reading: block; }
+.print .markdown-preview-view .metadata-container {
+display: none;
+}
+.metadata-container.is-collapsed .metadata-property {
+display: none;
+}
+.metadata-property {
+--input-border-width: 0;
+  --input-border-width-focus: 0;
+  --input-radius: 0;
+  position: relative;
+  display: flex;
+  align-items: start;
+  padding: var(--metadata-property-padding);
+  border-radius: var(--metadata-property-radius);
+  corner-shape: var(--metadata-property-corner-shape);
+  overflow: hidden;
+  background-color: var(--metadata-property-background);
+  box-shadow: var(--metadata-property-box-shadow);
+}
+.metadata-property-icon {
+cursor: var(--cursor);
+  color: var(--icon-color);
+  display: flex;
+  align-items: center;
+  padding: var(--size-4-1) 0;
+  height: var(--input-height);
+  -webkit-user-select: none;
+}
+.metadata-property-key {
+display: flex;
+  align-self: stretch;
+  align-items: flex-start;
+  flex-direction: row;
+  flex-shrink: 0;
+  font-family: var(--metadata-label-font);
+  border-bottom: var(--metadata-divider-width) solid var(--metadata-divider-color);
+  background-color: var(--metadata-label-background);
+  width: var(--metadata-label-width);
+  min-width: var(--metadata-label-width);
+}
+input.metadata-property-key-input {
+border: none;
+  flex-grow: 1;
+  color: var(--metadata-label-text-color);
+  font-size: var(--metadata-label-font-size);
+  font-weight: var(--metadata-label-font-weight);
+  padding: var(--metadata-input-padding);
+  height: var(--input-height);
+  background-color: transparent;
+  display: flex;
+  align-items: center;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  width: 100%;
+  text-align: left;
+}
+.metadata-property-warning-icon {
+--icon-size: var(--icon-s);
+  position: absolute;
+  inset-inline-end: var(--size-2-1);
+  top: var(--size-2-1);
+  bottom: var(--size-2-1);
+  align-items: center;
+  display: flex;
+  color: var(--text-warning);
+}
+.metadata-property-value {
+--input-padding: var(--metadata-input-padding);
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--size-2-2);
+  align-items: center;
+  align-self: stretch;
+  overflow: hidden;
+  font-family: var(--metadata-input-font);
+  min-height: var(--input-height);
+  background-color: var(--metadata-input-background);
+  border-bottom: var(--metadata-divider-width) solid var(--metadata-divider-color);
+}
+.markdown-source-view .metadata-container,
+.markdown-preview-view .metadata-container:not(.mod-error) {
+display: none;
+}
+.markdown-source-view.is-live-preview.show-properties .metadata-container:not(.mod-error) {
+display: var(--metadata-display-editing);
+}
+.markdown-preview-view.show-properties .metadata-container {
+display: var(--metadata-display-reading);
+}
+.markdown-source-view.is-live-preview.show-properties .metadata-container[data-property-count="0"]:not(.mod-error),
+.markdown-preview-view.show-properties .metadata-container[data-property-count="0"]:not(.mod-error) {
+display: none;
+}
+.inline-embed .markdown-source-view.is-live-preview.show-properties .metadata-container:not(.mod-error),
+.inline-embed .markdown-preview-view.show-properties .metadata-container:not(.mod-error) {
+display: none;
+}
+.hover-popover.bases-new-item-popover .markdown-source-view.is-live-preview .metadata-container {
+display: var(--metadata-display-editing);
+}

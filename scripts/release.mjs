@@ -20,6 +20,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalBuildInputDigest } from "./build-provenance.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS = ["main.js", "manifest.json", "styles.css"];
@@ -186,6 +187,26 @@ execFileSync("node", ["esbuild.config.mjs", "production"], { cwd: root, stdio: "
 
 if (!fs.existsSync(staleBundle) || fs.statSync(staleBundle).mtimeMs < builtMarker) {
 	console.error("FATAL: esbuild did not produce a fresh main.js. Nothing packaged.");
+	process.exit(1);
+}
+
+// A production bundle must not vary with whether the source arrived as a git
+// checkout or a .git-less archive. Git commit identity belongs in this receipt;
+// the bundle carries a deterministic canonical-input identity instead.
+const bundleText = fs.readFileSync(staleBundle, "utf8");
+for (const marker of [
+	'sourceCommit:"unverified"',
+	'dirtyStatus:"unverified"',
+	"verified:!1",
+]) {
+	if (!bundleText.includes(marker)) {
+		console.error(`FATAL: main.js embeds checkout-specific provenance; missing ${marker}.`);
+		process.exit(1);
+	}
+}
+const expectedInputDigest = canonicalBuildInputDigest(root);
+if (!bundleText.includes(`sourceTree:"${expectedInputDigest}"`)) {
+	console.error("FATAL: main.js is missing its canonical build-input identity.");
 	process.exit(1);
 }
 

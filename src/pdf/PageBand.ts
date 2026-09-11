@@ -31,7 +31,7 @@
  * Pure arithmetic, no DOM, for the reason ScrollBand gives: the rules that
  * decide where ink is drawn should be testable without a viewer.
  */
-import { Band, BandViewport, bandFor } from "../inline/ScrollBand";
+import { Band, BandViewport } from "../inline/ScrollBand";
 
 export type { Band, BandViewport };
 export { bandCovers, bandFor, bandMargin, bandNeedsMove } from "../inline/ScrollBand";
