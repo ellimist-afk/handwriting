@@ -2,8 +2,8 @@
  * Production-route reproduction for a pinch that ends between display frames.
  *
  * This deliberately drives InkOverlayPlugin's real `pinch` callback and the
- * real `flushPinch` / `applyPinchScale` / `settlePinchRaster` methods.  Only
- * the browser frame clock, DOM style sinks, and expensive `handleResize` body
+ * real `flushPinch` / `applyPinchScale` methods. Only
+ * the browser frame clock, DOM style sinks, and final layout transaction
  * are controlled.  No predicate or pinch state transition is copied here.
  *
  * The red case is the ordering at pinch end: the gesture anchor/reference are
@@ -68,17 +68,20 @@ function makeRig() {
 	overlay.pinchRaf = 0;
 	overlay.pinchScrollAt = 0;
 
-	// `settlePinchRaster` is real.  Its expensive final sink is observed rather
-	// than run because canvas allocation/repaint is outside this reproduction.
+	// The transaction's expensive sinks are observed; the mounted continuous
+	// pinch test separately verifies the real allocation and layout behavior.
 	const handleResize = vi.fn();
 	overlay.handleResize = handleResize;
 	// This test owns coalescing/final raster settlement, not browser layout.
 	// The production transaction and loading guard are exercised mounted.
 	overlay.getNoteViewportState = () => ({ busy: false });
+	overlay.prepareViewportLayout = () => true;
+	overlay.viewportLayout = {width:640,height:480,baseTransform:"none"};
 	overlay.commitCameraScale = (next: number) => {
 		overlay.pinchScaleNow = next;
 		overlay.cssScale = next;
 		host.setCssStyles({ transform: `scale(${next})`, transformOrigin: "0 0" });
+		handleResize();requestMeasure();
 		return true;
 	};
 
@@ -109,6 +112,16 @@ function makeRig() {
 }
 
 describe("InkOverlay pinch end with a coalesced move still pending", () => {
+	it("settles after returning to the starting scale", () => {
+		const rig=makeRig(),centroid={x:100,y:80};
+		rig.onPinch("start",1,centroid);
+		rig.onPinch("move",2,centroid);rig.runNextFrame();
+		rig.onPinch("move",1,centroid);rig.runNextFrame();
+		rig.onPinch("end",1,centroid);
+		expect(rig.scale()).toBe(1);
+		expect(rig.handleResize).toHaveBeenCalledTimes(1);
+		expect(rig.pendingFrames()).toBe(0);
+	});
 	it("lands the final requested scale and settles exactly once", () => {
 		const rig = makeRig();
 		const centroid = { x: 100, y: 80 };

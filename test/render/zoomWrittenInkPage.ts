@@ -76,4 +76,57 @@ function reference(){
  for(const point of stroke.points){point.x+=dx;point.y+=dy;}
  return serializePage(page);
 }
-(window as any).zoomDrift={setup,write,raster,reference,pixels};
+function dense(count: number) {
+ const page=emptyPage(id);page.surface="inline";
+ for(let s=0;s<count;s++) {
+  const x=30+(s%10)*70,y=30+Math.floor(s/10)*15;
+  page.strokes.push({id:`dense-${s}`,tool:"pen",color:"#000000",width:2,createdAt:s,
+   points:Array.from({length:80},(_,i)=>({x:x+i*.6,y:y+Math.sin(i/5)*5,pressure:.5,t:i*4})),
+   bbox:{x:x-4,y:y-9,width:56,height:18}});
+ }
+ return serializePage(page);
+}
+async function continuousPinch(target: number, cancel: boolean) {
+ const overlay=overlayForPath(path)! as any;
+ view.scrollDOM.scrollLeft=160;view.scrollDOM.scrollTop=160;await settle();
+ const before=snapshot(),column=view.contentDOM.offsetWidth;
+ let live=true,backingWrites=0,liveClears=0,liveTransactions=0,finalTransactions=0;
+ const liveAnchors:{x:number;y:number;column:number}[]=[];
+ let anchor:{x:number;y:number;worldX:number;worldY:number}|null=null;
+ const commit=overlay.commitCameraScale,pinch=overlay.pinch;
+ overlay.commitCameraScale=function(...args:any[]){if(live)liveTransactions++;else finalTransactions++;return commit.apply(this,args);};
+ overlay.pinch=function(phase:string,ratio:number,centroid:{x:number;y:number}) {
+  if(phase==="start") {const r=view.contentDOM.getBoundingClientRect();anchor={...centroid,worldX:centroid.x-r.left,worldY:centroid.y-r.top};}
+  return pinch.call(this,phase,ratio,centroid);
+ };
+ const canvasProto=HTMLCanvasElement.prototype;
+ const descriptors=["width","height"].map(key=>[key,Object.getOwnPropertyDescriptor(canvasProto,key)!] as const);
+ for(const [key,d] of descriptors)Object.defineProperty(canvasProto,key,{...d,set:function(value:number){if(live)backingWrites++;d.set!.call(this,value);}});
+ const clear=CanvasRenderingContext2D.prototype.clearRect;
+ CanvasRenderingContext2D.prototype.clearRect=function(...args:Parameters<typeof clear>){if(live&&(this===overlay.committedCtx||this===overlay.highlightCtx))liveClears++;return clear.apply(this,args);};
+ try {
+  point("pointerdown",300,220,"touch",501);point("pointerdown",500,220,"touch",502);
+  for(let i=1;i<=60;i++) {
+   await new Promise<void>(r=>requestAnimationFrame(()=>r()));
+   if(anchor) {const a=anchor as {x:number;y:number;worldX:number;worldY:number},r=view.contentDOM.getBoundingClientRect();liveAnchors.push({x:r.left+a.worldX*overlay.pinchScaleNow-a.x,y:r.top+a.worldY*overlay.pinchScaleNow-a.y,column:view.contentDOM.offsetWidth});}
+   const half=100*(1+(target-1)*i/60);
+   point("pointermove",400-half,220,"touch",501);point("pointermove",400+half,220,"touch",502);
+  }
+  await new Promise<void>(r=>requestAnimationFrame(()=>r()));
+  const liveScale=overlay.pinchScaleNow;
+  live=false;
+  point(cancel?"pointercancel":"pointerup",400-100*target,220,"touch",501);
+  point("pointerup",400+100*target,220,"touch",502);
+  await settle();
+  const rect=view.contentDOM.getBoundingClientRect(),a=anchor!;
+  return {backingWrites,liveClears,liveTransactions,finalTransactions,liveScale,liveAnchors,
+   finalScale:overlay.pinchScaleNow,columnBefore:column,columnAfter:view.contentDOM.offsetWidth,
+   anchorError:{x:rect.left+a.worldX*target-a.x,y:rect.top+a.worldY*target-a.y},
+   before,after:snapshot(),pixels:pixels(),preview:overlay.pinchPreview};
+ } finally {
+  overlay.commitCameraScale=commit;overlay.pinch=pinch;
+  for(const [key,d] of descriptors)Object.defineProperty(canvasProto,key,d);
+  CanvasRenderingContext2D.prototype.clearRect=clear;
+ }
+}
+(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch};

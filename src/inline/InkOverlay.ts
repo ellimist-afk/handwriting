@@ -1414,6 +1414,8 @@ export class InkOverlayPlugin {
 	private pinchPending: { next: number } | null = null;
 	/** When the pinch last wrote the scroll itself; see the scroll handler. */
 	private pinchScrollAt = 0;
+	/** Live transform owns the existing raster until the final layout transaction. */
+	private pinchPreview = false;
 	/** Hides a reticle left behind by a pen that never sent pointerleave. */
 	private hoverWatchdog: ReturnType<Window["setTimeout"]> | null = null;
 	/** Whether the metrics frame ticker is running; see startFrameTicker. */
@@ -2688,6 +2690,7 @@ export class InkOverlayPlugin {
 	// ---- geometry -----------------------------------------------------------
 
 	private handleResize(): void {
+  if(this.deferPinchRaster())return;
   this.mobileTools?.refresh();
   this.scrollExpansion?.rebase(this.view.scrollDOM.scrollLeft,this.view.scrollDOM.scrollTop);
   const layout=this.viewportLayout;
@@ -3088,6 +3091,7 @@ export class InkOverlayPlugin {
 	 * the one frame in which CM's own answer for it is not yet true.
 	 */
 	private syncCamera(): void {
+		if (this.deferPinchRaster()) return;
 		if (!this.container) return;
 		// A stroke in flight owns its coordinate frame until it ends.
 		if (this.frame.locked) return;
@@ -4465,9 +4469,8 @@ export class InkOverlayPlugin {
 	// ---- eraser (canvas semantics: whole-stroke, hit-circle, live) -----------
 
 	/**
-	 * Two-finger pinch resizes the editor's base font, which reflows the note.
-	 * Ink follows through the font-zoom path the overlay already runs, so
-	 * nothing here touches a stored coordinate. The size is always computed
+	 * Two-finger pinch magnifies the editor without changing stored coordinates.
+	 * Layout and raster changes wait until the gesture ends. Scale is computed
 	 * from what was captured at "start", so a pinch out and back lands exactly
 	 * where it began.
 	 */
@@ -4478,6 +4481,8 @@ export class InkOverlayPlugin {
 	): void {
 		if (phase === "start") {
 			if(this.getNoteViewportState().busy) return;
+			// Invalidate an earlier navigation's pending measure write.
+			this.viewportGeneration++;
 			this.pinchRefScale = this.pinchScaleNow;
 			// The anchor is captured ONCE, here. Every frame of the gesture
 			// is then computed from this state, so the view cannot chase the
@@ -4506,6 +4511,8 @@ export class InkOverlayPlugin {
 			} finally {
 				this.pinchRefScale = null;
 				this.pinchAnchor = null;
+				this.pinchPreview = false;
+				if (this.viewportStyleDirty) this.scheduleViewportStyleRefresh();
 			}
 			return;
 		}
@@ -4545,7 +4552,7 @@ export class InkOverlayPlugin {
 		this.pinchPending = null;
 		if (!pending && !settle) return;
 		if (pending) this.applyPinchScale(pending.next, settle);
-		else if (settle && this.pinchScaleNow !== this.pinchRasterScale)
+		else if (settle && (this.pinchPreview || this.pinchScaleNow !== this.pinchRasterScale))
 			this.applyPinchScale(this.pinchScaleNow, true);
 	}
 
@@ -4568,19 +4575,46 @@ export class InkOverlayPlugin {
 		const nextLeft = anchoredScroll(anchor.scrollLeft, anchor.offsetX, from*external, next*external);
 		const nextTop = anchoredScroll(anchor.scrollTop, anchor.offsetY, from*external, next*external);
 
-		if (!this.commitCameraScale(next, {left:nextLeft,top:nextTop})) return;
-		// A final native scroll write needs the final range first. Browsers clamp
-		// against the old range synchronously and do not retry after the extent
-		// grows, so settle before committing the original-anchor offsets.
-		if (settle) this.settlePinchRaster();
+		if (settle) {
+			this.pinchPreview = false;
+			// The final transaction establishes the range before its scroll writes.
+			if (!this.commitCameraScale(next, {left:nextLeft,top:nextTop})) return;
+			this.pinchRasterScale = next;
+		} else {
+			const effective = external * next;
+			if (this.frame.locked || this.scaleGeometryValid === false || next > 4 ||
+				!validCameraScale(next) || !validCameraScale(effective) || !this.prepareViewportLayout()) return;
+			const layout = this.viewportLayout!;
+			if (!validCameraScale(next, layout.width, layout.height) ||
+				![layout.width / next, layout.height / next, nextLeft, nextTop]
+					.every(n => Number.isFinite(n) && n >= 0 && n <= MAX_VIEWPORT_LAYOUT)) return;
+			this.pinchPreview = true;
+			this.pinchScrollAt = performance.now();
+			this.pinchScaleNow = next;
+			this.cssScale = effective;
+			this.scale = effective * this.fontZoom;
+			this.router?.cameraTransformChanged();
+			// No counter-scaled width/height, extent pass or canvas allocation here.
+			this.view.dom.setCssStyles({
+				transform: `${layout.baseTransform !== "none" ? layout.baseTransform + " " : ""}scale(${next})`,
+				transformOrigin: "0 0",
+			});
+		}
 		this.setViewportScroll(nextLeft,nextTop);
 		// Stamp AFTER the writes: the scroll events they queue are the ones
 		// the handler above should let pass without a repaint.
 		this.pinchScrollAt = performance.now();
 	}
 
+	private deferPinchRaster(): boolean {
+		// Match the scroll handler's bounded suppression: a lost end event must
+		// never suppress future geometry work for the lifetime of the editor.
+		return this.pinchPreview && performance.now() - this.pinchScrollAt < PINCH_SCROLL_QUIET_MS;
+	}
+
 
  private restoreViewportLayout():void {
+  this.pinchPreview=false;
   this.viewportGeneration++;
   this.viewportPaneObserver?.disconnect();this.viewportPaneObserver=null;
   this.viewportStyleObserver?.disconnect();this.viewportStyleObserver=null;
@@ -4634,7 +4668,7 @@ export class InkOverlayPlugin {
    if(!dirty)return;
    if(dirty.path!==this.filePath()||dirty.container!==this.container){this.viewportStyleDirty=null;return;}
    // Keep one dirty marker; pen-up schedules the single retry, never a loop.
-   if(this.frame.locked)return;
+   if(this.frame.locked||this.deferPinchRaster())return;
    this.viewportStyleDirty=null;
    this.refreshViewportColumn();
   });
@@ -4721,6 +4755,7 @@ export class InkOverlayPlugin {
 
  /** One validated transaction owns layout, transform, native range and scroll. */
  commitCameraScale(next:number,scroll?:{left:number;top:number}):boolean {
+  this.pinchPreview=false;
   if(this.frame.locked||this.scaleGeometryValid===false||next>4||!validCameraScale(next,this.view.dom.clientWidth,this.view.dom.clientHeight))return false;
   const previous=this.pinchScaleNow,effective=this.cssScale/previous*next;
   if(!validCameraScale(effective)||!this.prepareViewportLayout())return false;
@@ -4755,15 +4790,6 @@ export class InkOverlayPlugin {
   this.mobileTools?.refresh();
   return true;
  }
-
-	private settlePinchRaster(): void {
-		if (this.pinchScaleNow === this.pinchRasterScale) return;
-		this.pinchRasterScale = this.pinchScaleNow;
-		// A transform does not resize CodeMirror's layout box. Refresh its
-		// measured scale before a later Undo captures a viewport snapshot.
-		this.view.requestMeasure();
-		this.handleResize();
-	}
 
 	private showPenCursor(sample: PenSample, pointerType?: string): void {
 		// Keyboard mode is an overarching pause for mouse ink. The router keeps
@@ -6173,6 +6199,7 @@ export class InkOverlayPlugin {
 	}
 
 	private repaint(): void {
+		if (this.deferPinchRaster()) return;
 		if (!this.container) return;
 		if ((this.winRef.devicePixelRatio || 1) !== this.dpr) {
 			this.handleResize();
@@ -6364,6 +6391,7 @@ export class InkOverlayPlugin {
 	// every mutation here is traced.
 
 	private updateExtent(force = false): void {
+		if (this.deferPinchRaster()) return;
 		if (!this.container || this.frame.locked) return;
 		const path = this.filePath();
 		if (!path) return;
