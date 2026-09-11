@@ -116,3 +116,12 @@ describe("anchorTop", () => {
 		expect(after - before).toBe(96);
 	});
 });
+
+it("uses live uniform zoom before CM measures, retaining the settled Y/X ratio", () => {
+ const v = { contentDOM: { getBoundingClientRect: () => ({ top: 20 }) }, documentTop: 28, scaleX: 1, scaleY: 1 };
+ expect(anchorTop(v, "8px", 1.75)).toBe(34);
+ const settled = { ...v, scaleX: 1.75, scaleY: 1.7518 };
+ expect(anchorTop(settled, "8px", 1.75)).toBe(anchorTop(settled, "8px"));
+ expect(anchorTop(settled, "8px", 1)).toBeCloseTo(20 + 8 * settled.scaleY / settled.scaleX);
+ expect(anchorTop(v, undefined, 1.75)).toBe(28);
+});

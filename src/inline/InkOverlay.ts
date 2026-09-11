@@ -3133,7 +3133,7 @@ export class InkOverlayPlugin {
 		// rects above have forced layout, and no `getComputedStyle` call. Absent
 		// only before the first `handleResize` has run, and `anchorTop` falls
 		// back to CodeMirror's own answer there.
-		const documentTop = anchorTop(this.view, this.contentStyle?.paddingTop);
+
 		// Measure the SCALE from the same rect read as the camera, every
 		// time, instead of trusting the value handleResize last cached.
 		//
@@ -3156,6 +3156,7 @@ export class InkOverlayPlugin {
 			return;
 		}
 		this.scaleGeometryValid = true;
+		const documentTop = anchorTop(this.view, this.contentStyle?.paddingTop, measured);
 		// Adopt it only when it MEANS something. Rect widths are fractional,
 		// so this quotient wobbles in its last decimals every frame; letting
 		// that through moved the camera origin every frame, and repaint()
@@ -3776,7 +3777,7 @@ export class InkOverlayPlugin {
 		if (!this.container) return null;
 		const overlay = this.container.getBoundingClientRect();
 		const contentLeft = this.columnLeft();
-		const documentTop = anchorTop(this.view, this.contentStyle?.paddingTop);
+		const documentTop = anchorTop(this.view, this.contentStyle?.paddingTop, this.cssScale);
 		return {
 			x: visualToNote(overlay.left - contentLeft, this.scale),
 			y: visualToNote(overlay.top - documentTop, this.scale),

@@ -53,7 +53,10 @@
  * CodeMirror latched, so the anchor this returns is bit-for-bit
  * `view.documentTop` and every settled frame is arithmetically identical to
  * what shipped - no drift, and no spurious repaint from a camera that
- * wobbled in its last decimals. A `parseFloat` here would disagree with the
+ * wobbled in its last decimals. During an unmeasured uniform CSS zoom, the
+ * caller supplies the live horizontal scale so the cached Y/X ratio can
+ * follow that zoom before new input is stored. Once CM measures, its exact
+ * scale is retained. A `parseFloat` here would disagree with the
  * belief by half a pixel forever at any fractional padding.
  */
 
@@ -74,13 +77,8 @@ export function declaredPaddingTop(
 	if (cssPaddingTop === undefined) return null;
 	const px = Number.parseInt(cssPaddingTop, 10);
 	if (!Number.isFinite(px)) return null;
-	// `scaleY` is CodeMirror's own, so this multiplication is the one it will
-	// make. It is 1 until the same measure cycle that latches the padding, so
-	// inside the pre-measure window a CSS-scaled editor gets a correction in
-	// layout px rather than visual px - short by the scale, and still far
-	// closer than the 0 it replaces. Using the overlay's separately measured
-	// scale instead would be exact there and would disagree with the belief
-	// in its last decimals forever after, which is the worse trade.
+	// Callers may supply a live correction for an unmeasured uniform zoom.
+	// Invalid scale retains the prior unscaled fallback.
 	const scale = Number.isFinite(scaleY) && scaleY > 0 ? scaleY : 1;
 	return px * scale;
 }
@@ -93,6 +91,8 @@ export interface TopAnchorView {
 	readonly documentTop: number;
 	/** `view.scaleY`, the factor CodeMirror scales the CSS padding by. */
 	readonly scaleY: number;
+	/** Cached horizontal scale, used to identify an unmeasured uniform zoom. */
+	readonly scaleX?: number;
 }
 
 /**
@@ -106,8 +106,18 @@ export interface TopAnchorView {
  * once per sync, so this adds a property read to a path that has just forced
  * layout for its own rects and no `getComputedStyle` call anywhere.
  */
-export function anchorTop(view: TopAnchorView, cssPaddingTop: string | undefined): number {
-	const declared = declaredPaddingTop(cssPaddingTop, view.scaleY);
+export function anchorTop(view: TopAnchorView, cssPaddingTop: string | undefined, currentScaleX?: number): number {
+	let scaleY = view.scaleY;
+	const cachedX = view.scaleX;
+	// Owned zoom scales both axes uniformly before CodeMirror measures again.
+	// Carry its last Y/X ratio forward using the live X scale. Once measured,
+	// retain CM's exact Y (including its layout-height rounding) as before.
+	if (currentScaleX !== undefined && Number.isFinite(currentScaleX) && currentScaleX > 0 &&
+		cachedX !== undefined && Number.isFinite(cachedX) && cachedX > 0 &&
+		Number.isFinite(scaleY) && scaleY > 0 && Math.abs(currentScaleX - cachedX) > cachedX * 1e-3) {
+		scaleY *= currentScaleX / cachedX;
+	}
+	const declared = declaredPaddingTop(cssPaddingTop, scaleY);
 	if (declared === null) return view.documentTop;
 	return view.contentDOM.getBoundingClientRect().top + declared;
 }
