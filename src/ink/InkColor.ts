@@ -24,7 +24,7 @@ export interface InkColorChoice {
 /** Pen inks. First entry is the default, the original Handwriting blue. */
 export const PEN_COLORS: ReadonlyArray<InkColorChoice> = [
 	{ name: "blue", hex: "#2f6de0" },
-	{ name: "black", hex: "#1c1f26" },
+	{ name: "black", hex: "#000000" },
 	{ name: "graphite", hex: "#5f6673" },
 	{ name: "white", hex: "#f4f4f2" },
 	{ name: "red", hex: "#cf3040" },
