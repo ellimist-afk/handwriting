@@ -27,7 +27,6 @@ import {
 	nearestSpaceBoundary,
 	type SpaceBoundary,
 	canSplitParagraph,
-	snapLine,
 	spaceProtectedBlocks,
 	type SpaceProtectedBlock,
 } from "./InsertSpace";
@@ -1306,6 +1305,9 @@ export class InkOverlayPlugin {
 	private spacePlan: (SpaceBoundary & {doc: Text}) | null = null;
 	private spaceRowsCache = new InsertSpaceRows();
 	private spaceTextEnd: {doc:Text;pos:number;blocks:SpaceProtectedBlock[]} | null = null;
+	private spacePreview: {plan:SpaceBoundary;doc:Text;moving:string[];staying:string[];rows:ReturnType<InsertSpaceRows["get"]>} | null = null;
+	private spaceHoverY: number | null = null;
+	private spaceFeedbackRaf: number | null = null;
 	/** Last viewport point of a pan drag; client space, so scrolling cannot
 	 * feed back into the delta the way surface coordinates would. */
 	private panLast: { x: number; y: number } | null = null;
@@ -2381,6 +2383,7 @@ export class InkOverlayPlugin {
 	}
 
 	update(u: ViewUpdate): void {
+		if(u.docChanged)this.clearSpaceFeedback();
 		if (!this.container) {
 			if (enabled) this.mount();
 			return;
@@ -5000,24 +5003,20 @@ export class InkOverlayPlugin {
 			return;
 		}
 		this.penCursorEl.classList.remove(LASSO_CURSOR_CLASS);
-		// Insert-space mode: the reticle IS the divider, in miniature - a
-		// short dashed rule lying where the seam would be planted. The nib
-		// dot would say "pen" for a tip that is about to move rows instead.
+		// Aim stays under the pointer. The eligible seam and whole-group
+		// exceptions live on the transient canvas, independently of this mark.
 		if (tipMode() === "space") {
-			const half = visualToNote(24, this.cssScale);
-			const world=this.camera.screenToWorld(sample.x,sample.y);
-			const cut=this.spaceLineY??this.planSpace(world.y)?.y;
-			if (cut===undefined) {this.penCursorEl.style.display="none";return;}
-			const y=this.camera.worldToScreen(world.x,cut).y;
+			const half = visualToNote(7, this.cssScale);
 			this.penCursorEl.classList.add(SPACE_CURSOR_CLASS);
 			this.penCursorEl.setCssStyles({
 				display: "block",
 				width: `${half * 2}px`,
 				height: "0px",
-				transform: `translate(${sample.x - half}px, ${y}px)`,
+				transform: `translate(${sample.x - half}px, ${sample.y}px)`,
 				backgroundColor: "transparent",
 				opacity: "1",
 			});
+			this.queueSpaceFeedback(this.camera.screenToWorld(sample.x,sample.y).y);
 			return;
 		}
 		this.penCursorEl.classList.remove(SPACE_CURSOR_CLASS);
@@ -5064,6 +5063,7 @@ export class InkOverlayPlugin {
 	 * `ensurePenTools` already have for their own fan-outs.
 	 */
 	hidePenCursor(): void {
+		this.clearSpaceFeedback();
 		this.clearHoverWatchdog();
 		this.view.scrollDOM.classList.remove(PEN_HOVER_CLASS);
 		// The pan drag's grabbing hand comes off wherever the reticle does,
@@ -5563,11 +5563,14 @@ export class InkOverlayPlugin {
 			}
 			const line=this.view.state.doc.lineAt(from);
 			const block=this.spaceTextEnd?.blocks.find(block=>line.number>=block.from&&line.number<=block.to);
+			let blockFallback=false;
 			if(block&&(line.number>block.from||from>line.from||block.frontmatter)){
+				blockFallback=true;
 				if(direction<0){if(block.frontmatter)return null;from=this.view.state.doc.line(block.from).from;}
 				else if(block.to<this.view.state.doc.lines)from=this.view.state.doc.line(block.to+1).from;
 				else return null;
 			}else if(from>line.from&&!canSplitParagraph(line.text,from-line.from)){
+				blockFallback=true;
 				if(direction<0)from=line.from;
 				else if(line.number<this.view.state.doc.lines)from=this.view.state.doc.line(line.number+1).from;
 				else return null;
@@ -5582,7 +5585,7 @@ export class InkOverlayPlugin {
 			if(!(lh>0))return null;
 			const top=el.getBoundingClientRect().top;
 			const rowTop=top+Math.max(0,Math.round((rect.top-top)/lh))*lh;
-			return {y:(rowTop-origin)/this.scale,from,lineHeight:lh/this.scale};
+			return {y:(rowTop-origin)/this.scale,from,lineHeight:lh/this.scale,blockFallback};
 		};
 		let boundary=find(clientY);
 		if(!boundary)return null;
@@ -5594,7 +5597,6 @@ export class InkOverlayPlugin {
 	}
 
 	private planSpace(y:number):SpaceBoundary|null {
-		const rows=(this.spaceRowsCache??=new InsertSpaceRows()).get(this.strokesHere());
 		const doc=this.view.state.doc;
 		if(this.spaceTextEnd?.doc!==doc){
 			let pos=0;
@@ -5607,11 +5609,44 @@ export class InkOverlayPlugin {
 		const end=this.spaceTextEnd.pos;
 		const textBottom=end===0?0:this.view.lineBlockAt(end).bottom/this.scale;
 		if(end===0||y>=textBottom){
-			let cut=snapLine(rows,y);
-			if(cut<textBottom)cut=rows.find(row=>row.top<=y&&row.bottom>=y)?.bottom??textBottom;
-			return {y:cut,from:doc.length,lineHeight:this.view.defaultLineHeight/this.scale,text:false};
+			return {y,from:doc.length,lineHeight:this.view.defaultLineHeight/this.scale,text:false};
 		}
-		return nearestSpaceBoundary(rows,y,(at,direction)=>this.spaceTextBoundary(at,direction));
+		return nearestSpaceBoundary(y,(at,direction)=>this.spaceTextBoundary(at,direction));
+	}
+
+	private previewSpace(plan:SpaceBoundary):NonNullable<InkOverlayPlugin["spacePreview"]> {
+		const strokes=this.strokesHere();
+		const rows=(this.spaceRowsCache??=new InsertSpaceRows()).get(strokes);
+		const moving=strokeIdsBelow(strokes,plan.y,rows),ids=new Set(moving);
+		const staying=rows.filter(row=>row.top<plan.y&&row.bottom>plan.y)
+			.flatMap(row=>row.ids).filter(id=>!ids.has(id));
+		return {plan,doc:this.view.state.doc,moving,staying,rows};
+	}
+
+	/** Coalesce hover feedback without repainting the committed ink layer.
+	 * The pointer itself updates synchronously, even when no seam is legal. */
+	private queueSpaceFeedback(y:number):void {
+		if(!this.tail)return;
+		this.spaceHoverY=y;
+		if(this.spaceFeedbackRaf!=null)return;
+		this.spaceFeedbackRaf=this.winRef.requestAnimationFrame(()=>{
+			this.spaceFeedbackRaf=null;
+			if(this.spaceHoverY===null||tipMode()!=="space")return;
+			if(this.mode!=="space"){
+				const plan=this.planSpace(this.spaceHoverY);
+				this.spacePreview=plan?this.previewSpace(plan):null;
+			}
+			this.redrawSelectionUI();
+		});
+	}
+
+	private clearSpaceFeedback():void {
+		if(this.spaceFeedbackRaf!=null)this.winRef.cancelAnimationFrame(this.spaceFeedbackRaf);
+		this.spaceFeedbackRaf=null;
+		this.spaceHoverY=null;
+		const hadPreview=!!this.spacePreview;
+		this.spacePreview=null;
+		if(hadPreview)this.redrawSelectionUI();
 	}
 
 	private spaceDown(sample: PenSample, _ev: PointerEvent): void {
@@ -5624,9 +5659,10 @@ export class InkOverlayPlugin {
 		// Resolve the seam once for the text position, ink membership and
 		// displayed guide. Never re-hit-test the original contact at release.
 		const plan=this.planSpace(w.y);
-		if(!plan){this.spacePlan=null;this.spaceLineY=null;this.hideSpaceCursor();return;}
+		if(!plan){this.spacePlan=null;this.spaceLineY=null;this.clearSpaceFeedback();this.showSpaceCursor(sample);return;}
 		const cut = plan.y;
 		this.spacePlan={...plan,doc:this.view.state.doc};
+		this.spacePreview=this.previewSpace(plan);
 		this.spaceLineY = cut;
 		this.showSpaceCursor(sample);
 		this.spaceFromY = w.y;
@@ -5634,11 +5670,11 @@ export class InkOverlayPlugin {
 		// The id list freezes at pen-down, and so does the box around it:
 		// membership cannot change mid-drag, so the damage region is just
 		// that box swept by the distance travelled.
-		this.spaceIds = strokeIdsBelow(here, cut);
+		this.spaceIds = [...this.spacePreview.moving];
 		this.spaceBounds = boundsOf(here, this.spaceIds);
 		if (this.spaceIds.length === 0 && !this.view.state.doc.sliceString(plan.from).trim()) {
 			new Notice("Handwriting: no content below the line");
-			this.spacePlan=null;this.spaceLineY=null;this.hideSpaceCursor();
+			this.spacePlan=null;this.spaceLineY=null;this.clearSpaceFeedback();
 		}
 		this.redrawSelectionUI();
 	}
@@ -5657,8 +5693,8 @@ export class InkOverlayPlugin {
 		inlineInk.moveStrokes(path, this.spaceIds, 0, dy);
 		this.spaceTotalDy += dy;
 		this.spaceFromY = w.y;
-		// Keep the initial snapped offset from the nib as the seam moves.
-		// The small reticle and full-width divider follow this same value.
+		// The live seam follows raw displacement. The origin and rounded
+		// release destination are drawn separately from the frozen plan.
 		if (this.spaceLineY !== null) this.spaceLineY += dy;
 		// Damage the swept band only. Marking the whole page dirty per frame
 		// re-rasterized every stroke in the note and the drag went jagged on
@@ -5686,6 +5722,7 @@ export class InkOverlayPlugin {
 		this.spaceBounds = null;
 		this.spacePlan = null;
 		this.spaceTotalDy = 0;
+		this.clearSpaceFeedback();
 		if (!path || applied === 0 || !plan) {
 			this.redrawSelectionUI();
 			return;
@@ -5775,6 +5812,7 @@ export class InkOverlayPlugin {
 
 	/** The strip's active-tool marks are stale; recompute them. */
 	refreshStrip(): void {
+		if(tipMode()!=="space")this.clearSpaceFeedback();
 		this.snapPreview?.check();
 		this.mobileTools?.refresh();
 	}
@@ -5813,8 +5851,25 @@ export class InkOverlayPlugin {
 		if (this.lassoActive && this.lassoPts.length > 1) {
 			this.tail.drawLasso(cam, this.lassoPts, SELECTION_COLOR);
 		}
-		if (this.spaceLineY !== null) {
-			this.tail.drawSpaceDivider(cam, this.spaceLineY, SELECTION_COLOR, this.cssWidth);
+		// A reload/erase while hovering invalidates the affected-set promise.
+		// A live drag intentionally keeps its frozen set despite translations.
+		if(this.spacePreview&&!this.spacePlan&&this.spaceRowsCache.get(this.strokesHere())!==this.spacePreview.rows)this.spacePreview=null;
+		const preview=this.spacePreview;
+		if (preview && preview.doc===this.view.state.doc) {
+			const moving=new Set(preview.moving),staying=new Set(preview.staying);
+			for(const stroke of this.strokesHere()){
+				if(moving.has(stroke.id)||staying.has(stroke.id))this.tail.drawSpaceStroke(
+					cam,stroke,moving.has(stroke.id)?SELECTION_COLOR:"#d98b00",this.cssWidth,this.cssHeight,this.cssScale);
+			}
+			this.tail.drawSpaceDivider(cam,preview.plan.y,SELECTION_COLOR,this.cssWidth);
+			const label=preview.plan.blockFallback?"Block boundary":preview.plan.text===false?"Ink gap":"Text boundary";
+			this.tail.drawSpaceLabel(cam,preview.plan.y,label+(moving.size?" · blue ink moves":"")+(staying.size?" · amber ink stays":""),SELECTION_COLOR,this.cssScale);
+			if(this.spacePlan && this.spaceLineY!==null){
+				const dy=this.spaceTextChange(this.spacePlan,this.spaceTotalDy).dy;
+				const landing=this.spacePlan.y+dy;
+				const gap=this.spacePlan.text===false?`${Math.round(dy*10)/10} gap`:`${Math.round(dy/this.spacePlan.lineHeight)} lines`;
+				this.tail.drawSpaceLabel(cam,landing,`Release: ${gap}`,SELECTION_COLOR,this.cssScale,true);
+			}
 		}
 		const bounds = this.selectionBounds();
 		if (bounds) this.tail.drawSelectionBox(cam, bounds, SELECTION_COLOR);
@@ -6411,7 +6466,7 @@ export class InkOverlayPlugin {
 		}
 		// Selection chrome lives in world coordinates: scrolling and reflow
 		// repaint it at the strokes' current position.
-		if (!this.selection.isEmpty || this.lassoActive || this.spaceLineY !== null)
+		if (!this.selection.isEmpty || this.lassoActive || this.spaceLineY !== null || this.spacePreview)
 			this.redrawSelectionUI();
 		// While a stroke is active this repaint ran with the LOCKED pen-down
 		// camera (syncCamera above was a no-op); measure how far that frame

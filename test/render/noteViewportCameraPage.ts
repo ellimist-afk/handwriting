@@ -297,10 +297,11 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
 
 // Reuse the real store, editor, camera and hit-tested router to compare the
 // Insert Space contact/preview boundary with the eventual text/ink operation.
-(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string;context?:string}={})=>{
+(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string;context?:string;contactY?:number;tall?:boolean;sweep?:number[];moves?:number[];wrongPreview?:boolean;invalidTarget?:boolean}={})=>{
  const id="space-precision",path=`fit-${id}.md`,pageId=`fit-page-${id}`;
  const data=emptyPage(pageId);data.surface="inline";
  data.strokes=[90,210].map((y,i)=>({id:`row-${i}`,tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:30,y,pressure:.5,t:0},{x:40,y:y+20,pressure:.5,t:10}],bbox:{x:28,y:y-2,width:14,height:24}}));
+ if(options.tall)data.strokes=[{id:"tall",x:30,top:50,bottom:190},{id:"distant",x:330,top:170,bottom:230},{id:"below",x:80,top:280,bottom:300}].map(s=>({id:s.id,tool:"pen",color:"#000000",width:2,createdAt:1,points:[{x:s.x,y:s.top,pressure:.3,t:0},{x:s.x+10,y:s.bottom,pressure:.8,t:10}],bbox:{x:s.x-2,y:s.top-2,width:14,height:s.bottom-s.top+4}}));
  if(options.textOnly)data.strokes=[];
  ids.set(path,pageId);pages.set(pageId,serializePage(data));
  const paragraph="word ".repeat(240);
@@ -310,22 +311,48 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  if(font!==1){r.view.contentDOM.style.fontSize=`${16*font}px`;r.view.requestMeasure();await settle();}
  r.overlay.commitCameraScale(zoom,{left:0,top:scroll});await settle();
  const origin=r.view.contentDOM.getBoundingClientRect().top+parseFloat(getComputedStyle(r.view.contentDOM).paddingTop)*r.overlay.cssScale;
- const scale=r.overlay.scale,contact={x:100,y:origin+104*scale};
+ const scale=r.overlay.scale,contact={x:100,y:origin+(options.contactY??104)*scale};
+ // Observe the actual transient renderer, not a copy of the planner's IDs.
+ // Each recorded stroke must also produce pixels at its projected midpoint.
+ let rendered:any[]=[],labels:any[]=[],guides:number[]=[];
+ const tail=r.overlay.tail,clear=tail.clearAll.bind(tail),draw=tail.drawSpaceStroke?.bind(tail),label=tail.drawSpaceLabel?.bind(tail),divider=tail.drawSpaceDivider.bind(tail);
+ tail.clearAll=(...args:any[])=>{rendered=[];labels=[];guides=[];return clear(...args);};
+ if(draw)tail.drawSpaceStroke=(cam:any,s:any,color:string,...args:any[])=>{
+  if(!draw(cam,s,color,...args))return false;
+  const a=s.points[0],b=s.points.at(-1),ctx=tail.ctx;
+  const px=((a.x+b.x)/2-cam.x)*cam.zoom,py=((a.y+b.y)/2-cam.y)*cam.zoom;
+  const ratio=ctx.canvas.width/r.overlay.cssWidth;
+  const data=ctx.getImageData(Math.floor(px*ratio)-1,Math.floor(py*ratio)-1,3,3).data;
+  const alpha=Array.from(data).filter((_,i)=>i%4===3).some(v=>(v as number)>0);
+  rendered.push({id:s.id,moving:color!=="#d98b00",alpha});return true;
+ };
+ if(label)tail.drawSpaceLabel=(cam:any,y:number,text:string,...args:any[])=>{labels.push({y,text});return label(cam,y,text,...args);};
+ tail.drawSpaceDivider=(cam:any,y:number,...args:any[])=>{guides.push(y);return divider(cam,y,...args);};
+ const feedback=()=>({rendered:structuredClone(rendered),labels:structuredClone(labels),guides:[...guides]});
+ if(options.invalidTarget)r.overlay.planSpace=()=>null;
  const coords=()=>Array.from({length:r.view.state.doc.lines},(_,i)=>{const l=r.view.state.doc.line(i+1),c=r.view.coordsAtPos(l.from);return {text:l.text,top:c?.top,bottom:c?.bottom};});
  const capture=()=>({doc:r.view.state.doc.toString(),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),text:coords(),rects:Array.from({length:r.view.state.doc.length+1},(_,i)=>r.view.coordsAtPos(i,1)),zoom:r.overlay.getNoteViewportState().zoom,history:undoDepth(r.view.state),scroll:{left:r.view.scrollDOM.scrollLeft,top:r.view.scrollDOM.scrollTop}});
  const before=capture();
  setPenInk(true);setInlineSpaceMode(true);
+ const sweep=[];
+ for(const y of options.sweep??[]){penEvent("pointermove",contact.x,origin+y*scale,921);await new Promise(requestAnimationFrame);sweep.push({y,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,...feedback()});}
  penEvent("pointermove",contact.x,contact.y,921);
+ await new Promise(requestAnimationFrame);
  const hover=r.overlay.penCursorEl?.getBoundingClientRect().top;
+ const hoverFeedback=feedback();
  penEvent("pointerdown",contact.x,contact.y,921);
- const down={cut:r.overlay.spaceLineY,ids:[...r.overlay.spaceIds],reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,mode:r.overlay.mode};
+ const down={cut:r.overlay.spaceLineY,ids:[...r.overlay.spaceIds],reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,mode:r.overlay.mode,...feedback()};
  const dy=options.dy??48;
+ const moves=[];
+ for(const y of options.moves??[]){penEvent("pointermove",contact.x,contact.y+y*scale,921);await new Promise(requestAnimationFrame);moves.push({dy:y,ids:[...r.overlay.spaceIds],strokes:capture().strokes,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,...feedback()});}
  penEvent("pointermove",contact.x,contact.y+dy*scale,921);
- const live={cut:r.overlay.spaceLineY,dy:r.overlay.spaceTotalDy,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top};
+ await new Promise(requestAnimationFrame);
+ const live={cut:r.overlay.spaceLineY,dy:r.overlay.spaceTotalDy,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,...feedback()};
  if(options.edit)r.view.dispatch({changes:{from:r.view.state.doc.length,insert:" external"},annotations:isolateHistory.of("full")});
  penEvent(options.end??"pointerup",contact.x,contact.y+dy*scale,921);await settle();
  const after=capture();
+ const ended=feedback();
  let undone:ReturnType<typeof capture>|null=null,redone:ReturnType<typeof capture>|null=null;
  if(after.history>before.history){undo(r.view);await settle();undone=capture();redo(r.view);await settle();redone=capture();}
- return {zoom,font,scroll,wrapped,scale,origin,contact,hover,down,live,before,after,undone,redone};
+ return {zoom,font,scroll,wrapped,scale,origin,contact,hover,hoverFeedback,sweep,moves,down,live,ended,before,after,undone,redone};
 };

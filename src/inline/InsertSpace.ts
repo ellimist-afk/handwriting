@@ -20,10 +20,10 @@
  *
  * Both failed because they judge strokes INDIVIDUALLY. Any horizontal line
  * through a page of handwriting passes through something. So membership is
- * decided a ROW at a time instead: the strokes are grouped into rows of
- * writing, the divider snaps to the nearest gap BETWEEN rows, and whole
- * rows move. A letter cannot come apart because nothing ever cuts through
- * a row - which is also what the gesture means when a person draws it.
+ * decided a ROW at a time instead. The nearest row edge determines which
+ * whole rows move; it no longer relocates the visible insertion guide.
+ * The overlay previews crossing groups explicitly so the line cannot imply
+ * that a letter or a large transitive group will be cut apart.
  */
 
 import type { BBox, InkStroke } from "../ink/Stroke";
@@ -51,7 +51,7 @@ export class InsertSpaceRows {
 	}
 }
 
-export interface SpaceBoundary { y: number; from: number; lineHeight: number; text?: boolean }
+export interface SpaceBoundary { y: number; from: number; lineHeight: number; text?: boolean; blockFallback?: boolean }
 
 export interface SpaceProtectedBlock { from: number; to: number; frontmatter?: boolean }
 
@@ -93,25 +93,16 @@ export function canSplitParagraph(text: string, offset: number): boolean {
 	return !/[`*_\\[\]<>|$]/.test(text);
 }
 
-/** Find the nearest text seam that does not cut an ink row. The renderer
- * supplies the actual visual line boundaries (including paragraph wraps).
- * Jump over an obstructing ink row rather than searching a whole document. */
+/** Nearest eligible text seam, independent of ink group extents. The caller
+ * previews whole-group membership separately instead of moving the guide. */
 export function nearestSpaceBoundary(
-	rows: readonly InkRow[], y: number,
+	y: number,
 	at: (y: number, direction: -1 | 1) => SpaceBoundary | null
 ): SpaceBoundary | null {
 	const candidates: SpaceBoundary[] = [];
 	for (const direction of [-1,1] as const) {
-		let target = y;
-		for (let n=0;n<=rows.length;n++) {
-			const boundary=at(target,direction);
-			if (!boundary || !Number.isFinite(boundary.y)) break;
-			const crossing=rows.find(row=>boundary.y>row.top+1e-5&&boundary.y<row.bottom-1e-5);
-			if (!crossing) {candidates.push(boundary);break;}
-			const next=direction<0?crossing.top:crossing.bottom;
-			if ((next-target)*direction<=0) break;
-			target=next;
-		}
+		const boundary=at(y,direction);
+		if (boundary && Number.isFinite(boundary.y)) candidates.push(boundary);
 	}
 	return candidates.sort((a,b)=>Math.abs(a.y-y)-Math.abs(b.y-y)||b.y-a.y)[0]??null;
 }
@@ -199,13 +190,9 @@ function xSpan(
 }
 
 /**
- * Where the cut actually lands: the divider snaps out of any row it was
- * drawn through, to whichever edge of that row is nearer.
- *
- * Drawing through a row is not ambiguous about intent - a person putting a
- * line halfway down a word means "make room around this line", not "tear
- * this word in half" - so the row goes wholly above or wholly below, and
- * the drawn line moves to say which. Everything else is left alone.
+ * Membership cut only: choose the nearest edge of a crossing row. The
+ * insertion guide and continuous pointer keep their independent positions.
+ * At the midpoint the whole crossing group stays, as before.
  */
 export function snapLine(rows: readonly InkRow[], lineY: number): number {
 	for (const row of rows) {
@@ -225,8 +212,7 @@ export function snapLine(rows: readonly InkRow[], lineY: number): number {
  * exactly meeting the line moves: the divider reads as "everything from
  * here down".
  */
-export function strokeIdsBelow(strokes: readonly InkStroke[], lineY: number): string[] {
-	const rows = rowsOf(strokes);
+export function strokeIdsBelow(strokes: readonly InkStroke[], lineY: number, rows: readonly InkRow[] = rowsOf(strokes)): string[] {
 	const cut = snapLine(rows, lineY);
 	const moving = new Set<string>();
 	for (const row of rows) {

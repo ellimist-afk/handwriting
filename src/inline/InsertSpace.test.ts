@@ -17,19 +17,19 @@ import { translateStroke } from "../objects/Selection";
 
 describe("shared space boundary",()=>{
  const at=(y:number,direction:-1|1)=>({y:(direction<0?Math.floor(y/24):Math.ceil(y/24))*24,from:0,lineHeight:24});
- it("chooses the closest text wrap that does not cross an ink row",()=>{
-  expect(nearestSpaceBoundary([{top:90,bottom:110,ids:["word"]}],104,at)?.y).toBe(120);
-  expect(nearestSpaceBoundary([{top:90,bottom:110,ids:["word"]}],80,at)?.y).toBe(72);
+ it("chooses the closest text wrap without consulting ink",()=>{
+  expect(nearestSpaceBoundary(104,at)?.y).toBe(96);
+  expect(nearestSpaceBoundary(80,at)?.y).toBe(72);
  });
- it("jumps across overlapping text seams while keeping whole ink rows",()=>{
-  expect(nearestSpaceBoundary([{top:20,bottom:130,ids:["drawing"]}],100,at)?.y).toBe(144);
+ it("keeps a nearby seam even where a tall drawing could cross it",()=>{
+  expect(nearestSpaceBoundary(100,at)?.y).toBe(96);
  });
  it("keeps a seam in a clear gap and resolves ties toward the lower seam",()=>{
-  expect(nearestSpaceBoundary([],96,at)?.y).toBe(96);
-  expect(nearestSpaceBoundary([],108,at)?.y).toBe(120);
+  expect(nearestSpaceBoundary(96,at)?.y).toBe(96);
+  expect(nearestSpaceBoundary(108,at)?.y).toBe(120);
  });
  it("does not fabricate a text position outside measured geometry",()=>{
-  expect(nearestSpaceBoundary([],40,()=>null)).toBeNull();
+  expect(nearestSpaceBoundary(40,()=>null)).toBeNull();
  });
  it("invalidates cached rows on real in-place movement, replacement and removal",()=>{
   const cache=new InsertSpaceRows(),s=letter("a",0,100);

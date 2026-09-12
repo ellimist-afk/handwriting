@@ -4,6 +4,8 @@ import { PenStyle, widthForPressure } from "./PenStyle";
 import { Point2 } from "./Smoothing";
 import { fillRibbon } from "./RibbonRenderer";
 import { inkColorFor } from "./InkTheme";
+import type { InkStroke } from "./Stroke";
+import { strokeRev } from "./StrokeRev";
 
 /**
  * How much width the predicted tail gives up by its tip.
@@ -34,6 +36,7 @@ export class TailRenderer {
 	private ctx: CanvasRenderingContext2D;
 	private dirty: { x0: number; y0: number; x1: number; y1: number } | null = null;
 	private readonly requested: boolean;
+	private spacePaths = new WeakMap<InkStroke,{rev:number;path:Path2D}>();
 
 	/**
 	 * `desynchronized` asks the browser to present this canvas without waiting
@@ -206,6 +209,39 @@ export class TailRenderer {
 		ctx.stroke();
 		ctx.restore();
 		this.dirty = null;
+	}
+
+	/** Actual stroke paths, never a union box or a stored color change. Hover
+	 * reuses geometry; offscreen strokes are rejected before path construction. */
+	drawSpaceStroke(cam:CameraState,stroke:InkStroke,color:string,width:number,height:number,cssScale:number):boolean {
+		const b=stroke.bbox,pad=4/cssScale;
+		if((b.x+b.width-cam.x)*cam.zoom < -pad || (b.y+b.height-cam.y)*cam.zoom < -pad ||
+			(b.x-cam.x)*cam.zoom > width+pad || (b.y-cam.y)*cam.zoom > height+pad || !stroke.points.length)return false;
+		let cached=this.spacePaths.get(stroke);
+		const rev=strokeRev(stroke);
+		if(!cached||cached.rev!==rev){
+			const path=new Path2D(),points=stroke.points;
+			path.moveTo(points[0]!.x,points[0]!.y);
+			for(let i=1;i<points.length;i++)path.lineTo(points[i]!.x,points[i]!.y);
+			if(points.length===1)path.lineTo(points[0]!.x+.001,points[0]!.y);
+			cached={rev,path};this.spacePaths.set(stroke,cached);
+		}
+		const ctx=this.ctx;
+		ctx.save();ctx.translate(-cam.x*cam.zoom,-cam.y*cam.zoom);ctx.scale(cam.zoom,cam.zoom);
+		ctx.strokeStyle=color;ctx.globalAlpha=.65;ctx.lineWidth=Math.max(stroke.width,4/(cssScale*cam.zoom));
+		ctx.lineCap="round";ctx.lineJoin="round";ctx.setLineDash([]);ctx.stroke(cached.path);ctx.restore();
+		this.dirty=null;
+		return true;
+	}
+
+	/** Small physical-size label/tick, including the exact rounded landing.
+	 * Keep origin and landing labels on opposite sides when their Y agrees. */
+	drawSpaceLabel(cam:CameraState,yWorld:number,label:string,color:string,cssScale:number,landing=false):void {
+		const ctx=this.ctx,y=(yWorld-cam.y)*cam.zoom;
+		ctx.save();ctx.translate(0,y);ctx.scale(1/cssScale,1/cssScale);
+		ctx.font="12px sans-serif";ctx.fillStyle=color;ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash([]);
+		if(landing){ctx.beginPath();ctx.moveTo(8,-4);ctx.lineTo(8,4);ctx.moveTo(8,0);ctx.lineTo(30,0);ctx.stroke();}
+		ctx.fillText(label,landing?36:8,landing?16:-7);ctx.restore();this.dirty=null;
 	}
 
 	/**
