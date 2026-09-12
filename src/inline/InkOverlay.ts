@@ -1420,6 +1420,8 @@ export class InkOverlayPlugin {
 	private hoverWatchdog: ReturnType<Window["setTimeout"]> | null = null;
 	/** Whether the metrics frame ticker is running; see startFrameTicker. */
 	private frameTicking = false;
+	private frameRaf = 0;
+	private frameTickToken: object | null = null;
 	/** Recent REAL samples, newest last: what prediction extrapolates from. */
 	private predReal: PenSample[] = [];
 	/** The tail drawn last event, kept only to score it against what arrived. */
@@ -5110,17 +5112,25 @@ export class InkOverlayPlugin {
 	private startFrameTicker(): void {
 		if (this.frameTicking) return;
 		this.frameTicking = true;
+		const token = this.frameTickToken = {};
 		const tick = (ts: number): void => {
-			if (!this.frameTicking) return;
+			if (this.frameTickToken !== token) return;
+			this.frameRaf = 0;
 			this.snapPreview?.check();
+			if (this.frameTickToken !== token) return;
 			metrics.recordFrame(ts);
-			this.winRef.requestAnimationFrame(tick);
+			this.frameRaf = this.winRef.requestAnimationFrame(tick);
 		};
-		this.winRef.requestAnimationFrame(tick);
+		this.frameRaf = this.winRef.requestAnimationFrame(tick);
 	}
 
 	private stopFrameTicker(): void {
 		this.frameTicking = false;
+		// A new pen-down may precede the old callback. Cancel its frame and
+		// invalidate its closure so consecutive strokes cannot multiply tickers.
+		this.frameTickToken = null;
+		if (this.frameRaf) this.winRef.cancelAnimationFrame(this.frameRaf);
+		this.frameRaf = 0;
 	}
 
 	/**
