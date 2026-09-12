@@ -372,6 +372,8 @@ export class PageStore {
 	 * revision is preserved as a conflict file instead of being overwritten.
 	 */
 	private knownMtime = new Map<string, number>();
+	/** A completed load found no sidecar; unlike an ID we have never opened. */
+	private observedMissing = new Set<string>();
 	/** Stamp of the content this session last read or wrote (see contentStamp). */
 	private knownHash = new Map<string, string>();
 	/**
@@ -888,7 +890,8 @@ export class PageStore {
 	 * moved (sync tools preserve mtimes, so the content stamp decides).
 	 * Never answers while a write for this page is queued - a half-landed
 	 * save of our own must not read as an external edit - and never for a
-	 * page this store has not read or written (nothing to compare against).
+	 * page this store has not read or written. A completed missing load is a
+	 * baseline too: the first JSON may arrive after the document was opened.
 	 * The write-path conflict guard stays the last word either way.
 	 *
 	 * See hasQueuedWrite above for why a caller must re-ask synchronously.
@@ -896,7 +899,7 @@ export class PageStore {
 	private async observeExternalChange(pageId: string): Promise<ExternalChangeObservation> {
 		if (this.hasQueuedWrite(pageId)) return "unchanged";
 		const known = this.knownMtime.get(pageId);
-		if (known === undefined) return "unchanged";
+		if (known === undefined && !this.observedMissing.has(pageId)) return "unchanged";
 		const adapter = this.app.vault.adapter;
 		let observation: ExternalChangeObservation;
 		try {
@@ -909,7 +912,7 @@ export class PageStore {
 				// `resolveFor` checked every eligible path with `exists`. This is
 				// positive absence, unlike a failed stat/read, and lets the inline
 				// caller start its hold notice without changing the shared boolean.
-				observation = "missing-live-sidecar";
+				observation = known === undefined ? "unchanged" : "missing-live-sidecar";
 			} else {
 				const st = await adapter.stat(watched.path).catch(() => null);
 				if (!st || st.mtime === known) {
@@ -1052,7 +1055,9 @@ export class PageStore {
 		// went. Nothing ever brought it back, so the note reopened empty and
 		// the next stroke began a SECOND sidecar under the same id, diverging
 		// from the copy sitting in the trash folder.
-		return await this.restoreFromTrash(pageId);
+		const restored = await this.restoreFromTrash(pageId);
+		if (restored === null) this.observedMissing.add(pageId);
+		return restored;
 	}
 
 	/**
@@ -2185,6 +2190,7 @@ export class PageStore {
 		this.pending.delete(pageId);
 		this.pendingWriter.delete(pageId);
 		this.knownMtime.delete(pageId);
+		this.observedMissing.delete(pageId);
 		this.knownHash.delete(pageId);
 		// The page is gone; a later page under this id is a different page,
 		// and must not be reconciled against a writer that predates it.

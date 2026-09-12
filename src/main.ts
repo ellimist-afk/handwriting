@@ -5328,7 +5328,29 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// The store is constructed before settings are read, so it starts on
 		// the default folder and is pointed at the real one here - before any
 		// note is opened, so nothing ever reads from the wrong place.
-		this.store.useInkFolder(this.settings.inkFolder);
+		// The desired folder can sync before this device starts. Merely
+		// repointing then leaves its existing hidden ink pinned by fallback,
+		// while the settings button already says compatibility is enabled.
+		// Reconcile that explicit saved choice before any surface is opened.
+		// Never overwrite collisions; retain both revisions and report a
+		// partial migration. No completion marker: failures retry on startup.
+		if (!this.freshInstall && this.settings.inkFolder === SYNCED_INK_FOLDER) {
+			this.store.holdWrites();
+			try {
+				const result = await migrateInkFolder(this.app.vault.adapter, DEFAULT_INK_FOLDER, SYNCED_INK_FOLDER);
+				if (result.unsupported || result.skipped > 0) {
+					new Notice("Handwriting: some existing ink could not be moved to the sync folder. The original files were kept.");
+				}
+			} catch (err) {
+				console.error("[handwriting] existing ink could not be moved to the sync folder", err);
+				new Notice("Handwriting: existing ink could not be moved to the sync folder. The original files were kept. Reload Handwriting to retry.");
+			} finally {
+				this.store.useInkFolder(this.settings.inkFolder);
+				this.store.releaseWrites();
+			}
+		} else {
+			this.store.useInkFolder(this.settings.inkFolder);
+		}
 		// The strip's eraser slider persists through here on release.
 		setPersistEraserRadius((px) => {
 			this.settings.eraserRadiusPx = px;

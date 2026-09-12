@@ -16,6 +16,10 @@ import { pdfInkId } from "./pdf/PdfIdentity";
 import { emptyPage, parsePage, serializePage, type PageData } from "./model/PageData";
 import type { InkStroke } from "./ink/Stroke";
 import { installLiveReloadPoll } from "./testUtils/LiveReloadTestHarness";
+const { notices } = vi.hoisted(() => ({ notices: [] as string[] }));
+vi.mock("obsidian", async original => ({ ...await original<object>(), Notice: class {
+  constructor(message: string) { notices.push(message); }
+} }));
 
 class SyncAdapter extends FakeAdapter {
   failList = false;
@@ -45,7 +49,7 @@ function documents(adapter: SyncAdapter) {
   adapter.externalWrite(notePath, `---\nhandwriting-page-id: ${noteId}\n---\nSynthetic text`);
   adapter.externalWrite("Synthetic.pdf", "%PDF-1.4 synthetic identity fixture");
 }
-async function device(adapter = new SyncAdapter(), raw: unknown = {}) {
+async function device(adapter = new SyncAdapter(), raw: unknown = {}, beforeLoad?: (store: PageStore) => void) {
   // Same prototype harness as SettingsUnknownKeys; actual store collaborators.
   const plugin = Object.create(HandwritingPlugin.prototype) as any;
   const store = new PageStore({ vault: { adapter } } as never);
@@ -56,6 +60,7 @@ async function device(adapter = new SyncAdapter(), raw: unknown = {}) {
     app: { vault: { adapter }, workspace: { onLayoutReady() {} } },
     loadData: async () => raw, saveData: async (value: unknown) => { saved = structuredClone(value); },
     applyPaperTo() {}, applyBooxMode() {} });
+  beforeLoad?.(store);
   await plugin.loadSettings();
   const ink = new InlineInkStore();
   ink.attachHost({
@@ -115,6 +120,7 @@ async function editAndReopen(d: Device) {
   for (const id of [noteId, pdfId]) expect([...d.adapter.files.keys()].filter(p => p.endsWith(`/${id}.json`))).toEqual([`handwriting/${id}.json`]);
 }
 beforeEach(async () => {
+  notices.length = 0;
   vi.stubGlobal("window", globalThis);
   vi.stubGlobal("document", { body: { classList: { add() {}, toggle() {}, contains: () => false } } });
   pdfId = await pdfInkId(new TextEncoder().encode("%PDF-1.4 synthetic identity fixture"));
@@ -164,5 +170,88 @@ describe("compatibility across two synthetic devices", () => {
     expect(p.errors).toEqual([]);
     expect.soft(p.notePaint()).toEqual(["note-original"]); expect.soft(p.pane.painted).toEqual(["pdf-original"]);
     await editAndReopen(d);
+  });
+  it("startup collision retains different source and destination bytes and reports incomplete migration", async () => {
+    const files = new SyncAdapter(); documents(files); seed(files); seed(files, "handwriting", "remote");
+    const before = [...files.files];
+    const d = await device(files, { inkFolder: "handwriting" }); await d.open();
+    expect([...files.files]).toEqual(before);
+    expect(notices.some(n => n.includes("could not be moved"))).toBe(true);
+    expect(ids(d)).toEqual([["note-remote"], ["pdf-remote"]]);
+    expect(files.files.get(`.handwriting/${noteId}.json`)).toContain("note-original");
+  });
+  it.each(["list", "rename"])("startup %s failure keeps bytes and retries migration on later startup", async failure => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const files = new SyncAdapter(); documents(files); seed(files);
+    if (failure === "list") files.failList = true; else files.failRenameTimes = 1;
+    const before = [...files.files];
+    const d = await device(files, { inkFolder: "handwriting" }); await d.open();
+    expect([...files.files]).toEqual(before);
+    expect(ids(d)).toEqual([["note-original"], ["pdf-original"]]);
+    expect(notices.some(n => n.includes("Reload Handwriting to retry"))).toBe(true);
+    files.failList = false;
+    const retried = await device(files, { inkFolder: "handwriting" }); await retried.open();
+    await editAndReopen(retried);
+  });
+  it("queued ink during startup migration lands at the destination after repoint", async () => {
+    const files = new SyncAdapter(); documents(files); seed(files);
+    const entered = gate(), release = gate();
+    const rename = files.rename.bind(files);
+    vi.spyOn(files, "rename").mockImplementation(async (a, b) => { entered.release(); await release.promise; return rename(a, b); });
+    let store!: PageStore;
+    const loading = device(files, { inkFolder: "handwriting" }, value => { store = value; });
+    await entered.promise;
+    store.schedule(noteId, page(noteId, "inline", ["note-original", "during-move"]));
+    await store.flush(); // held, requeued rather than discarded or written behind the move
+    release.release(); await loading; await store.flush();
+    expect(files.files.has(`.handwriting/${noteId}.json`)).toBe(false);
+    expect(parsePage(files.files.get(`handwriting/${noteId}.json`)!, noteId).data.strokes.map(s => s.id)).toEqual(["note-original", "during-move"]);
+  });
+  it("busy ordinary toggle refuses migration and leaves the requested choice unchanged", async () => {
+    const files = new SyncAdapter(); documents(files); seed(files);
+    const d = await device(files);
+    vi.spyOn(inlineInk, "settle").mockResolvedValueOnce(false);
+    await d.clickCompatibility();
+    expect(d.plugin.settings.inkFolder).toBe(".handwriting");
+    expect(files.files.has(`.handwriting/${noteId}.json`)).toBe(true);
+    expect(files.files.has(`handwriting/${noteId}.json`)).toBe(false);
+  });
+  it("never-opened IDs remain unpolled; an opened missing page does not trigger a missing-ink notice", async () => {
+    const d = await device(); documents(d.adapter);
+    const reads = vi.spyOn(d.adapter, "read");
+    expect(await d.store.externallyChanged("unopened")).toBe(false);
+    expect(reads).not.toHaveBeenCalled();
+    await d.open(); const p = poll(d); await p.tick();
+    expect(d.store.externalChangeObservation(noteId)).toBe("unchanged");
+    expect(notices).toEqual([]);
+  });
+  it.each(["damaged", "future", "preservation"])("late %s input stays retryable without consuming either surface", async failure => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const files = new SyncAdapter(); documents(files);
+    const d = await device(files, { inkFolder: "handwriting" }); await d.open(); const p = poll(d);
+    seed(files, "handwriting");
+    if (failure === "preservation") files.failWriteTimes = 2;
+    else for (const id of [noteId, pdfId]) {
+      const path = `handwriting/${id}.json`;
+      files.externalWrite(path, failure === "damaged" ? "{" : JSON.stringify({ ...JSON.parse(files.files.get(path)!), schemaVersion: 999 }));
+    }
+    const before = [files.files.get(`handwriting/${noteId}.json`), files.files.get(`handwriting/${pdfId}.json`)];
+    await p.tick();
+    expect(ids(d)).toEqual([[], []]); expect(p.notePaint()).toEqual([]); expect(p.pane.painted).toEqual([]);
+    expect([files.files.get(`handwriting/${noteId}.json`), files.files.get(`handwriting/${pdfId}.json`)]).toEqual(before);
+    files.failWriteTimes = 0; seed(files, "handwriting"); await p.tick();
+    expect(p.notePaint()).toEqual(["note-original"]); expect(p.pane.painted).toEqual(["pdf-original"]);
+  });
+  it("local ink queued before arrival blocks adoption and preserves both revisions after flush", async () => {
+    const files = new SyncAdapter(); documents(files);
+    const d = await device(files, { inkFolder: "handwriting" }); await d.open(); const p = poll(d);
+    d.ink.commit(notePath, stroke("local-note"));
+    d.pdf.replaceAllLive(pdfId, [{ ...stroke("local-pdf"), page: 1 }]); d.pdf.save(pdfId);
+    seed(files, "handwriting"); await p.tick();
+    expect(ids(d)).toEqual([["local-note"], ["local-pdf"]]);
+    await d.ink.settle(); await d.store.flush();
+    const allBytes = [...files.files.values()].join("\n");
+    for (const name of ["local-note", "local-pdf", "note-original", "pdf-original"]) expect(allBytes).toContain(name);
+    for (const id of [noteId, pdfId]) expect([...files.files.keys()].filter(path => path.endsWith(`/${id}.json`))).toHaveLength(1);
   });
 });

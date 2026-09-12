@@ -3,16 +3,28 @@ import { build } from "esbuild";
 import { chromium, type Browser } from "playwright";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { installLiveReloadPoll } from "../../src/testUtils/LiveReloadTestHarness";
 const root=fileURLToPath(new URL("../../",import.meta.url));
 let browser:Browser, bundle:string;
 beforeAll(async()=>{browser=await chromium.launch({headless:true});bundle=(await build({entryPoints:[root+"test/render/zoomWrittenInkPage.ts"],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:root+"test/render/iphoneObsidianStub.ts"}})).outputFiles[0]!.text;});
 afterAll(async()=>{await browser?.close();});
-async function open(padding:number,bytes?:string,exactStroke?:unknown){
+async function open(padding:number,bytes?:string,exactStroke?:unknown,late=false){
  const page=await browser.newPage({viewport:{width:900,height:700}});
  await page.setContent("<body></body>");await page.addStyleTag({content:readFileSync(root+"styles.css","utf8")});
  await page.addStyleTag({content:`html,body{margin:0;width:100%;height:100%;overflow:hidden}body{display:flex}.drift-host{position:relative;display:flex;flex:1;min-width:0;min-height:0;height:480px;overflow:hidden}.drift-host .cm-editor{display:flex;flex:1;min-width:0;min-height:0;height:480px}.drift-host .cm-scroller{flex:1;min-height:0;overflow:auto}.drift-host .cm-content{padding:${padding}px 0!important}.drift-host .cm-line{padding:0}`});
- await page.addScriptTag({content:bundle});const initial=await page.evaluate(([bytes,stroke])=>(window as any).zoomDrift.setup(bytes,false,stroke),[bytes,exactStroke]);return {page,initial};
+ await page.addScriptTag({content:bundle});
+ if(late){await page.addScriptTag({content:`window.installCompatibilityPoll = ${installLiveReloadPoll.toString()}`});
+  const initial=await page.evaluate(()=>(window as any).zoomDrift.lateSidecar((window as any).installCompatibilityPoll));return {page,initial};}
+ const initial=await page.evaluate(([bytes,stroke])=>(window as any).zoomDrift.setup(bytes,false,stroke),[bytes,exactStroke]);return {page,initial};
 }
+it("first sidecar arrival paints committed ink in an already-open eligible note through the registered poll",async()=>{
+ const {page,initial:r}=await open(8,undefined,undefined,true);
+ try{expect(r.eligible).toBe(true);expect(r.errors).toEqual([]);
+  expect(r.before.strokes).toEqual([]);expect(r.before.pixels.black.count).toBe(0);
+  expect(r.after.strokes.map((s:any)=>s.id)).toEqual(["old"]);expect(r.after.pixels.black.count).toBeGreaterThan(0);
+  expect(r.live).toBe(r.before.saved);
+ }finally{await page.close();}
+});
 describe("zoomed pen capture uses the physical text anchor",()=>{
  for(const [padding,scale,measured,pinch,cancel] of [[8,1.75,false,false,false],[8,1.375,false,true,false],[8,1.75,false,true,true],[8,1.75,true,true,false],[0,1.75,false,true,false]] as const){
  it(`padding=${padding} scale=${scale} measured=${measured} pinch=${pinch} cancel=${cancel}`,async()=>{

@@ -2,7 +2,10 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history } from "@codemirror/commands";
 import { Platform } from "obsidian";
-import { inlineInk, inkOverlayExtension, overlayForPath, setScrollExpansionEnabled } from "../../src/inline/InkOverlay";
+import { inlineInk, inkOverlayExtension, overlayForPath, setScrollExpansionEnabled, inlineReloadCandidates, inkExternallyReloaded } from "../../src/inline/InkOverlay";
+import { notifyInkChanged } from "../../src/inline/InkEvents";
+import { PageStore } from "../../src/persistence/PageStore";
+import { FakeAdapter } from "../../src/persistence/FakeAdapter";
 import { setPenInk } from "../../src/inline/PenInk";
 import { emptyPage, parsePage, serializePage, type PageData } from "../../src/model/PageData";
 import { installObsidianDom } from "./obsidianDom";
@@ -250,4 +253,24 @@ async function viewportOwnership(){
  view.setState(EditorState.create({doc:"detached"}));await settle();const detached=has();
  return {before,active,restored,detached};
 }
-(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen,focusSeed,focusReturn,editorFocus,desktopPlatform,viewportOwnership};
+// Reuse the mounted editor and committed-pixel oracle for first JSON arrival.
+// The installer is the existing node-side LiveReloadTestHarness function,
+// supplied by the render test, not a second copy of the production poll.
+async function lateSidecar(installPoll: Function) {
+ const adapter=new FakeAdapter(),store=new PageStore({vault:{adapter}} as never,"handwriting");
+ inlineInk.attachHost({readPageId:()=>id,claimId:async()=>({pageId:id}),loadSidecar:async i=>{loads++;return store.load(i);},
+  scheduleSidecar:(i,p)=>store.schedule(i,p),scheduleSidecarNow:(i,p)=>store.saveNow(i,p),
+  prepareExternalAdoption:(i,p)=>store.prepareExternalAdoption(i,p),acceptExternalAdoption:p=>store.acceptExternalAdoption(p),notify:()=>{}});
+ const before=await setup();
+ let callback!:()=>void,pending=Promise.resolve();
+ const errors:unknown[]=[];
+ installPoll.call({store,pdfStore:{},pdfInk:new Map(),pdfIds:new Map(),pollStats:{ticks:0,hidden:0,spaced:0,checks:0},registerInterval(){}},
+  {setInterval(fn:()=>void){callback=fn;return 1;}},document,(p:Promise<void>)=>{pending=p;},inlineReloadCandidates,inlineInk,
+  inkExternallyReloaded,notifyInkChanged,()=>null,async()=>false,{error:(...args:unknown[])=>errors.push(args.map(String))});
+ const eligible=inlineReloadCandidates().includes(path);
+ callback();await pending;
+ adapter.externalWrite(`handwriting/${id}.json`,saved);
+ callback();await pending;await settle();
+ return {before,eligible,after:{...snapshot(),pixels:pixels()},errors,live:adapter.files.get(`handwriting/${id}.json`)};
+}
+(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen,focusSeed,focusReturn,editorFocus,desktopPlatform,viewportOwnership,lateSidecar};
