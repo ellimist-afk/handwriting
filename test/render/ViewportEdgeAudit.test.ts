@@ -25,10 +25,18 @@ it("edge audit: tiny Fit resize and upper/lower zoom rejection preserve ink and 
  const original=await call(p,"setup","edge");const fitted=await call(p,"fit","edge");expect(fitted.state.zoom).toBeLessThan(.05);
  const resized=await call(p,"resize","edge");expect(resized.viewport.width).toBeCloseTo(580,0);expect(resized.state.zoom).toBe(fitted.state.zoom);
  const refit=await call(p,"fit","edge");framed(refit);expect(refit.state.zoom).toBeLessThan(fitted.state.zoom);
- for(let i=0;i<3;i++){const smaller=await edge(p,"zoom","edge",.5);expect(smaller.accepted).toBe(true);}const beforeRefusal=await call(p,"snap","edge");for(let i=0;i<2;i++){const rejected=await edge(p,"zoom","edge",1e-9);expect(rejected.accepted).toBe(false);expect(rejected.state.zoom).toBe(beforeRefusal.state.zoom);}const upper=await edge(p,"zoom","edge",1e9);expect(upper.state.zoom).toBe(4);expect((await edge(p,"zoom","edge",2)).state.zoom).toBe(4);
+ for(let i=0;i<3;i++){const smaller=await edge(p,"zoom","edge",.5);expect(smaller.accepted).toBe(true);}for(let i=0;i<2;i++){const limited=await edge(p,"zoom","edge",1e-9);expect(limited.accepted).toBe(true);expect(limited.state.zoom).toBe(.01);}const upper=await edge(p,"zoom","edge",1e9);expect(upper.state.zoom).toBe(4);expect((await edge(p,"zoom","edge",2)).state.zoom).toBe(4);
  for(let i=0;i<3;i++){await p.getByRole("button",{name:"Reset note zoom to 100%",exact:true}).click();await call(p,"settle");framed(await call(p,"fit","edge"));}
  const end=await call(p,"snap","edge");expect(end.strokes).toEqual(original.strokes);expect(end.writes).toBe(original.writes);expect(end.history).toBe(original.history);
 }finally{await p.close();}},20000);
+it("one-percent floor covers live pinch, camera commits and Fit without changing ink",async()=>{const p=await mounted();try{
+ const original=await call(p,"setup","floor","below-minimum");
+ const pinch=await edge(p,"floorPinch","floor");expect(pinch.live.state.zoom).toBe(.01);expect(pinch.after.state.zoom).toBe(.01);
+ const before=await call(p,"snap","floor");const rejected=await edge(p,"commit","floor",.001);expect(rejected.accepted).toBe(false);expect(rejected.state.zoom).toBe(before.state.zoom);expect(rejected.scroll).toEqual(before.scroll);
+ const fitted=await call(p,"fit","floor");expect(fitted.result).toBe("unrepresentable");expect(fitted.state.zoom).toBe(before.state.zoom);expect(fitted.scroll).toEqual(before.scroll);
+ expect(fitted.strokes).toEqual(original.strokes);expect(fitted.writes).toBe(original.writes);expect(fitted.history).toBe(original.history);
+ const recovery=await edge(p,"zoom","floor",2);expect(recovery.state.zoom).toBe(.02);
+}finally{await p.close();}});
 it("edge audit: erase distant outlier then undo/redo changes live Fit bounds",async()=>{const p=await mounted();try{
  const original=await call(p,"setup","history");const fitted=await call(p,"fit","history");const erased=await edge(p,"eraseOutlier","history");expect(erased.strokes).toHaveLength(1);
  const near=await call(p,"fit","history");framed(near);expect(near.state.zoom).toBeGreaterThan(fitted.state.zoom*10);

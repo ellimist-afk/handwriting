@@ -22,9 +22,11 @@ describe("pinchScale", () => {
 		expect(pinchScale(start, 1)).toBe(start);
 	});
 
-	it("caps magnification and preserves positive lower requests", () => {
+	it("caps magnification and clamps zoom-out at one percent", () => {
 		expect(pinchScale(1, 100)).toBe(MAX_PINCH_SCALE);
-		expect(pinchScale(1, 0.001)).toBe(0.001);
+		expect(pinchScale(1, 0.001)).toBe(0.01);
+		expect(pinchScale(0.01, 0.5)).toBe(0.01);
+		expect(pinchScale(0.01, 2)).toBe(0.02);
 	});
 
 	it("holds still on junk rather than collapsing the editor", () => {
@@ -100,7 +102,11 @@ describe("fitInkBounds",()=>{
  it("fits distant ink below the former floor and accounts for font/external exactly once",()=>{
   const bounds={x:0,y:0,width:18000,height:22000};
   expect(fitInkBounds({...g,bounds})).toEqual({kind:"fit",zoom:432/22000});
-  expect(fitInkBounds({...g,bounds,fontZoom:1.5,externalScale:2})).toEqual({kind:"fit",zoom:432/(22000*3)});
+  expect(fitInkBounds({...g,bounds,fontZoom:1.5,externalScale:2})).toEqual({kind:"below-minimum"});
+ });
+ it("allows an exact one-percent fit and refuses smaller fits",()=>{
+  expect(fitInkBounds({...g,bounds:{x:0,y:0,width:59200,height:43200}})).toEqual({kind:"fit",zoom:.01});
+  expect(fitInkBounds({...g,bounds:{x:0,y:0,width:59201,height:43200}})).toEqual({kind:"below-minimum"});
  });
  it("caps a point at normal size and returns an explicit empty plan",()=>{
   expect(fitInkBounds({...g,bounds:{x:10,y:20,width:0,height:0}})).toEqual({kind:"fit",zoom:1});

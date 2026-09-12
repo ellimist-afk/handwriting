@@ -188,7 +188,7 @@ import { DWELL_MS, snapStroke } from "../ink/ShapeSnap";
 import { beginUndoWindow, discardUndoTrace, isUndoRedoKey, registerUndoTraceView, unregisterUndoTraceView } from "../diag/UndoHistoryTrace";
 
 const sessionStartMs = Date.now();
-import { anchoredScroll, pinchScale, fitInkBounds, clampToReachable, MAX_VIEWPORT_LAYOUT, type InkFitBounds } from "./PinchScale";
+import { anchoredScroll, pinchScale, fitInkBounds, clampToReachable, MIN_PINCH_SCALE, MAX_VIEWPORT_LAYOUT, type InkFitBounds } from "./PinchScale";
 import { ERASER_CURSOR_CLASS } from "./PenCursor";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius } from "../ink/EraserSize";
 import {
@@ -4732,7 +4732,8 @@ export class InkOverlayPlugin {
 
  zoomNoteBy(factor:number):boolean {
   if(this.getNoteViewportState().busy||!Number.isFinite(factor)||factor<=0) return false;
-  return this.zoomAroundCenter(Math.min(4,this.pinchScaleNow*factor));
+  const next=Math.max(MIN_PINCH_SCALE,Math.min(4,this.pinchScaleNow*factor));
+  return next===this.pinchScaleNow || this.zoomAroundCenter(next);
  }
  resetNoteZoom():boolean {
   return !this.getNoteViewportState().busy && this.zoomAroundCenter(1);
@@ -4778,6 +4779,7 @@ export class InkOverlayPlugin {
   // No strokes at all stays "empty", which resets to 100% rather than refusing.
   if(sawStroke&&!bounds) return refuse();
   const plan=fitInkBounds({bounds,viewportWidthScreen:screenWidth,viewportHeightScreen:screenHeight,externalScale:external,fontZoom:this.fontZoom,marginScreen:24});
+  if(plan.kind==="below-minimum") {new Notice("Handwriting: this ink cannot fit above the 1% zoom limit.");return "unrepresentable";}
   if(plan.kind==="unrepresentable") return refuse();
   if(!bounds) return this.commitCameraScale(1,{left:0,top:0})?"empty":refuse();
   const scale=external*plan.zoom;
@@ -4795,7 +4797,7 @@ export class InkOverlayPlugin {
  /** One validated transaction owns layout, transform, native range and scroll. */
  commitCameraScale(next:number,scroll?:{left:number;top:number}):boolean {
   this.pinchPreview=false;
-  if(this.frame.locked||this.scaleGeometryValid===false||next>4||!validCameraScale(next,this.view.dom.clientWidth,this.view.dom.clientHeight))return false;
+  if(this.frame.locked||this.scaleGeometryValid===false||next<MIN_PINCH_SCALE||next>4||!validCameraScale(next,this.view.dom.clientWidth,this.view.dom.clientHeight))return false;
   const previous=this.pinchScaleNow,effective=this.cssScale/previous*next;
   if(!validCameraScale(effective)||!this.prepareViewportLayout())return false;
   const layout=this.viewportLayout!;

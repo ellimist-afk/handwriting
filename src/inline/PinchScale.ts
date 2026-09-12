@@ -20,10 +20,11 @@
 import { validCameraScale } from "./ZoomScale";
 
 export const MAX_PINCH_SCALE = 4;
+export const MIN_PINCH_SCALE = 0.01;
 
-/** Positive representable requests have no arbitrary percentage floor. */
+/** Bound user zoom requests before creating an extreme counter-sized editor. */
 export function clampPinchScale(scale: number): number {
- return validCameraScale(scale) ? Math.min(MAX_PINCH_SCALE, scale) : 1;
+ return validCameraScale(scale) ? Math.max(MIN_PINCH_SCALE, Math.min(MAX_PINCH_SCALE, scale)) : 1;
 }
 
 /** Intersect one stroke with the reachable right/down surface; never mutate it. */
@@ -42,7 +43,7 @@ export function clampToReachable(
 }
 
 export interface InkFitBounds { x:number; y:number; width:number; height:number; }
-export type InkFitPlan = { kind:"fit"; zoom:number } | { kind:"empty"; zoom:1 } | { kind:"unrepresentable" };
+export type InkFitPlan = { kind:"fit"; zoom:number } | { kind:"empty"; zoom:1 } | { kind:"unrepresentable" } | { kind:"below-minimum" };
 /** Native Chromium layout has a finite range; refuse before saturating it. */
 export const MAX_VIEWPORT_LAYOUT = 8_000_000;
 export function fitInkBounds(g:{bounds:InkFitBounds|null; viewportWidthScreen:number; viewportHeightScreen:number; externalScale:number; fontZoom:number; marginScreen:number}):InkFitPlan {
@@ -53,6 +54,7 @@ export function fitInkBounds(g:{bounds:InkFitBounds|null; viewportWidthScreen:nu
  const margin=Math.min(g.marginScreen,w/4,h/4);
  const zoom=Math.min(1,(w-2*margin)/(Math.max(1,b.width)*e*f),(h-2*margin)/(Math.max(1,b.height)*e*f));
  if (!validCameraScale(zoom,w/e,h/e)||Math.max(w/(e*zoom),h/(e*zoom),Math.abs(b.x*f),Math.abs(b.y*f),(b.x+b.width)*f,(b.y+b.height)*f)>MAX_VIEWPORT_LAYOUT) return {kind:"unrepresentable"};
+ if (zoom < MIN_PINCH_SCALE) return {kind:"below-minimum"};
  return {kind:"fit",zoom};
 }
 
