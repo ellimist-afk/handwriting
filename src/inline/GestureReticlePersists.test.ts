@@ -54,6 +54,7 @@
  * subject.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EditorState } from "@codemirror/state";
 
 import {
 	InkOverlayPlugin,
@@ -135,7 +136,10 @@ function makeRig(): Rig {
 	inst.spaceLineY = null;
 	inst.spaceIds = [];
 	inst.spaceBounds = null;
-	inst.spaceClient = null;
+	inst.spacePlan = null;
+	// Placement is covered by the mounted precision suite. This rig tests
+	// watchdog lifetime and has no rendered CodeMirror text geometry.
+	inst.planSpace = () => ({y:100,from:0,lineHeight:20});
 	inst.panLast = null;
 	inst.spaceFromY = 0;
 	inst.spaceTotalDy = 0;
@@ -158,6 +162,7 @@ function makeRig(): Rig {
 	// `view.dom.ownerDocument.defaultView`, which is where the watchdog's
 	// timer functions have to live for the spies below to see them.
 	inst.view = {
+		state: EditorState.create({doc:"text"}),
 		dom: {
 			ownerDocument: {
 				defaultView: { setTimeout: setTimeoutSpy, clearTimeout: clearTimeoutSpy },

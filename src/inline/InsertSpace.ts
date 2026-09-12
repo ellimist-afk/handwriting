@@ -27,12 +27,63 @@
  */
 
 import type { BBox, InkStroke } from "../ink/Stroke";
+import { strokeRev } from "../ink/StrokeRev";
 
 /** A row of writing: its vertical extent and the strokes that make it up. */
 export interface InkRow {
 	top: number;
 	bottom: number;
 	ids: string[];
+}
+
+/** Hover must not rescan every point in the note. Moves mutate strokes in
+ * place, so both object identity and the renderer's revision are significant. */
+export class InsertSpaceRows {
+	private entries: {stroke: InkStroke; rev: number}[] = [];
+	private rows: InkRow[] = [];
+	get(strokes: readonly InkStroke[]): readonly InkRow[] {
+		if (strokes.length !== this.entries.length || strokes.some((s,i)=>
+			this.entries[i]!.stroke !== s || this.entries[i]!.rev !== strokeRev(s))) {
+			this.entries = strokes.map(stroke=>({stroke,rev:strokeRev(stroke)}));
+			this.rows = rowsOf(strokes);
+		}
+		return this.rows;
+	}
+}
+
+export interface SpaceBoundary { y: number; from: number; lineHeight: number; text?: boolean }
+
+/** Internal paragraph breaks are safe between ordinary words. Keep structured
+ * Markdown lines whole rather than breaking a link, code span, emphasis,
+ * heading or list marker across the new paragraph. No characters are removed. */
+export function canSplitParagraph(text: string, offset: number): boolean {
+	if(offset<=0||offset>=text.length)return false;
+	if(!/\s/.test(text[offset-1]!)&&!/\s/.test(text[offset]!))return false;
+	if(/^(?: {4}|\t| {0,3}(?:#{1,6}\s|>|[-+*]\s|\d+[.)]\s|~{3}))/.test(text))return false;
+	return !/[`*_\\[\]<>|$]/.test(text);
+}
+
+/** Find the nearest text seam that does not cut an ink row. The renderer
+ * supplies the actual visual line boundaries (including paragraph wraps).
+ * Jump over an obstructing ink row rather than searching a whole document. */
+export function nearestSpaceBoundary(
+	rows: readonly InkRow[], y: number,
+	at: (y: number, direction: -1 | 1) => SpaceBoundary | null
+): SpaceBoundary | null {
+	const candidates: SpaceBoundary[] = [];
+	for (const direction of [-1,1] as const) {
+		let target = y;
+		for (let n=0;n<=rows.length;n++) {
+			const boundary=at(target,direction);
+			if (!boundary || !Number.isFinite(boundary.y)) break;
+			const crossing=rows.find(row=>boundary.y>row.top+1e-5&&boundary.y<row.bottom-1e-5);
+			if (!crossing) {candidates.push(boundary);break;}
+			const next=direction<0?crossing.top:crossing.bottom;
+			if ((next-target)*direction<=0) break;
+			target=next;
+		}
+	}
+	return candidates.sort((a,b)=>Math.abs(a.y-y)-Math.abs(b.y-y)||b.y-a.y)[0]??null;
 }
 
 function extentOf(stroke: InkStroke): { top: number; bottom: number } {

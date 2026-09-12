@@ -241,7 +241,7 @@ describe("production overlay with CodeMirror history", () => {
 	it.each(["claimed", "memory"] as const)("insert-space in %s mode is one text-and-ink event across rename", async mode => {
 		const r = await rig(mode, [stroke("s")]);
 		inlineInk.moveStrokes(r.path, ["s"], 0, 20);
-		Object.assign(r.overlay, { spaceTotalDy: 20, spaceIds: ["s"], spaceClient: { x: 0, y: 0 },
+		Object.assign(r.overlay, { spaceTotalDy: 20, spaceIds: ["s"], spacePlan: { y:0,from:0,lineHeight:20 },
 			spaceTextChange: () => ({ dy: 20, changes: { from: 0, insert: "\n" } }) });
 		r.overlay.spaceUp();
 		expect(typeof r.published[0]!.historyIdentity).toBe("symbol");

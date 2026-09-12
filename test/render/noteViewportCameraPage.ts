@@ -1,8 +1,8 @@
 import { setPenGestureGuardEnabled } from "../../src/inline/InlinePenRouter";
 import { EditorState, StateEffect } from "@codemirror/state";
 import { EditorView, Decoration, WidgetType } from "@codemirror/view";
-import { history, undoDepth, undo, redo } from "@codemirror/commands";
-import { inlineInk, inkOverlayExtension, overlayForPath, setScrollExpansionEnabled, setInlineEraserMode, setInlineLassoMode } from "../../src/inline/InkOverlay";
+import { history, undoDepth, undo, redo, isolateHistory } from "@codemirror/commands";
+import { inlineInk, inkOverlayExtension, overlayForPath, setScrollExpansionEnabled, setInlineEraserMode, setInlineLassoMode, setInlineSpaceMode } from "../../src/inline/InkOverlay";
 import { surfaceExtents } from "../../src/inline/SurfaceExtent";
 import { setPenInk } from "../../src/inline/PenInk";
 import { installObsidianDom } from "./obsidianDom";
@@ -116,7 +116,7 @@ async function mountControl() {
 // Persisted fixture data is loaded through the real store/host boundary.
 class InlineWidget extends WidgetType { toDOM(){const el=document.createElement("span");el.textContent="[widget]";return el;} }
 const rigs=new Map<string,{host:HTMLElement;view:EditorView;overlay:any;path:string}>();
-async function setup(id:string,kind="far",font=1,external=1) {
+async function setup(id:string,kind="far",font=1,external=1,initialDoc?:string) {
  const path=`fit-${id}.md`,pageId=`fit-page-${id}`;
  if(kind==="loading")blockedIds.add(pageId);
  setScrollExpansionEnabled(true);
@@ -168,8 +168,8 @@ async function setup(id:string,kind="far",font=1,external=1) {
  if(kind==="zero-padding")host.classList.add("zero-padding-control");
  if(kind==="theme") {document.body.classList.add("handwriting-paper-grid");document.body.style.setProperty("--background-modifier-border","#aaaaaa");const style=document.createElement("style");style.textContent=`[data-rig="${id}"] .cm-content {max-width:500px;margin:0 auto;padding:20px 24px;} [data-rig="${id}"] .cm-line {padding:0 12px;}`;host.appendChild(style);}
  if(external!==1){host.style.transform=`scale(${external})`;host.style.transformOrigin="0 0";}
- const doc="alpha beta gamma delta ".repeat(30)+"\n# Heading\n- list item\nsecond line";
- const view=new EditorView({parent:host,state:EditorState.create({doc,extensions:[history(),EditorView.lineWrapping,EditorView.decorations.of(Decoration.set([Decoration.widget({widget:new InlineWidget()}).range(doc.indexOf("# Heading"))])),editorInfoField.init(()=>({app:{commands:{executeCommandById:()=>false}},file:{path},editor:{}})),inkOverlayExtension(),EditorView.theme({"&":{width:"640px",height:"480px"},".cm-content":{fontFamily:"monospace",fontSize:`${16*font}px`,lineHeight:"24px"}})]})});
+ const doc=initialDoc??("alpha beta gamma delta ".repeat(30)+"\n# Heading\n- list item\nsecond line");
+ const view=new EditorView({parent:host,state:EditorState.create({doc,extensions:[history(),EditorView.lineWrapping,EditorView.decorations.of(Decoration.set(doc.includes("# Heading")?[Decoration.widget({widget:new InlineWidget()}).range(doc.indexOf("# Heading"))]:[])),editorInfoField.init(()=>({app:{commands:{executeCommandById:()=>false}},file:{path},editor:{}})),inkOverlayExtension(),EditorView.theme({"&":{width:"640px",height:"480px"},".cm-content":{fontFamily:"monospace",fontSize:`${16*font}px`,lineHeight:"24px"}})]})});
  await settle();
  const overlay=overlayForPath(path)!;rigs.set(id,{host,view,overlay,path});
  return snap(id);
@@ -178,7 +178,7 @@ function snap(id:string) {
  const {host,view,overlay,path}=rigs.get(id)!;
  const cr=view.contentDOM.getBoundingClientRect(),sr=view.scrollDOM.getBoundingClientRect(),scale=overlay.cssScale,font=overlay.fontZoom;
  const paperStyle=getComputedStyle(view.scrollDOM);
- return {paddingTop:Number.parseFloat(getComputedStyle(view.contentDOM).paddingTop),paper:{image:paperStyle.backgroundImage,attachment:paperStyle.backgroundAttachment},state:overlay.getNoteViewportState(),doc:view.state.doc.toString(),writes,history:undoDepth(view.state),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),extent:surfaceExtents.get(path),scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop,width:view.scrollDOM.scrollWidth,height:view.scrollDOM.scrollHeight},viewport:{x:sr.x,y:sr.y,width:sr.width,height:sr.height},ink:inlineInk.strokes(path).map(s=>({id:s.id,x:cr.left+s.bbox.x*scale*font,y:view.documentTop+s.bbox.y*scale*font,right:cr.left+(s.bbox.x+s.bbox.width)*scale*font,bottom:view.documentTop+(s.bbox.y+s.bbox.height)*scale*font})),layout:Array.from({length:100},(_,i)=>{const c=view.coordsAtPos(i)!;return[(c.left-cr.left)/scale,(c.top-cr.top)/scale];}),buttons:[...host.querySelectorAll(".handwriting-note-viewport-controls button")].map(b=>b.getBoundingClientRect().toJSON()),backings:[...host.querySelectorAll("canvas")].map(c=>c.width*c.height),selection:view.state.selection.main.toJSON(),selected:overlay.selection.strokeIds,handles:host.querySelectorAll(".handwriting-selection-handle").length};
+ return {paddingTop:Number.parseFloat(getComputedStyle(view.contentDOM).paddingTop),paper:{image:paperStyle.backgroundImage,attachment:paperStyle.backgroundAttachment},state:overlay.getNoteViewportState(),doc:view.state.doc.toString(),writes,history:undoDepth(view.state),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),extent:surfaceExtents.get(path),scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop,width:view.scrollDOM.scrollWidth,height:view.scrollDOM.scrollHeight},viewport:{x:sr.x,y:sr.y,width:sr.width,height:sr.height},ink:inlineInk.strokes(path).map(s=>({id:s.id,x:cr.left+s.bbox.x*scale*font,y:view.documentTop+s.bbox.y*scale*font,right:cr.left+(s.bbox.x+s.bbox.width)*scale*font,bottom:view.documentTop+(s.bbox.y+s.bbox.height)*scale*font})),layout:Array.from({length:Math.min(100,view.state.doc.length+1)},(_,i)=>{const c=view.coordsAtPos(i)!;return[(c.left-cr.left)/scale,(c.top-cr.top)/scale];}),buttons:[...host.querySelectorAll(".handwriting-note-viewport-controls button")].map(b=>b.getBoundingClientRect().toJSON()),backings:[...host.querySelectorAll("canvas")].map(c=>c.width*c.height),selection:view.state.selection.main.toJSON(),selected:overlay.selection.strokeIds,handles:host.querySelectorAll(".handwriting-selection-handle").length};
 }
 async function fit(id:string) {const r=rigs.get(id)!.overlay.fitHandwriting();await settle();return {result:r,...snap(id)};}
 /**
@@ -293,4 +293,38 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  eraseOutlier:async(id:string)=>{const r=rigs.get(id)!;const b=snap(id).ink.at(-1)!;setPenInk(true);setInlineLassoMode(false);setInlineEraserMode(true);const x=(b.x+b.right)/2,y=(b.y+b.bottom)/2;penEvent("pointerdown",x,y);penEvent("pointermove",x+1,y+1);penEvent("pointerup",x+1,y+1);await settle();return snap(id);},
  heldTool:async(id:string,kind:string)=>{const r=rigs.get(id)!;setPenInk(true);setInlineEraserMode(kind==="erase");setInlineLassoMode(kind==="lasso");penEvent("pointerdown",300,250,876);penEvent("pointermove",310,260,876);const before=snap(id),result=r.overlay.fitHandwriting();penEvent("pointerup",310,260,876);await settle();return {before,result,after:snap(id)};},
  tinyTouch:async(id:string)=>{const r=rigs.get(id)!;setPenInk(false);setInlineEraserMode(false);setInlineLassoMode(false);setPenGestureGuardEnabled(false);const scroller=r.view.scrollDOM;const before=snap(id);const event=(type:string,pid:number,x:number,y:number)=>scroller.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:"touch",pointerId:pid,isPrimary:pid===701,clientX:x,clientY:y,buttons:type==="pointerup"?0:1,width:8,height:8}));event("pointerdown",701,300,350);event("pointermove",701,300,290);event("pointerup",701,300,290);await settle();const panned=snap(id);const fling=r.overlay.router.flingRaf!==0;event("pointerdown",701,250,250);event("pointerdown",702,350,250);event("pointermove",702,450,250);await settle();const pinched=snap(id);event("pointerup",701,250,250);event("pointerup",702,450,250);await settle();return {before,panned,pinched,after:snap(id),fling};},
+};
+
+// Reuse the real store, editor, camera and hit-tested router to compare the
+// Insert Space contact/preview boundary with the eventual text/ink operation.
+(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string}={})=>{
+ const id="space-precision",path=`fit-${id}.md`,pageId=`fit-page-${id}`;
+ const data=emptyPage(pageId);data.surface="inline";
+ data.strokes=[90,210].map((y,i)=>({id:`row-${i}`,tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:30,y,pressure:.5,t:0},{x:40,y:y+20,pressure:.5,t:10}],bbox:{x:28,y:y-2,width:14,height:24}}));
+ if(options.textOnly)data.strokes=[];
+ ids.set(path,pageId);pages.set(pageId,serializePage(data));
+ const paragraph="word ".repeat(240);
+ const doc=options.shortText??(wrapped?(options.markup?`**${paragraph}**`:paragraph)+"\nlast":Array.from({length:80},(_,i)=>`text line ${i+1}`).join("\n"));
+ await setup(id,"empty",1,1,doc);const r=rigs.get(id)!;
+ if(font!==1){r.view.contentDOM.style.fontSize=`${16*font}px`;r.view.requestMeasure();await settle();}
+ r.overlay.commitCameraScale(zoom,{left:0,top:scroll});await settle();
+ const origin=r.view.contentDOM.getBoundingClientRect().top+parseFloat(getComputedStyle(r.view.contentDOM).paddingTop)*r.overlay.cssScale;
+ const scale=r.overlay.scale,contact={x:100,y:origin+104*scale};
+ const coords=()=>Array.from({length:r.view.state.doc.lines},(_,i)=>{const l=r.view.state.doc.line(i+1),c=r.view.coordsAtPos(l.from);return {text:l.text,top:c?.top,bottom:c?.bottom};});
+ const capture=()=>({doc:r.view.state.doc.toString(),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),text:coords(),rects:Array.from({length:r.view.state.doc.length+1},(_,i)=>r.view.coordsAtPos(i,1)),zoom:r.overlay.getNoteViewportState().zoom,history:undoDepth(r.view.state),scroll:{left:r.view.scrollDOM.scrollLeft,top:r.view.scrollDOM.scrollTop}});
+ const before=capture();
+ setPenInk(true);setInlineSpaceMode(true);
+ penEvent("pointermove",contact.x,contact.y,921);
+ const hover=r.overlay.penCursorEl?.getBoundingClientRect().top;
+ penEvent("pointerdown",contact.x,contact.y,921);
+ const down={cut:r.overlay.spaceLineY,ids:[...r.overlay.spaceIds],reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,mode:r.overlay.mode};
+ const dy=options.dy??48;
+ penEvent("pointermove",contact.x,contact.y+dy*scale,921);
+ const live={cut:r.overlay.spaceLineY,dy:r.overlay.spaceTotalDy,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top};
+ if(options.edit)r.view.dispatch({changes:{from:r.view.state.doc.length,insert:" external"},annotations:isolateHistory.of("full")});
+ penEvent(options.end??"pointerup",contact.x,contact.y+dy*scale,921);await settle();
+ const after=capture();
+ let undone:ReturnType<typeof capture>|null=null,redone:ReturnType<typeof capture>|null=null;
+ if(after.history>before.history){undo(r.view);await settle();undone=capture();redo(r.view);await settle();redone=capture();}
+ return {zoom,font,scroll,wrapped,scale,origin,contact,hover,down,live,before,after,undone,redone};
 };

@@ -7,8 +7,49 @@ import {
 	snapLine,
 	strokeIdsBelow,
 	sweptRect,
+	InsertSpaceRows,
+	nearestSpaceBoundary,
+	canSplitParagraph,
 } from "./InsertSpace";
 import { InkPoint, InkStroke, computeBBox } from "../ink/Stroke";
+import { translateStroke } from "../objects/Selection";
+
+describe("shared space boundary",()=>{
+ const at=(y:number,direction:-1|1)=>({y:(direction<0?Math.floor(y/24):Math.ceil(y/24))*24,from:0,lineHeight:24});
+ it("chooses the closest text wrap that does not cross an ink row",()=>{
+  expect(nearestSpaceBoundary([{top:90,bottom:110,ids:["word"]}],104,at)?.y).toBe(120);
+  expect(nearestSpaceBoundary([{top:90,bottom:110,ids:["word"]}],80,at)?.y).toBe(72);
+ });
+ it("jumps across overlapping text seams while keeping whole ink rows",()=>{
+  expect(nearestSpaceBoundary([{top:20,bottom:130,ids:["drawing"]}],100,at)?.y).toBe(144);
+ });
+ it("keeps a seam in a clear gap and resolves ties toward the lower seam",()=>{
+  expect(nearestSpaceBoundary([],96,at)?.y).toBe(96);
+  expect(nearestSpaceBoundary([],108,at)?.y).toBe(120);
+ });
+ it("does not fabricate a text position outside measured geometry",()=>{
+  expect(nearestSpaceBoundary([],40,()=>null)).toBeNull();
+ });
+ it("invalidates cached rows on real in-place movement, replacement and removal",()=>{
+  const cache=new InsertSpaceRows(),s=letter("a",0,100);
+  const first=cache.get([s]);expect(cache.get([s])).toBe(first);
+  translateStroke(s,0,24);expect(cache.get([s])[0]!.top).toBe(116);
+  expect(cache.get([letter("a",0,200)])[0]!.top).toBe(192);
+  expect(cache.get([])).toEqual([]);
+ });
+});
+
+describe("paragraph break safety",()=>{
+ it("permits a break between words without rewriting either side",()=>{
+  expect(canSplitParagraph("first words next words",12)).toBe(true);
+ });
+ it.each(["**first words next words**","[first words next words](url)","`first words next words`","> first words next words","- first words next words","# first words next words","    first words next words"])("keeps structured Markdown intact: %s",text=>{
+  expect(canSplitParagraph(text,text.indexOf("next"))).toBe(false);
+ });
+ it("never inserts a paragraph break in the middle of a word",()=>{
+  expect(canSplitParagraph("aVeryLongWordWithoutSpaces",10)).toBe(false);
+ });
+});
 
 function pt(x: number, y: number): InkPoint {
 	return { x, y, pressure: 0.5, t: 0 };

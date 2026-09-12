@@ -92,7 +92,7 @@ function makeRig() {
 	inst.spaceLineY = 120;
 	inst.spaceIds = ["s1"];
 	inst.spaceBounds = { x: 0, y: 0 };
-	inst.spaceClient = { x: 0, y: 0 };
+	inst.spacePlan = { y:120,from:0,lineHeight:20 };
 	inst.spaceTotalDy = 9;
 	inst.panLast = { x: 5, y: 5 };
 	inst.hoverWatchdog = null;
@@ -167,6 +167,7 @@ describe("the note surface stands its own gesture down when a stroke is abandone
 		expect(rig.inst.mode).toBe("ink");
 		expect(rig.inst.lassoPts).toEqual([]);
 		expect(rig.inst.spaceLineY).toBe(null);
+		expect(rig.inst.spacePlan).toBe(null);
 		expect(rig.inst.dragFrom).toBe(null);
 		expect(rig.inst.panLast).toBe(null);
 	});

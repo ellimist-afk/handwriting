@@ -1,5 +1,5 @@
 import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
-import { Prec } from "@codemirror/state";
+import { Prec, type Text } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
 import { isolateHistory, redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { Notice, Platform, editorInfoField } from "obsidian";
@@ -21,10 +21,13 @@ import {
 	blankLinesAbove,
 	boundsOf,
 	lineSteps,
-	rowsOf,
-	snapLine,
 	strokeIdsBelow,
 	sweptRect,
+	InsertSpaceRows,
+	nearestSpaceBoundary,
+	type SpaceBoundary,
+	canSplitParagraph,
+	snapLine,
 } from "./InsertSpace";
 import { MobileTools } from "./MobileTools";
 import { stripPenDown, stripPenUp } from "./StripPenChrome";
@@ -1297,8 +1300,10 @@ export class InkOverlayPlugin {
 	private spaceIds: string[] = [];
 	/** Box around those ids, tracked through the drag so damage stays bounded. */
 	private spaceBounds: BBox | null = null;
-	/** Viewport point of the contact, for locating the text line to open. */
-	private spaceClient: { x: number; y: number } | null = null;
+	/** The same text/ink seam as the guide, frozen before any live movement. */
+	private spacePlan: (SpaceBoundary & {doc: Text}) | null = null;
+	private spaceRowsCache = new InsertSpaceRows();
+	private spaceTextEnd: {doc:Text;pos:number} | null = null;
 	/** Last viewport point of a pan drag; client space, so scrolling cannot
 	 * feed back into the delta the way surface coordinates would. */
 	private panLast: { x: number; y: number } | null = null;
@@ -4998,12 +5003,16 @@ export class InkOverlayPlugin {
 		// dot would say "pen" for a tip that is about to move rows instead.
 		if (tipMode() === "space") {
 			const half = visualToNote(24, this.cssScale);
+			const world=this.camera.screenToWorld(sample.x,sample.y);
+			const cut=this.spaceLineY??this.planSpace(world.y)?.y;
+			if (cut===undefined) {this.penCursorEl.style.display="none";return;}
+			const y=this.camera.worldToScreen(world.x,cut).y;
 			this.penCursorEl.classList.add(SPACE_CURSOR_CLASS);
 			this.penCursorEl.setCssStyles({
 				display: "block",
 				width: `${half * 2}px`,
 				height: "0px",
-				transform: `translate(${sample.x - half}px, ${sample.y}px)`,
+				transform: `translate(${sample.x - half}px, ${y}px)`,
 				backgroundColor: "transparent",
 				opacity: "1",
 			});
@@ -5528,35 +5537,101 @@ export class InkOverlayPlugin {
 
 	// ---- insert space (divider gesture: ink below the line follows the pen) --
 
-	private spaceDown(sample: PenSample, ev: PointerEvent): void {
+	/** A visual line start, not the beginning of its entire Markdown paragraph.
+	 * Layout rectangles are screen pixels; converting through the fresh note
+	 * origin and effective ink scale also covers font scaling and scrolling. */
+	private spaceTextBoundary(y:number,direction:-1|1):SpaceBoundary|null {
+		if (!this.container || !this.view.dom.isConnected || !(this.scale>0)) return null;
+		const origin=anchorTop(this.view,this.contentStyle?.paddingTop,this.cssScale);
+		const clientY=origin+y*this.scale;
+		const x=this.view.contentDOM.getBoundingClientRect().left+this.cssScale;
+		const find=(screenY:number):SpaceBoundary|null=>{
+			const pos=this.view.posAtCoords({x,y:screenY});
+			if(pos===null)return null;
+			const hit=this.view.coordsAtPos(pos,1);
+			if(!hit)return null;
+			// CM's visual-line navigation samples one SCREEN pixel inside the
+			// editor. At 10% that can skip the first character. Find the first
+			// position on this rendered row by its vertical coordinates instead.
+			let from=this.view.state.doc.lineAt(pos).from,hi=pos;
+			while(from<hi){
+				const mid=Math.floor((from+hi)/2),rect=this.view.coordsAtPos(mid,1);
+				if(!rect)return null;
+				if(rect.top<hit.top-.01*this.cssScale)from=mid+1;else hi=mid;
+			}
+			const line=this.view.state.doc.lineAt(from);
+			if(from>line.from&&!canSplitParagraph(line.text,from-line.from)){
+				if(direction<0)from=line.from;
+				else if(line.number<this.view.state.doc.lines)from=this.view.state.doc.line(line.number+1).from;
+				else return null;
+			}
+			const rect=this.view.coordsAtPos(from,1);
+			if(!rect)return null;
+			const dom=this.view.domAtPos(from).node;
+			const el=(dom.nodeType===1?dom as Element:dom.parentElement)?.closest(".cm-line");
+			if(!el)return null;
+			const style=this.winRef.getComputedStyle(el);
+			const lh=parseFloat(style.lineHeight)*this.cssScale || this.view.defaultLineHeight;
+			if(!(lh>0))return null;
+			const top=el.getBoundingClientRect().top;
+			const rowTop=top+Math.max(0,Math.round((rect.top-top)/lh))*lh;
+			return {y:(rowTop-origin)/this.scale,from,lineHeight:lh/this.scale};
+		};
+		let boundary=find(clientY);
+		if(!boundary)return null;
+		if(direction>0&&boundary.y<y-1e-5) {
+			boundary=find(origin+(boundary.y+boundary.lineHeight)*this.scale+Math.min(.1,this.cssScale));
+		}
+		if(!boundary||(boundary.y-y)*direction < -1e-5)return null;
+		return boundary;
+	}
+
+	private planSpace(y:number):SpaceBoundary|null {
+		const rows=(this.spaceRowsCache??=new InsertSpaceRows()).get(this.strokesHere());
+		const doc=this.view.state.doc;
+		if(this.spaceTextEnd?.doc!==doc){
+			let pos=0;
+			for(let n=doc.lines;n>0;n--){const line=doc.line(n),text=line.text.trimEnd();if(text.trim()){pos=line.from+text.length;break;}}
+			this.spaceTextEnd={doc,pos};
+		}
+		// No text below the contact: the ink seam remains continuous instead
+		// of jumping back to the final Markdown line. No blank lines are
+		// manufactured in a note just to move ink that has no text to follow.
+		const end=this.spaceTextEnd.pos;
+		const textBottom=end===0?0:this.view.lineBlockAt(end).bottom/this.scale;
+		if(end===0||y>=textBottom){
+			let cut=snapLine(rows,y);
+			if(cut<textBottom)cut=rows.find(row=>row.top<=y&&row.bottom>=y)?.bottom??textBottom;
+			return {y:cut,from:doc.length,lineHeight:this.view.defaultLineHeight/this.scale,text:false};
+		}
+		return nearestSpaceBoundary(rows,y,(at,direction)=>this.spaceTextBoundary(at,direction));
+	}
+
+	private spaceDown(sample: PenSample, _ev: PointerEvent): void {
 		// Same watchdog reasoning as lassoDown and the pan branch above: this
 		// is the one call site into a space gesture, so the reticle persists
 		// through it from the first sample rather than only from whatever
 		// hover happened to leave behind.
-		this.showSpaceCursor(sample);
 		const w = this.camera.screenToWorld(sample.x, sample.y);
 		const here = this.strokesHere();
-		// Snap out of any row the line was drawn through, and DRAW it where it
-		// snapped: the seam the gesture will actually cut at is the one worth
-		// showing, and seeing it jump into the gap is how the rule explains
-		// itself without a word of documentation.
-		const cut = snapLine(rowsOf(here), w.y);
+		// Resolve the seam once for the text position, ink membership and
+		// displayed guide. Never re-hit-test the original contact at release.
+		const plan=this.planSpace(w.y);
+		if(!plan){this.spacePlan=null;this.spaceLineY=null;this.hideSpaceCursor();return;}
+		const cut = plan.y;
+		this.spacePlan={...plan,doc:this.view.state.doc};
 		this.spaceLineY = cut;
+		this.showSpaceCursor(sample);
 		this.spaceFromY = w.y;
 		this.spaceTotalDy = 0;
 		// The id list freezes at pen-down, and so does the box around it:
 		// membership cannot change mid-drag, so the damage region is just
 		// that box swept by the distance travelled.
-		this.spaceIds = strokeIdsBelow(here, w.y);
+		this.spaceIds = strokeIdsBelow(here, cut);
 		this.spaceBounds = boundsOf(here, this.spaceIds);
-		// The contact's CLIENT point, kept as-is: the editor can turn that
-		// into a document position exactly, with no world-to-viewport
-		// conversion of ours to drift out of step with the camera.
-		this.spaceClient = { x: ev.clientX, y: ev.clientY };
-		if (this.spaceIds.length === 0) {
-			// A gesture that moves nothing is indistinguishable from a broken
-			// one - it cost an evening of hardware testing to learn that once.
-			new Notice("Handwriting: no ink below the line");
+		if (this.spaceIds.length === 0 && !this.view.state.doc.sliceString(plan.from).trim()) {
+			new Notice("Handwriting: no content below the line");
+			this.spacePlan=null;this.spaceLineY=null;this.hideSpaceCursor();
 		}
 		this.redrawSelectionUI();
 	}
@@ -5575,9 +5650,8 @@ export class InkOverlayPlugin {
 		inlineInk.moveStrokes(path, this.spaceIds, 0, dy);
 		this.spaceTotalDy += dy;
 		this.spaceFromY = w.y;
-		// The line rides with the pen, leading the ink it is pushing: it stays
-		// under the nib all through the drag, so the gesture reads as shoving a
-		// seam down the page rather than watching a mark sit still.
+		// Keep the initial snapped offset from the nib as the seam moves.
+		// The small reticle and full-width divider follow this same value.
 		if (this.spaceLineY !== null) this.spaceLineY += dy;
 		// Damage the swept band only. Marking the whole page dirty per frame
 		// re-rasterized every stroke in the note and the drag went jagged on
@@ -5599,13 +5673,13 @@ export class InkOverlayPlugin {
 		const path = this.filePath();
 		const applied = this.spaceTotalDy;
 		const strokeIds = this.spaceIds;
-		const client = this.spaceClient;
+		const plan = this.spacePlan;
 		this.spaceLineY = null;
 		this.spaceIds = [];
 		this.spaceBounds = null;
-		this.spaceClient = null;
+		this.spacePlan = null;
 		this.spaceTotalDy = 0;
-		if (!path || applied === 0 || strokeIds.length === 0) {
+		if (!path || applied === 0 || !plan) {
 			this.redrawSelectionUI();
 			return;
 		}
@@ -5618,7 +5692,7 @@ export class InkOverlayPlugin {
 		// writing that must not be deleted, settles back to zero rather than
 		// leaving the ink permanently offset from the line it belongs to -
 		// which is the one thing this gesture exists to prevent.
-		const change = this.spaceTextChange(client, applied);
+		const change = this.spaceTextChange(plan, applied);
 		const dy = change.dy;
 		const correction = dy - applied;
 		if (correction !== 0) inlineInk.moveStrokes(path, strokeIds, 0, correction);
@@ -5630,13 +5704,13 @@ export class InkOverlayPlugin {
 			this.redrawSelectionUI();
 			return;
 		}
-		inlineInk.save(path);
-		const op = this.stampInkIdentity({ type: "move", path, strokeIds, dx: 0, dy });
+		if(strokeIds.length)inlineInk.save(path);
+		const op = strokeIds.length?this.stampInkIdentity({ type: "move", path, strokeIds, dx: 0, dy }):null;
 		try {
 			this.view.dispatch({
 				changes: change.changes ?? undefined,
-				effects: inkEffect.of(op),
-				annotations: [inkApplied.of(true), isolateHistory.of("full")],
+				effects: op?inkEffect.of(op):undefined,
+				annotations: op?[inkApplied.of(true), isolateHistory.of("full")]:isolateHistory.of("full"),
 			});
 		} catch (err) {
 			console.error("[handwriting] insert-space dispatch failed", err);
@@ -5652,31 +5726,32 @@ export class InkOverlayPlugin {
 	 * closed a gap. Returns the SNAPPED distance too, because the ink has to
 	 * land on the same whole number of lines the text just moved by.
 	 *
-	 * Null when there is nothing honest to do - no contact point, a drag
-	 * shorter than half a line, or a close-up drag over text that is not
-	 * blank. In every one of those the ink still moves; only the text is
-	 * left alone.
+	 * A changed document, short drag or upward drag over nonblank text
+	 * returns zero; the caller then rolls back the live ink movement.
 	 */
 	private spaceTextChange(
-		client: { x: number; y: number } | null,
+		plan: (SpaceBoundary & {doc: Text}) | null,
 		applied: number
 	): { changes: { from: number; to: number; insert: string } | null; dy: number } {
 		const none = { changes: null, dy: 0 };
-		if (!client) return none;
-		const lineHeight = visualToNote(this.view.defaultLineHeight, this.scale);
+		if (!plan || plan.doc!==this.view.state.doc) return none;
+		if(plan.text===false)return {changes:null,dy:applied};
+		const lineHeight = plan.lineHeight;
 		const steps = lineSteps(applied, lineHeight);
 		if (steps === 0) return none;
-		const pos = this.view.posAtCoords(client);
-		if (pos === null) return none;
+		const pos = plan.from;
 		const doc = this.view.state.doc;
 		const line = doc.lineAt(pos);
 		if (steps > 0) {
 			return {
-				changes: { from: line.from, to: line.from, insert: "\n".repeat(steps) },
+				// An internal break replaces an existing visual wrap. One extra
+				// newline preserves that wrap before opening the requested space.
+				changes: { from: pos, to: pos, insert: "\n".repeat(steps+(pos>line.from?1:0)) },
 				dy: steps * lineHeight,
 			};
 		}
 		// Closing up: take back only blank lines, never a word of writing.
+		if(pos!==line.from)return none;
 		const removable = blankLinesAbove((n) => doc.line(n).text, line.number, -steps);
 		if (removable === 0) return none;
 		const first = doc.line(line.number - removable);
@@ -5868,7 +5943,7 @@ export class InkOverlayPlugin {
 		this.spaceLineY = null;
 		this.spaceIds = [];
 		this.spaceBounds = null;
-		this.spaceClient = null;
+		this.spacePlan = null;
 		this.spaceTotalDy = 0;
 		this.panLast = null;
 		// The gesture is over, so the device that started it stops answering
