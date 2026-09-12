@@ -10,6 +10,7 @@ import {
 	InsertSpaceRows,
 	nearestSpaceBoundary,
 	canSplitParagraph,
+	spaceProtectedBlocks,
 } from "./InsertSpace";
 import { InkPoint, InkStroke, computeBBox } from "../ink/Stroke";
 import { translateStroke } from "../objects/Selection";
@@ -40,6 +41,22 @@ describe("shared space boundary",()=>{
 });
 
 describe("paragraph break safety",()=>{
+ it.each(["---","==="])("keeps all lines of a Setext heading with its %s underline",underline=>{
+  const lines=["First heading words","next heading words",underline,"","paragraph"];
+  expect(spaceProtectedBlocks(n=>lines[n-1]!,lines.length)).toEqual([{from:1,to:3}]);
+ });
+ it("keeps leading YAML and fenced bodies out of paragraph splitting",()=>{
+  const lines=["---","title: ordinary words","---","","~~~~","ordinary words","~~~","~~~~","paragraph"];
+  expect(spaceProtectedBlocks(n=>lines[n-1]!,lines.length)).toEqual([{from:1,to:3,frontmatter:true},{from:5,to:8,frontmatter:undefined}]);
+ });
+ it("does not treat a separated thematic rule as a Setext underline",()=>{
+  const lines=["paragraph","","---"];
+  expect(spaceProtectedBlocks(n=>lines[n-1]!,lines.length)).toEqual([]);
+ });
+ it("protects an unclosed fence through the document end",()=>{
+  const lines=["paragraph","```text","ordinary words"];
+  expect(spaceProtectedBlocks(n=>lines[n-1]!,lines.length)).toEqual([{from:2,to:3,frontmatter:undefined}]);
+ });
  it("permits a break between words without rewriting either side",()=>{
   expect(canSplitParagraph("first words next words",12)).toBe(true);
  });

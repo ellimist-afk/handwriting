@@ -53,6 +53,36 @@ export class InsertSpaceRows {
 
 export interface SpaceBoundary { y: number; from: number; lineHeight: number; text?: boolean }
 
+export interface SpaceProtectedBlock { from: number; to: number; frontmatter?: boolean }
+
+/** Block context for paragraph eligibility, cached per immutable CM document.
+ * Setext underlines belong to the preceding nonblank paragraph; fence bodies
+ * and leading YAML are not paragraphs even when their individual lines look
+ * like ordinary words. Returned line numbers are one-based and inclusive. */
+export function spaceProtectedBlocks(textAt:(line:number)=>string,count:number):SpaceProtectedBlock[] {
+	const blocks:SpaceProtectedBlock[]=[];
+	let paragraph=0,open:{from:number;mark:string;length:number;frontmatter?:boolean}|null=null;
+	for(let n=1;n<=count;n++){
+		const text=textAt(n);
+		if(open){
+			const close=open.frontmatter?/^(?:---|\.\.\.)\s*$/.test(text):
+				new RegExp(`^ {0,3}${open.mark}{${open.length},}\\s*$`).test(text);
+			if(close){blocks.push({from:open.from,to:n,frontmatter:open.frontmatter});open=null;}
+			continue;
+		}
+		if(n===1&&/^\uFEFF?---\s*$/.test(text)){open={from:n,mark:"",length:0,frontmatter:true};paragraph=0;continue;}
+		const fence=/^ {0,3}(`{3,}|~{3,})/.exec(text);
+		if(fence){open={from:n,mark:fence[1]![0]!,length:fence[1]!.length};paragraph=0;continue;}
+		if(!text.trim()){paragraph=0;continue;}
+		if(paragraph&&/^ {0,3}(?:=+|-+)\s*$/.test(text)){
+			blocks.push({from:paragraph,to:n});paragraph=0;continue;
+		}
+		if(!paragraph)paragraph=n;
+	}
+	if(open)blocks.push({from:open.from,to:count,frontmatter:open.frontmatter});
+	return blocks;
+}
+
 /** Internal paragraph breaks are safe between ordinary words. Keep structured
  * Markdown lines whole rather than breaking a link, code span, emphasis,
  * heading or list marker across the new paragraph. No characters are removed. */

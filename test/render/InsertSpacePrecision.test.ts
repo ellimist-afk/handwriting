@@ -92,3 +92,14 @@ it.each([[1,""],[.1,""],[4,""],[1,"short typed line"]] as const)("keeps an ink-o
   expect(r.redone.strokes).toEqual(r.after.strokes);
  }finally{await page.close();}
 });
+
+it.each(["setext-dash","setext-equals","fence","frontmatter"])("keeps the surrounding Markdown block intact: %s",async context=>{
+ const page=await mounted();try{
+  const r=await page.evaluate(context=>(window as any).insertSpaceProbe(1,1,0,true,{context}),context);
+  if(context==="frontmatter"){
+   const end=r.before.doc.lastIndexOf("\nlast");
+   expect(r.after.doc.slice(0,end)).toBe(r.before.doc.slice(0,end));
+  }else expect(r.after.doc).toBe("\n\n"+r.before.doc);
+  expect(r.undone.doc).toBe(r.before.doc);expect(r.undone.strokes).toEqual(r.before.strokes);
+ }finally{await page.close();}
+});

@@ -297,14 +297,15 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
 
 // Reuse the real store, editor, camera and hit-tested router to compare the
 // Insert Space contact/preview boundary with the eventual text/ink operation.
-(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string}={})=>{
+(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string;context?:string}={})=>{
  const id="space-precision",path=`fit-${id}.md`,pageId=`fit-page-${id}`;
  const data=emptyPage(pageId);data.surface="inline";
  data.strokes=[90,210].map((y,i)=>({id:`row-${i}`,tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:30,y,pressure:.5,t:0},{x:40,y:y+20,pressure:.5,t:10}],bbox:{x:28,y:y-2,width:14,height:24}}));
  if(options.textOnly)data.strokes=[];
  ids.set(path,pageId);pages.set(pageId,serializePage(data));
  const paragraph="word ".repeat(240);
- const doc=options.shortText??(wrapped?(options.markup?`**${paragraph}**`:paragraph)+"\nlast":Array.from({length:80},(_,i)=>`text line ${i+1}`).join("\n"));
+ const contextual=options.context==="setext-dash"?paragraph+"\n---\nlast":options.context==="setext-equals"?paragraph+"\n===\nlast":options.context==="fence"?"```\n"+paragraph+"\n```\nlast":options.context==="frontmatter"?"---\ntitle: "+paragraph+"\n---\nlast":undefined;
+ const doc=contextual??options.shortText??(wrapped?(options.markup?`**${paragraph}**`:paragraph)+"\nlast":Array.from({length:80},(_,i)=>`text line ${i+1}`).join("\n"));
  await setup(id,"empty",1,1,doc);const r=rigs.get(id)!;
  if(font!==1){r.view.contentDOM.style.fontSize=`${16*font}px`;r.view.requestMeasure();await settle();}
  r.overlay.commitCameraScale(zoom,{left:0,top:scroll});await settle();

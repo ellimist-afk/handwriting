@@ -28,6 +28,8 @@ import {
 	type SpaceBoundary,
 	canSplitParagraph,
 	snapLine,
+	spaceProtectedBlocks,
+	type SpaceProtectedBlock,
 } from "./InsertSpace";
 import { MobileTools } from "./MobileTools";
 import { stripPenDown, stripPenUp } from "./StripPenChrome";
@@ -1303,7 +1305,7 @@ export class InkOverlayPlugin {
 	/** The same text/ink seam as the guide, frozen before any live movement. */
 	private spacePlan: (SpaceBoundary & {doc: Text}) | null = null;
 	private spaceRowsCache = new InsertSpaceRows();
-	private spaceTextEnd: {doc:Text;pos:number} | null = null;
+	private spaceTextEnd: {doc:Text;pos:number;blocks:SpaceProtectedBlock[]} | null = null;
 	/** Last viewport point of a pan drag; client space, so scrolling cannot
 	 * feed back into the delta the way surface coordinates would. */
 	private panLast: { x: number; y: number } | null = null;
@@ -5560,7 +5562,12 @@ export class InkOverlayPlugin {
 				if(rect.top<hit.top-.01*this.cssScale)from=mid+1;else hi=mid;
 			}
 			const line=this.view.state.doc.lineAt(from);
-			if(from>line.from&&!canSplitParagraph(line.text,from-line.from)){
+			const block=this.spaceTextEnd?.blocks.find(block=>line.number>=block.from&&line.number<=block.to);
+			if(block&&(line.number>block.from||from>line.from||block.frontmatter)){
+				if(direction<0){if(block.frontmatter)return null;from=this.view.state.doc.line(block.from).from;}
+				else if(block.to<this.view.state.doc.lines)from=this.view.state.doc.line(block.to+1).from;
+				else return null;
+			}else if(from>line.from&&!canSplitParagraph(line.text,from-line.from)){
 				if(direction<0)from=line.from;
 				else if(line.number<this.view.state.doc.lines)from=this.view.state.doc.line(line.number+1).from;
 				else return null;
@@ -5592,7 +5599,7 @@ export class InkOverlayPlugin {
 		if(this.spaceTextEnd?.doc!==doc){
 			let pos=0;
 			for(let n=doc.lines;n>0;n--){const line=doc.line(n),text=line.text.trimEnd();if(text.trim()){pos=line.from+text.length;break;}}
-			this.spaceTextEnd={doc,pos};
+			this.spaceTextEnd={doc,pos,blocks:spaceProtectedBlocks(n=>doc.line(n).text,doc.lines)};
 		}
 		// No text below the contact: the ink seam remains continuous instead
 		// of jumping back to the final Markdown line. No blank lines are
