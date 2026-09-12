@@ -4801,6 +4801,10 @@ export class InkOverlayPlugin {
   this.updatePaperSpacing();
   this.applyViewportBox(next);
   this.scrollExpansion?.rebase(this.view.scrollDOM.scrollLeft,this.view.scrollDOM.scrollTop);
+  // A content-sized parent can grow with our counter-scaled host. Record that
+  // result before resize handling can mistake our write for an external resize
+  // and add the same growth back into the stored viewport dimensions.
+  layout.paneWidth=layout.parent.clientWidth;layout.paneHeight=layout.parent.clientHeight;
   this.handleResize();this.updateExtent(true);this.setViewportScroll(target.left,target.top);
   // The target scroll can leave the old raster band, especially on zoom-out.
   // Finish its coverage before the router can map and lock the next pen down.
