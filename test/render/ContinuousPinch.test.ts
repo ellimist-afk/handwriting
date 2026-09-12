@@ -28,7 +28,7 @@ async function mount(page:Page,count:number,focus=false,desktop=false){
 // Native editor focus makes CodeMirror rewrite its complete root class attr.
 // Window focus alone does not exercise this path. Synthetic routed pen events
 // below use actual hit testing; native device timing remains separate.
-for(const [zoom,locked,focus,desktop] of [[.0732,true,true,false],[.01,true,true,false],[.0732,false,true,false],[.01,false,true,false],[.0732,true,false,false],[.01,true,false,false],[.0732,true,false,true],[.01,true,false,true]] as const){
+for(const [zoom,locked,focus,desktop] of [[.2,true,true,false],[.1,true,true,false],[.2,false,true,false],[.1,false,true,false],[.2,true,false,false],[.1,true,false,false],[.2,true,false,true],[.1,true,false,true]] as const){
  it(`retains viewport through editor focus: zoom=${zoom}, locked=${locked}, focus=${focus}, desktop=${desktop}`,async()=>{
   const page=await browser.newPage({viewport:{width:900,height:700}});
   try{

@@ -22,11 +22,11 @@ describe("pinchScale", () => {
 		expect(pinchScale(start, 1)).toBe(start);
 	});
 
-	it("caps magnification and clamps zoom-out at one percent", () => {
+	it("caps magnification and clamps zoom-out at ten percent", () => {
 		expect(pinchScale(1, 100)).toBe(MAX_PINCH_SCALE);
-		expect(pinchScale(1, 0.001)).toBe(0.01);
-		expect(pinchScale(0.01, 0.5)).toBe(0.01);
-		expect(pinchScale(0.01, 2)).toBe(0.02);
+		expect(pinchScale(1, 0.001)).toBe(0.1);
+		expect(pinchScale(0.1, 0.5)).toBe(0.1);
+		expect(pinchScale(0.1, 2)).toBe(0.2);
 	});
 
 	it("holds still on junk rather than collapsing the editor", () => {
@@ -99,14 +99,15 @@ describe("anchoredScroll", () => {
 
 describe("fitInkBounds",()=>{
  const g={viewportWidthScreen:640,viewportHeightScreen:480,externalScale:1,fontZoom:1,marginScreen:24};
- it("fits distant ink below the former floor and accounts for font/external exactly once",()=>{
-  const bounds={x:0,y:0,width:18000,height:22000};
-  expect(fitInkBounds({...g,bounds})).toEqual({kind:"fit",zoom:432/22000});
+ it("fits separated ink within the zoom range and accounts for font/external exactly once",()=>{
+  const bounds={x:0,y:0,width:1800,height:2200};
+  expect(fitInkBounds({...g,bounds})).toEqual({kind:"fit",zoom:432/2200});
   expect(fitInkBounds({...g,bounds,fontZoom:1.5,externalScale:2})).toEqual({kind:"below-minimum"});
  });
- it("allows an exact one-percent fit and refuses smaller fits",()=>{
-  expect(fitInkBounds({...g,bounds:{x:0,y:0,width:59200,height:43200}})).toEqual({kind:"fit",zoom:.01});
-  expect(fitInkBounds({...g,bounds:{x:0,y:0,width:59201,height:43200}})).toEqual({kind:"below-minimum"});
+ it("allows an exact ten-percent fit and refuses smaller fits",()=>{
+  expect(fitInkBounds({...g,bounds:{x:0,y:0,width:5920,height:4320}})).toEqual({kind:"fit",zoom:.1});
+  expect(fitInkBounds({...g,bounds:{x:0,y:0,width:5921,height:4320}})).toEqual({kind:"below-minimum"});
+  expect(fitInkBounds({...g,bounds:{x:0,y:0,width:18000,height:22000}})).toEqual({kind:"below-minimum"});
  });
  it("caps a point at normal size and returns an explicit empty plan",()=>{
   expect(fitInkBounds({...g,bounds:{x:10,y:20,width:0,height:0}})).toEqual({kind:"fit",zoom:1});

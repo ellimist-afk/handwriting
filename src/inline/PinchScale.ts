@@ -20,7 +20,7 @@
 import { validCameraScale } from "./ZoomScale";
 
 export const MAX_PINCH_SCALE = 4;
-export const MIN_PINCH_SCALE = 0.01;
+export const MIN_PINCH_SCALE = 0.1;
 
 /** Bound user zoom requests before creating an extreme counter-sized editor. */
 export function clampPinchScale(scale: number): number {

@@ -63,7 +63,7 @@ it("production note viewport controls are reachable", async () => {
  } finally { await page.close(); }
 });
 
-it("real Fit frames saved distant ink below 5%, ignores empty growth, and reopens unchanged",async()=>{
+it("real Fit frames saved separated ink within the zoom range, ignores empty growth, and reopens unchanged",async()=>{
  const page=await browser.newPage({viewport:{width:700,height:540}});
  try {
   await page.setContent("<!doctype html><body></body>");await page.addStyleTag({content:css+readFileSync(fileURLToPath(new URL("./noteViewportCamera.css",import.meta.url)),"utf8")});await page.addScriptTag({content:script});
@@ -72,7 +72,7 @@ it("real Fit frames saved distant ink below 5%, ignores empty growth, and reopen
   await page.getByRole("button",{name:"Fit handwriting",exact:true}).click();await page.evaluate(()=>(window as any).viewportFixture.settle());
   const fitted=await page.evaluate(()=>(window as any).viewportFixture.snap("far"));evidence.push({before,fitted});
   if(process.env.HW_VIEWPORT_SCREENSHOT)await page.screenshot({path:process.env.HW_VIEWPORT_SCREENSHOT});
-  expect(fitted.state.zoom).toBeLessThan(.05);expect(fitted.strokes).toHaveLength(2);
+  expect(fitted.state.zoom).toBeLessThan(.3);expect(fitted.strokes).toHaveLength(2);
   const union={width:Math.max(...before.strokes.map((s:any)=>s.bbox.x+s.bbox.width))-Math.min(...before.strokes.map((s:any)=>s.bbox.x)),height:Math.max(...before.strokes.map((s:any)=>s.bbox.y+s.bbox.height))-Math.min(...before.strokes.map((s:any)=>s.bbox.y))};expect(fitted.state.zoom).toBeCloseTo(fitScale(union),10);
   for(const b of fitted.ink){expect(b.x).toBeGreaterThanOrEqual(-.5);expect(b.y).toBeGreaterThanOrEqual(-.5);expect(b.right).toBeLessThanOrEqual(640.5);expect(b.bottom).toBeLessThanOrEqual(480.5);}
   expect(fitted.strokes).toEqual(before.strokes);expect(fitted.doc).toBe(before.doc);expect(fitted.writes).toBe(before.writes);expect(fitted.history).toBe(before.history);
@@ -126,7 +126,7 @@ it("loading and active ink refuse navigation; Fit composes font and external sca
   const loaded=await page.evaluate(()=>(window as any).viewportFixture.release("load"));expect(loaded.state.busy).toBe(false);
   expect(await page.evaluate(()=>(window as any).viewportFixture.busy("load"))).toBe("busy");
   await page.evaluate(()=>(window as any).viewportFixture.setup("scaled","far",1,.8));await page.evaluate(()=>(window as any).viewportFixture.font("scaled"));
-  const fitted=await page.evaluate(()=>(window as any).viewportFixture.fit("scaled"));expect(fitted.result).toBe("fit");expect(fitted.state.zoom).toBeLessThan(.05);
+  const fitted=await page.evaluate(()=>(window as any).viewportFixture.fit("scaled"));expect(fitted.result).toBe("fit");expect(fitted.state.zoom).toBeLessThan(.3);
   for(const b of fitted.ink){expect(b.x).toBeGreaterThanOrEqual(fitted.viewport.x-.5);expect(b.y).toBeGreaterThanOrEqual(fitted.viewport.y-.5);expect(b.right).toBeLessThanOrEqual(fitted.viewport.x+fitted.viewport.width+.5);expect(b.bottom).toBeLessThanOrEqual(fitted.viewport.y+fitted.viewport.height+.5);}
  }finally{await page.close();}
 });

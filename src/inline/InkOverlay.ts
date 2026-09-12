@@ -4779,7 +4779,7 @@ export class InkOverlayPlugin {
   // No strokes at all stays "empty", which resets to 100% rather than refusing.
   if(sawStroke&&!bounds) return refuse();
   const plan=fitInkBounds({bounds,viewportWidthScreen:screenWidth,viewportHeightScreen:screenHeight,externalScale:external,fontZoom:this.fontZoom,marginScreen:24});
-  if(plan.kind==="below-minimum") {new Notice("Handwriting: this ink cannot fit above the 1% zoom limit.");return "unrepresentable";}
+  if(plan.kind==="below-minimum") {new Notice(`Handwriting: this ink cannot fit above the ${MIN_PINCH_SCALE*100}% zoom limit.`);return "unrepresentable";}
   if(plan.kind==="unrepresentable") return refuse();
   if(!bounds) return this.commitCameraScale(1,{left:0,top:0})?"empty":refuse();
   const scale=external*plan.zoom;
