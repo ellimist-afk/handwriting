@@ -5332,12 +5332,16 @@ export default class HandwritingPlugin extends Plugin implements HandwritingHost
 		// repointing then leaves its existing hidden ink pinned by fallback,
 		// while the settings button already says compatibility is enabled.
 		// Reconcile that explicit saved choice before any surface is opened.
-		// Never overwrite collisions; retain both revisions and report a
-		// partial migration. No completion marker: failures retry on startup.
+		// Never overwrite collisions; retire the source as recovery data so a
+		// later startup cannot republish it after a synced removal. Genuine
+		// failures and newly arrived source files remain retryable.
 		if (!this.freshInstall && this.settings.inkFolder === SYNCED_INK_FOLDER) {
 			this.store.holdWrites();
 			try {
-				const result = await migrateInkFolder(this.app.vault.adapter, DEFAULT_INK_FOLDER, SYNCED_INK_FOLDER);
+				const result = await migrateInkFolder(this.app.vault.adapter, DEFAULT_INK_FOLDER, SYNCED_INK_FOLDER, { preserveCollisions: true });
+				if (result.preserved) {
+					new Notice("Handwriting: conflicting ink was kept in recovery files in the sync folder.");
+				}
 				if (result.unsupported || result.skipped > 0) {
 					new Notice("Handwriting: some existing ink could not be moved to the sync folder. The original files were kept.");
 				}

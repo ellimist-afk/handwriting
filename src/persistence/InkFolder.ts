@@ -208,6 +208,8 @@ export interface MigrationResult {
 	skipped: number;
 	/** True when the adapter cannot enumerate, so nothing was attempted. */
 	unsupported: boolean;
+	/** Startup collisions relocated as recovery files, never as live pages. */
+	preserved?: number;
 }
 
 /**
@@ -218,6 +220,8 @@ export interface MigrationResult {
  * 1. Never overwrite. A name already present at the destination is left
  *    alone and counted as skipped - two files claiming one page id is a
  *    problem to be looked at, not resolved by clobbering one of them.
+ *    Automatic startup reconciliation opts into preserving those collisions
+ *    under recovery names, so a retry cannot recreate a removed live file.
  * 2. Move, never copy-then-delete. A rename either happened or did not; a
  *    copy that fails halfway through leaves two partial truths.
  * 3. Only our own files. `isSidecarFile` gates it, so a folder someone
@@ -234,7 +238,8 @@ export interface MigrationResult {
 export async function migrateInkFolder(
 	adapter: MigrationAdapter,
 	from: string,
-	to: string
+	to: string,
+	options: { preserveCollisions?: boolean } = {}
 ): Promise<MigrationResult> {
 	const idle: MigrationResult = { moved: 0, skipped: 0, unsupported: false };
 	if (from === to) return idle;
@@ -247,9 +252,21 @@ export async function migrateInkFolder(
 	await ensureFolder(adapter, to);
 	let moved = 0;
 	let skipped = 0;
+	let preserved = 0;
 	for (const file of sidecars) {
 		const target = `${to}/${baseName(file)}`;
-		if (await adapter.exists(target)) {
+		if (await adapter.exists(target) || (options.preserveCollisions && target.endsWith(".json.tmp") && await adapter.exists(target.slice(0, -4)))) {
+			if (options.preserveCollisions) {
+				// Startup retries must not later promote a rejected revision when
+				// sync removes the live destination. Retire its live (or .tmp)
+				// name by rename, retaining every byte under a recovery name.
+				const base = `${target.replace(/\.json(?:\.tmp)?$/, "")}.conflict-migration-${Date.now()}`;
+				let recovery = `${base}.json`, n = 1;
+				while (await adapter.exists(recovery)) recovery = `${base}-${n++}.json`;
+				await adapter.rename(file, recovery);
+				preserved++;
+				continue;
+			}
 			skipped++;
 			continue;
 		}
@@ -274,7 +291,7 @@ export async function migrateInkFolder(
 			}
 		}
 	}
-	return { moved, skipped, unsupported: false };
+	return { moved, skipped, unsupported: false, ...(preserved > 0 ? { preserved } : {}) };
 }
 
 export interface FolderChangeSteps {

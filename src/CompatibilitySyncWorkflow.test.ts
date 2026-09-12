@@ -171,14 +171,19 @@ describe("compatibility across two synthetic devices", () => {
     expect.soft(p.notePaint()).toEqual(["note-original"]); expect.soft(p.pane.painted).toEqual(["pdf-original"]);
     await editAndReopen(d);
   });
-  it("startup collision retains different source and destination bytes and reports incomplete migration", async () => {
+  it("startup collision retains different source bytes as recovery and leaves the destination unchanged", async () => {
     const files = new SyncAdapter(); documents(files); seed(files); seed(files, "handwriting", "remote");
-    const before = [...files.files];
+    const before = new Map(files.files);
     const d = await device(files, { inkFolder: "handwriting" }); await d.open();
-    expect([...files.files]).toEqual(before);
-    expect(notices.some(n => n.includes("could not be moved"))).toBe(true);
+    for (const id of [noteId, pdfId]) {
+      expect(files.files.get(`handwriting/${id}.json`)).toBe(before.get(`handwriting/${id}.json`));
+      expect(files.files.has(`.handwriting/${id}.json`)).toBe(false);
+      const recovery = [...files.files].filter(([path]) => path.startsWith(`handwriting/${id}.conflict-migration-`));
+      expect(recovery).toHaveLength(1);
+      expect(recovery[0]![1]).toBe(before.get(`.handwriting/${id}.json`));
+    }
+    expect(notices.some(n => n.includes("conflicting ink was kept in recovery files"))).toBe(true);
     expect(ids(d)).toEqual([["note-remote"], ["pdf-remote"]]);
-    expect(files.files.get(`.handwriting/${noteId}.json`)).toContain("note-original");
   });
   it.each(["list", "rename"])("startup %s failure keeps bytes and retries migration on later startup", async failure => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -192,6 +197,41 @@ describe("compatibility across two synthetic devices", () => {
     files.failList = false;
     const retried = await device(files, { inkFolder: "handwriting" }); await retried.open();
     await editAndReopen(retried);
+  });
+  it("a later startup never republishes a retained collision after the visible sidecar is removed", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(42);
+    const files = new SyncAdapter(); documents(files); seed(files); seed(files, "handwriting", "remote");
+    files.externalWrite(`.handwriting/${noteId}.json.tmp`, serializePage(page(noteId, "inline", ["interrupted-ink"])));
+    const oldRecovery = `handwriting/${noteId}.conflict-migration-42.json`;
+    files.externalWrite(oldRecovery, "previous recovery bytes");
+    await device(files, { inkFolder: "handwriting" });
+    for (const id of [noteId, pdfId]) files.files.delete(`handwriting/${id}.json`);
+    const unseen = serializePage(page("unseen", "inline", ["unseen-ink"]));
+    files.externalWrite(".handwriting/unseen.json", unseen);
+    await device(files, { inkFolder: "handwriting" }); // no document open or fallback read
+    for (const id of [noteId, pdfId]) expect.soft(files.files.has(`handwriting/${id}.json`)).toBe(false);
+    expect(files.files.has(`handwriting/${noteId}.json.tmp`)).toBe(false);
+    expect(files.files.get(oldRecovery)).toBe("previous recovery bytes");
+    const bytes = [...files.files.values()].join("\n");
+    expect(bytes).toContain("note-original"); expect(bytes).toContain("pdf-original");
+    expect(bytes).toContain("interrupted-ink");
+    expect(files.files.get("handwriting/unseen.json")).toBe(unseen);
+  });
+  it("failed collision preservation leaves both revisions intact and retries without claiming success", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const files = new SyncAdapter(); documents(files); seed(files); seed(files, "handwriting", "remote");
+    const before = [...files.files]; files.failRenameTimes = 1;
+    await device(files, { inkFolder: "handwriting" });
+    expect([...files.files]).toEqual(before);
+    expect(notices.some(n => n.includes("conflicting ink was kept in recovery files"))).toBe(false);
+    await device(files, { inkFolder: "handwriting" });
+    expect(notices.some(n => n.includes("conflicting ink was kept in recovery files"))).toBe(true);
+    for (const id of [noteId, pdfId]) {
+      expect(files.files.has(`.handwriting/${id}.json`)).toBe(false);
+      expect(files.files.get(`handwriting/${id}.json`)).toContain("remote");
+    }
+    const bytes = [...files.files.values()].join("\n");
+    expect(bytes).toContain("note-original"); expect(bytes).toContain("pdf-original");
   });
   it("queued ink during startup migration lands at the destination after repoint", async () => {
     const files = new SyncAdapter(); documents(files); seed(files);
