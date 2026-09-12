@@ -107,7 +107,7 @@ function dims(rig: { parent: HTMLElement; view: EditorView; overlay: any }) {
  * feedback loop produces them until the frame budget runs out, which is what
  * the reader sees as flicker and an unresponsive editor.
  */
-async function zoomOutAndWatch(kind: "constrained" | "shrinkToFit", steps: number, resize = false) {
+async function zoomOutAndWatch(kind: "constrained" | "shrinkToFit", steps: number, resize: boolean | "beforeZoom" = false) {
 	const rig = await mount(kind);
 	const before = dims(rig);
 	let resizes = 0;
@@ -122,12 +122,16 @@ async function zoomOutAndWatch(kind: "constrained" | "shrinkToFit", steps: numbe
 	const zooms: number[] = [];
 	const samples: ReturnType<typeof dims>[] = [];
 	for (let i = 0; i < steps; i++) {
+		if (resize === "beforeZoom" && i === 1) {
+			rig.parent.style.width = "800px";
+			rig.parent.style.height = "600px";
+		}
 		rig.overlay.zoomNoteBy?.(0.5);
 		await settle();
 		zooms.push(rig.overlay.getNoteViewportState?.().zoom ?? NaN);
 		samples.push(dims(rig));
 	}
-	if (resize) {
+	if (resize === true) {
 		rig.parent.style.width = "800px";
 		rig.parent.style.height = "600px";
 	}
@@ -150,3 +154,31 @@ async function zoomOutAndWatch(kind: "constrained" | "shrinkToFit", steps: numbe
 }
 
 (window as any).unconstrainedLoop = zoomOutAndWatch;
+
+// Reuse the actual pointer router for preview/end/cancel ordering. Event
+// dispatch is synthetic; this does not measure native input latency.
+(window as any).unconstrainedPinch = async (kind: "constrained" | "shrinkToFit", cancel: boolean, resize: boolean) => {
+	const rig = await mount(kind);
+	rig.overlay.zoomNoteBy(0.5);
+	await settle();
+	const before = dims(rig);
+	const point = (type: string, id: number, x: number) => rig.view.scrollDOM.dispatchEvent(new PointerEvent(type, {
+		bubbles: true, cancelable: true, pointerType: "touch", pointerId: id,
+		clientX: x, clientY: 40, buttons: type === "pointerup" || type === "pointercancel" ? 0 : 1,
+		width: 8, height: 8,
+	}));
+	point("pointerdown", 501, 20); point("pointerdown", 502, 100);
+	for (let i = 1; i <= 12; i++) {
+		const half = 40 * (1 - 0.5 * i / 12);
+		point("pointermove", 501, 60 - half); point("pointermove", 502, 60 + half);
+		await settle(1);
+	}
+	const liveScale = rig.overlay.pinchScaleNow;
+	if (resize) { rig.parent.style.width = "800px"; rig.parent.style.height = "600px"; }
+	point(cancel ? "pointercancel" : "pointerup", 501, 40); point("pointerup", 502, 80);
+	await settle(20);
+	const after = dims(rig), finalScale = rig.overlay.pinchScaleNow;
+	const previewPending = !!rig.overlay.viewportLayout?.previewBox;
+	rig.view.destroy(); rig.parent.remove();
+	return { before, after, liveScale, finalScale, previewPending };
+};

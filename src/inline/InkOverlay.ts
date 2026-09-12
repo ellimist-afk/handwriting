@@ -1472,7 +1472,7 @@ export class InkOverlayPlugin {
  private viewportStyleFrame = 0;
  private viewportStyleStamp = "";
  private viewportStyleDirty: {path:string|null;container:HTMLElement|null} | null = null;
- private viewportLayout: {parent:HTMLElement; paneWidth:number; paneHeight:number; externalScale:number; baseTransform:string; width:number; height:number; column:number; left:string; right:string; styles:Map<string,{value:string;priority:string}>} | null = null;
+ private viewportLayout: {parent:HTMLElement; paneWidth:number; paneHeight:number; externalScale:number; baseTransform:string; width:number; height:number; column:number; left:string; right:string; previewBox?:{width:string;height:string;transform:string}; styles:Map<string,{value:string;priority:string}>} | null = null;
 
 	private fontZoom = 1;
 	/** overflow-x re-checked once per resize/mount, not per repaint. */
@@ -4600,6 +4600,9 @@ export class InkOverlayPlugin {
 			this.router?.cameraTransformChanged();
 			// Keep the scroller's physical viewport fixed while magnifying its
 			// contents. Reuse the raster; observers cannot allocate it mid-move.
+			// Save styles only, without measuring layout on live frames. At lift
+			// they let us compare the parent with its pre-preview dimensions.
+			layout.previewBox??={width:this.view.dom.style.width,height:this.view.dom.style.height,transform:this.view.dom.style.transform};
 			this.applyViewportBox(next);
 		}
 		this.setViewportScroll(nextLeft,nextTop);
@@ -4791,10 +4794,27 @@ export class InkOverlayPlugin {
   if(this.frame.locked||this.scaleGeometryValid===false||next>4||!validCameraScale(next,this.view.dom.clientWidth,this.view.dom.clientHeight))return false;
   const previous=this.pinchScaleNow,effective=this.cssScale/previous*next;
   if(!validCameraScale(effective)||!this.prepareViewportLayout())return false;
-  const layout=this.viewportLayout!;
-  const width=layout.width/next,height=layout.height/next;
+  const layout=this.viewportLayout!,host=this.view.dom;
   const target=scroll??{left:this.view.scrollDOM.scrollLeft,top:this.view.scrollDOM.scrollTop};
-  if(![width,height,target.left,target.top].every(n=>Number.isFinite(n)&&n>=0&&n<=MAX_VIEWPORT_LAYOUT)||width===0||height===0)return false;
+  // A preview can enlarge a content-sized parent. Compare pending external
+  // changes in the same host box that produced the cached parent dimensions.
+  // This temporary restoration stays inside the final transaction, before
+  // another pen sample can be mapped, and the explicit target scroll survives.
+  const preview=layout.previewBox;
+  const liveBox=preview?{width:host.style.width,height:host.style.height,transform:host.style.transform}:null;
+  if(preview)host.setCssStyles(preview);
+  const paneWidth=layout.parent.clientWidth,paneHeight=layout.parent.clientHeight;
+  const logicalWidth=layout.width+paneWidth-layout.paneWidth,logicalHeight=layout.height+paneHeight-layout.paneHeight;
+  const width=logicalWidth/next,height=logicalHeight/next;
+  if(paneWidth<=0||paneHeight<=0||![width,height,target.left,target.top].every(n=>Number.isFinite(n)&&n>=0&&n<=MAX_VIEWPORT_LAYOUT)||width===0||height===0){if(liveBox)host.setCssStyles(liveBox);return false;}
+  delete layout.previewBox;
+  if(paneWidth!==layout.paneWidth||paneHeight!==layout.paneHeight){
+   layout.width=logicalWidth;layout.height=logicalHeight;
+   host.classList.remove("handwriting-note-viewport");
+   host.setCssStyles({width:`${logicalWidth}px`,height:`${logicalHeight}px`});
+   const style=this.winRef.getComputedStyle(this.view.contentDOM),column=this.view.contentDOM.offsetWidth;
+   if(column>0){layout.column=column;layout.left=style.marginLeft;layout.right=style.marginRight;}
+  }
   if(next!==previous)this.router?.cameraTransformChanged();
   const generation=++this.viewportGeneration,path=this.filePath();
   this.pinchScaleNow=next;this.cssScale=effective;this.scale=effective*this.fontZoom;

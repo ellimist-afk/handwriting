@@ -31,7 +31,7 @@ afterAll(async () => {
 	await browser?.close();
 });
 
-async function run(kind: "constrained" | "shrinkToFit", steps: number, resize = false) {
+async function run(kind: "constrained" | "shrinkToFit", steps: number, resize: boolean | "beforeZoom" = false, pinch?: {cancel: boolean; resize: boolean}) {
 	const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
 	try {
 		const errors: string[] = [];
@@ -42,7 +42,10 @@ async function run(kind: "constrained" | "shrinkToFit", steps: number, resize = 
 				css + readFileSync(fileURLToPath(new URL("./noteViewportCamera.css", import.meta.url)), "utf8"),
 		});
 		await page.addScriptTag({ content: script });
-		const r = await page.evaluate(
+		const r = pinch ? await page.evaluate(
+			(args) => (window as any).unconstrainedPinch(...args),
+			[kind, pinch.cancel, pinch.resize] as const
+		) : await page.evaluate(
 			(args) => (window as any).unconstrainedLoop(...args),
 			[kind, steps, resize] as const
 		);
@@ -54,8 +57,8 @@ async function run(kind: "constrained" | "shrinkToFit", steps: number, resize = 
 }
 
 /**
- * The ceiling the production guard itself uses. Anything at or near this is the
- * runaway, not a large-but-legitimate layout.
+ * A regression ceiling below the production guard's8,000,000px limit. Exact
+ * logical dimensions and requested zooms below are the stronger oracle.
  */
 const RUNAWAY = 1_000_000;
 
@@ -104,3 +107,30 @@ it("still adopts a genuine external pane resize after zoom", async () => {
 	expect(r.after.cachedPaneWidth).toBe(800);
 	expect(r.after.cachedPaneHeight).toBe(600);
 }, 120_000);
+
+it("adopts a pending external resize before a same-turn zoom", async () => {
+	const r = await run("constrained", 2, "beforeZoom");
+	expect(r.zooms).toEqual([0.5, 0.25]);
+	expect(r.after.layoutWidth).toBe(800);
+	expect(r.after.layoutHeight).toBe(600);
+	expect(r.after.hostWidth).toBe(3200);
+	expect(r.after.hostHeight).toBe(2400);
+	expect(r.after.cachedPaneWidth).toBe(800);
+	expect(r.after.cachedPaneHeight).toBe(600);
+}, 120_000);
+
+for (const cancel of [false, true]) for (const kind of ["constrained", "shrinkToFit"] as const) {
+	it(`settles actual routed pinch with ${kind} parent, cancel=${cancel}`, async () => {
+		const resize = kind === "constrained";
+		const r = await run(kind, 0, false, {cancel, resize});
+		expect(r.liveScale).toBeCloseTo(0.25, 5);
+		expect(r.finalScale).toBeCloseTo(0.25, 5);
+		expect(r.after.layoutWidth).toBe(resize ? 800 : 640);
+		expect(r.after.layoutHeight).toBe(resize ? 600 : 480);
+		expect(r.after.hostWidth).toBe((resize ? 800 : 640) / 0.25);
+		expect(r.after.hostHeight).toBe((resize ? 600 : 480) / 0.25);
+		expect(r.after.cachedPaneWidth).toBe(r.after.paneWidth);
+		expect(r.after.cachedPaneHeight).toBe(r.after.paneHeight);
+		expect(r.previewPending).toBe(false);
+	});
+}
