@@ -122,7 +122,7 @@ async function setup(id:string,kind="far",font=1,external=1) {
  setScrollExpansionEnabled(true);
  if(!ids.has(path)) {
   const data=emptyPage(pageId);data.surface="inline";
-  const points=kind==="empty"?[]:kind==="edge"?[[6,120]]:kind==="point"?[[80,120]]:kind==="huge"?[[200,200],[9_000_000,9_000_000]]:kind==="below-minimum"?[[200,200],[100000,100000]]:kind==="former-far"?[[200,200],[18000,22000]]:[[200,200],[1800,2200]];
+  const points=kind==="empty"?[]:kind==="edge"?[[6,120]]:kind==="point"?[[80,120]]:kind==="huge"?[[200,200],[9_000_000,9_000_000]]:kind==="below-minimum"?[[200,200],[100000,100000]]:kind==="former-far"?[[200,200],[18000,22000]]:kind==="paper-scaled"?[[200,200],[900,1100]]:[[200,200],[1800,2200]];
   const long=kind!=="point"&&kind!=="edge";const width=long?32:2,dx=long?800:10,dy=long?600:8;
   data.strokes=points.map(([x,y],i)=>({id:`seed-${i}`,tool:"pen" as const,color:"#000000",width,createdAt:1,points:[{x:x!,y:y!,pressure:.5,t:0},{x:x!+dx,y:y!+dy,pressure:.5,t:10}],bbox:{x:x!-width,y:y!-width,width:dx+2*width,height:dy+2*width}}));
   if(kind==="thick-dot"||kind==="negative")data.strokes=[{id:"seed-0",tool:"pen",color:"#000000",width:kind==="thick-dot"?1000:2,createdAt:1,points:[{x:kind==="thick-dot"?3000:-100,y:3000,pressure:.5,t:0}],bbox:{x:0,y:0,width:0,height:0}}]; // Parse recomputes the stored bbox.
