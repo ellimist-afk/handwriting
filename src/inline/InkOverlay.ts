@@ -4717,6 +4717,11 @@ export class InkOverlayPlugin {
   }
  }
 
+ // CodeMirror owns the root class attribute and rewrites it on focus changes.
+ // Its facet must agree with our synchronous camera writes, including while a
+ // stroke owns the frame. Reading the DOM class here would retain its loss.
+ ownsNoteViewport():boolean {return this.viewportLayout!==null;}
+
  getNoteViewportState():{zoom:number;busy:boolean;fitAvailable:boolean} {
   const path=this.filePath();
   const busy=!this.container || !path || !inlineInk.isLoaded(path) || inlineInk.deleteAllReadiness(path).kind==="unsettled" || this.frame.locked || this.builder!==null || this.mode!=="ink";
@@ -6603,7 +6608,11 @@ export class InkOverlayPlugin {
 	}
 }
 
-const inkOverlayPlugin = ViewPlugin.fromClass(InkOverlayPlugin);
+const inkOverlayPlugin = ViewPlugin.fromClass(InkOverlayPlugin, {
+	provide: plugin => EditorView.editorAttributes.of(view =>
+		view.plugin(plugin)?.ownsNoteViewport() ? { class: "handwriting-note-viewport" } : null
+	),
+});
 
 // Obsidian's ordinary editor keymap also handles Delete and Backspace. Put
 // the selected-ink handler first, but claim those keys only while ink is

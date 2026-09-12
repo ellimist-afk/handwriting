@@ -1,6 +1,7 @@
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history } from "@codemirror/commands";
+import { Platform } from "obsidian";
 import { inlineInk, inkOverlayExtension, overlayForPath, setScrollExpansionEnabled } from "../../src/inline/InkOverlay";
 import { setPenInk } from "../../src/inline/PenInk";
 import { emptyPage, parsePage, serializePage, type PageData } from "../../src/model/PageData";
@@ -207,4 +208,35 @@ async function focusReturn(changed:boolean,zoom:number){
   return {before,hidden,returns,scheduled,contact,error,after:read(),bytesBefore:bytes,bytesAfter:snapshot().saved};
  }finally{overlay.handleResize=resize;}
 }
-(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen,focusSeed,focusReturn};
+async function editorFocus(zoom:number,locked:boolean,focus:boolean){
+ const overlay=overlayForPath(path)! as any;
+ const read=()=>({viewportClass:view.dom.classList.contains("handwriting-note-viewport"),height:view.scrollDOM.getBoundingClientRect().height,paneHeight:view.dom.parentElement!.clientHeight,hit:view.scrollDOM.contains(document.elementFromPoint(100,300)),locked:overlay.frame.locked,scale:overlay.pinchScaleNow});
+ overlay.commitCameraScale(zoom);await settle();
+ const old=JSON.stringify(inlineInk.strokes(path)),before=read();
+ if(locked)point("pointerdown",100,300);
+ if(focus)view.focus();await settle();const focused=read();
+ view.contentDOM.blur();await settle();const blurred=read();
+ if(focus)view.focus();await settle();const refocused=read();
+ let error:string|null=null;
+ try{
+  if(!locked)point("pointerdown",100,300);
+  point("pointermove",110,310);point("pointerup",110,310);
+ }catch(e){
+  error=String(e);
+  // Cleanup through the original captured surface; not a hit-target pass.
+  view.scrollDOM.dispatchEvent(new PointerEvent("pointerup",{bubbles:true,pointerType:"pen",pointerId:741,clientX:110,clientY:310,buttons:0}));
+ }
+ await settle();
+ const strokes=inlineInk.strokes(path),after=read();
+ return {before,focused,blurred,refocused,after,error,oldUnchanged:JSON.stringify(strokes.slice(0,JSON.parse(old).length))===old,added:strokes.length-JSON.parse(old).length};
+}
+function desktopPlatform(){Object.assign(Platform,{isMobile:false,isDesktop:true,isIosApp:false,isDesktopApp:true,isMobileApp:false,isPhone:false,isWin:true});}
+async function viewportOwnership(){
+ const overlay=overlayForPath(path)! as any,has=()=>view.dom.classList.contains("handwriting-note-viewport");
+ view.focus();await settle();const before=has();
+ overlay.commitCameraScale(.1);view.contentDOM.blur();await settle();const active=has();
+ overlay.restoreViewportLayout();view.focus();await settle();const restored=has();
+ view.setState(EditorState.create({doc:"detached"}));await settle();const detached=has();
+ return {before,active,restored,detached};
+}
+(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen,focusSeed,focusReturn,editorFocus,desktopPlatform,viewportOwnership};

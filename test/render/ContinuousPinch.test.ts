@@ -15,7 +15,7 @@ beforeAll(async()=>{
  bundle=(await build({entryPoints:[root+"test/render/zoomWrittenInkPage.ts"],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:root+"test/render/iphoneObsidianStub.ts"}})).outputFiles[0]!.text;
 });
 afterAll(async()=>{await browser?.close();});
-async function mount(page:Page,count:number,focus=false){
+async function mount(page:Page,count:number,focus=false,desktop=false){
    await page.setContent("<body></body>");await page.addStyleTag({content:readFileSync(root+"styles.css","utf8")});
    await page.addStyleTag({content:`html,body{margin:0;width:100%;height:100%;overflow:hidden}body{display:flex}.drift-host{position:relative;display:flex;flex:1;min-width:0;min-height:0;height:480px;overflow:hidden}.drift-host .cm-editor{display:flex;flex:1;min-width:0;min-height:0;height:480px}.drift-host .cm-scroller{flex:1;min-height:0;overflow:auto}.drift-host .cm-content{padding:8px 0!important}.drift-host .cm-line{padding:0}`});
    // Installed Obsidian1.13.7 app.css: a column flex host and this three-class
@@ -23,8 +23,33 @@ async function mount(page:Page,count:number,focus=false){
    await page.addStyleTag({content:`.markdown-source-view.mod-cm6{height:100%;display:flex;flex-direction:column}.markdown-source-view.mod-cm6 .cm-editor{flex:1 1;min-height:0}.drift-host.markdown-source-view{height:480px}`});
    await page.addStyleTag({content:`.markdown-source-view.mod-cm6 .cm-sizer{display:flex;flex-direction:column;align-items:stretch;width:100%;min-height:100%}.markdown-source-view.mod-cm6 .cm-contentContainer{flex:1 1 auto;display:flex;align-items:stretch;overflow-x:visible}.markdown-source-view.mod-cm6 .cm-content{flex-basis:unset!important;width:0;min-height:unset}`});
    await page.addScriptTag({content:bundle});
-   await page.evaluate(([count,focus])=>(window as any).zoomDrift.setup(focus?(window as any).zoomDrift.focusSeed():(window as any).zoomDrift.dense(count),true),[count,focus]);
+   await page.evaluate(([count,focus,desktop])=>{if(desktop)(window as any).zoomDrift.desktopPlatform();return (window as any).zoomDrift.setup(focus?(window as any).zoomDrift.focusSeed():(window as any).zoomDrift.dense(count),true);},[count,focus,desktop]);
 }
+// Native editor focus makes CodeMirror rewrite its complete root class attr.
+// Window focus alone does not exercise this path. Synthetic routed pen events
+// below use actual hit testing; native device timing remains separate.
+for(const [zoom,locked,focus,desktop] of [[.0732,true,true,false],[.01,true,true,false],[.0732,false,true,false],[.01,false,true,false],[.0732,true,false,false],[.01,true,false,false],[.0732,true,false,true],[.01,true,false,true]] as const){
+ it(`retains viewport through editor focus: zoom=${zoom}, locked=${locked}, focus=${focus}, desktop=${desktop}`,async()=>{
+  const page=await browser.newPage({viewport:{width:900,height:700}});
+  try{
+   await mount(page,0,true,desktop);
+   const r=await page.evaluate(([z,l,f])=>(window as any).zoomDrift.editorFocus(z,l,f),[zoom,locked,focus]);
+   for(const state of [r.focused,r.blurred,r.refocused,r.after]){
+    expect.soft(state.viewportClass).toBe(true);
+    expect.soft(Math.abs(state.height-state.paneHeight)).toBeLessThan(.1);
+    expect.soft(state.hit).toBe(true);
+    expect.soft(state.scale).toBe(zoom);
+   }
+   expect(r.focused.locked).toBe(locked);expect(r.after.locked).toBe(false);
+   expect(r.error).toBeNull();expect(r.oldUnchanged).toBe(true);expect(r.added).toBe(1);
+  }finally{await page.close();}
+ });
+}
+it("only contributes the viewport class while the overlay owns that layout",async()=>{
+ const page=await browser.newPage({viewport:{width:900,height:700}});
+ try{await mount(page,0);const r=await page.evaluate(()=>(window as any).zoomDrift.viewportOwnership());expect(r).toEqual({before:false,active:true,restored:false,detached:false});}
+ finally{await page.close();}
+});
 for(const [count,target,cancel,dpr] of [[0,1.75,false,1],[250,1.75,true,2],[250,.75,false,1],[250,.75,true,2],[250,.322,false,1],[250,.322,true,2]] as const) {
  it(`reuses live raster: ${count} strokes, ${target} scale, cancel=${cancel}, DPR=${dpr}`,async()=>{
   const page=await browser.newPage({viewport:{width:900,height:700},deviceScaleFactor:dpr});
