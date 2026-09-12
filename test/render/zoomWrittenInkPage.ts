@@ -7,14 +7,17 @@ import { setPenInk } from "../../src/inline/PenInk";
 import { emptyPage, parsePage, serializePage, type PageData } from "../../src/model/PageData";
 import { installObsidianDom } from "./obsidianDom";
 import { editorInfoField } from "./iphoneObsidianStub";
+import type { InkStroke } from "../../src/ink/Stroke";
 installObsidianDom();
 const path = "drift.md", id = "drift-page";
 let saved = "", loads = 0;
 let view: EditorView;
+let exactReferenceStroke: InkStroke | undefined;
 const settle = async () => { for(let i=0;i<8;i++) await new Promise<void>(r=>requestAnimationFrame(()=>r())); };
 const save = (_id: string, data: PageData) => { saved = serializePage(data); };
-inlineInk.attachHost({ readPageId:()=>id, claimId:async()=>({pageId:id}), loadSidecar:async()=>{loads++;return parsePage(saved,id);}, scheduleSidecar:save, scheduleSidecarNow:async(i,p)=>save(i,p), notify:()=>{} });
-async function setup(bytes?: string, obsidianWrappers = false) {
+inlineInk.attachHost({ readPageId:()=>id, claimId:async()=>({pageId:id}), loadSidecar:async()=>{loads++;const result=parsePage(saved,id);if(exactReferenceStroke)result.data.strokes[result.data.strokes.length-1]=exactReferenceStroke;return result;}, scheduleSidecar:save, scheduleSidecarNow:async(i,p)=>save(i,p), notify:()=>{} });
+async function setup(bytes?: string, obsidianWrappers = false, referenceStroke?: InkStroke) {
+ exactReferenceStroke=referenceStroke;
  const data=emptyPage(id); data.surface="inline";
  data.strokes=[{id:"old",tool:"pen",color:"#000000",width:2,createdAt:1,points:[{x:300,y:300,pressure:.5,t:0},{x:320,y:310,pressure:.5,t:10}],bbox:{x:298,y:298,width:24,height:14}}];
  saved=bytes??serializePage(data);
@@ -28,10 +31,12 @@ async function setup(bytes?: string, obsidianWrappers = false) {
  setScrollExpansionEnabled(true);setPenInk(true);await settle();return {...snapshot(),pixels:pixels()};
 }
 function snapshot(){return {saved,loads,strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),scaleY:view.scaleY};}
-function point(type:string,x:number,y:number,pointerType="pen",pointerId=741){
+function point(type:string,x:number,y:number,pointerType="pen",pointerId=741,timestamp?:number){
  const target=document.elementFromPoint(x,y);
  if(!target||!view.scrollDOM.contains(target))throw Error(`input outside scroller: ${x},${y}`);
- target.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType,pointerId,isPrimary:true,clientX:x,clientY:y,buttons:type==="pointerup"||type==="pointercancel"?0:1,pressure:.6,width:8,height:8}));
+ const event=new PointerEvent(type,{bubbles:true,cancelable:true,pointerType,pointerId,isPrimary:true,clientX:x,clientY:y,buttons:type==="pointerup"||type==="pointercancel"?0:1,pressure:.6,width:8,height:8});
+ if(timestamp!==undefined)Object.defineProperty(event,"timeStamp",{value:timestamp});
+ target.dispatchEvent(event);
 }
 async function write(scale:number,measured:boolean,pinch:boolean,cancel:boolean){
  const overlay=overlayForPath(path)! as any;
@@ -48,7 +53,10 @@ async function write(scale:number,measured:boolean,pinch:boolean,cancel:boolean)
  const actual=view.dom.getBoundingClientRect().width/parseFloat(getComputedStyle(view.dom).width);
  const x=line.left+400*actual,y=line.top+200*actual;
  const before={scale:actual,cached:view.scaleY,expected:{x:400,y:200},scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop}};
- point("pointerdown",x,y);point("pointermove",x+8,y+4);point("pointerup",x+12,y+6);
+ // Fixed sample intervals keep velocity shaping independent of runner load.
+ // At 5ms the warm and serialized ribbons straddle an antialiasing cutoff.
+ const t=performance.now();
+ point("pointerdown",x,y,"pen",741,t);point("pointermove",x+8,y+4,"pen",741,t+5);point("pointerup",x+12,y+6,"pen",741,t+10);
  await settle();return {...before,...snapshot(),pixels:pixels()};
 }
 function pixels(displace = 0){
@@ -74,14 +82,17 @@ async function raster(){
  if(!overlay.commitCameraScale(1,{left:0,top:0}))throw Error("reset refused");await settle();
  return {...pixels(),...snapshot()};
 }
-function reference(){
- // Same stroke shape/style/pressure as captured, placed at the independently
- // specified physical anchor. This removes cap and antialiasing bias.
+function reference(exact = false){
+ // Match the subject's precision: warm geometry retains full precision, while
+ // cold geometry has passed through the sidecar's coordinate/pressure rounding.
+ // Both are placed at the independently specified physical anchor.
  const page=parsePage(saved,id).data;
+ if(exact)page.strokes[page.strokes.length-1]=structuredClone(inlineInk.strokes(path).at(-1)!);
  const stroke=page.strokes.at(-1)!;
  const dx=400-stroke.points[0]!.x,dy=200-stroke.points[0]!.y;
  for(const point of stroke.points){point.x+=dx;point.y+=dy;}
- return serializePage(page);
+ stroke.bbox.x+=dx;stroke.bbox.y+=dy;
+ return exact?stroke:serializePage(page);
 }
 function dense(count: number) {
  const page=emptyPage(id);page.surface="inline";
