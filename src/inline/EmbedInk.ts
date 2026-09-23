@@ -199,8 +199,22 @@ export function embedInkAnchorWatchCount(): number {
  * or a print renders into a container of its own.
  */
 export function embedInkRoot(sectionEl: HTMLElement): HTMLElement | null {
+	// An embedded note is the one editor-internal document that owns its
+	// own ink: the host editor's InkOverlay paints the outer note, not the
+	// embedded one, so this needs its own surface even inside a `.cm-editor`.
+	const embed = sectionEl.closest<HTMLElement>(".markdown-embed-content");
+	if (embed) return embed;
+
+	// Everything else inside an editor is editor chrome - table widgets,
+	// callouts, code blocks, the block renderer's own wrappers. The host
+	// editor's InkOverlay already paints that region; a second surface
+	// there duplicates the strokes. Territory rule, not a selector
+	// blocklist: future editor widgets are covered by construction.
+	if (sectionEl.closest(".cm-editor")) return null;
+
+	// Outside any editor: real rendered documents - reading view, hover
+	// preview, export, print.
 	return (
-		sectionEl.closest<HTMLElement>(".markdown-embed-content") ??
 		sectionEl.closest<HTMLElement>(".markdown-preview-view") ??
 		sectionEl.closest<HTMLElement>(".markdown-preview-sizer") ??
 		sectionEl.closest<HTMLElement>(".markdown-rendered")
