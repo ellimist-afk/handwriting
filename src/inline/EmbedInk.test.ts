@@ -105,15 +105,27 @@ describe("embedInkNeedsPaint (reading view drops the canvas, keeps the marker)",
 
 /**
  * A minimal stand-in for the one DOM method `embedInkRoot` calls: `closest`,
- * walking a `parent` chain and matching a single class per fake element. No
- * jsdom in this suite (see the teardown fakes below), and `closest` is all
- * either function touches, so a real element would only add ceremony.
+ * walking a `parent` chain. A real element carries many classes at once -
+ * a Live Preview table widget is `cm-embed-block cm-table-widget
+ * markdown-rendered` - so each fake node takes a set, not a single class.
+ * Still no jsdom (see the teardown fakes below): `closest` is all either
+ * function touches, so a real element would only add ceremony.
  */
-function fakeNode(cls: string | null, parent: { closest(sel: string): unknown } | null = null) {
+function fakeNode(
+	classes: string | string[] | null,
+	parent: { closest(sel: string): unknown } | null = null,
+	opts: {
+		connected?: boolean;
+		doc?: { querySelector(sel: string): unknown } | null;
+	} = {}
+) {
+	const set = new Set(Array.isArray(classes) ? classes : classes ? [classes] : []);
 	const node = {
+		isConnected: opts.connected ?? true,
+		ownerDocument: opts.doc ?? { querySelector: () => null },
 		closest(sel: string): unknown {
 			const wanted = sel.replace(/^\./, "");
-			return cls === wanted ? node : (parent?.closest(sel) ?? null);
+			return set.has(wanted) ? node : (parent?.closest(sel) ?? null);
 		},
 	};
 	return node;
@@ -173,6 +185,86 @@ describe("embedInkRootFor (the renderer loads a section before inserting it)", (
 		expect(embedInkRootFor(detachedSection as unknown as HTMLElement, null)).toBeNull();
 		expect(embedInkRootFor(detachedSection as unknown as HTMLElement, undefined)).toBeNull();
 	});
+});
+
+describe("embedInkRoot territory rule: editor chrome is not an embed root", () => {
+	it("returns null for a table widget, even though it carries markdown-rendered", () => {
+		// The Live Preview table widget's wrapper has class
+		// `cm-embed-block cm-table-widget markdown-rendered` and used to be
+		// picked by the final fallback, giving it a frozen copy of the
+		// note's ink painted over the table.
+		const cmEditor = fakeNode("cm-editor");
+		const tableWidget = fakeNode(
+			["cm-embed-block", "cm-table-widget", "markdown-rendered"],
+			cmEditor
+		);
+		const section = fakeNode(null, tableWidget);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBeNull();
+	});
+
+	it("returns null for a callout, even though it carries markdown-rendered", () => {
+		const cmEditor = fakeNode("cm-editor");
+		const callout = fakeNode(["callout", "markdown-rendered"], cmEditor);
+		const section = fakeNode(null, callout);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBeNull();
+	});
+
+	it("returns null when the container fallback would also land in the editor", () => {
+		// `embedInkResolveRoot` tries the section, then the renderer's
+		// container. Both are inside the editor for editor chrome; the
+		// guard must reject both, not just the section.
+		const cmEditor = fakeNode("cm-editor");
+		const tableWidget = fakeNode(["cm-table-widget", "markdown-rendered"], cmEditor);
+		const detachedSection = fakeNode(null);
+		expect(
+			embedInkRootFor(
+				detachedSection as unknown as HTMLElement,
+				tableWidget as unknown as HTMLElement
+			)
+		).toBeNull();
+	});
+
+	it("keeps painting an embedded note's own content, which lives inside the editor", () => {
+		// A `![[note]]` embed in Live Preview sits inside the host
+		// `.cm-editor`, but its ink is not what the host InkOverlay
+		// paints - the embed needs its own surface. Regression guard: the
+		// territory rule must not swallow this case.
+		const cmEditor = fakeNode("cm-editor");
+		const embedContent = fakeNode("markdown-embed-content", cmEditor);
+		const section = fakeNode(null, embedContent);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBe(embedContent);
+	});
+	
+	it("defers a detached root when the document hosts an editor", () => {
+		// Live Preview builds block widgets detached: the section reaches
+		// the post-processor before CodeMirror attaches it, so `closest`
+		// cannot find the host editor yet and the guard above passes. The
+		// root must still be rejected — deferring to the observer lets the
+		// guard see the attached tree and reject editor chrome there.
+		const cmEditor = fakeNode("cm-editor");
+		const detachedRoot = fakeNode("markdown-rendered", null, {
+			connected: false,
+			doc: {
+				querySelector: (sel: string) =>
+					sel.includes("cm-editor") ? cmEditor : null,
+			},
+		});
+		const section = fakeNode(null, detachedRoot);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBeNull();
+	});
+
+	it("still resolves a detached root when no editor is in the document", () => {
+		// Export and print render into a window without a live editor and
+		// serialize synchronously, before a deferred pass can run. A
+		// detached root there is legitimate and must still be painted.
+		const detachedRoot = fakeNode("markdown-rendered", null, {
+			connected: false,
+			doc: { querySelector: () => null },
+		});
+		const section = fakeNode(null, detachedRoot);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBe(detachedRoot);
+	});
+
 });
 
 /**
