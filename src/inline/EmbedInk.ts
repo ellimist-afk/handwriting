@@ -199,28 +199,41 @@ export function embedInkAnchorWatchCount(): number {
  * or a print renders into a container of its own.
  */
 export function embedInkRoot(sectionEl: HTMLElement): HTMLElement | null {
-	// An embedded note is the one editor-internal document that owns its
-	// own ink: the host editor's InkOverlay paints the outer note, not the
-	// embedded one, so this needs its own surface even inside a `.cm-editor`.
+	// An embedded note owns its own ink: the host editor's InkOverlay
+	// paints the outer note, not the embedded one.
 	const embed = sectionEl.closest<HTMLElement>(".markdown-embed-content");
 	if (embed) return embed;
 
-	// Everything else inside an editor is editor chrome - table widgets,
-	// callouts, code blocks, the block renderer's own wrappers. The host
-	// editor's InkOverlay already paints that region; a second surface
-	// there duplicates the strokes. Territory rule, not a selector
-	// blocklist: future editor widgets are covered by construction.
+	// Reject anything that climbs through a host editor: editor chrome,
+	// already painted by InkOverlay.
 	if (sectionEl.closest(".cm-editor")) return null;
 
-	// Outside any editor: real rendered documents - reading view, hover
-	// preview, export, print.
-	return (
+	const root =
 		sectionEl.closest<HTMLElement>(".markdown-preview-view") ??
 		sectionEl.closest<HTMLElement>(".markdown-preview-sizer") ??
-		sectionEl.closest<HTMLElement>(".markdown-rendered")
-	);
-}
+		sectionEl.closest<HTMLElement>(".markdown-rendered");
 
+	if (!root) return null;
+
+	// A detached root may be a render sandbox about to be grafted into
+	// an editor. Live Preview builds block widgets detached - the section
+	// arrives at the post-processor before CodeMirror attaches it - so
+	// `closest(".cm-editor")` above finds nothing and the guard passes,
+	// letting a surface into what will become editor chrome. The canvas
+	// then persists inside the widget and duplicates the strokes.
+	//
+	// While detached we cannot tell sandbox-from-destination. Defer: the
+	// observer in `attachEmbedInkOnceReady` will re-resolve once the
+	// section lands, and the guard above will reject editor chrome on the
+	// attached tree.
+	//
+	// Export and print render in a window without a live editor and
+	// serialize before a deferred pass can run, so they rely on the
+	// synchronous path and are exempt.
+	if (!root.isConnected && root.ownerDocument.querySelector(".cm-editor")) return null;
+
+	return root;
+}
 /**
  * The root for a section, or for the renderer's container when the section
  * is not yet in a tree.

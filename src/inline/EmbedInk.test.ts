@@ -113,10 +113,16 @@ describe("embedInkNeedsPaint (reading view drops the canvas, keeps the marker)",
  */
 function fakeNode(
 	classes: string | string[] | null,
-	parent: { closest(sel: string): unknown } | null = null
+	parent: { closest(sel: string): unknown } | null = null,
+	opts: {
+		connected?: boolean;
+		doc?: { querySelector(sel: string): unknown } | null;
+	} = {}
 ) {
 	const set = new Set(Array.isArray(classes) ? classes : classes ? [classes] : []);
 	const node = {
+		isConnected: opts.connected ?? true,
+		ownerDocument: opts.doc ?? { querySelector: () => null },
 		closest(sel: string): unknown {
 			const wanted = sel.replace(/^\./, "");
 			return set.has(wanted) ? node : (parent?.closest(sel) ?? null);
@@ -228,6 +234,37 @@ describe("embedInkRoot territory rule: editor chrome is not an embed root", () =
 		const section = fakeNode(null, embedContent);
 		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBe(embedContent);
 	});
+	
+	it("defers a detached root when the document hosts an editor", () => {
+		// Live Preview builds block widgets detached: the section reaches
+		// the post-processor before CodeMirror attaches it, so `closest`
+		// cannot find the host editor yet and the guard above passes. The
+		// root must still be rejected — deferring to the observer lets the
+		// guard see the attached tree and reject editor chrome there.
+		const cmEditor = fakeNode("cm-editor");
+		const detachedRoot = fakeNode("markdown-rendered", null, {
+			connected: false,
+			doc: {
+				querySelector: (sel: string) =>
+					sel.includes("cm-editor") ? cmEditor : null,
+			},
+		});
+		const section = fakeNode(null, detachedRoot);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBeNull();
+	});
+
+	it("still resolves a detached root when no editor is in the document", () => {
+		// Export and print render into a window without a live editor and
+		// serialize synchronously, before a deferred pass can run. A
+		// detached root there is legitimate and must still be painted.
+		const detachedRoot = fakeNode("markdown-rendered", null, {
+			connected: false,
+			doc: { querySelector: () => null },
+		});
+		const section = fakeNode(null, detachedRoot);
+		expect(embedInkRootFor(section as unknown as HTMLElement, null)).toBe(detachedRoot);
+	});
+
 });
 
 /**
