@@ -152,6 +152,11 @@ async function layerVisual(action:string,zoom=.4){
   const x=(430-cam.x)*cam.zoom*dpr,y=(417-cam.y)*cam.zoom*dpr,w=60*cam.zoom*dpr,h=6*cam.zoom*dpr;
   ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(x,y,w,h);ctx.globalAlpha=Number(getComputedStyle(overlay.highlightCanvas).opacity);ctx.drawImage(overlay.highlightCanvas,x,y,w,h,x,y,w,h);ctx.restore();
  }
+ if(action.startsWith('shift-plant')){
+  // Move the whole borrowed preview right by 'shift-plant:<backing px>' (default 1): the same ink, off by that much.
+  const target=overlay.wetCanvas as HTMLCanvasElement,ctx=target.getContext('2d')!;
+  ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.globalCompositeOperation='copy';ctx.drawImage(target,Number(action.split(':')[1]??1),0);ctx.restore();
+ }
  if(action==='scaled-preview'){overlay.pinch('start',1,{x:30,y:10});overlay.pinch('move',zoom===.1?4:.25,{x:30,y:10});for(let i=0;i<3;i++)await new Promise<void>(r=>requestAnimationFrame(()=>r()));overlay.pinchScrollAt=performance.now()+60000;}
  if(action==='restore')overlay.restorePinchLayers();
  if(action==='tail')overlay.tail.drawSelectionBox(overlay.camera.snapshot,{x:overlay.camera.x+120,y:overlay.camera.y+120,width:80,height:60},'#ff0000');

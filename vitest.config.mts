@@ -15,7 +15,8 @@ export default defineConfig({
 		// Only the plugin's own suite. Without this, a worktree or repo copy
 		// sitting anywhere under the root gets swept into the run and the
 		// counts stop meaning anything.
-		include: ["src/**/*.test.ts"],
+		// The CI bounds cell lives under test/, not src/: the build digest walks src/**.
+		include: ["src/**/*.test.ts", "test/CiTimingBounds.test.ts"],
 		// Vitest swaps every CSS import for "" unless it matches css.include,
 		// and a `?raw` text import still has an id ending in `.css?raw`, so it
 		// was emptied too. GuardStyle.test.ts asserts on styles.css as text.

@@ -67,6 +67,7 @@ for(const [zoom,scaled] of [[.1,false],[.4,false],[1,false],[.1,true],[.4,true]]
   const before=await state('setup');expect(before.pixels[0]).toBeGreaterThan(0);expect(before.pixels[2]).toBeGreaterThan(0);
   let original=await page.screenshot();const preview=await state(scaled?'scaled-preview':'preview');expect(preview.composite).toBe(true);expect(preview.blank[3]).toBe(false);
   if(process.env.HW_COMPOSITE_THIN_PLANT)await state('thin-gap-plant');
+  if(process.env.HW_COMPOSITE_SHIFT_PLANT)await state(`shift-plant:${process.env.HW_COMPOSITE_SHIFT_PLANT}`);
   const combined=await page.screenshot();
   if(scaled){const restored=await state('restore');expect(restored.originalHashes).toEqual(before.originalHashes);expect(restored.pixels[3]).toBe(0);original=await page.screenshot();}
   await state('background');const background=await page.screenshot();const captured=await state('background-restore');
@@ -97,7 +98,12 @@ for(const [zoom,scaled] of [[.1,false],[.4,false],[1,false],[.1,true],[.4,true]]
   expect(diff.missing).toBe(0);expect(diff.missingDark).toBe(0);
   for(const arm of diff.thinArms){expect(arm.samples).toBeGreaterThan(20);expect(arm.originalPresent,`original ${arm.width}px arm`).toBe(arm.samples);expect(arm.combinedPresent,`preview ${arm.width}px arm`).toBe(arm.samples);}
   expect(Math.abs(diff.massRatio-1)).toBeLessThan(.02);expect(Math.abs(diff.darkMassRatio-1)).toBeLessThan(.02);
-  if(!scaled){expect(diff.max).toBeLessThanOrEqual(2);expect(diff.changed).toBe(0);const restored=await state('restore');expect(restored.originalHashes).toEqual(before.originalHashes);expect(restored.pixels[3]).toBe(0);expect((await page.screenshot()).equals(original)).toBe(true);}
+  // Fixed scale: the composite and the separate layers rasterize the same ink,
+  // but the two paths may round an edge pixel differently (the Linux CI runner
+  // read 3). Flat interiors stay at 2 (coreMax above); edges
+  // allow 4, on at most 0.5 percent of the ink pixels. A half-pixel shift of the
+  // preview (HW_COMPOSITE_SHIFT_PLANT=0.5) passes the checks above and reads over both here.
+  if(!scaled){const edge=`composite edge: max ${diff.max}, changed ${diff.changed}, roiPixels ${diff.roiPixels}`;expect(diff.max,edge).toBeLessThanOrEqual(4);expect(diff.changed,edge).toBeLessThanOrEqual(.005*diff.roiPixels);const restored=await state('restore');expect(restored.originalHashes).toEqual(before.originalHashes);expect(restored.pixels[3]).toBe(0);expect((await page.screenshot()).equals(original)).toBe(true);}
   if(scaled)return;
   for(const action of ['restore','tail','tail-clear','repaint','resize','wet-clear','wet','pen']){
    // The tail-clear arm paints its tail on the full surface: the composite takes a

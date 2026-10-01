@@ -459,10 +459,14 @@ async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: 
 		await page.addStyleTag({
 			content: css + readFileSync(fileURLToPath(new URL("./noteViewportCamera.css", import.meta.url)), "utf8") + READABLE_LINE_WIDTH_CSS,
 		});
+		// FONT PLANT: the rig's "monospace" is Consolas on Windows (0.55 em advance)
+		// and a 0.6 em face on the Linux runner, so the text lines land elsewhere
+		// there. HW_SCPX_FONT_PLANT="Courier New" (0.6 em) moves them on Windows the same way.
+		if (process.env.HW_SCPX_FONT_PLANT) await page.addStyleTag({ content: `.cm-content { font-family: ${JSON.stringify(process.env.HW_SCPX_FONT_PLANT)} !important; }` });
 		await page.addScriptTag({ content: script });
 		const r: any = await page.evaluate(
 			a => (window as any).scrollColumnAnchor.runPixelColumn(a.readable, a.infiniteCanvas, a.backing, a.options),
-			{ readable, infiniteCanvas, backing: !!process.env.HW_SCPX_BACKING, options: { external: options.external, riseAt: options.riseAt, risePx: options.risePx, pauseAt: options.pauseAt, pauseAction: options.pauseAction } }
+			{ readable, infiniteCanvas, backing: !!process.env.HW_SCPX_BACKING, options: { external: options.external, riseAt: options.riseAt, risePx: options.risePx, pauseAt: options.pauseAt, pauseAction: options.pauseAction, shiftPlant: Number(process.env.HW_SCPX_SHIFT_PLANT) || undefined } }
 		);
 		expect(shots.length, "a screenshot behind every frame record").toBeGreaterThanOrEqual(r.frames.length);
 		const detect = (b64: string, shift = 0, pad?: number) => page.evaluate(a => (window as any).scrollColumnAnchor.detectMark(a.b64, a.shift, a.pad), { b64, shift, pad });
@@ -485,9 +489,11 @@ async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: 
 			Object.assign(f, {
 				dpr, detected: d.n, area: Math.round(area), areaRatio: area > 0 ? d.n / area : null, components: d.components, others: d.others, clipped,
 				bboxDevice: [bboxW, bboxH], expectedBboxDevice: [Math.round(boxW * dpr), Math.round(boxH * dpr)],
-				// THE WHOLE BOX INSIDE THE PANE, on both axes, from layout.
+				// THE WHOLE BOX INSIDE THE PANE, on both axes, from the camera's expected box,
+				// where the ink is painted. The text line (ey) moves with the machine's font
+				// metrics, so it is printed (offY) and not used here.
 				inPane: f.expectedX !== null && f.expectedX - boxW / 2 >= f.clip.x + 1 && f.expectedX + boxW / 2 <= f.clip.x + f.clip.width - 1 &&
-					ey - boxH / 2 >= f.clip.y + 1 && ey + boxH / 2 <= f.clip.y + f.clip.height - 1,
+					f.expectedY - boxH / 2 >= f.clip.y + 1 && f.expectedY + boxH / 2 <= f.clip.y + f.clip.height - 1,
 				// PRESENT: found at roughly its own area and not cut by an image edge.
 				present: d.n > 0 && !clipped && d.n >= 0.5 * area && d.n <= 1.6 * area,
 				detectedX: d.n ? f.clip.x + (d.minX + d.maxX + 1) / 2 / dpr : null,

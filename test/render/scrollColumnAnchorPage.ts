@@ -3783,7 +3783,7 @@ async function runLayerBoundsTeardown() {
  * a frame whose raster or transform changed while the screenshot was taken is
  * flagged rather than silently counted.
  */
-async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backing = false, options: { external?: number; riseAt?: number; risePx?: number; pauseAt?: number[]; pauseAction?: "stroke" | "resize" | "font" | "watchdog" | "host" } = {}) {
+async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backing = false, options: { external?: number; riseAt?: number; risePx?: number; pauseAt?: number[]; pauseAction?: "stroke" | "resize" | "font" | "watchdog" | "host"; shiftPlant?: number } = {}) {
 	const shot = (window as any).__scpShot as ((clip: { x: number; y: number; width: number; height: number }) => Promise<{ ms: number; index: number }>) | undefined;
 	if (!shot) throw new Error("runPixelColumn needs the test-side __scpShot binding");
 	const rig = await mount(`pixels-${readable ? "rll" : "full"}-${infiniteCanvas ? "ic" : "noic"}`, readable, infiniteCanvas);
@@ -3883,6 +3883,10 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 		// THE TEXT ANCHOR FOR Y: the line the mark was drawn beside, found by its
 		// text and carried by the painted scale. CodeMirror estimates unrendered
 		// heights, so the content box top alone can disagree with the painted lines.
+		// A READING ONLY: where the text lands depends on the machine's font metrics
+		// (the Linux CI runner puts this line 144 px lower than Windows at k=2), while
+		// the ink is painted at expectedY on both. The rig centres, picks its focal
+		// point and plans its scroll from expectedY, the camera's box.
 		const line = anchorLine ? lineRectByText(anchorLine.text) : null;
 		const expectedYLine = anchorLine && line ? line.top + anchorLine.deltaNote * scale : null;
 		return { scale, colX, expectedX: colX === null ? null : colX + note.cx * scale, expectedY, expectedYLine };
@@ -3996,7 +4000,7 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 	const centreMark = async () => {
 		const at = layout(), pr = pane.getBoundingClientRect();
 		if (at.expectedX === null || !(at.scale > 0)) return;
-		const dx = at.expectedX - (pr.left + pr.width / 2), dy = (at.expectedYLine ?? at.expectedY) - (pr.top + pr.height / 2);
+		const dx = at.expectedX - (pr.left + pr.width / 2), dy = at.expectedY - (pr.top + pr.height / 2);
 		if (Math.abs(dy) > 40) scroller.scrollTop += dy / at.scale;
 		if (Math.abs(dx) > 40 && scroller.scrollWidth > scroller.clientWidth) scroller.scrollLeft += dx / at.scale;
 		await quiet();
@@ -4008,7 +4012,7 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 		// scale, predicted from layout: the note point under the fingers holds
 		// still and everything else scales about it.
 		const g = ratios[ratios.length - 1]!;
-		const mx = at.expectedX ?? pr.left + pr.width / 2, my = at.expectedYLine ?? at.expectedY;
+		const mx = at.expectedX ?? pr.left + pr.width / 2, my = at.expectedY;
 		const hw = (note.halfW + 8) * at.scale * g, hh = (note.halfH + 8) * at.scale * g;
 		const inside = (v: number, lo: number, hi: number) => Math.min(hi - 2, Math.max(lo + 2, v));
 		const fxs = [mx, (at.colX ?? mx) + 4, pr.left + 10, pr.left + pr.width / 2].map(v => inside(v, pr.left, pr.right));
@@ -4087,6 +4091,9 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 				}
 				await new Promise(r2 => setTimeout(r2, 300)); await frame();
 				const pausedMs = Math.round(performance.now() - t0);
+				// SHIFT PLANT: a leftover translate on the ink layer, the shape of the
+				// e355b259 resize commit; the camera's box stays where it was.
+				if (options.shiftPlant) { const layer = overlay.inkLayer as HTMLElement; layer.style.transform = `${layer.style.transform} translate(0px, ${options.shiftPlant}px)`.trim(); }
 				await shoot(phase, `${phase} pause${pausedMs} r=${r} k=${overlay.pinchScaleNow.toFixed(3)}`);
 				const last = frames[frames.length - 1];
 				last.pause = { pausedMs, action: options.pauseAction ?? null, before: s0, fired: { resizesPastGuard: resizesPastGuard - s0.resizesPastGuard, resizeEntries: resizes - s0.resizes, repaints: repaints - s0.repaints, deferArms: deferArms - s0.deferArms, camChanged: last.before.cam !== s0.cam, backingChanged: last.before.backing !== s0.backing, measuresInDispatch, heldAfter: Object.prototype.hasOwnProperty.call(view, "measure") } };
@@ -4136,7 +4143,7 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 			const plus = Math.min(hi - pos - half - 20, cur * at0.scale);
 			return minus >= plus ? { sign: 1, step: Math.max(0, Math.min(80, minus / 3)) } : { sign: -1, step: Math.max(0, Math.min(80, plus / 3)) };
 		};
-		const vy = plan(at0.expectedYLine ?? at0.expectedY, pr0.top, pr0.bottom, (note.halfH + 8) * at0.scale, scroller.scrollTop, scroller.scrollHeight - scroller.clientHeight);
+		const vy = plan(at0.expectedY, pr0.top, pr0.bottom, (note.halfH + 8) * at0.scale, scroller.scrollTop, scroller.scrollHeight - scroller.clientHeight);
 		const vx = plan(at0.expectedX ?? pr0.left, pr0.left, pr0.right, (note.halfW + 8) * at0.scale, scroller.scrollLeft, scroller.scrollWidth - scroller.clientWidth);
 		const scrollTops: number[] = [], scrollLefts: number[] = [];
 		for (let i = 1; i <= 6; i++) {

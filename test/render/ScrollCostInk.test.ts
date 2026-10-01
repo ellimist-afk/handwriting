@@ -48,6 +48,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import css from "../../styles.css?raw";
 import REAL_OBSIDIAN_CSS from "./obsidianReadableWidth";
+import { timingBound } from "../ciBounds";
 
 declare const process: { env: Record<string, string | undefined>; platform: string };
 
@@ -320,7 +321,7 @@ for (const arm of ARMS) {
 			const movedStill = still.filter(camMoved);
 			const moves = rows.filter(moved);
 			const bare = moves.filter(x => !x.carried || x.work === "all");
-			const slowMoves = moves.filter(x => x.paintMs >= 3);
+			const slowMoves = moves.filter(x => x.paintMs >= timingBound(3));
 			const med = (a: number[]) => { const s = [...a].sort((p, q) => p - q); return s.length ? s[Math.floor(s.length / 2)]! : 0; };
 			const summary = { arm, scale: mounted.scale, cssScale: mounted.cssScale, repaints: rows.length, scrollEvents: r.scrolls.length, stillAll: allStill.length, stillCamMoved: movedStill.length, still: still.length,
 				moves: moves.length, bareMoves: bare.length, slowMoves: slowMoves.length, medianProbeWaitStill: f2(med(still.map(x => x.probeWait ?? 0))), medianPaintStill: f2(med(still.map(x => x.paintMs))),

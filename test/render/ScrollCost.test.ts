@@ -42,6 +42,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import css from "../../styles.css?raw";
 import REAL_OBSIDIAN_CSS from "./obsidianReadableWidth";
+import { timingBound } from "../ciBounds";
 
 declare const process: { env: Record<string, string | undefined>; platform: string };
 
@@ -396,7 +397,7 @@ for (const canvas of [true, false]) for (const h of HORIZONTAL) {
 			if (traceDir) { const buf = await browser.stopTracing(); const name = `trace-h-${canvas ? "on" : "off"}-${h.dir}.json`; writeFileSync(`${traceDir}/${name}`, buf); traced = phaseReport(buf.toString("utf8")); }
 			const rows = inFling(r.rows as Row[]);
 			const bandMove = (x: Row) => !!x.writes["div.handwriting-ink-overlay"]?.left;
-			const over = rows.filter(x => x.ms > (bandMove(x) ? 5 : 2));
+			const over = rows.filter(x => x.ms > (bandMove(x) ? timingBound(5) : timingBound(2)));
 			const worst = rows.reduce((a, x) => Math.max(a, x.ms), 0);
 			record.push({ cell: "horizontal", canvas, dir: h.dir, mounted, start, range, scrollAtStart: r.scrollAtStart, end: r.end, worst: f2(worst), over: over.length, repaints: rows.length, scrollEvents: r.scrolls.length, traced, rows: r.rows, extras: r.extras });
 			const brief = `\nrange ${range}, began at ${start}, ended at ${r.end.left}, ${rows.length} repaints, ${r.scrolls.length} scroll events, worst ${f2(worst)} ms, ${over.length} over 2 ms\n${table(r.rows)}`;
