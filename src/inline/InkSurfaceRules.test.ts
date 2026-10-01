@@ -639,41 +639,12 @@ const RULES: readonly SurfaceRule[] = [
 		},
 	},
 	{
-		// Another one-surface divergence, this one caught by reading source
-		// rather than by a device report: the note's Escape-releases-a-
-		// held-mode rule (InkOverlay.ts:1627-1637, "Landing in pan or insert
-		// space used to strand you until you found the Pen button; Escape is
-		// what a hand reaches for") never reached the pdf. `tipModeHeld` and
-		// `releaseTipMode` had ZERO hits in PdfInkController.ts before
-		// 1.4.9, so Pan or Insert-space on a pdf stranded the pen with no
-		// way back but the strip - worse there than on a note, which at
-		// least has this rule.
-		//
-		// The marker is the whole condition, not a bare `tipModeHeld()`,
-		// and that is deliberate. A bare marker would be VACUOUS for the
-		// note: InkOverlay.ts re-exports its own wrapper, `export function
-		// tipModeHeld(): boolean { return tipModeHeldNow(); }` (:347), and
-		// that empty-parens SIGNATURE contains the literal text
-		// "tipModeHeld()" - so the marker would stay green on a note with
-		// the Escape branch itself deleted, the exact failure this file
-		// exists to refuse (checked: `grep -n "tipModeHeld("
-		// src/inline/InkOverlay.ts` shows exactly two hits, the declaration
-		// at :347 and the real call at :1631 - nothing else to fall back
-		// on). Anchoring to the whole condition reaches only the real call
-		// on both files: one hit apiece (checked the same way on
-		// PdfInkController.ts - one hit, the call, at :857).
-		//
-		// Two spellings, not one, because the two surfaces name the release
-		// differently: the note calls its own `releaseTipModes()` wrapper
-		// (plural, InkOverlay.ts's own name for it), the pdf calls
-		// TipMode.ts's `releaseTipMode()` directly (singular, the only
-		// export that exists there). Same held state either way - `tipMode`
-		// is process-global (TipMode.ts) - so the note surface's own
-		// mode-release is what a pdf pane's Escape now reaches too.
+		// Both keyboard handlers must call the shared floor. Match call sites,
+		// not its declaration or import, so removing either handler still fails.
 		rule: "Escape hands the tip back to the nib from a held mode (pan, lasso or space)",
 		markers: [
-			'event.key === "Escape" && tipModeHeld()',
-			'ev.key === "Escape" && tipModeHeld()',
+			"if (peelInkEscapeFloor(event)) return true;",
+			"if (peelInkEscapeFloor(ev)) return;",
 		],
 		on: ["note", "pdf"],
 		exempt: {

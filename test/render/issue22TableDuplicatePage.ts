@@ -1,14 +1,21 @@
-import { EditorState, StateField } from "@codemirror/state";
-import { Decoration, EditorView, WidgetType } from "@codemirror/view";
-import { inlineInk, inkOverlayExtension, inkExternallyReloaded, overlayForPath } from "../../src/inline/InkOverlay";
+import { EditorState, StateField, Prec, type Extension } from "@codemirror/state";
+import { history, redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
+import { Decoration, EditorView, WidgetType, type ViewPlugin } from "@codemirror/view";
+import { InkOverlayPlugin, inlineInk, inkOverlayExtension, inkExternallyReloaded, overlayForPath } from "../../src/inline/InkOverlay";
 import type { InkStroke } from "../../src/ink/Stroke";
 import type { SelectionModel } from "../../src/objects/SelectionModel";
 import { installObsidianDom } from "./obsidianDom";
-import { editorInfoField, type Issue22EditorOwner } from "./issue22ObsidianStub";
+import { editorInfoField, issue22Notices, type Issue22EditorOwner } from "./issue22ObsidianStub";
+import HandwritingPlugin from "../../src/main";
+import { embedInkChanged } from "../../src/inline/EmbedInk";
+import { clearInkClipboard, copyInk, inkClipboardMarker } from "../../src/inline/InkClipboard";
+import { setRoutineNoticesVisible } from "../../src/diag/RoutineNotices";
 
 installObsidianDom();
-inlineInk.attachHost({ readPageId: () => null, claimId: async (_path, pageId) => ({ pageId }),
-	loadSidecar: async () => null, scheduleSidecar: () => {}, scheduleSidecarNow: async () => {}, notify: () => {} });
+const fixtureInkHost = { readPageId: () => null, claimId: async (_path: string, pageId: string) => ({ pageId }),
+	loadSidecar: async () => null, scheduleSidecar: () => { persistenceWrites++; },
+	scheduleSidecarNow: async () => {}, notify: () => {} };
+inlineInk.attachHost(fixtureInkHost);
 
 const prefix = "Synthetic heading\n\n\n\n\n\n\n\n";
 const markdown = "| item | value |\n| --- | --- |\n| alpha | beta |\n";
@@ -46,10 +53,52 @@ type Overlay = { committedCanvas: HTMLCanvasElement; selection: SelectionModel }
 let view: EditorView, host: HTMLElement, overlay: Overlay, observer: MutationObserver;
 const path = "synthetic-issue22.md";
 let mutations = 0, measures = 0;
+let persistenceWrites = 0;
 const owner: Issue22EditorOwner = { app: { commands: { executeCommandById: () => false } }, file: { path }, editor: {} };
 type EditorRecord = { id: string; view: EditorView; host: HTMLElement; kind: "note" | "cell" | "bare" | "popout" };
 const editors: EditorRecord[] = [];
+type RenderChild = { onload?(): void; onunload?(): void };
+type Postprocessor = (el: HTMLElement, ctx: { sourcePath: string; containerEl: HTMLElement; addChild(child: RenderChild): void }) => void;
+let postprocessor: Postprocessor | null = null;
+type Command = { id: string; checkCallback?: (checking: boolean) => boolean };
+let pasteCommand: Command | null = null;
+let pluginInstance: Record<string, unknown> | null = null;
+const noop = () => {};
+async function registeredPostprocessor(): Promise<Postprocessor> {
+	if (postprocessor) return postprocessor;
+	const callbacks: Postprocessor[] = [];
+	const adapter = { exists: async () => false, read: async () => "", write: async () => {},
+		mkdir: async () => {}, list: async () => ({ files: [], folders: [] }), stat: async () => null,
+		remove: async () => {}, rename: async () => {} };
+	const app = { loadLocalStorage: () => null, saveLocalStorage: noop,
+		vault: { adapter, on: () => ({}), getFileByPath: () => null, getMarkdownFiles: () => [],
+			getFiles: () => [], getAbstractFileByPath: () => null, cachedRead: async () => "",
+			configDir: ".obsidian" },
+		workspace: { on: () => ({}), onLayoutReady: noop, getLeavesOfType: () => [],
+			getActiveFile: () => null, getActiveViewOfType: () => null, activeLeaf: null,
+			iterateAllLeaves: noop, trigger: noop },
+		metadataCache: { on: () => ({}), getFileCache: () => null, getCache: () => null },
+		keymap: { pushScope: noop, popScope: noop }, scope: {},
+		fileManager: { processFrontMatter: async () => {} } };
+	const plugin = new (HandwritingPlugin as unknown as new (a: unknown, m: unknown) => Record<string, unknown> & { onload(): Promise<void> })(app, {});
+	Object.assign(plugin, { app, manifest: { id: "handwriting", version: "1.4.21", dir: ".obsidian/plugins/handwriting" },
+		addCommand: (command: Command) => { if (command.id === "paste-ink") pasteCommand = command; },
+		registerView: noop, addSettingTab: noop, addRibbonIcon: () => ({ addClass: noop }),
+		registerEvent: noop, registerDomEvent: noop, registerInterval: noop,
+		registerEditorExtension: noop, registerMarkdownPostProcessor: (cb: Postprocessor) => callbacks.push(cb),
+		registerObsidianProtocolHandler: noop, register: noop,
+		loadData: async () => ({}), saveData: async () => {} });
+	await plugin.onload();
+	// The registered plugin installs its own host sink. Restore this fixture's
+	// counted synthetic adapter so persistence assertions still observe paste.
+	inlineInk.attachHost(fixtureInkHost);
+	pluginInstance = plugin;
+	if (callbacks.length !== 1) throw Error(`expected production postprocessor, got ${callbacks.length}`);
+	postprocessor = callbacks[0]!;
+	return postprocessor;
+}
 let cell: EditorRecord | null = null;
+let cellInkPlugin: ViewPlugin<InkOverlayPlugin> | null = null;
 let cellWrapper: HTMLElement | null = null;
 let cellContent: HTMLElement | null = null;
 let cellNumber = 0;
@@ -104,7 +153,7 @@ async function mount(tableFirst: boolean) {
 	host = document.body.appendChild(document.createElement("div"));
 	host.className = "markdown-source-view issue22-proof";
 	view = new EditorView({ parent: host, state: EditorState.create({ doc: prefix + (tableFirst ? markdown : "") + suffix,
-		extensions: [tables, editorInfoField.init(() => owner),
+			extensions: [tables, history(), editorInfoField.init(() => owner),
 			inkOverlayExtension(), EditorView.theme({ "&": { width: "640px", height: "600px" },
 				".cm-content": { fontFamily: "monospace", fontSize: "16px", lineHeight: "24px" } })] }) });
 	view.dom.dataset.issue22Editor = "note-main";
@@ -128,6 +177,111 @@ async function insertTable() {
 	view.dispatch({ changes: { from: prefix.length, insert: markdown } });
 	await settle();
 	return snapshot();
+}
+async function postprocessOwnBlock(kind: "table" | "callout") {
+	const callback = await registeredPostprocessor();
+	let container: HTMLElement, section: HTMLElement;
+	if (kind === "table") {
+		container = host.querySelector<HTMLElement>(".cm-table-widget") ?? (() => { throw Error("table widget missing"); })();
+		section = container.querySelector<HTMLElement>(".table-cell-content") ?? (() => { throw Error("table cell missing"); })();
+	} else {
+		container = view.dom.appendChild(document.createElement("div"));
+		container.className = "cm-embed-block cm-callout";
+		section = container.appendChild(document.createElement("div"));
+		section.className = "markdown-rendered";
+		section.textContent = "Synthetic callout content";
+	}
+	let children = 0;
+	callback(section, { sourcePath: path, containerEl: container,
+		addChild(child) { children++; child.onload?.(); } });
+	await settle();
+	const result = { children, staticCanvases: container.querySelectorAll("canvas.handwriting-embed-ink").length,
+		original: snapshot(), table: kind === "table" ? tableRect() : rect(container) };
+	return result;
+}
+async function postprocessOwnBlockBoundary(kind: "detached-container" | "delayed") {
+	const callback = await registeredPostprocessor();
+	let container: HTMLElement;
+	if (kind === "detached-container") {
+		container = host.querySelector<HTMLElement>(".cm-table-widget") ??
+			(() => { throw Error("own table widget missing"); })();
+	} else {
+		container = document.createElement("div");
+	}
+	const section = document.createElement("div"); // deliberately detached at callback entry
+	let children = 0;
+	callback(section, { sourcePath: path, containerEl: container,
+		addChild(child) { children++; child.onload?.(); } });
+	if (kind === "delayed") {
+		container.className = "cm-embed-block cm-callout markdown-rendered";
+		container.style.cssText = "width:320px;height:80px;background:white";
+		section.className = "markdown-rendered";
+		section.textContent = "Delayed own-note callout";
+		container.appendChild(section);
+		view.dom.appendChild(container);
+	}
+	await settle();
+	return { kind, children, staticCanvases: container.querySelectorAll("canvas.handwriting-embed-ink").length,
+		original: snapshot(), rect: kind === "detached-container" ? tableRect() : rect(container) };
+}
+async function postprocessRenderedControl(
+	kind: "reading" | "embed" | "other-note" | "delayed" | "unloaded" | "popout",
+	withInk: boolean
+) {
+	const callback = await registeredPostprocessor();
+	const targetPath = kind === "other-note" ? "synthetic-target-b.md" : path;
+	await inlineInk.ensureLoaded(targetPath);
+	if (withInk) {
+		inlineInk.applyAdd(targetPath, [{ ...structuredClone(stroke), id: `control-${kind}` }]);
+		inkExternallyReloaded(targetPath);
+	}
+	let doc = document, iframe: HTMLIFrameElement | null = null;
+	if (kind === "popout") {
+		iframe = document.body.appendChild(document.createElement("iframe"));
+		iframe.style.cssText = "position:absolute;left:0;top:0;width:640px;height:360px;border:0";
+		doc = iframe.contentDocument!;
+		for (const style of document.querySelectorAll("style")) doc.head.appendChild(style.cloneNode(true));
+		const realm = doc.defaultView as unknown as { HTMLElement: typeof HTMLElement };
+		for (const name of ["createEl", "createDiv", "createSpan", "setText", "empty", "detach", "addClass", "removeClass", "toggleClass", "setCssStyles"])
+			Object.defineProperty(realm.HTMLElement.prototype, name, Object.getOwnPropertyDescriptor(HTMLElement.prototype, name)!);
+	}
+	const root = doc.createElement("div");
+	root.className = kind === "delayed" || kind === "unloaded" ? "" :
+		kind === "reading" ? "markdown-preview-view" : "markdown-embed-content";
+	root.style.cssText = "position:relative;width:320px;height:230px;background:white;overflow:visible";
+	const section = doc.createElement("div");
+	section.className = kind === "delayed" || kind === "unloaded" ? "" : "markdown-rendered";
+	section.textContent = "Rendered note content";
+	let callout: HTMLElement | null = null;
+	if (kind === "other-note") {
+		callout = view.dom.appendChild(document.createElement("div"));
+		callout.className = "cm-embed-block cm-callout markdown-rendered";
+		callout.appendChild(root);
+	} else if (kind !== "delayed" && kind !== "unloaded") {
+		(kind === "reading" || kind === "popout" ? doc.body : view.dom).appendChild(root);
+	}
+	if (kind !== "other-note") root.appendChild(section);
+	let children = 0, renderChild: RenderChild | null = null;
+	callback(section, { sourcePath: targetPath, containerEl: root,
+		addChild(child) { children++; renderChild = child; child.onload?.(); } });
+	if (kind === "other-note") root.appendChild(section); // detached section, valid attached container
+	if (kind === "unloaded") (renderChild as RenderChild | null)?.onunload?.();
+	if (kind === "delayed" || kind === "unloaded") {
+		root.className = "markdown-embed-content";
+		section.className = "markdown-rendered";
+		view.dom.appendChild(root);
+	}
+	await settle();
+	const canvas = root.querySelector<HTMLCanvasElement>("canvas.handwriting-embed-ink");
+	const raster = canvas ? canvasRaster(canvas) : null;
+	const box = rect(root), frame = iframe ? rect(iframe) : null;
+	return { kind, children, canvasCount: root.querySelectorAll("canvas.handwriting-embed-ink").length,
+		raster, rect: frame ? { ...box, x: box.x + frame.x, y: box.y + frame.y } : box,
+		insideCallout: !!root.closest(".cm-callout"), storeCount: inlineInk.strokes(targetPath).length };
+}
+function notifyOwnBlockInkChanged() {
+	embedInkChanged(path);
+	return host.querySelectorAll("canvas.handwriting-embed-ink").length;
 }
 function tableRect() {
 	const table = host.querySelector(".cm-table-widget table");
@@ -221,6 +375,7 @@ function removeCell() {
 	if (cellContent) cellContent.hidden = false;
 	editors.splice(editors.indexOf(old), 1);
 	cell = null; cellWrapper = null; cellContent = null;
+	cellInkPlugin = null;
 	host.querySelector(".cm-table-widget")?.classList.remove("has-focus");
 }
 async function destroyCell() {
@@ -245,8 +400,31 @@ async function focusCell(withOwner = true, index = 0) {
 	const id = `cell-${++cellNumber}`;
 	cell = { id, view: child, host: childHost, kind: withOwner ? "cell" : "bare" };
 	editors.push(cell);
-	child.setState(EditorState.create({ doc: text, extensions: [editorInfoField.init(() => withOwner ? owner : undefined),
-		inkOverlayExtension(), EditorView.theme({ "&": { width: "100%", height: "80px" },
+	// Keep the extension's production ViewPlugin token so the captured command
+	// can call the real inert cell overlay, not a zero-result stand-in.
+	const inkExtensions = inkOverlayExtension() as Extension[];
+	cellInkPlugin = inkExtensions[2] as ViewPlugin<InkOverlayPlugin>;
+	child.setState(EditorState.create({ doc: text, extensions: [history(), editorInfoField.init(() => withOwner ? owner : undefined),
+		EditorView.updateListener.of(update => {
+			// Synthetic HJ -> UJ host boundary: document and selection changes
+			// forward to the parent; effects-only ink transactions do not.
+			if (!update.docChanged && !update.selectionSet) return;
+			const source = view.state.doc.toString(), from = source.indexOf(text);
+			if (from < 0) return;
+			const selection = update.state.selection.main;
+			view.dispatch({
+				...(update.docChanged ? { changes: { from, to: from + text.length,
+					insert: update.state.doc.toString() } } : {}),
+				...(update.selectionSet ? { selection: { anchor: from + selection.anchor,
+					head: from + selection.head } } : {}),
+			});
+		}),
+		Prec.highest(EditorView.domEventHandlers({ keydown(event) {
+			// Synthetic host routes a cell's Mod-z to the owning note editor.
+			if (event.key.toLowerCase() !== "z" || !(event.ctrlKey || event.metaKey)) return false;
+			event.preventDefault(); event.stopPropagation(); undo(view); return true;
+		} })),
+		inkExtensions, EditorView.theme({ "&": { width: "100%", height: "80px" },
 			".cm-content": { padding: "0", fontFamily: "monospace", fontSize: "16px", lineHeight: "24px" } })] }));
 	child.dom.dataset.issue22Editor = id;
 	const detached = census();
@@ -265,6 +443,98 @@ async function focusCell(withOwner = true, index = 0) {
 }
 async function blurCell() { view.focus(); await settle(); return census(); }
 async function refocusCell() { if (!cell) throw Error("no cell to refocus"); cell.view.focus(); await settle(); return census(); }
+
+function pasteSnapshot() {
+	const other = editors.find(e => e.id === "note-second" || e.id === "note-popout");
+	return { parentDoc: view.state.doc.toString(), cellDoc: cell?.view.state.doc.toString() ?? null,
+		parentSelection: { anchor: view.state.selection.main.anchor, head: view.state.selection.main.head },
+		cellSelection: cell ? { anchor: cell.view.state.selection.main.anchor,
+			head: cell.view.state.selection.main.head } : null,
+		parentUndo: undoDepth(view.state), parentRedo: redoDepth(view.state),
+		cellUndo: cell ? undoDepth(cell.view.state) : null,
+		otherDoc: other?.view.state.doc.toString() ?? null,
+		otherUndo: other ? undoDepth(other.view.state) : null,
+		ids: inlineInk.strokes(path).map(s => s.id),
+		points: inlineInk.strokes(path).map(s => s.points.map(p => ({ x: p.x, y: p.y }))),
+		selected: [...overlay.selection.strokeIds], persistenceWrites,
+		notices: [...issue22Notices] };
+}
+async function seedParentTextEdit() {
+	view.dispatch({ changes: { from: view.state.doc.length, insert: "seed" } });
+	await settle();
+	return pasteSnapshot();
+}
+async function seedCellSelection() {
+	if (!cell) throw Error("selection seed needs cell");
+	cell.view.dispatch({ selection: { anchor: 1, head: 3 } });
+	await settle();
+	return pasteSnapshot();
+}
+async function cellUndoParent() {
+	if (!cell) throw Error("cell undo needs cell");
+	const before = pasteSnapshot();
+	const event = new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true });
+	cell.view.contentDOM.dispatchEvent(event);
+	await settle();
+	return { before, prevented: event.defaultPrevented, after: pasteSnapshot() };
+}
+function dispatchPaste(target: HTMLElement, text: string) {
+	const data = new DataTransfer(); data.setData("text/plain", text);
+	const event = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+	let bubbled = 0;
+	const onBubble = () => { bubbled++; };
+	(host.parentElement ?? document.body).addEventListener("paste", onBubble);
+	target.dispatchEvent(event);
+	(host.parentElement ?? document.body).removeEventListener("paste", onBubble);
+	return { prevented: event.defaultPrevented, bubbled };
+}
+async function cellPasteProbe(kind: "current" | "stale" | "text") {
+	if (!cell) throw Error("cell paste needs a mounted cell");
+	issue22Notices.length = 0;
+	const text = kind === "current" ? inkClipboardMarker()! :
+		kind === "stale" ? "handwriting-ink/v1 stale-token (1 stroke)" : "ordinary text";
+	if (kind === "stale") clearInkClipboard();
+	const before = pasteSnapshot();
+	const event = dispatchPaste(cell.view.contentDOM, text);
+	await settle();
+	return { kind, text, event, before, after: pasteSnapshot() };
+}
+function prepareInkPaste() {
+	copyInk([stroke], path);
+	return inkClipboardMarker();
+}
+async function parentPasteAndUndo() {
+	issue22Notices.length = 0;
+	const before = pasteSnapshot();
+	const event = dispatchPaste(view.contentDOM, inkClipboardMarker()!);
+	await settle();
+	const after = pasteSnapshot();
+	const undid = undo(view);
+	await settle();
+	const afterUndo = pasteSnapshot();
+	const redid = redo(view);
+	await settle();
+	return { before, event, after, undid, afterUndo, redid, afterRedo: pasteSnapshot() };
+}
+async function capturedCommandCellRefusal() {
+	await registeredPostprocessor();
+	if (!pluginInstance || !pasteCommand?.checkCallback || !cell || !cellInkPlugin)
+		throw Error("paste command needs registered command and live cell overlay");
+	const realCellOverlay = cell.view.plugin(cellInkPlugin);
+	if (!realCellOverlay) throw Error("production cell ViewPlugin missing");
+	const prior = pluginInstance.activeInkSurface;
+	pluginInstance.activeInkSurface = () => ({ kind: "inline", overlay: realCellOverlay });
+	const results = [];
+	for (const routine of [false, true]) {
+		setRoutineNoticesVisible(routine);
+		issue22Notices.length = 0;
+		const before = pasteSnapshot();
+		const accepted = pasteCommand.checkCallback(false);
+		results.push({ routine, accepted, before, after: pasteSnapshot() });
+	}
+	pluginInstance.activeInkSurface = prior;
+	return results;
+}
 
 async function addLegitimatePane(popout: boolean) {
 	let doc = document;
@@ -324,8 +594,12 @@ function layerPNGs() {
 			png: canvas.width && canvas.height ? canvas.toDataURL("image/png") : null }));
 	});
 }
-const api = { mount, addInk, insertTable, snapshot, tableRect, duplicateRaster, pixels, settle,
+const api = { mount, addInk, insertTable, postprocessOwnBlock, postprocessOwnBlockBoundary,
+	postprocessRenderedControl, notifyOwnBlockInkChanged,
+	snapshot, tableRect, duplicateRaster, pixels, settle,
 	census, focusCell, blurCell, refocusCell, destroyCell, addLegitimatePane, setPaneRootEligibility, layerPNGs,
+	pasteSnapshot, seedParentTextEdit, seedCellSelection, cellUndoParent,
+	cellPasteProbe, prepareInkPaste, parentPasteAndUndo, capturedCommandCellRefusal,
 	destroy: () => { observer.disconnect(); removeCell(); for (const e of editors.splice(0)) { e.view.destroy(); e.host.remove(); } popoutFrame?.remove(); } };
 declare global { interface Window { issue22: typeof api } }
 window.issue22 = api;

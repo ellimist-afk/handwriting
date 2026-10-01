@@ -188,6 +188,11 @@ type Overlay = { ensurePenTools(): void; destroy(): void };
 function noteOverlay(): Overlay {
 	let mounted = false;
 	const noop = (): void => undefined;
+	const zoomChrome = () => ({
+		createEl: () => ({ addEventListener: noop, textContent: "", disabled: false }),
+		toggleClass: noop,
+		remove: noop,
+	});
 	// Enough of an editor for `destroy()` to run to the end. It has to: the
 	// only thing that takes an overlay back out of `instances` is
 	// `instances.delete(this)` on `destroy`'s last line, so a teardown that
@@ -196,7 +201,7 @@ function noteOverlay(): Overlay {
 	// overlay any earlier test opened. That is not a hypothetical; it is what
 	// this fixture did before the members below were added.
 	const dom = {
-		parentElement: { setCssStyles: noop },
+		parentElement: { setCssStyles: noop, createDiv: zoomChrome },
 		ownerDocument: {
 			defaultView: { getComputedStyle: () => ({ position: "relative" }), cancelAnimationFrame: noop },
 		},

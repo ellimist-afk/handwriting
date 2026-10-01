@@ -1,5 +1,5 @@
 /**
- * s93, step 8: WHAT the pinch-end repaint's cost is made of, at a fixed point
+ * Step 8: WHAT the pinch-end repaint's cost is made of, at a fixed point
  * count.
  *
  * ZoomFreezeHeavyNote.test.ts is the red: 200 strokes x 2000 samples spanning
@@ -129,7 +129,7 @@ for (const arm of ARMS) it(`cost shape at ${STROKES} x ${SAMPLES} points: ${arm.
 		// so measured nothing at all.
 		await page.evaluate(([pane, scroll]) => (window as any).scrollColumnAnchor.runTearMount(1, scroll, pane, true, { fx: 0.5, fy: 0.5 }),
 			[{ w: PANE.w, h: PANE.h }, arm.scroll] as const);
-		// s179: the canvas-off mode no longer zooms, so this cost cell runs under the Infinite
+		// The canvas-off mode no longer zooms, so this cost cell runs under the Infinite
 		// Canvas. The variable is unchanged.
 		await page.evaluate(() => (window as any).scrollColumnAnchor.setScrollExpansionEnabled(true));
 
@@ -153,7 +153,7 @@ for (const arm of ARMS) it(`cost shape at ${STROKES} x ${SAMPLES} points: ${arm.
 		const tasks = await page.evaluate(() => (window as any).__s93tasks as number[]).catch(() => [] as number[]);
 		const longest = tasks.length ? Math.round(Math.max(...tasks)) : 0;
 		/**
-		 * The number Architect asked for: the mean cost of one closePath in the
+		 * The number review asked for: the mean cost of one closePath in the
 		 * worst commit, as an UPPER bound. It is the whole commit divided by the
 		 * closes, so it carries the moveTo, lineTo, fill and clear as well; the
 		 * closePath-only figure comes from the no-op probe's difference, not from

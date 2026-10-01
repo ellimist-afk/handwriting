@@ -307,3 +307,49 @@ export function fontZoomFactor(currentFontPx: number, referenceFontPx: number): 
 	if (!Number.isFinite(r) || r <= 0) return 1;
 	return Math.min(Math.max(r, MIN_SCALE), MAX_SCALE);
 }
+
+/**
+ * Whether this window's engine reports getBoundingClientRect in zoomed
+ * lengths under CSS zoom. WebKit before Safari 26.4 returned them unscaled,
+ * the whole rect divided by the element's effective zoom (WebKit bug 77998).
+ * The overlay measures its scale as a rect width over offsetWidth, so on that
+ * engine a host shrunk with CSS zoom reads 1 at every zoom and pen samples
+ * are never divided by it: zoomed out on an iPad, ink lands at the zoom times
+ * the pen's distance from the top left of the screen (GitHub #32).
+ *
+ * Two hidden boxes of one width, one at zoom 2 and one at zoom 1, compared by
+ * ratio, so a zoom or transform on the body cancels out. Near 2: scaled. Near
+ * 1: unscaled. Anything else, a zero rect or a throw: null, no answer, not
+ * remembered, so the next call asks again. A real answer is kept per window.
+ */
+const zoomRectAnswers = new WeakMap<object, boolean>();
+export function zoomScalesClientRects(win: Window | undefined): boolean | null {
+	if (!win) return null;
+	const kept = zoomRectAnswers.get(win);
+	if (kept !== undefined) return kept;
+	let answer: boolean | null = null;
+	try {
+		const doc = win.document, body = doc?.body;
+		if (!body || typeof (win as { createDiv?: unknown }).createDiv !== "function") return null;
+		const box = (zoom: string): HTMLElement => {
+			const el = (win as Window & { createDiv(): HTMLDivElement }).createDiv();
+			el.style.cssText = `position:absolute;left:-10000px;top:0;width:100px;height:1px;zoom:${zoom};visibility:hidden;pointer-events:none`;
+			body.appendChild(el);
+			return el;
+		};
+		const one = box("1"), two = box("2");
+		try {
+			const w1 = one.getBoundingClientRect().width, w2 = two.getBoundingClientRect().width;
+			const ratio = w1 > 0 && w2 > 0 ? w2 / w1 : NaN;
+			if (ratio > 1.5 && ratio < 2.5) answer = true;
+			else if (ratio > 0.5 && ratio < 1.5) answer = false;
+		} finally {
+			one.remove();
+			two.remove();
+		}
+	} catch {
+		return null;
+	}
+	if (answer !== null) zoomRectAnswers.set(win, answer);
+	return answer;
+}

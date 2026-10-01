@@ -1,9 +1,9 @@
 /**
- * s179(2): CANVAS OFF, THE PINCH DOES NOTHING. RETIRED FROM THE FITTING-PAGE STANDING-PAN CLAIM.
+ * CANVAS OFF, THE PINCH DOES NOTHING. RETIRED FROM THE FITTING-PAGE STANDING-PAN CLAIM.
  *
  * This file used to read the paper through a pan standing at rest after a zoom-out settle on a page that fits the
  * pane (readable line length on and off, the fit-clamp readout). That claim's own regime - reaching a fitting page by
- * a pinch with the canvas off - no longer exists: s179 restores the canvas-off pinch gate, so a pinch with the
+ * a pinch with the canvas off - no longer exists: a later ruling restores the canvas-off pinch gate, so a pinch with the
  * canvas off is refused outright (no preview, scale stays 1, the bar reads busy) and never reaches a settle to stand
  * a pan against. The old arms (RLL on at 75 percent, RLL off at 100 percent) are gone with their subject, not
  * rewritten; the paper-follows-a-live-pan guarantee for a canvas-ON gesture lives in PaperPinchPan and
@@ -155,7 +155,7 @@ afterAll(async () => { await browser?.close(); });
 const call = (p: Page, method: string, ...args: unknown[]) => p.evaluate(([m, a]) => (window as any).standingPan[m](...a), [method, args] as const);
 
 /**
- * s179(2), THE PIN: canvas off, a pinch, nothing moves. Same page, same mount (canvas off is this
+ * THE PIN: canvas off, a pinch, nothing moves. Same page, same mount (canvas off is this
  * rig's own default, unchanged), one gesture asking for 200 percent about the ink.
  */
 it("CANVAS OFF: a two-finger pinch is not a zoom - no preview, the scale stays at 100 percent, the bar reads busy", async () => {

@@ -18,11 +18,12 @@ import {
 	captureInlinePenTrace,
 	clearInlinePenTrace,
 	formatInlinePenTrace,
+	InlinePenRouter,
 	summarizeAcquisitions,
 	TraceCapture,
 } from "./InlinePenRouter";
 import { analyzePointerDeliveryTrace } from "./PointerDeliveryTrace";
-import { harness, installFakeWindow, penEvent } from "../../test/routerHarness";
+import { fakeEl, harness, installFakeWindow, penEvent, recorder } from "../../test/routerHarness";
 import { replayTrace } from "../../test/replayTrace";
 
 import chromiumStream from "../../test/traces/synthetic-chromium-stream.json";
@@ -77,6 +78,52 @@ describe("capture: the trace records what the ink consumed", () => {
 		const down = cap.events.find((e) => e.type === "pointerdown");
 		expect(down?.x).toBe(400.6);
 		expect(down?.y).toBe(300.4);
+	});
+
+	it("guard row after a pen-down carries rect, scale, pan, offset and the sample onPenDown got - GH-32's diagnostic", () => {
+		const el = fakeEl();
+		const rec = recorder();
+		new InlinePenRouter(
+			el as unknown as HTMLElement,
+			el as unknown as HTMLElement,
+			rec.cb,
+			() => 2,
+			"none",
+			() => ({ x: 3, y: 4 })
+		);
+		const fire = (ev: PointerEvent) => {
+			const handler = el.handlers.get(ev.type);
+			if (!handler) throw new Error(`router registered no handler for ${ev.type}`);
+			handler(ev);
+		};
+		// Rect moves between build (the constructor's read) and down: only a
+		// row that reads this.rect AFTER refreshRect() sees (12,8), not (0,0).
+		el.getBoundingClientRect = () => ({
+			left: 12,
+			top: 8,
+			right: 812,
+			bottom: 608,
+			width: 800,
+			height: 600,
+			x: 12,
+			y: 8,
+		});
+		const down = penEvent("pointerdown", 100, { x: 110, y: 220, offsetX: 50, offsetY: 100 });
+		(down as unknown as { target: unknown }).target = el;
+		fire(down);
+		fire(penEvent("pointerup", 120, { pressure: 0, buttons: 0 }));
+		const cap = captureInlinePenTrace({ note: "test" });
+		const downIdx = cap.events.findIndex((e) => e.type === "pointerdown");
+		const guardIdx = cap.events.findIndex(
+			(e, i) => i > downIdx && e.type === "guard" && e.id === cap.events[downIdx]!.id && e.note.startsWith("geo ")
+		);
+		expect(guardIdx).toBeGreaterThan(downIdx);
+		const row = cap.events[guardIdx]!;
+		// rect (12,8) post-refresh, scale 2, pan (3,4):
+		// sample = ((110 - 12 - 3) / 2, (220 - 8 - 4) / 2) = (47.5, 104).
+		expect(row.note).toBe(
+			"geo rect=(12.000,8.000) scale=2.000 pan=(3.000,4.000) offset=(50.000,100.000) tgt=1 sample=(47.500,104.000)"
+		);
 	});
 
 	it("keeps every coalesced sample, not just the dispatched event", () => {

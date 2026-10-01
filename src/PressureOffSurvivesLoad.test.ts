@@ -1,5 +1,5 @@
 /**
- * s236(1) red-first (ARCHITECT-RULING-1420.md, `^## s236\.`). Issue #27: a vault
+ * Red-first. Issue #27: a vault
  * with pressure sensitivity saved OFF gets every old firm stroke redrawn under
  * the ON law, up to 3.22x wider, because loadSettings hardcodes
  * `pressureSensitivity: true` (main.ts :5215) instead of reading the stored
@@ -18,7 +18,7 @@ import type { InkPoint } from "./ink/Stroke";
 
 // Harness as SettingsSimplified.test.ts: `Object.create` on the real plugin,
 // loadSettings run for real, nothing restated there - this file owns its own
-// copy so the two lanes (Slicer 1's red cell, Engineer 2's fix) touch no
+// copy so the two lanes (the red cell and the fix) touch no
 // common file.
 function ensureDocument(): void {
 	const g = globalThis as unknown as { document?: unknown };
@@ -54,7 +54,7 @@ function sample(pressure: number): InkPoint[] {
 	return [{ x: 0, y: 0, t: 0, pressure }];
 }
 
-describe("s236(1): pressure-off survives a save/load round trip", () => {
+describe("pressure-off survives a save/load round trip", () => {
 	it("an exp7 stroke's firm samples redraw wider under ON than the OFF law that saved them, and a stored OFF must survive load", () => {
 		// ---- the width law: samples above 0.7, OFF vs ON --------------------
 		const firmSamples = [0.75, 1.0];

@@ -26,7 +26,7 @@
  * an end but heading INTO the range still scrolls and reports no pull; and the pen path is untouched -
  * this gate is inside the touch branch.
  *
- * s135: THE GIVE MOVED INTO INFINITE CANVAS, so the flag's meaning is inverted and every row here is
+ * THE GIVE MOVED INTO INFINITE CANVAS, so the flag's meaning is inverted and every row here is
  * restated against the new one. The rig now defaults to the canvas being ON, which is where a give
  * exists at all; the control at the bottom is the canvas being OFF, where the note scrolls like any
  * other Obsidian note and an end gives nothing.
@@ -77,7 +77,7 @@ function rig(opts: { rangeX?: number; rangeY?: number; top?: number; left?: numb
 			...record.cb,
 			fingerInk: () => false,
 			penOff: () => false,
-			// s135: mirrors the host (InkOverlay.ts `overscrollAllowancePx`): the canvas gives, canvas off does not.
+			// Mirrors the host (InkOverlay.ts `overscrollAllowancePx`): the canvas gives, canvas off does not.
 			overscrollAllowancePx: () => (infiniteCanvas ? ALLOWANCE : 0),
 			onOverscrollPull: (x: number, y: number) => pulls.push({ x, y }),
 			onOverscrollRelease: () => void releases++,
@@ -148,7 +148,7 @@ function drag(h: ReturnType<typeof rig>, axis: "x" | "y", stepPx: number, steps:
 	h.pointer("pointerup", at(steps).x, at(steps).y);
 }
 
-describe("s128: a lift against an end leaves the guard armed", () => {
+describe("a lift against an end leaves the guard armed", () => {
 	it("after a drag down at the top lifts, touch-action stays none: the next finger is ours, not the browser's", () => {
 		const h = rig({ rangeX: 0, rangeY: 600, top: 0 });
 		drag(h, "y", 20, 12);
@@ -226,7 +226,7 @@ describe("a drag that starts against an end", () => {
 
 	/**
 	 * A TAP IS NOT A DRAG, and on a note that fits the pane EVERY touch now begins against an end,
-	 * so every touch takes the edge branch - including the tap that places the caret. Reviewer's
+	 * so every touch takes the edge branch - including the tap that places the caret. The review's
 	 * read, and the right one to check: taking the assist must not swallow a tap.
 	 *
 	 * What is asserted is what a swallowed tap would break: the contact's default is not prevented,
@@ -284,7 +284,7 @@ describe("a drag that starts against an end", () => {
 		expect(h.pulls, "two fingers dragged at the end: the pinch owns it, nothing is pulled").toEqual([]);
 	});
 
-	it("CONTROL: with the canvas OFF the note scrolls like any other, so an end gives nothing (s135)", () => {
+	it("CONTROL: with the canvas OFF the note scrolls like any other, so an end gives nothing", () => {
 		const h = rig({ rangeX: 0, rangeY: 0, infiniteCanvas: false });
 		drag(h, "y", 20, 12);
 		expect(h.pulls, "canvas off: the host offers no allowance, so nothing is refused into a pull").toEqual([]);

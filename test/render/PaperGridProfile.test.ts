@@ -1,8 +1,8 @@
 /**
- * S192, MEASUREMENT ONLY: what grid paper actually paints at a pinch-left zoom.
+ * MEASUREMENT ONLY: what grid paper actually paints at a pinch-left zoom.
  *
  * Alan, Orion, vault test 2, c978650e: "background kinda messed up on grid background at 50% zoom", screenshot at
- * slate-artifacts/1.4.20/s192-grid-50/alan-orion-grid-50pct.png, zoom 51.8 percent. This file measures; it rules
+ * Alan's Orion screenshot alan-orion-grid-50pct.png, zoom 51.8 percent. This file measures; it rules
  * nothing and fixes nothing. It reads every rule the grid paints on both axes and reports position, width, peak
  * contrast and mass, so the table can say where the rules are uneven and whether the pitch is a whole number of
  * device px there.
@@ -150,7 +150,7 @@ function summary(bs: Band[], periodDevice: number): AxisSummary {
 
 /**
  * One arm's departure from the default: which paper, how long and wide the scrolled area is, and whether the rule or
- * the gradient itself is replaced before the pixels are read. s192 add. 2's E1 to E5, and nothing else changes.
+ * the gradient itself is replaced before the pixels are read. The ruling's E1 to E5, and nothing else changes.
  */
 interface Variant {
 	/** What the line in the table is called. "" is the default arm. */
@@ -168,7 +168,7 @@ interface Variant {
 	readonly onlyLayer?: "h" | "v";
 	/** With `literalStops`, paint the vertical layer FIRST and the horizontal one second. */
 	readonly reverseLayers?: boolean;
-	/** s192 add. 3's direction: the grid as ONE conic-gradient tile, a pitch square, applied over the shipped CSS. */
+	/** The ruling's direction: the grid as ONE conic-gradient tile, a pitch square, applied over the shipped CSS. */
 	readonly tile?: boolean;
 	/** Scroll to the end of the scrolled area before reading, for the drift arms. */
 	readonly atBottom?: boolean;
@@ -186,7 +186,7 @@ interface Variant {
 	readonly previewBox?: boolean;
 	/** G5: a minimum height on the content, to walk the scrolled area's size. */
 	readonly tall?: number;
-	/** s192's plant: both layers back on the scroller, the vertical box emptied. */
+	/** The ruling's plant: both layers back on the scroller, the vertical box emptied. */
 	readonly plantBothOnScroller?: boolean;
 }
 
@@ -232,7 +232,7 @@ async function readArm(dsf: number, zoom: number, fontPx: number, v: Variant = {
 			await (window as any).viewportFixture.settle();
 			const sc = document.querySelector(".cm-scroller") as HTMLElement, host = document.querySelector(".cm-editor") as HTMLElement;
 			const k0 = sc.getBoundingClientRect().height / sc.offsetHeight;
-			// s192: since the fix, grid paper paints its VERTICAL rules on a box inside the scroller
+			// Since the fix, grid paper paints its VERTICAL rules on a box inside the scroller
 			// (.handwriting-paper-grid-column), not on the scroller itself. Every arm below that REPLACES the scroller's
 			// background is asking what one box paints, so the plugin's own box is emptied first - left painting, it adds
 			// a perfect set of vertical rules underneath the arm's own, and an arm built to paint one axis reads two.
@@ -324,7 +324,7 @@ async function readArm(dsf: number, zoom: number, fontPx: number, v: Variant = {
 					sc.insertBefore(box, sc.firstChild);
 				}
 			}
-			// s192 plant: the two layers back on the one box, as they were at the parent, and the vertical box left with
+			// plant: the two layers back on the one box, as they were at the parent, and the vertical box left with
 			// nothing to paint. The stops are the element's own resolved values, which E3 measured to reproduce the
 			// shipped grid to the digit.
 			if (v.plantBothOnScroller) {
@@ -526,7 +526,7 @@ it.each(SWEEP)("grid at DSF %s, zoom %s, text %s px", async (dsf, zoom, fontPx) 
 }, 240_000);
 
 /**
- * S192 ADD. 2, E1 TO E5. The pitch read is withdrawn; these arms ask what else could select a bad one. All at the
+ * E1 TO E5. The pitch read is withdrawn; these arms ask what else could select a bad one. All at the
  * priority arm - dpr 2, zoom 0.518, 18 px text - unless the line says otherwise, and all measure only.
  *
  * E1 asks whether the bad axis follows the gradient's LENGTH: the same arm with a short scrolled area, the current
@@ -560,14 +560,14 @@ it.each(E_ARMS.map(a => [a.label, a] as const))("E-ARM %s", async (_label, a) =>
 }, 240_000);
 
 /**
- * S192 ADD. 3, F1 TO F6. The direction under test: the grid as ONE layer - a pitch-square conic tile carrying its
+ * F1 TO F6. The direction under test: the grid as ONE layer - a pitch-square conic tile carrying its
  * phase in the tile position, exactly as the dots do - against the shipped two-layer grid and against the shipped
  * dots, which are the control for tiles. CSS override on the element only; src is untouched.
  */
 /** A note with line boxes all the way down, so the paper can be compared to the text rather than to one stub line. */
 const LONG_DOC = Array.from({ length: 400 }, (_, i) => `line ${i + 1}`).join(String.fromCharCode(10));
 
-/** s192 add. 4's arms, run against G1(a), G1(b) and G2. */
+/** The ruling's arms, run against G1(a), G1(b) and G2. */
 const G_SHAPES: { key: string; v: Variant }[] = [
 	{ key: "G1a", v: { name: "G1a", sacrificial: "plain" } },
 	{ key: "G1b", v: { name: "G1b", sacrificial: "stops" } },
@@ -616,7 +616,7 @@ it.each(F_ARMS.map(a => [a.label, a] as const))("F-ARM %s", async (_label, a) =>
 }, 240_000);
 
 /**
- * S192 G3 TO G5. G3 asks whether the KIND of the second layer matters or only that a second layer paints; G4 paints
+ * G3 TO G5. G3 asks whether the KIND of the second layer matters or only that a second layer paints; G4 paints
  * the pinch preview's shape - one box the size of the pane plus a pitch of margin, not locally attached - to say
  * whether that path needs changing at all; G5 walks the scrolled area's size to find the edge where the shipped grid
  * starts losing rules.
@@ -645,19 +645,19 @@ it.each(G345_ARMS.map(a => [a.label, a] as const))("H-ARM %s", async (_label, a)
 }, 240_000);
 
 /**
- * S192 THE GATE. Everything above measures; this asserts, on the SHIPPED stylesheet with no override on the element.
+ * THE GATE. Everything above measures; this asserts, on the SHIPPED stylesheet with no override on the element.
  * One cell per arm, each reading both axes of the paper the plugin actually paints.
  *
  * THE THREE NUMBERS, and why these and not a pixel-for-pixel compare: a rule that is missing, a rule that is fainter
  * than its neighbours, and a rule smeared over several device rows are the three ways Alan's screenshot is wrong
- * (slate-artifacts/1.4.20/s192-grid-50/alan-orion-grid-50pct.png). `absent` counts rules the reader found a two-period
+ * (Alan's Orion screenshot alan-orion-grid-50pct.png). `absent` counts rules the reader found a two-period
  * gap in place of; `spreadPct` is the peak contrast range across the rules of one axis; `widths` is how many device
  * rows each band covers. A grid that paints every rule, each one crisp and all of them alike, passes all three at any
  * zoom a pinch can leave.
  *
  * THE ARMS. The priority arm is Orion's own: 2880x1920 at Windows 200 percent (DSF 2) and the screenshot's 51.8
  * percent, at three text sizes, because the pitch follows the text and 10 px text packs the rules tightest. The very
- * long and wide arms are the area the measurement found the defect scales with (s192 add. 5: 2021 x 1729 clean,
+ * long and wide arms are the area the measurement found the defect scales with (2021 x 1729 clean,
  * 4613 x 1729 loses five rules). The fixture mounts with the Infinite Canvas ON, so the wide arm is the canvas case.
  * The two 100 percent arms are the promise that the fix changes nothing where nothing was wrong.
  *

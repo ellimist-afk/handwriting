@@ -11,7 +11,7 @@ import { mouseInkEnabled } from "../inline/MouseInk";
 import {
 	addStripSurface, applyToolbarPlacement, armMouseInkQuietlyEverywhere, releaseMouseInkQuietlyEverywhere,
 	getInlineTool, getInlineEraserMode, getEraserWholeStrokes, setEraserWholeStrokes, persistEraserModeNow,
-	getEraserRadiusPx, setEraserRadiusPx, commitEraserRadius, getInkSizeMult, setInkSizeMult,
+	getEraserRadiusPx, setEraserRadiusPx, commitEraserRadius, getInkSizeMult, setInkSizeMult, applyInkSize,
 	pickStripColor, getToolbarCorner,
 } from "../inline/InkOverlay";
 import { slideActionAvailable, type SlidesAction, type SlidesActions } from "./SlidesActions";
@@ -59,6 +59,10 @@ export function presentationCommands(resolve: () => SlidesActions | null, execut
 function buildSlidesTools(parent: HTMLElement, actions: SlidesActions, app: App, exec: (id: string) => void, toast: (text: string) => void): () => void {
 	const root = parent.createDiv({ cls: "handwriting-slides-tools" });
 	root.setCssStyles({ position: "absolute", inset: "0", pointerEvents: "none", zIndex: "40" });
+	// Reveal blurs a deck when a pointerdown outside `.reveal` reaches its
+	// document handler. Let the strip's own buttons handle the press, then stop
+	// that bubble before it leaves the sibling toolbar.
+	if (typeof root.addEventListener === "function") root.addEventListener("pointerdown", ev => ev.stopPropagation());
 	const shared = new Set(["handwriting:inline-tool-pen", "handwriting:inline-tool-highlighter", "handwriting:inline-tool-eraser"]);
 	const supportedCommands = new Set([...shared, "editor:undo", "editor:redo", "handwriting:slides-clear-current", "handwriting:slides-clear-all"]);
 	const strip = new MobileTools(root, {
@@ -68,6 +72,7 @@ function buildSlidesTools(parent: HTMLElement, actions: SlidesActions, app: App,
 			const command = SLIDES_COMMANDS.find(c => `handwriting:${c.id}` === id);
 			if (command) { requestSlidesAction(app, actions, command.action); return; }
 			if (shared.has(id)) { actions.finishGesture(); if (!runGatedCommand(id)) exec(id); }
+			if (id === "handwriting:toggle-diagnostics") exec(id);
 		},
 		activeTool: getInlineTool, eraserOn: getInlineEraserMode,
 		eraserWholeStroke: getEraserWholeStrokes,
@@ -77,7 +82,12 @@ function buildSlidesTools(parent: HTMLElement, actions: SlidesActions, app: App,
 		eraserRadiusPx: getEraserRadiusPx,
 		setEraserRadiusPx: (px, commit) => { if (!actions.status().live) return; setEraserRadiusPx(px); if (commit) commitEraserRadius(); },
 		inkSizeMult: tool => getInkSizeMult(tool as InkTool),
-		setInkSizeMult: (tool, mult) => { if (actions.status().live) setInkSizeMult(tool as InkTool, mult); },
+		// A release (commit) is saved, as on the note's toolbar; the drag before it only shows.
+		setInkSizeMult: (tool, mult, commit) => {
+			if (!actions.status().live) return;
+			if (commit) applyInkSize(tool as InkTool, mult);
+			else setInkSizeMult(tool as InkTool, mult);
+		},
 		canUndo: () => slideActionAvailable(actions.status(), "undo"),
 		canRedo: () => slideActionAvailable(actions.status(), "redo"),
 		canPasteInk: () => false, hasInkSelection: () => false,
@@ -121,6 +131,9 @@ function buildSlidesTools(parent: HTMLElement, actions: SlidesActions, app: App,
 /** Follow the shared auto/show/hide rule, including changes during a presentation. */
 export function mountSlidesTools(parent: HTMLElement, actions: SlidesActions, app: App, exec: (id: string) => void, toast: (text: string) => void): () => void {
 	let unmount: (() => void) | null = null;
+	// The strip can be hidden while the presentation remains live. Keep its
+	// render-only settings repaint registered for the whole deck lifetime.
+	const offRepaint = addStripSurface(() => {}, undefined, () => actions.repaintSettings?.());
 	const ensure = () => {
 		const want = actions.status().live && penToolsVisible(getPenToolsMode(), Platform.isMobileApp, penSeenThisSession());
 		if (want && !unmount) unmount = buildSlidesTools(parent, actions, app, exec, toast);
@@ -129,5 +142,5 @@ export function mountSlidesTools(parent: HTMLElement, actions: SlidesActions, ap
 	const offMode = onPenToolsChanged(ensure);
 	const offDeck = actions.onChange(ensure);
 	ensure();
-	return () => { offMode(); offDeck(); unmount?.(); unmount = null; };
+	return () => { offMode(); offDeck(); offRepaint(); unmount?.(); unmount = null; };
 }

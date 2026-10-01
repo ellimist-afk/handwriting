@@ -1,5 +1,5 @@
 /**
- * s110, line 6: the page side of ZoomGive.test.ts. Mounts through scrollColumnAnchorPage's
+ * Line 6: the page side of ZoomGive.test.ts. Mounts through scrollColumnAnchorPage's
  * tear rig (the plain note, real router) and drives the REAL router - beginPinch / updatePinch /
  * endPinch with two touch contacts - past the cap, then reads the overlay's scale of record on the
  * frame clock after the lift. Nothing here decides; it reports what each frame showed.
@@ -144,7 +144,7 @@ async function watch(maxFrames: number): Promise<Read[]> {
 		return { scales, easing, atPenDown, beforePenUp, justAfterPenUp, rows, final, strokeX, strokeY, expMid, control };
 	},
 	/**
-	 * s128: a pinch to `to` about the pane's centre, then, spread held, the two fingers travel by (dx, dy) over
+	 * A pinch to `to` about the pane's centre, then, spread held, the two fingers travel by (dx, dy) over
 	 * `dragSteps` frames, then lift. Reads the committed pan and the page's painted rect on every drag frame.
 	 */
 	async zoomThenDrag(to: number, dx: number, dy: number, zoomSteps: number, dragSteps: number, cx: number, cy: number) {

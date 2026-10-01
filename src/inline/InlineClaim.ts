@@ -1,4 +1,5 @@
 import { MD_VERSION, parseMarkdownPage, updateFrontmatter } from "../model/MarkdownPage";
+import { isSafePageId } from "../model/PageData";
 
 /**
  * The one Markdown write the inline model ever makes: stamping `handwriting-page-id`
@@ -58,9 +59,29 @@ export function reassignMarkdown(content: string, newId: string): ClaimResult {
 	return { content: next, pageId: newId, changed: true };
 }
 
+/**
+ * The note has a frontmatter block that Obsidian could not parse (its metadata
+ * cache reports no frontmatter for it). An id written into that block would be
+ * invisible to every id read, which all go through the cache, so the claim is
+ * refused instead and the strokes wait in memory.
+ */
+export class UnreadableFrontmatterError extends Error {
+	constructor() {
+		super("Handwriting: Obsidian cannot read this note's frontmatter");
+	}
+}
+
+/** True when the text opens with a `---` fenced block, readable or not. */
+export function hasFrontmatterBlock(content: string): boolean {
+	return /^---\r?\n(?:[\s\S]*?\r?\n)?---(?:\r?\n|$)/.test(content);
+}
+
 export function claimMarkdown(content: string, pageId: string): ClaimResult {
 	const parsed = parseMarkdownPage(content);
-	if (parsed.pageId) {
+	// An id no sidecar can be named after (a template placeholder, "my page")
+	// is not a claim: adopting it damage-locked the record and nothing drawn
+	// was ever saved. It is replaced below, like a missing one.
+	if (parsed.pageId && isSafePageId(parsed.pageId)) {
 		// Someone already claimed it. Adopt their id, touch nothing.
 		return { content, pageId: parsed.pageId, changed: false };
 	}

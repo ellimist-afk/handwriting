@@ -154,8 +154,8 @@ export function gatedCommandNames(): string[] {
  * through to `executeCommandById` for everything else. No reading of
  * Obsidian's private registry, and no way to run a command twice.
  *
- * Hotkeys and the palette still see only what is registered, which is what the
- * ruling asked for.
+ * Hotkeys and the palette still see only what is registered, which is what was
+ * asked for.
  */
 const actions = new Map<string, () => void>();
 

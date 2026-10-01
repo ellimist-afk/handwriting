@@ -126,7 +126,7 @@ const CELLS: Cell[] = [
 	// C1's resize path (measureNaturalColumn takes the plugin's zoom off the host and applyViewportBox writes it back),
 	// run at the committed 10% before the far scroll: the bypass must still answer on every zoom-host read after it.
 	{ name: "resize-40-far-0.1-11482-ic", zoom: .1, infiniteCanvas: true, farVisual: 11482, resizeBy: 40 },
-	// s180: the two canvas-off cells that stood here are retired. With the Infinite Canvas off the
+	// The two canvas-off cells that stood here are retired. With the Infinite Canvas off the
 	// product ignores every pinch phase, so they recorded a note at 100 percent while their names said
 	// 0.1 and 0.15, and no assertion in the cell reads the scale. Their canvas-on twins far-0.1-11482-ic
 	// and frac-0.15-both-ic make the same claim. See RETIRED-CELLS.md.

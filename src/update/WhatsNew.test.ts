@@ -20,6 +20,14 @@ describe("decideWhatsNew", () => {
 		});
 	});
 
+	it("an older build does not roll the recorded version back, so the newer notes are not shown again", () => {
+		// The vault last showed 1.4.22; an older 1.4.21 build starts on it.
+		const d = decideWhatsNew("1.4.21", "1.4.22", false, { "1.4.21": ["a"], "1.4.22": ["b"] });
+		expect(d).toEqual({ show: false, record: "1.4.22" });
+		// ... and when 1.4.22 comes back, it is the version already seen: quiet.
+		expect(decideWhatsNew("1.4.22", d.record, false, { "1.4.22": ["b"] }).show).toBe(false);
+	});
+
 	it("shows once, not on every launch", () => {
 		expect(decideWhatsNew("1.3.10", "1.3.10", false, NOTES).show).toBe(false);
 	});
@@ -172,7 +180,40 @@ describe("whatsNewFragment", () => {
 		});
 	});
 
-	it("more than one group labels every version after the first", () => {
+	it("notes of an older release are labelled with their own version, not left under the current heading", () => {
+		// 1.4.22 has no notes of its own; the newest notes at or below it are 1.4.20's.
+		const d = decideWhatsNew("1.4.22", null, false, { "1.4.20": ["old"] });
+		expect(d.show).toBe(true);
+		if (!d.show) return;
+		const frag = whatsNewFragment(d.version, d.notes, d.groups);
+		expect(shape(frag)).toEqual({
+			tag: "fragment",
+			cls: undefined,
+			text: undefined,
+			children: [
+				{ tag: "div", cls: "handwriting-whats-new-title", text: "Handwriting 1.4.22", children: [] },
+				{ tag: "div", cls: "handwriting-whats-new-version", text: "1.4.20", children: [] },
+				{
+					tag: "ul",
+					cls: "handwriting-whats-new-list",
+					text: undefined,
+					children: [{ tag: "li", cls: undefined, text: "old", children: [] }],
+				},
+			],
+		});
+	});
+
+	it("the first of several groups is labelled too when it is not the heading's version", () => {
+		const groups = [
+			{ version: "1.4.19", notes: ["x"] },
+			{ version: "1.4.21", notes: ["y"] },
+		];
+		const frag = shape(whatsNewFragment("1.4.22", ["x", "y"], groups)) as { children: { cls?: string; text?: string }[] };
+		const labels = frag.children.filter((c) => c.cls === "handwriting-whats-new-version").map((c) => c.text);
+		expect(labels).toEqual(["1.4.19", "1.4.21"]);
+	});
+
+	it("more than one group labels every version that is not the heading's own", () => {
 		const groups = [
 			{ version: "1.3.11", notes: ["x"] },
 			{ version: "1.4.1", notes: ["y", "z"] },
@@ -187,6 +228,12 @@ describe("whatsNewFragment", () => {
 					tag: "div",
 					cls: "handwriting-whats-new-title",
 					text: "Handwriting 1.4.1",
+					children: [],
+				},
+				{
+					tag: "div",
+					cls: "handwriting-whats-new-version",
+					text: "1.3.11",
 					children: [],
 				},
 				{

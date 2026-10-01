@@ -3,7 +3,7 @@ import { build } from "esbuild";
 import { chromium, type Browser } from "playwright";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { installLiveReloadPoll } from "../../src/testUtils/LiveReloadTestHarness";
+import { installLiveReloadPollScript } from "../../src/testUtils/LiveReloadTestHarness";
 const root=fileURLToPath(new URL("../../",import.meta.url));
 let browser:Browser, bundle:string;
 beforeAll(async()=>{browser=await chromium.launch({headless:true});bundle=(await build({entryPoints:[root+"test/render/zoomWrittenInkPage.ts"],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:root+"test/render/iphoneObsidianStub.ts"}})).outputFiles[0]!.text;});
@@ -13,7 +13,7 @@ async function open(padding:number,bytes?:string,exactStroke?:unknown,late=false
  await page.setContent("<body></body>");await page.addStyleTag({content:readFileSync(root+"styles.css","utf8")});
  await page.addStyleTag({content:`html,body{margin:0;width:100%;height:100%;overflow:hidden}body{display:flex}.drift-host{position:relative;display:flex;flex:1;min-width:0;min-height:0;height:480px;overflow:hidden}.drift-host .cm-editor{display:flex;flex:1;min-width:0;min-height:0;height:480px}.drift-host .cm-scroller{flex:1;min-height:0;overflow:auto}.drift-host .cm-content{padding:${padding}px 0!important}.drift-host .cm-line{padding:0}`});
  await page.addScriptTag({content:bundle});
- if(late){await page.addScriptTag({content:`window.installCompatibilityPoll = ${installLiveReloadPoll.toString()}`});
+ if(late){await page.addScriptTag({content:`window.installCompatibilityPoll = ${installLiveReloadPollScript}`});
   const initial=await page.evaluate(()=>(window as any).zoomDrift.lateSidecar((window as any).installCompatibilityPoll));return {page,initial};}
  const initial=await page.evaluate(([bytes,stroke])=>(window as any).zoomDrift.setup(bytes,false,stroke),[bytes,exactStroke]);return {page,initial};
 }

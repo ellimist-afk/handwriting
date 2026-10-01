@@ -29,8 +29,10 @@ always be moved into the open later.
 
 ## scope
 
-Handwriting makes no network requests, has no accounts, and runs no server.
-The realistic surface is what it reads and writes on disk, and what it does
+Handwriting makes no network request on its own, has no accounts, and runs
+no server. The one request is the bug-report window's Upload to developer
+button: it is sent only when you tap it, and it carries the report shown on
+screen. The realistic surface is what it reads and writes on disk, and what it does
 with content that comes from a note or a sidecar file.
 
 ## no bug bounty

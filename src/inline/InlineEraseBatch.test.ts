@@ -108,3 +108,18 @@ describe("applyAddLive", () => {
 		expect(host.scheduled).toEqual(["p1"]);
 	});
 });
+
+describe("reinsertLive: one partial-erase pass puts every survivor back in order", () => {
+	it("a stroke put back whole and strokes split around it keep their order", () => {
+		const store = new InlineInkStore();
+		store.applyAddLive("note.md", [stroke("a"), stroke("b"), stroke("c"), stroke("d")]);
+		const hits = store.takeLive("note.md", ["a", "b", "c"]);
+		expect(hits.map((h) => [h.stroke.id, h.index])).toEqual([["a", 0], ["b", 1], ["c", 2]]);
+		store.reinsertLive("note.md", [
+			{ index: 0, pieces: [stroke("a")] },
+			{ index: 1, pieces: [stroke("b1"), stroke("b2"), stroke("b3")] },
+			{ index: 2, pieces: [] },
+		]);
+		expect(store.strokes("note.md").map((s) => s.id)).toEqual(["a", "b1", "b2", "b3", "d"]);
+	});
+});

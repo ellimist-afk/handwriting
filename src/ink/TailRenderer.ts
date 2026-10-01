@@ -6,6 +6,7 @@ import { fillRibbon } from "./RibbonRenderer";
 import { inkColorFor } from "./InkTheme";
 import type { InkStroke } from "./Stroke";
 import { strokeRev } from "./StrokeRev";
+import { canvasLayerBox } from "../inline/ZoomScale";
 
 /**
  * How much width the predicted tail gives up by its tip.
@@ -17,6 +18,96 @@ import { strokeRev } from "./StrokeRev";
  * stroke was correct.
  */
 const TAIL_TIP_TAPER = 0.5;
+
+/**
+ * Side of the compact inline tail backing, in canvas CSS px. The bitmap is
+ * sized once, when the band is configured, and a stroke only moves it:
+ * writing a canvas width or height reallocates the bitmap, and the pen path
+ * must not pay that per event. 256 px holds a live head and the capped
+ * prediction at ordinary speeds; a larger envelope takes the full backing.
+ */
+const COMPACT_TILE_CSS_PX = 256;
+
+type LiveHead = {
+	cam: CameraState;
+	style: PenStyle;
+	from: Point2;
+	to: Point2;
+	pressure: number;
+	hwWorld: number;
+};
+
+type LivePrediction = {
+	fromX: number;
+	fromY: number;
+	points: readonly PenSample[];
+	lineWidthPx: number;
+};
+
+type InlineBacking = {
+	width: number;
+	height: number;
+	backing: number;
+	cssScale: number;
+	hostZoom: boolean;
+	grid: number | null;
+	/** The compact tile in backing px, on the grid; 0 when no tile fits. */
+	tileW: number;
+	tileH: number;
+};
+
+/** The one compact tile size for a configured band, or 0 x 0 when compact placement is off. */
+function compactTile(width: number, height: number, backing: number, grid: number | null): { tileW: number; tileH: number } {
+	if (!grid) return { tileW: 0, tileH: 0 };
+	const fullW = Math.round(width * backing), fullH = Math.round(height * backing);
+	const side = Math.ceil(COMPACT_TILE_CSS_PX * backing / grid) * grid;
+	const tileW = Math.min(side, Math.floor(fullW / grid) * grid);
+	const tileH = Math.min(side, Math.floor(fullH / grid) * grid);
+	return tileW > 0 && tileH > 0 && tileW * tileH < fullW * fullH ? { tileW, tileH } : { tileW: 0, tileH: 0 };
+}
+
+/** Tile origin on one axis: centred on the envelope, on the grid, inside the band, covering lo..hi. */
+function tileOrigin(lo: number, hi: number, tile: number, full: number, grid: number): number {
+	const min = Math.max(0, hi - tile);
+	const max = Math.min(lo, Math.floor((full - tile) / grid) * grid);
+	const centred = Math.floor(((lo + hi) / 2 - tile / 2) / grid) * grid;
+	return Math.min(max, Math.max(min, centred));
+}
+
+/** A joint backing, CSS-layout and displayed-device grid, in backing pixels. */
+function backingGrid(backing: number, cssScale: number, dpr: number, hostZoom: boolean): number | null {
+	if (!(backing > 0) || !(cssScale > 0) || !(dpr > 0) ||
+		![backing, cssScale, dpr].every(Number.isFinite)) return null;
+	const k = !hostZoom && cssScale < 1 ? cssScale : 1;
+	const whole = (n: number) => Math.abs(n - Math.round(n)) < 1e-8;
+	for (let grid = 1; grid <= 64; grid++) {
+		if (whole(grid * cssScale * dpr / backing) &&
+			whole(64 * grid / backing) && whole(64 * grid * k / backing)) return grid;
+	}
+	return null;
+}
+
+type ContextState = {
+	lineCap: CanvasLineCap;
+	lineJoin: CanvasLineJoin;
+	lineWidth: number;
+	strokeStyle: string | CanvasGradient | CanvasPattern;
+	fillStyle: string | CanvasGradient | CanvasPattern;
+	globalAlpha: number;
+	globalCompositeOperation: GlobalCompositeOperation;
+	lineDash: number[];
+	lineDashOffset: number;
+	miterLimit: number;
+	filter: string;
+	imageSmoothingEnabled: boolean;
+	shadowBlur: number;
+	shadowColor: string;
+	shadowOffsetX: number;
+	shadowOffsetY: number;
+	font: string;
+	textAlign: CanvasTextAlign;
+	textBaseline: CanvasTextBaseline;
+};
 
 /**
  * The transient overlay: a canvas above the wet ink layer holding only
@@ -40,12 +131,266 @@ export class TailRenderer {
 	private blank = false;
 	private untrackedPixels = true;
 	private backingScale = 1;
+	private inlineBacking: InlineBacking | null = null;
+	private backingMode: "full" | "compact" | "empty" = "full";
+	private originX = 0;
+	private originY = 0;
+	private backingResizeTotal = 0;
+	private fullFallbacks = 0;
+	private translateSupport: boolean | undefined;
 	beforeWrite?: () => void;
 	get provenBlank(): boolean { return this.blank; }
+	/** Monotonic count of backing size changes on this renderer. */
+	get resizeTotal(): number { return this.backingResizeTotal; }
+	/** Monotonic count of live envelopes that took the full surface from a tile or an empty backing. */
+	get fullFallbackTotal(): number { return this.fullFallbacks; }
+	private fallBackToFullSurface(): void {
+		if (this.backingMode !== "full") this.fullFallbacks++;
+		this.restoreFullSurface();
+	}
 	noteBackingCleared(): void { this.blank = true; this.untrackedPixels = false; }
+	private contextState(): ContextState {
+		const c = this.ctx;
+		return {
+			lineCap: c.lineCap, lineJoin: c.lineJoin, lineWidth: c.lineWidth,
+			strokeStyle: c.strokeStyle, fillStyle: c.fillStyle,
+			globalAlpha: c.globalAlpha, globalCompositeOperation: c.globalCompositeOperation,
+			lineDash: c.getLineDash?.() ?? [], lineDashOffset: c.lineDashOffset,
+			miterLimit: c.miterLimit, filter: c.filter, imageSmoothingEnabled: c.imageSmoothingEnabled,
+			shadowBlur: c.shadowBlur, shadowColor: c.shadowColor,
+			shadowOffsetX: c.shadowOffsetX, shadowOffsetY: c.shadowOffsetY,
+			font: c.font, textAlign: c.textAlign, textBaseline: c.textBaseline,
+		};
+	}
+	private restoreContext(state: ContextState): void {
+		const c = this.ctx;
+		c.lineCap = state.lineCap; c.lineJoin = state.lineJoin; c.lineWidth = state.lineWidth;
+		c.strokeStyle = state.strokeStyle; c.fillStyle = state.fillStyle;
+		c.globalAlpha = state.globalAlpha; c.globalCompositeOperation = state.globalCompositeOperation;
+		c.setLineDash(state.lineDash); c.lineDashOffset = state.lineDashOffset;
+		c.miterLimit = state.miterLimit; c.filter = state.filter;
+		c.imageSmoothingEnabled = state.imageSmoothingEnabled;
+		c.shadowBlur = state.shadowBlur; c.shadowColor = state.shadowColor;
+		c.shadowOffsetX = state.shadowOffsetX; c.shadowOffsetY = state.shadowOffsetY;
+		c.font = state.font; c.textAlign = state.textAlign; c.textBaseline = state.textBaseline;
+	}
+	/**
+	 * Whether the page places a canvas with the CSS translate property. The
+	 * compact tile moves by translate; an old WebView ignores the property and
+	 * would leave the tile at the band origin, off the pen. Asked once.
+	 */
+	private translateSupported(): boolean {
+		if (this.translateSupport === undefined) {
+			const css = (this.canvas.ownerDocument?.defaultView as unknown as { CSS?: { supports?: (property: string, value: string) => boolean } } | null | undefined)?.CSS;
+			this.translateSupport = css?.supports?.("translate", "1px 1px") === true;
+		}
+		return this.translateSupport;
+	}
+	private placeInlineBacking(): void {
+		const config = this.inlineBacking;
+		if (!config) return;
+		const width = this.backingMode === "full" ? config.width : this.canvas.width / config.backing;
+		const height = this.backingMode === "full" ? config.height : this.canvas.height / config.backing;
+		const box = canvasLayerBox(width, height, config.cssScale, config.hostZoom);
+		const style = this.canvas.style;
+		const translation = this.originX || this.originY
+			? `${this.originX / config.backing}px ${this.originY / config.backing}px`
+			: "none";
+		// Individual translate precedes the box transform, including in RTL.
+		if (style.left !== "0px") style.left = "0px";
+		if (style.top !== "0px") style.top = "0px";
+		if (style.right !== "auto") style.right = "auto";
+		if (style.bottom !== "auto") style.bottom = "auto";
+		// Asked at configure; this reads the answer.
+		if (this.translateSupport === true && style.translate !== translation) style.translate = translation;
+		if (style.width !== `${box.width}px`) style.width = `${box.width}px`;
+		if (style.height !== `${box.height}px`) style.height = `${box.height}px`;
+		if (style.transform !== box.transform) style.transform = box.transform;
+		const transformOrigin = box.transform ? "0 0" : "";
+		if (style.transformOrigin !== transformOrigin) style.transformOrigin = transformOrigin;
+	}
+	/** Erase every backing pixel, whatever the origin: stale pixels must not ride a moved tile. */
+	private wipeBacking(): void {
+		if (this.blank) return;
+		this.beforeWrite?.();
+		this.ctx.save();
+		this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+		this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+		this.ctx.restore();
+		this.noteBackingCleared();
+	}
+	/** The size an empty inline backing keeps: the tile, or the full band when no tile fits. */
+	private emptySize(config: InlineBacking): { width: number; height: number } {
+		return config.tileW > 0
+			? { width: config.tileW, height: config.tileH }
+			: { width: Math.round(config.width * config.backing), height: Math.round(config.height * config.backing) };
+	}
+	/** Release the live bitmap's content without resizing it when it already has the empty size. */
+	private emptyBacking(config: InlineBacking): void {
+		const { width, height } = this.emptySize(config);
+		const keep = this.canvas.width === width && this.canvas.height === height;
+		if (keep) this.wipeBacking();
+		this.resizeBacking(width, height, keep ? this.originX : 0, keep ? this.originY : 0, "empty");
+	}
+	private resizeBacking(width: number, height: number, x: number, y: number,
+		mode: "full" | "compact" | "empty"): void {
+		const changed = this.canvas.width !== width || this.canvas.height !== height;
+		if (changed) this.beforeWrite?.();
+		const state = changed ? this.contextState() : null;
+		if (this.canvas.width !== width) this.canvas.width = width;
+		if (this.canvas.height !== height) this.canvas.height = height;
+		if (changed) this.backingResizeTotal++;
+		this.originX = x; this.originY = y; this.backingMode = mode;
+		if (state) {
+			this.restoreContext(state);
+			this.dirty = null;
+			this.noteBackingCleared();
+		}
+		if (mode === "empty") { this.dirty = null; this.noteBackingCleared(); }
+		const b = this.backingScale;
+		this.ctx.setTransform(b, 0, 0, b, -x, -y);
+		this.placeInlineBacking();
+	}
+	/** Inline only. PDF and slides keep their original full-surface backing. */
+	configureInlineBacking(width: number, height: number, backing: number, cssScale: number, hostZoom: boolean): void {
+		const dpr = this.canvas.ownerDocument?.defaultView?.devicePixelRatio ?? backing;
+		const grid = backingGrid(backing, cssScale, dpr, hostZoom);
+		this.inlineBacking = {
+			width, height, backing, cssScale, hostZoom, grid,
+			...(this.translateSupported() ? compactTile(width, height, backing, grid) : { tileW: 0, tileH: 0 }),
+		};
+		this.backingScale = backing;
+		this.emptyBacking(this.inlineBacking);
+	}
+	/** Reapply placement after a band style update; changing scale uses a safe full backing. */
+	placeInline(cssScale: number, hostZoom: boolean): void {
+		const config = this.inlineBacking;
+		if (!config) return;
+		if (config.cssScale !== cssScale || config.hostZoom !== hostZoom) {
+			config.cssScale = cssScale;
+			config.hostZoom = hostZoom;
+			config.grid = backingGrid(config.backing, cssScale,
+				this.canvas.ownerDocument?.defaultView?.devicePixelRatio ?? config.backing, hostZoom);
+			Object.assign(config, this.translateSupported()
+				? compactTile(config.width, config.height, config.backing, config.grid) : { tileW: 0, tileH: 0 });
+			if (this.backingMode === "compact") this.restoreFullSurface(true);
+			else if (this.backingMode === "empty") this.emptyBacking(config);
+		}
+		this.placeInlineBacking();
+	}
+	/** UI drawers need the whole band. Preserve live pixels only for carry fallback. */
+	restoreFullSurface(preserve = false): void {
+		const config = this.inlineBacking;
+		if (!config || this.backingMode === "full") return;
+		const x = this.originX, y = this.originY;
+		const oldW = this.canvas.width, oldH = this.canvas.height;
+		const oldDirty = this.dirty, oldUntracked = this.untrackedPixels, oldBlank = this.blank;
+		let copy: HTMLCanvasElement | null = null;
+		if (preserve && oldW > 0 && oldH > 0) {
+			// A detached canvas in the layer's own document (a popout's, in a popout).
+			copy = this.canvas.cloneNode(false) as HTMLCanvasElement;
+			copy.width = oldW; copy.height = oldH;
+			copy.getContext("2d")?.drawImage(this.canvas, 0, 0);
+		}
+		this.resizeBacking(Math.round(config.width * config.backing), Math.round(config.height * config.backing), 0, 0, "full");
+		if (copy) {
+			this.ctx.save();
+			this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+			this.ctx.globalAlpha = 1;
+			this.ctx.globalCompositeOperation = "source-over";
+			this.ctx.filter = "none";
+			this.ctx.drawImage(copy, x, y);
+			this.ctx.restore();
+			this.blank = oldBlank;
+			this.untrackedPixels = oldUntracked;
+			this.dirty = oldDirty;
+		}
+	}
+	/** Size the next event's head and prediction together, before either draw. */
+	prepareLive(head: LiveHead | null, prediction: LivePrediction | null): void {
+		const config = this.inlineBacking;
+		if (!config) return;
+		if (!head && (!prediction || prediction.points.length === 0)) {
+			this.emptyBacking(config);
+			return;
+		}
+		let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+		const cover = (x: number, y: number, radius: number) => {
+			const pad = radius + Math.max(2, 2 / config.backing);
+			left = Math.min(left, x - pad); top = Math.min(top, y - pad);
+			right = Math.max(right, x + pad); bottom = Math.max(bottom, y + pad);
+		};
+		if (head) {
+			const { cam, from, to } = head;
+			const radius = Math.max(0.25, head.hwWorld * cam.zoom);
+			cover((from.x - cam.x) * cam.zoom, (from.y - cam.y) * cam.zoom, radius);
+			cover((to.x - cam.x) * cam.zoom, (to.y - cam.y) * cam.zoom, radius);
+		}
+		if (prediction?.points.length) {
+			const radius = Math.max(0.25, prediction.lineWidthPx / 2);
+			cover(prediction.fromX, prediction.fromY, radius);
+			for (const point of prediction.points) cover(point.x, point.y, radius);
+		}
+		const grid = config.grid, b = config.backing;
+		if (!grid || ![left, top, right, bottom].every(Number.isFinite)) {
+			this.fallBackToFullSurface();
+			return;
+		}
+		const x0 = Math.floor(Math.floor(left * b) / grid) * grid;
+		const y0 = Math.floor(Math.floor(top * b) / grid) * grid;
+		const x1 = Math.ceil(Math.ceil(right * b) / grid) * grid;
+		const y1 = Math.ceil(Math.ceil(bottom * b) / grid) * grid;
+		const fullW = Math.round(config.width * b), fullH = Math.round(config.height * b);
+		const { tileW, tileH } = config;
+		if (x0 < 0 || y0 < 0 || x1 > fullW || y1 > fullH || x1 <= x0 || y1 <= y0 ||
+			!(tileW > 0) || x1 - x0 > tileW || y1 - y0 > tileH) {
+			this.fallBackToFullSurface();
+			return;
+		}
+		// Full already (UI chrome, or an envelope larger than the tile): it
+		// stays full until the release, because shrinking here would
+		// reallocate on the pen path.
+		if (this.backingMode === "full") return;
+		const sized = this.canvas.width === tileW && this.canvas.height === tileH;
+		if (sized && x0 >= this.originX && y0 >= this.originY &&
+			x1 <= this.originX + tileW && y1 <= this.originY + tileH) {
+			if (this.backingMode !== "compact") { this.backingMode = "compact"; this.placeInlineBacking(); }
+			return;
+		}
+		const x = tileOrigin(x0, x1, tileW, fullW, grid), y = tileOrigin(y0, y1, tileH, fullH, grid);
+		if (!sized) {
+			this.resizeBacking(tileW, tileH, x, y, "compact");
+			return;
+		}
+		// Same bitmap, new place: translate only, no allocation.
+		this.wipeBacking();
+		this.dirty = null;
+		this.originX = x; this.originY = y; this.backingMode = "compact";
+		this.ctx.setTransform(b, 0, 0, b, -x, -y);
+		this.placeInlineBacking();
+	}
 	/** See WetInkRenderer.carry: the band moved under a live stroke. */
 	carry(shiftX: number, shiftY: number): void {
 		if (shiftX === 0 && shiftY === 0) return;
+		if (this.inlineBacking && this.backingMode === "empty") return;
+		if (this.inlineBacking && this.backingMode === "compact") {
+			const { grid, backing, width, height } = this.inlineBacking;
+			const dx = Math.round(shiftX * backing), dy = Math.round(shiftY * backing);
+			const x = this.originX + dx, y = this.originY + dy;
+			if (grid && dx % grid === 0 && dy % grid === 0 &&
+				x >= 0 && y >= 0 && x + this.canvas.width <= Math.round(width * backing) &&
+				y + this.canvas.height <= Math.round(height * backing)) {
+				this.beforeWrite?.();
+				this.originX = x; this.originY = y;
+				this.ctx.setTransform(backing, 0, 0, backing, -x, -y);
+				this.placeInlineBacking();
+				if (this.dirty) this.dirty = { x0: this.dirty.x0 + shiftX, y0: this.dirty.y0 + shiftY,
+					x1: this.dirty.x1 + shiftX, y1: this.dirty.y1 + shiftY };
+				return;
+			}
+			// Off the grid or out of the band: shift the pixels inside the
+			// same tile below, as the full backing does, rather than reallocate.
+		}
 		this.beforeWrite?.();
 		const ctx = this.ctx, b = this.backingScale;
 		ctx.save();
@@ -110,7 +455,7 @@ export class TailRenderer {
 	}
 
 	applyDpr(dpr: number): void {
-		this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+		this.ctx.setTransform(dpr, 0, 0, dpr, -this.originX, -this.originY);
 		this.backingScale = dpr;
 	}
 

@@ -96,6 +96,8 @@ interface Rig {
 	/** Draw ops logged since the last clearRect, i.e. what the canvas holds now. */
 	drawnSinceClear(): number;
 	band(): { left: number; top: number; width: number; height: number } | null;
+	/** Copy blits on the committed context: one per band carry, and nothing else draws with drawImage here. */
+	blits(): number;
 }
 
 function makeRig(path: string): Rig {
@@ -103,6 +105,7 @@ function makeRig(path: string): Rig {
  o.pinchScaleNow = 1;
 	const trace: string[] = [];
 	const canvasLog: CanvasLog = { sizes: [], ops: [] };
+	let blitCount = 0;
 
 	// ---- the scroller, 0x0 until layout
 	const scrollDOM = el({
@@ -200,6 +203,10 @@ function makeRig(path: string): Rig {
 			setTransform() {},
 			getImageData: () => ({ data: new Uint8ClampedArray(4) }),
 			fillRect() {},
+			// A band carry slides the painted pixels with a copy blit: it moves what is there and draws nothing new.
+			drawImage() {
+				if (log) blitCount++;
+			},
 		} as unknown as CanvasRenderingContext2D;
 	};
 
@@ -268,10 +275,19 @@ function makeRig(path: string): Rig {
 	o.highlightWetCanvas = canvas("highlightWet");
 	o.committedCtx = recordingCtx(true);
 	o.highlightCtx = recordingCtx(false);
-	const layer = { applyDpr: () => undefined, clear: () => undefined, clearAll: () => undefined };
+	const layer = {
+		applyDpr: () => undefined, clear: () => undefined, clearAll: () => undefined,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+		carry: () => undefined,
+	};
 	o.wet = layer;
 	o.highlightWet = layer;
 	o.tail = layer;
+	o.predReal = [];
+	o.predLastTail = [];
 	o.mode = "ink";
 	o.builder = null;
 	o.strokeIndex = new StrokeIndex();
@@ -343,6 +359,7 @@ function makeRig(path: string): Rig {
 			return ops.slice(i + 1).length;
 		},
 		band: () => o.band as ReturnType<Rig["band"]>,
+		blits: () => blitCount,
 	};
 }
 
@@ -477,6 +494,53 @@ describe("first paint while a shared sidecar read is pending", () => {
 		}
 		expect(rig.drawnSinceClear()).toBeGreaterThan(0);
 		expect(load.host.loadSidecar).toHaveBeenCalledTimes(1);
+	});
+
+	// A band move at rest slides the painted pixels and owes only the strips it uncovers. That is right only while the
+	// raster holds what the store holds: ink that reached the store after the last paint, with no repaint asked for, is
+	// on no pixel, and a slide would keep it missing until something repainted the whole band.
+	const scrollBandTo = (rig: Rig, top: number) => {
+		(rig.overlay.view as { scrollDOM: { scrollTop: number } }).scrollDOM.scrollTop = top;
+		(rig.overlay.scheduleRepaint as (via: string) => void)("scroll");
+		rig.deliverPaintCallbacks();
+	};
+	it("a band move carries the painted pixels when the raster holds the store's strokes (control: the carry path is reached)", async () => {
+		const load = pendingLoad();
+		void inlineInk.ensureLoaded(load.path);
+		const rig = openOverlay(load.path);
+		await load.finish();
+		rig.deliverPaintCallbacks(); // the loaded ink is painted: raster and store agree
+		scrollBandTo(rig, 1000);
+		expect(rig.blits(), "the band moved and slid its pixels").toBeGreaterThan(0);
+	});
+	it("a band move does not carry when ink reached the store after the last paint", async () => {
+		const load = pendingLoad();
+		void inlineInk.ensureLoaded(load.path);
+		const rig = openOverlay(load.path);
+		rig.deliverPaintCallbacks(); // painted while the store was empty
+		await load.finish(); // the store now holds a stroke no paint has seen
+		scrollBandTo(rig, 1000);
+		expect(rig.blits(), "a slide would have kept the loaded ink missing").toBe(0);
+		expect(rig.band()!.top, "the band did move").toBeGreaterThan(0);
+	});
+	it("a partial paint does not stand in for the whole raster: ink that arrived unpainted stays owed to a band move", async () => {
+		const load = pendingLoad();
+		void inlineInk.ensureLoaded(load.path);
+		const rig = openOverlay(load.path);
+		await load.finish();
+		rig.deliverPaintCallbacks(); // the saved stroke is painted: raster and store agree
+		// A second stroke reaches the store with no repaint asked for (a shared load finishing after the first paint).
+		inlineInk.applyAdd(load.path, [stroke("late", { x: 100, y: 500 })]);
+		// Then the user draws one stroke: the frame repaints only that stroke's rect, and never reaches the late one.
+		const drawn = stroke("drawn", { x: 400, y: 50 });
+		inlineInk.applyAdd(load.path, [drawn]);
+		(rig.overlay.damage as { addRect(r: { x: number; y: number; width: number; height: number }): void }).addRect(drawn.bbox);
+		(rig.overlay.scheduleRepaint as (via: string) => void)("partial");
+		rig.deliverPaintCallbacks();
+		expect(inlineInk.strokes(load.path)).toHaveLength(3);
+		scrollBandTo(rig, 1000);
+		expect(rig.blits(), "a slide would have kept the late stroke missing: the partial paint must not record the store's count").toBe(0);
+		expect(rig.band()!.top, "the band did move").toBeGreaterThan(0);
 	});
 });
 

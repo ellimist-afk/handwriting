@@ -17,7 +17,7 @@ afterAll(async()=>{await browser?.close();if(process.env.HW_VIEWPORT_EVIDENCE)wr
 /**
  * Replaces `toEqual` on two `snap().layout` arrays (family 1: the `snap()`
  * producer, zoom via one button click to k .5, `overlay.cssScale` divisor -
- * see REVIEW-c789587d.md F1's note that production measures this back too,
+ * see the review note that production measures this back too,
  * though it does not bite at k .5 with an integer offset width). Measured
  * (gate-eb9e7239.log diff blocks, both cells): every differing entry is
  * exactly 0.015625 = 1/64 note px, x only, y always exactly equal - glyph-
@@ -158,7 +158,7 @@ it.each(cases)("camera %s axis%s font%s cancel%s",async(zoom,axis,font,cancel)=>
   evidence.push(r);expect(pageErrors).toEqual([]);
   // The pin: the harness engine supports css zoom, and the overlay's own
   // cached gate agrees with it. A run where either is false is a different
-  // host form (no coverage here per ruling F1) and nothing below is claimed
+  // host form (no coverage here) and nothing below is claimed
   // for it.
   expect(r.engineZoom, "the harness engine supports css zoom").toBe(true);
   expect(r.hostZoom, "the overlay's host-form gate agrees with the engine").toBe(r.engineZoom);
@@ -169,8 +169,7 @@ it.each(cases)("camera %s axis%s font%s cancel%s",async(zoom,axis,font,cancel)=>
   // but NOT a re-wrap (wrapping changes a line's height, not the count), so
   // height is asserted per line beside the count; each line's top is asserted
   // unmoved. Measured 0 layout-px line-box top movement at every k/font/
-  // cancel arm tried (slate-artifacts/1.4.20/camera-font1-cancel-read/
-  // read-linebox.txt) - the 1/64 note-px bound below is tighter than
+  // cancel arm tried (a line-box read on 1.4.20) - the 1/64 note-px bound below is tighter than
   // CodeMirror's own LayoutUnit grid at k .25 (1/64 SCREEN px = 1/16 note px
   // there) and holds on this fixture only because both measured tops (the
   // padding top, and padding + line 0's height) land exactly on that grid at
@@ -215,7 +214,7 @@ it.each(cases)("camera %s axis%s font%s cancel%s",async(zoom,axis,font,cancel)=>
   expect(end.fling).toBe(false);expect(r.flingUpdates).toBeGreaterThan(0);
   if(cancel){expect(r.cancelled).toEqual({accepted:true,fling:false,assist:false,parole:null});expect(end.offset).toBe(r.cancelOffset);}
   else{
-   // s179 add.6: canvas on now (the zoom bar needs it live), so the glide decays on the canvas's own
+   // Canvas on now (the zoom bar needs it live), so the glide decays on the canvas's own
    // shorter tau, 200ms not Fling.ts's 325 (InlinePenRouter.ts CANVAS_FLING_TAU_MS, not exported).
    const ideal=-(lifted.velocity-end.velocity)*200;
    expect(ideal).toBeGreaterThan(20);expect(Math.abs(down.content-end.content-120-ideal)).toBeLessThan((r.flingUpdates+3)*.5*zoom+1);
@@ -373,16 +372,24 @@ it("a theme change during a real pen gesture is applied once after release",asyn
  }finally{await page.close();}
 });
 
+// Infinite canvas owns the touch pan from contact and still glides after the lift, as with it off.
 it.each([.5,1,2])("infinite canvas momentum policy at%s",async zoom=>{
  for(const axis of ["x","y"] as const)for(const mode of ["on","off","toggle","native","pen","pinch"]){
   const page=await browser.newPage({viewport:{width:700,height:540}});
   try {
    await page.setContent("<!doctype html><body></body>");await page.addStyleTag({content:css+readFileSync(fileURLToPath(new URL("./noteViewportCamera.css",import.meta.url)),"utf8")});await page.addScriptTag({content:script});
+   // The pan is read on screen: the content under the finger, from contact to lift. Scroll units differ
+   // with Infinite canvas on and off at the same zoom, so a scroll delta cannot say whether the page kept up.
+   await page.evaluate(axis=>{const w=window as any;w.__pan={};const at=()=>{const b=document.querySelector<HTMLElement>(".cm-content")!.getBoundingClientRect();return axis==="x"?b.left:b.top;};
+    window.addEventListener("pointerdown",e=>{if(e.pointerId===301)w.__pan.down=at();},true);
+    window.addEventListener("pointerup",e=>{if(e.pointerId===301)w.__pan.up=at();},true);},axis);
    const r=await page.evaluate(args=>(window as any).momentum(...args),[zoom,axis,mode]);
-   expect(r.lifted-r.before).toBeGreaterThan(80/zoom);expect(r.running).toBe(false);expect(r.settled).toBe(r.end);
+   const pan=await page.evaluate(()=>(window as any).__pan);
+   expect(pan.down-pan.up,`${axis} ${mode} the page moved with the finger on screen`).toBeGreaterThan(80);
+   expect(r.lifted).not.toBe(r.before);expect(r.running).toBe(false);expect(r.settled).toBe(r.end);
    if(mode==="off"){expect(r.started).toBe(true);expect(r.end).toBeGreaterThan(r.lifted);}
    else if(mode==="toggle"||mode==="pen"||mode==="pinch"){expect(r.started).toBe(true);expect(r.end).toBe(r.stopped);}
-   else {expect(r.started).toBe(false);expect(r.end).toBe(r.lifted);expect(r.touchAction).toBe("none");}
+   else {expect(r.started,`${axis} ${mode} glide starts under Infinite canvas`).toBe(true);expect(r.end,`${axis} ${mode} glide carries past the lift`).toBeGreaterThan(r.lifted);expect(r.touchAction).toBe("none");}
   } finally {await page.close();}
  }
 });
@@ -394,15 +401,25 @@ it("Chromium touch input pans without native coast; wheel scrolling remains avai
   await page.evaluate(()=>(window as any).nativeMomentumSetup());
   const cdp=await page.context().newCDPSession(page);
   for(const [type,n] of [["touchStart",380],["touchMove",340],["touchMove",300],["touchMove",260],["touchEnd",260]] as const){await cdp.send("Input.dispatchTouchEvent",{type,touchPoints:type==="touchEnd"?[]:[{x:300,y:n,id:1,radiusX:4,radiusY:4,force:.5}]});await page.waitForTimeout(25);}
-  const lifted=await page.evaluate(()=>(window as any).nativeMomentumState());expect(lifted.top).toBeGreaterThan(80);expect(lifted.fling).toBe(false);expect(lifted.touchAction).toBe("none");
-  await page.waitForTimeout(500);expect(await page.evaluate(()=>(window as any).nativeMomentumState())).toEqual(lifted);
-  await page.mouse.move(300,200);await page.mouse.wheel(30,100);await page.waitForTimeout(150);const wheel=await page.evaluate(()=>(window as any).nativeMomentumState());expect(wheel.top).toBeGreaterThan(lifted.top);
+  // The plugin's own glide may run after the lift and must stop; once it has, nothing else moves the page.
+  const lifted=await page.evaluate(()=>(window as any).nativeMomentumState());expect(lifted.top).toBeGreaterThan(80);
+  await page.waitForFunction(()=>!(window as any).nativeMomentumState().fling,undefined,{timeout:3000});
+  const rested=await page.evaluate(()=>(window as any).nativeMomentumState());
+  // A control only: headless Chromium does not coast CDP touch, so the touch-action check below is what catches a browser coast.
+  await page.waitForTimeout(500);expect(await page.evaluate(()=>(window as any).nativeMomentumState()),"no motion after the glide ends").toEqual(rested);
+  expect(lifted.touchAction).toBe("none");
+  await page.mouse.move(300,200);await page.mouse.wheel(30,100);await page.waitForTimeout(150);const wheel=await page.evaluate(()=>(window as any).nativeMomentumState());expect(wheel.top).toBeGreaterThan(rested.top);
   await cdp.detach();
  }finally{await page.close();}
 });
 
-it("uses the exact Infinite Canvas settings explanation",()=>{
- expect(readFileSync(fileURLToPath(new URL("../../src/main.ts",import.meta.url)),"utf8")).toContain('desc: "Scroll to the right or down infinitely. Momentum is turned off when this setting is toggled on."');
+// The wording is product copy that changes, so only the row is pinned: the setting exists,
+// drives the canvas key, and says something.
+it("lists the Infinite canvas setting with a description",()=>{
+ const main=readFileSync(fileURLToPath(new URL("../../src/main.ts",import.meta.url)),"utf8");
+ const row=main.match(/name:\s*"Infinite canvas",\s*desc:\s*"([^"]*)",\s*control:\s*\{\s*type:\s*"toggle",\s*key:\s*"extendCanvasWhileScrolling"\s*\}/);
+ expect(row,"the Infinite canvas toggle row").not.toBeNull();
+ expect((row![1] ?? "").trim().length).toBeGreaterThan(0);
 });
 
 

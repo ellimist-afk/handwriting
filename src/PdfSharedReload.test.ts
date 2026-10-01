@@ -128,12 +128,15 @@ describe("PDF document-coordinated external reload", () => {
 		const readPaths = h.reads.mock.calls.map(([path]) => path);
 		expect(readPaths.filter(path => path === ".handwriting/shared.json")).toHaveLength(3);
 		expect(readPaths.filter(path => path === ".handwriting/other.json")).toHaveLength(3);
-		expect(readPaths.filter(path => path.includes(".conflict-external-"))).toHaveLength(4);
+		// A pair is written, and read back, only for a revision that would lose
+		// something: "add" only adds to the shared document, so only the other
+		// document's changed stroke earns one.
+		expect(readPaths.filter(path => path.includes(".conflict-external-"))).toHaveLength(_name === "add" ? 2 : 4);
 		expect(await h.originalCheck("shared")).toBe(false);
 		await h.tick();
 		for (const pane of [h.a, h.b, h.other]) expect(pane.controller.refresh).toHaveBeenCalledTimes(1);
 		expect(h.schedule).not.toHaveBeenCalled();
-		expect(h.adapter.log).toHaveLength(4);
+		expect(h.adapter.log).toHaveLength(_name === "add" ? 2 : 4);
 		expect(h.adapter.log.every(entry =>
 			entry.startsWith("write ") && entry.includes(".conflict-external-")
 		)).toBe(true);

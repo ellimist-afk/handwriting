@@ -30,6 +30,7 @@
 import { transformSync } from "esbuild";
 import { describe, expect, it } from "vitest";
 import mainSource from "./main.ts?raw";
+import { SYNC_ALL_TYPES_HINT } from "./main";
 import { inkFolderSyncs, normalizeInkFolder } from "./persistence/InkFolder";
 
 // ---- the slice, fail-closed ------------------------------------------------
@@ -147,10 +148,11 @@ async function run(
 		"normalizeInkFolder",
 		"inkFolderSyncs",
 		"Notice",
+		"SYNC_ALL_TYPES_HINT",
 		`${compiled}; return run;`
 	) as (...deps: unknown[]) => (raw: string) => Promise<void>;
 
-	const fn = make(inlineInk, changeFolder, migrateInkFolder, normalizeInkFolder, inkFolderSyncs, Notice);
+	const fn = make(inlineInk, changeFolder, migrateInkFolder, normalizeInkFolder, inkFolderSyncs, Notice, SYNC_ALL_TYPES_HINT);
 	const self = {
 		store,
 		app: { vault: { adapter } },

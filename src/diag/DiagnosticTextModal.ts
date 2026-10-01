@@ -237,8 +237,11 @@ export class DiagnosticTextModal extends Modal {
 			window.setTimeout(() => button.setText(label), 1500);
 		};
 		try {
-			if (navigator.clipboard?.writeText) {
-				await navigator.clipboard.writeText(text);
+			// The button's own window: in a popout the main window's clipboard
+			// refuses the write (audit 60).
+			const clipboard = (button.ownerDocument?.defaultView?.navigator ?? navigator).clipboard;
+			if (clipboard?.writeText) {
+				await clipboard.writeText(text);
 				done();
 				if (markDelivered) this.delivered();
 				return;

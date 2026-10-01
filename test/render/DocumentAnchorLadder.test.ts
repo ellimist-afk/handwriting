@@ -1,14 +1,14 @@
 /**
- * QE4a-c for mechanism E's ladder (ruling 2B), in real Chromium.
+ * The document anchor ladder's surface checks, in real Chromium.
  *
  * WHAT EACH ONE IS PROTECTING, in one line: the anchor must not write inside
- * `contentDOM` while the reader scrolls (QE4a), must not let CodeMirror's
- * scroll anchoring move a restored far scroll when it installs (QE4b), and must
- * not add scroll range of its own when it grows (QE4c). Each has the plant
- * ruling 2B names, and the plant is asserted to FAIL the same assertion the
+ * `contentDOM` while the reader scrolls, must not let CodeMirror's
+ * scroll anchoring move a restored far scroll when it installs, and must
+ * not add scroll range of its own when it grows. Each has the plant
+ * the design names, and the plant is asserted to FAIL the same assertion the
  * shipped shape passes - a green here with a green plant would mean nothing.
  *
- * QE4d is the existing `LagAtLowZoom` arms and `ContinuousPinch`, which are run
+ * The lag check is the existing `LagAtLowZoom` arms and `ContinuousPinch`, which are run
  * unchanged and are not duplicated here.
  */
 
@@ -97,13 +97,13 @@ it("teardown: removing the overlay removes the anchor, and a remount leaves exac
 	expect(plant.afterRemount, "a wrapper planted after the mount is counted").toBe(2);
 }, 180_000);
 
-it("QE4a: scrolling across rung boundaries writes nothing inside contentDOM", async () => {
+it("scroll: scrolling across rung boundaries writes nothing inside contentDOM", async () => {
 	const live = await call("runScroll", false);
 	const plant = await call("runScroll", true);
 	// eslint-disable-next-line no-console
-	console.log(`QE4a shipped ${JSON.stringify({ ...live, steps: undefined })}`);
+	console.log(`scroll shipped ${JSON.stringify({ ...live, steps: undefined })}`);
 	// eslint-disable-next-line no-console
-	console.log(`QE4a plant   ${JSON.stringify({ ...plant, steps: undefined })}`);
+	console.log(`scroll plant   ${JSON.stringify({ ...plant, steps: undefined })}`);
 
 	// THE ARM DID THE THING IT CLAIMS: several rung boundaries were crossed, so
 	// a zero mutation count is not the zero of a scroll that never switched.
@@ -125,7 +125,7 @@ it("QE4a: scrolling across rung boundaries writes nothing inside contentDOM", as
 		.toBeLessThanOrEqual(live.maxRepaintsOnHold);
 }, 240_000);
 
-it("QE4b: installing the anchor leaves a restored far scroll where it was", async () => {
+it("install: installing the anchor leaves a restored far scroll where it was", async () => {
 	const control = await call("runInstall", "control");
 	const live = await call("runInstall", "shipped");
 	const plant = await call("runInstall", "plant");
@@ -136,7 +136,7 @@ it("QE4b: installing the anchor leaves a restored far scroll where it was", asyn
 	const plantBig = await call("runInstall", "plantBig");
 	for (const [name, r] of [["control", control], ["shipped", live], ["plant", plant], ["plantBig", plantBig]] as const) {
 		// eslint-disable-next-line no-console
-		console.log(`QE4b ${name} ${JSON.stringify(r)}`);
+		console.log(`install ${name} ${JSON.stringify(r)}`);
 	}
 
 	expect(live.ladderLen, "the ladder is installed").toBeGreaterThan(0);
@@ -153,23 +153,23 @@ it("QE4b: installing the anchor leaves a restored far scroll where it was", asyn
 	expect(live.movedOnMeasure, "the first measure must not move the surface").toBe(0);
 
 	// THE PLANT: CodeMirror's default unknown height. Recorded either way -
-	// ruling 2B's reason for the guard is CodeMirror's source (an unknown height
+	// The reason for the guard is CodeMirror's source (an unknown height
 	// feeds the height map until measured), and this arm says what it measured
 	// rather than pretending to have proven the mechanism.
 	// eslint-disable-next-line no-console
-	console.log(`QE4b PLANT height 1px: afterMount ${plant.afterMount} vs control ${control.afterMount} (delta ${plant.afterMount - control.afterMount}); ` +
+	console.log(`install PLANT height 1px: afterMount ${plant.afterMount} vs control ${control.afterMount} (delta ${plant.afterMount - control.afterMount}); ` +
 		`height 200px: afterMount ${plantBig.afterMount} (delta ${plantBig.afterMount - control.afterMount})`);
 	expect(plant.mode, "the plant really ran").toBe("plant");
 	expect(plantBig.mode, "the calibration really ran").toBe("plantBig");
 }, 240_000);
 
-it("QE4c: growing the ladder moves neither the scroll nor the scroll range", async () => {
+it("growth: growing the ladder moves neither the scroll nor the scroll range", async () => {
 	const live = await call("runExtent");
 	const plant = await call("runExtent", "noOverflowHidden");
 	// eslint-disable-next-line no-console
-	console.log(`QE4c shipped ${JSON.stringify(live)}`);
+	console.log(`growth shipped ${JSON.stringify(live)}`);
 	// eslint-disable-next-line no-console
-	console.log(`QE4c plant   ${JSON.stringify(plant)}`);
+	console.log(`growth plant   ${JSON.stringify(plant)}`);
 
 	// THE ARM DID THE THING IT CLAIMS: the extent really grew and rungs really
 	// were appended.
@@ -178,22 +178,22 @@ it("QE4c: growing the ladder moves neither the scroll nor the scroll range", asy
 	expect(live.scrollMoved, "the surface must not move when the ladder grows").toBe(0);
 	expect(live.cameraMoved, "the camera must not jump when the ladder grows").toBeLessThanOrEqual(CAP);
 	expect(live.scrollHeightOverSpacer, "the ladder adds no scroll range beyond the spacer").toBeLessThanOrEqual(0);
-	// THE PLANT: the same ladder without `overflow: hidden`. Ruling 2B RP-5 says
+	// THE PLANT: the same ladder without `overflow: hidden`. The design says
 	// to record whichever way this goes and keep the guard either way.
 	// eslint-disable-next-line no-console
-	console.log(`QE4c PLANT no-overflow-hidden: overflow=${plant.plantOverflow} rungs=${plant.plantRungs} scrollHeightOverSpacer=${plant.scrollHeightOverSpacer} (shipped ${live.scrollHeightOverSpacer})`);
+	console.log(`growth PLANT no-overflow-hidden: overflow=${plant.plantOverflow} rungs=${plant.plantRungs} scrollHeightOverSpacer=${plant.scrollHeightOverSpacer} (shipped ${live.scrollHeightOverSpacer})`);
 	expect(plant.plantOverflow, "the plant really dropped the clip").not.toBe("hidden");
 	expect(plant.plantRungs, "the plant ladder really exists").toBeGreaterThan(10);
 }, 240_000);
 
-it("QE2: the document top E implies matches anchorTop within the amended bar", async () => {
+it("parity: the document top the ladder implies matches anchorTop within the amended bar", async () => {
 	const near = await call("runParity", 0);
 	const far = await call("runParity", 20000);
 	for (const [name, r] of [["near", near], ["far", far]] as const) {
 		// eslint-disable-next-line no-console
-		console.log(`QE2 ${name} maxError=${r.maxError} bar=${r.bar} minPlantError=${r.minPlantError} cssScale=${r.cssScale} ladderLen=${r.ladderLen} samples=${JSON.stringify(r.samples.slice(0, 2))}`);
+		console.log(`parity ${name} maxError=${r.maxError} bar=${r.bar} minPlantError=${r.minPlantError} cssScale=${r.cssScale} ladderLen=${r.ladderLen} samples=${JSON.stringify(r.samples.slice(0, 2))}`);
 		expect(r.samples.length, `${name} produced samples`).toBeGreaterThan(2);
-		// THE CLAIM, against ruling 2A's per-extent bar and not a flat 2.5e-5:
+		// THE CLAIM, against the per-extent bar and not a flat 2.5e-5:
 		// anchorTop reads the noisy rect E exists to remove, so the two MUST
 		// differ by that rect's own rounding.
 		expect(r.maxError, `${name} parity against the amended bar`).toBeLessThanOrEqual(r.bar);
@@ -203,46 +203,46 @@ it("QE2: the document top E implies matches anchorTop within the amended bar", a
 	}
 }, 240_000);
 
-it("QE4d/E0-2: reflow above the content moves the anchor with it", async () => {
+it("reflow: reflow above the content moves the anchor with it", async () => {
 	const r = await call("runReflow");
 	// eslint-disable-next-line no-console
-	console.log(`QE4d reflow ${JSON.stringify(r)}`);
-	// THE WRAPPER IS WHERE P-3 SAYS, checked by the same DOM properties the
+	console.log(`reflow ${JSON.stringify(r)}`);
+	// THE WRAPPER IS WHERE THE PLACEMENT CHECK SAYS, checked by the same DOM properties the
 	// production path checks every sync.
 	expect(r.live, "wrapper is the in-flow sibling immediately before contentDOM").toEqual({ isConnected: true, nextIsContent: true, sameParent: true });
 	// THE CLAIM: 1 layout px of growth above the content moves the rung by
 	// 1 x cssScale, so the camera sees the reflow and adopts it. A scroller-
-	// anchored probe reads 0 here - that is what this plant caught in E0.
+	// anchored probe reads 0 here - that is what this plant caught in the first measurement.
 	expect(r.rungMoved, `rung must move by ${r.expected}`).toBeCloseTo(r.expected, 2);
 	expect(r.contentMoved, "contentDOM moves by the same amount").toBeCloseTo(r.expected, 2);
 	expect(r.docTopMoved, "the document top the camera used moves with it").toBeCloseTo(r.expected, 2);
 	expect(r.rungRestored, "and comes back when the growth is taken back").toBeLessThan(0.01);
 }, 240_000);
 
-it("E2: static position, a pinned cross axis, and a gate that refuses what cannot be pinned", async () => {
+it("placement: static position, a pinned cross axis, and a gate that refuses what cannot be pinned", async () => {
 	const above = await call2("runE2", "above");
 	const aboveTop0 = await call2("runE2", "aboveTop0");
 	const center = await call2("runE2", "center");
 	const unpinnable = await call2("runE2", "unpinnable");
 	for (const [n, r] of [["above", above], ["aboveTop0", aboveTop0], ["center", center], ["unpinnable", unpinnable]] as const) {
 		// eslint-disable-next-line no-console
-		console.log(`E2 ${n} ${JSON.stringify(r)}`);
+		console.log(`placement ${n} ${JSON.stringify(r)}`);
 	}
 
-	// E2-1: with a 37px block above the content, the static position and the
+	// Block above: with a 37px block above the content, the static position and the
 	// scroller's origin are no longer the same point - which is what makes this
 	// arm able to tell `auto` from `top: 0` at all.
 	expect(above.ladderUsed, "auto offsets keep the ladder in service").toBe(true);
 	expect(above.parity, "auto offsets sit exactly on the document top").toBe(0);
 	expect(aboveTop0.parity, "top:0 resolves against the scroller and must NOT be 0").toBeGreaterThan(0);
 
-	// E2-2a: F-1 pins the cross axis whatever the container aligns to.
+	// Centred container: the wrapper's own align-self pins the cross axis whatever the container aligns to.
 	expect(center.containerAlignItems, "the arm really centred the container").toBe("center");
-	expect(center.wrapperAlignSelf, "F-1 is in force").toBe("flex-start");
+	expect(center.wrapperAlignSelf, "the wrapper's align-self is in force").toBe("flex-start");
 	expect(center.ladderUsed, "the ladder is used under align-items:center").toBe(true);
 	expect(center.parity, "and it still sits on the document top").toBe(0);
 
-	// E2-2b: what F-1 cannot pin, the gate must refuse - and everything falls
+	// Unpinnable: what the wrapper's align-self cannot pin, the gate must refuse - and everything falls
 	// back TOGETHER, which is the point of unmounting rather than flagging.
 	expect(unpinnable.refusalsAdded, "the gate fired exactly once").toBe(1);
 	expect(unpinnable.ladderUsed, "the ladder is out of service").toBe(false);

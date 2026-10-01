@@ -102,16 +102,17 @@ describe("reloadExternal", () => {
 		expect(await h.store.reloadExternal("pdf-never")).toBe(false);
 	});
 
-	it("refuses while the sidecar is locked", async () => {
-		// Dropping the record would clear the lock, and the next stroke would
-		// write into a file we had already decided not to touch.
+	it("refuses a damaged retry, then recovers only after a sound read", async () => {
+		// A retry must keep the write lock until the sidecar can be read.
 		const h = harness([]);
 		h.state.damaged = true;
 		await h.store.ensureLoaded("pdf-1");
-		h.state.damaged = false;
-		h.state.strokes = [stroke("a")];
 		expect(await h.store.reloadExternal("pdf-1")).toBe(false);
 		expect(h.store.strokes("pdf-1")).toEqual([]);
+		h.state.damaged = false;
+		h.state.strokes = [stroke("a")];
+		expect(await h.store.reloadExternal("pdf-1")).toBe(true);
+		expect(h.store.strokes("pdf-1")).toEqual([stroke("a")]);
 	});
 
 	it("does not write anything back", async () => {

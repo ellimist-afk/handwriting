@@ -20,9 +20,10 @@ import {
 	recordFork,
 	refreshForks,
 	resetForks,
+	forkHostFor,
 	scanForForks,
 } from "./ForkResolution";
-import { PageData } from "../model/PageData";
+import { PageData, parsePage } from "../model/PageData";
 
 const PAGE = "504fdb34-aed8-42a0-8df8-66f7db7a02de";
 const NOTE = "Demo/two devices.md";
@@ -53,7 +54,10 @@ interface Vault extends ForkHost {
 	saved: { pageId: string; data: PageData }[];
 }
 
-/** An in-memory vault. `saveNow` records rather than writing a sidecar. */
+/**
+ * An in-memory vault. `saveNow` records the call and writes the live sidecar
+ * beside the pair, as the store does, so a decision can read it back.
+ */
 function vault(seed: Record<string, string> = {}): Vault {
 	const files = new Map(Object.entries(seed));
 	const saved: { pageId: string; data: PageData }[] = [];
@@ -62,7 +66,10 @@ function vault(seed: Record<string, string> = {}): Vault {
 		saved,
 		read: async (p: string) => files.get(p) ?? null,
 		stat: async (p: string) => (files.has(p) ? { mtime: 1000 + files.get(p)!.length } : null),
-		saveNow: async (pageId: string, data: PageData) => void saved.push({ pageId, data }),
+		saveNow: async (pageId: string, data: PageData) => {
+			saved.push({ pageId, data });
+			files.set(`${MINE.slice(0, MINE.lastIndexOf("/") + 1)}${pageId}.json`, page(data.strokes.map((st) => st.id)));
+		},
 	};
 }
 
@@ -176,7 +183,11 @@ describe("each decision does the right thing on disk, and destroys nothing", () 
 	});
 
 	it("TAKE THE OTHER writes nothing, and does NOT destroy this device's revision", async () => {
-		const v = vault({ [MINE]: page(["a", "mine"]), [THEIRS]: page(["a", "theirs"]) });
+		const v = vault({
+			[MINE]: page(["a", "mine"]),
+			[THEIRS]: page(["a", "theirs"]),
+			[`.handwriting/${PAGE}.json`]: page(["a", "theirs"]),
+		});
 		recordFork(rec());
 
 		const out = await applyForkDecision(v, rec(), "take-theirs");
@@ -189,6 +200,22 @@ describe("each decision does the right thing on disk, and destroys nothing", () 
 		// The whole point: this device's revision is still on disk afterwards.
 		expect(v.files.get(MINE)).toBe(page(["a", "mine"]));
 		expect(listForks()).toHaveLength(0);
+	});
+
+	it("TAKE THE OTHER writes the other device's revision when the live page is no longer it", async () => {
+		const v = vault({
+			[MINE]: page(["a", "mine"]),
+			[THEIRS]: page(["a", "theirs"]),
+			// Keep-mine earlier, or ink drawn since: the live page is not theirs.
+			[`.handwriting/${PAGE}.json`]: page(["a", "mine"]),
+		});
+		recordFork(rec());
+
+		const out = await applyForkDecision(v, rec(), "take-theirs");
+
+		expect(out).toMatchObject({ kind: "applied", wrote: true, stillListed: false });
+		expect(v.saved.map((s) => s.data.strokes.map((st) => st.id))).toEqual([["a", "theirs"]]);
+		expect(v.files.get(MINE)).toBe(page(["a", "mine"]));
 	});
 
 	it("KEEP BOTH writes nothing and stays reachable afterwards", async () => {
@@ -246,7 +273,8 @@ describe("restoring this device's revision unwraps the exact capture", () => {
 	 * copy into the user's live sidecar permanently.
 	 */
 	it("writes the nested capture, not the wrapper that carries it", async () => {
-		const inner = JSON.parse(page(["exact-a", "exact-b"])) as Record<string, unknown>;
+		// Nested the way the store writes it: the in-memory page, not the packed file form.
+		const inner = parsePage(page(["exact-a", "exact-b"]), PAGE).data;
 		const outer = { ...(JSON.parse(page(["rounded"])) as Record<string, unknown>) };
 		outer["handwriting:exactOutgoing"] = inner;
 		const v = vault({ [MINE]: JSON.stringify(outer), [THEIRS]: page(["a"]) });
@@ -308,7 +336,9 @@ describe("forks are findable after a restart, because nothing else can find them
 
 	it("does not displace a live record, which is the one that knows the note", async () => {
 		const v = scanVault([O, I]);
-		recordFork(rec());
+		// The same pair, recorded live this session. The register holds one
+		// entry per pair, so it is the same pair the scan finds.
+		recordFork({ ...rec(), outgoingPath: `${FOLDER}/${O}`, incomingPath: `${FOLDER}/${I}` });
 
 		await refreshForks(v, FOLDER);
 
@@ -341,5 +371,78 @@ describe("the register", () => {
 
 		forgetFork("p2");
 		expect(listForks().map((f) => f.pageId)).toEqual(["p1"]);
+	});
+});
+
+describe("a scanned fork is titled with the note or PDF, not a page id (#194)", () => {
+	const FOLDER = ".handwriting";
+	const O = `${PAGE}.conflict-external-tok-outgoing.json`;
+	const I = `${PAGE}.conflict-external-tok-incoming.json`;
+	const PDF = "Papers/intro.pdf";
+
+	/** The real forkHostFor over an in-memory adapter, with the two lookups a caller may give. */
+	function hostWith(lookups: { pathForNote?: (id: string) => string | null; pathForPdf?: (id: string) => Promise<string | null> }): ForkHost {
+		const files = new Map([
+			[`${FOLDER}/${O}`, page(["a"])],
+			[`${FOLDER}/${I}`, page(["b"])],
+		]);
+		return forkHostFor({
+			adapter: {
+				read: async (p: string) => files.get(p) ?? "",
+				stat: async (p: string) => (files.has(p) ? { mtime: 1 } : null),
+				list: async () => ({ files: [O, I] }),
+			},
+			store: { saveNow: async () => {}, preserve: async () => null },
+			...lookups,
+		});
+	}
+
+	async function scanned(host: ForkHost): Promise<ForkRecord> {
+		const found = await scanForForks(host, FOLDER);
+		expect(found).toHaveLength(1);
+		return found[0]!;
+	}
+
+	it("a scanned note pair shows the note name", async () => {
+		const host = hostWith({ pathForNote: (id) => (id === PAGE ? NOTE : null) });
+		expect((await describeFork(host, await scanned(host))).path).toBe(NOTE);
+	});
+
+	it("a scanned PDF pair shows the PDF name", async () => {
+		const host = hostWith({ pathForNote: () => null, pathForPdf: async (id) => (id === PAGE ? PDF : null) });
+		expect((await describeFork(host, await scanned(host))).path).toBe(PDF);
+	});
+
+	it("an id nothing knows shows the id", async () => {
+		for (const host of [hostWith({}), hostWith({ pathForNote: () => null, pathForPdf: async () => null })]) {
+			expect((await describeFork(host, await scanned(host))).path).toBe(PAGE);
+		}
+	});
+
+	it("after a restart, a note nothing has loaded is named from the census (the audit's first trigger)", async () => {
+		// The register is empty, as it is at startup; the only source of the
+		// name is the ownership census the host was given, not an open note.
+		resetForks();
+		const census = new Map([[PAGE, NOTE]]);
+		const host = hostWith({ pathForNote: (id) => census.get(id) ?? null });
+		await refreshForks(host, FOLDER);
+		const [only] = listForks();
+		expect(only!.path).toBe(PAGE);
+		expect((await describeFork(host, only!)).path).toBe(NOTE);
+	});
+
+	it("a lookup that throws leaves the id, and does not hide the entry", async () => {
+		const host = hostWith({
+			pathForNote: () => null,
+			pathForPdf: async () => {
+				throw new Error("sidecar unreadable");
+			},
+		});
+		expect((await describeFork(host, await scanned(host))).path).toBe(PAGE);
+	});
+
+	it("a live-recorded pair keeps its own path, whatever the lookup says", async () => {
+		const host = hostWith({ pathForNote: () => "Other/note.md", pathForPdf: async () => PDF });
+		expect((await describeFork(host, rec())).path).toBe(NOTE);
 	});
 });

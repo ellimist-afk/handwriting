@@ -1,5 +1,5 @@
 /**
- * s110, LINE 6: A PINCH PAST THE CAP GIVES, AND THE LIFT EASES BACK TO THE CAP.
+ * LINE 6: A PINCH PAST THE CAP GIVES, AND THE LIFT EASES BACK TO THE CAP.
  *
  * Alan, 2026-09-18, second video: "the zoom should expand and then settle like onenote". Before this
  * the preview stopped dead at 400%: the fingers kept spreading and nothing on screen answered. Now a
@@ -12,7 +12,7 @@
  *   2. the lift does not move the page (the first read after it is still the overshoot), then the
  *      frames after it only ever shrink, never pass the cap, and the last one is exactly 4 with the
  *      preview down and the raster committed at 4;
- *   3. under the floor there is NO give (s112, the 10% rule is Alan's and Fit's): the preview stops at 10%
+ *   3. under the floor there is NO give: the preview stops at 10%
  *      and the lift settles at once;
  *   4. inside the range nothing changed: the lift settles at once, no ease frame;
  *   5. a new contact mid-ease lands on the cap first, and the next gesture starts from it;
@@ -49,7 +49,7 @@ afterAll(async () => {
 });
 
 const PANE = { w: 945, h: 834 } as const;
-// s179 add. 3 (Architect): every target in this file is read off the cap constant, not a literal.
+// Every target in this file is read off the cap constant, not a literal.
 // The cells were written when MAX_PINCH_SCALE was 4 and asked for 4.3; the 600 percent restore
 // moved the cap to 6 and left them asking for a scale well inside the range, so nothing reached
 // the cap and the give, the ease and the button refusal all had nothing to act on. PAST_CAP is the
@@ -59,7 +59,7 @@ const PAST_CAP = MAX_PINCH_SCALE * PINCH_GIVE;
 const CX = PANE.w / 2, CY = PANE.h / 2;
 type Read = { k: number; preview: boolean; raster: number; css: number; give: boolean; bounce: boolean };
 
-// s179 (Alan, 2026-09-20): the note zoom exists only under the Infinite Canvas, so every cell in
+// Alan, 2026-09-20: the note zoom exists only under the Infinite Canvas, so every cell in
 // this file mounts with the canvas ON. With it off the product ignores the whole gesture and
 // there is no cap, no give and no ease to read.
 async function mounted(infiniteCanvas = true): Promise<Page> {
@@ -102,7 +102,7 @@ it("1 + 2: past the cap the preview keeps painting, and the lift eases it back o
 	} finally { await page.close(); }
 }, 180_000);
 
-// RETIRED BY s179: this cell existed to show the cap give and its ease are the same with the
+// RETIRED BY the ruling: this cell existed to show the cap give and its ease are the same with the
 // Infinite Canvas on as with it off. There is no canvas-off zoom to compare against any more,
 // and the cell above now runs with the canvas on, so the two are one cell.
 
@@ -202,8 +202,8 @@ it("7: a pen landing mid-ease holds the zoom where it is for the stroke, the str
 	} finally { await page.close(); }
 }, 180_000);
 
-// RETIRED BY s179. This cell zoomed out to 25% with the Infinite Canvas OFF and then dragged,
-// to show the plain bound of s135 stopping the page and the lift landing on it. A note cannot
+// RETIRED BY the ruling. This cell zoomed out to 25% with the Infinite Canvas OFF and then dragged,
+// to show the plain bound of the ruling stopping the page and the lift landing on it. A note cannot
 // be at 25% with the canvas off any more - the pinch is ignored and the zoom commands read
 // busy - so the state it measured cannot occur. The canvas-on twin of this gesture, where the
 // band grants the give and the lift eases home, is covered by the overscroll bounce rows.

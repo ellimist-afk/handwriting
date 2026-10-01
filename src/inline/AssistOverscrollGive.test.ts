@@ -7,7 +7,7 @@
  * nothing either. He wants the give at every zoom, about an inch, then a spring back.
  *
  * THE MECHANISM. Both gestures are the same path: the assist pan, not the pinch
- * (Engineer's read, s103 add. 4). `carryScrollBy` writes `scrollLeft`/`scrollTop`
+ * (read at the time). `carryScrollBy` writes `scrollLeft`/`scrollTop`
  * through `carryStep`, which is hard-clamped to `[0, range]`. At an end the requested
  * delta is dropped on the floor - no transient offset, no visual - so the page cannot
  * move by one px and there is nothing to spring back from. Measured in
@@ -15,7 +15,7 @@
  * scrollTop stays 0 during the drag and after the lift.
  *
  * THE FIX. The remainder the clamp refuses becomes a transient PULL, capped at the
- * allowance A (96 painted px x the external scale, the s103 constant), reported to the
+ * allowance A (96 painted px x the external scale, the ruled constant), reported to the
  * host through `onOverscrollPull`. The host paints it on `viewportPan`. On the lift
  * `onOverscrollRelease` folds it into the standing pan and hands it to the existing
  * `resumeStrandedPan` - the one return a lift already has, which eases it to zero through
@@ -153,7 +153,7 @@ describe("the assist pan gives at an end and springs back", () => {
 	 * not at all - neither pan nor pinch - and there is no refused remainder for the give
 	 * to carry. Measured, not read: pull stays 0 and the scroller never moves.
 	 *
-	 * This asserts today's behaviour so the gap is visible and pinned. When the Architect
+	 * This asserts today's behaviour so the gap is visible and pinned. When a ruling
 	 * rules where line 5's give belongs - the pinch settle's clamp, or beginPinch ceasing
 	 * to cancel the assist - this cell is the one to turn red first.
 	 */

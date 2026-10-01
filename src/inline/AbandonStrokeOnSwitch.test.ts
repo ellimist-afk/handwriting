@@ -22,7 +22,7 @@
  * The SAME abandoned-stroke shape had a second half this router-only fix
  * never touched (Orion, 2026-09, second report): `InkOverlay.penDown` calls
  * `stripPenDown` -> `MobileTools.setInking(true)` on the strip AND the
- * collapsed pill (styles.css `.is-inking`: opacity 0, visibility hidden - not
+ * collapsed pill (styles.css `.is-inking`: opacity 0, pointer-events none - not
  * merely invisible but unhit-testable) the instant a claimed pen gesture
  * starts, and only a normal pointerup's `cb.onPenUp` -> `InkOverlay.penUp` ->
  * `stripPenUp` -> `setInking(false)` puts it back. `abandonActiveStroke()`

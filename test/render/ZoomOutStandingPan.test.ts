@@ -8,7 +8,7 @@
  * Scrolling does not bring it back, because at 100% the note fits the pane and
  * there is nothing to scroll.
  *
- * WHY IT HAPPENS (read on 043612dc, slate-artifacts/1.4.20/r1-standing-pan/READ-NOTES.md):
+ * WHY IT HAPPENS (read on 043612dc):
  * a pinch holds the note with a pan translate, and the settle spends that pan
  * into native scroll - `Math.max(0, anchor.scrollLeft - pan.x / effScale)`.
  * Whatever the scroll clamp refuses comes back as pan by design, so the settled
@@ -61,7 +61,7 @@
  * length on, 150% with it off). There the pan is doing its job, and the
  * invariant is the design's own: the settled frame stands where the last
  * preview frame stood. They are the guard that the fix touches only the fitting
- * axis. Measured first (R1-read, slate-artifacts/1.4.20/r1-standing-pan): where
+ * axis. Measured first (the R1 read): where
  * the content does not fit the settle may spend the whole remainder into
  * scroll and leave no pan at all, so "a pan survives" is NOT the guard.
  *
@@ -152,7 +152,7 @@ function sample(phase) {
 	const s = view.scrollDOM, pr = pane.getBoundingClientRect(), sr = s.getBoundingClientRect(), cr = view.contentDOM.getBoundingClientRect();
 	const pan = overlay.viewportPan || { x: 0, y: 0 };
 	const layout = overlay.viewportLayout;
-	// s179: the zoom bar, its buttons, Fit and the zoom commands all stand down together with the
+	// The zoom bar, its buttons, Fit and the zoom commands all stand down together with the
 	// canvas off, and they read that from this one term. The refusal pin below asserts it.
 	const viewportState = typeof overlay.getNoteViewportState === "function" ? overlay.getNoteViewportState() : null;
 	return { phase, k, preview: !!overlay.pinchPreview, busy: viewportState ? viewportState.busy : null,
@@ -170,7 +170,7 @@ function sample(phase) {
 		inkN: ink ? ink.n : 0, inkLeft: ink && ink.n ? r2(ink.left) : null, inkRight: ink && ink.n ? r2(ink.right) : null,
 		dyNote: ink && ink.n ? (ink.cy - t.cy) / k : null,
 		bounce: typeof overlay.overscrollBounceReadout === "function" ? overlay.overscrollBounceReadout() : null,
-		// s97 add. 52/55: room and extent, the two terms of the settle's floor (min(0, room - extent)),
+		// room and extent, the two terms of the settle's floor (min(0, room - extent)),
 		// read the same way the settle reads them (InkOverlay.ts :6603-6613), so a cell can derive its
 		// own expected rest instead of pinning one.
 		paneWidthPx: layout ? r2(layout.paneWidth) : null, externalScale: layout ? layout.externalScale : null,
@@ -180,9 +180,9 @@ function sample(phase) {
 
 window.standingPan = {
 	async mount(readable, tag, infiniteCanvas) {
-		// s179 (Alan, 2026-09-20): the pinch zoom exists only under the Infinite Canvas now, so a
+		// Alan, 2026-09-20: the pinch zoom exists only under the Infinite Canvas now, so a
 		// rig that pinches mounts with the canvas ON. The canvas-on settle laws apply here: the
-		// page stays where the fingers left it, no centring and no fit window (s78, s97).
+		// page stays where the fingers left it, no centring and no fit window.
 		setPenInk(true); setScrollExpansionEnabled(infiniteCanvas !== false);
 		setInlineTool("pen"); setInkColorHex("pen", "#ff00ff"); setInkSizeMult("pen", 4);
 		const path = "standing-pan-" + readable + "-" + (tag || "gesture") + ".md";
@@ -249,7 +249,7 @@ window.standingPan = {
 		return rows;
 	},
 	/**
-	 * s103: A TWO-FINGER DRAG, the scale held, the centre travelling by (dx, dy) over steps frames.
+	 * A TWO-FINGER DRAG, the scale held, the centre travelling by (dx, dy) over steps frames.
 	 * pinchPath only moves the centre horizontally and only while the spread changes; the allowance
 	 * is a per-axis claim, so the vertical needs its own driver.
 	 */
@@ -264,7 +264,7 @@ window.standingPan = {
 		touch(cx, cy, spread0); router.beginPinch(ev("pointerdown"));
 		for (let i = 1; i <= steps; i++) {
 			const t = i / steps;
-			// s110 add. 3(2)(a): THE SPREAD IS HELD. A real two-finger drag does not change the spread at all;
+			// The ruling: THE SPREAD IS HELD. A real two-finger drag does not change the spread at all;
 			// the 3% ramp this used to carry was there only to keep the router previewing, and it moved the
 			// settle's floor 50 px across the gesture, so every frame was measured against a bound it never
 			// ran under. Held, the floor stands still: measured spread 0.0000 px across all 30 frames.
@@ -378,7 +378,7 @@ const r3 = (v: number) => Math.round(v * 1000) / 1000;
 /** How far the zoom-out's centre sits from the zoom-in's, in client px: a hand does not pinch twice about one point. */
 const CENTRE_OFFSET_PX = 340;
 const PAN_MIN_VISIBLE_PX = 24;
-/** s97 add. 52's floor, `min(0, room - extent)`, from the raw fields `sample()` reads off the settle's own layout. */
+/** The ruling's floor, `min(0, room - extent)`, from the raw fields `sample()` reads off the settle's own layout. */
 function floorXOf(row: any): number {
 	const effective = row.k * row.externalScale;
 	const room = Math.max(0, row.paneWidthPx * row.externalScale - PAN_MIN_VISIBLE_PX);
@@ -417,21 +417,21 @@ it("an in-then-out pinch that ends at its starting scale is a pan to the settle:
 		expect(errors).toEqual([]);
 		expect(peak.k, "the gesture really zoomed in").toBeGreaterThan(2.5);
 		expect(settled.k, "and came back to the scale it began at").toBeCloseTo(1, 6);
-		// s179: the arm runs under the Infinite Canvas now, and the canvas grants sideways room, so the
+		// The arm runs under the Infinite Canvas now, and the canvas grants sideways room, so the
 		// old premise - a page that fits its pane with no scroll range at all - cannot hold. Measured at
 		// aa437ff1 on this fixture: rangeX 1690 before the gesture and 2202 at rest. The regime this arm
 		// asserts is the canvas one: room exists, and the settle still does not spring the page back.
 		expect(settled.rangeX, "premise: the canvas granted this note sideways room").toBeGreaterThan(1);
-		// s97 add. 52/55: ZERO SNAP at the commit frame (the first settle sample, a real measured DOM
+		// ZERO SNAP at the commit frame (the first settle sample, a real measured DOM
 		// rect so any bounce overlay is already reflected in it): it paints where the last preview
 		// frame painted, whatever the glide eases afterward.
 		const commitRow = round.find((r: any) => r.phase === "round-settle-1");
 		expect(commitRow, "premise: the commit frame was sampled").toBeTruthy();
-		// s97 add. 73, second attempt, test-only. THE ROW STAYS ON THE SCREEN. The first attempt compared
+		// Second attempt, test-only. THE ROW STAYS ON THE SCREEN. The first attempt compared
 		// `panX + bounce.fromX` against the preview's `panX`, which is the app's own arithmetic checked
 		// against itself - `fromX` IS `painted - landed`, so the sum returns `painted` by construction and
-		// a page painting somewhere else entirely would still pass. Withdrawn; that is the add. 40/41
-		// mistake and add. 43 already ruled the shape out.
+		// a page painting somewhere else entirely would still pass. Withdrawn; that is the ruling
+		// mistake and the ruling already ruled the shape out.
 		// What is actually wrong is the SAMPLE TIME: `round-settle-1` is read after the glide has begun,
 		// and the only thing between the commit and that read is the glide's own progress, which the
 		// readout reports exactly - `fromX` where it started, `x` where it is now. Measured over four
@@ -442,9 +442,9 @@ it("an in-then-out pinch that ends at its starting scale is a pan to the settle:
 		const glideSoFar = commitRow.bounce ? commitRow.bounce.fromX - commitRow.bounce.x : 0;
 		expect(Math.abs((commitRow.contentLeft + glideSoFar) - lastPreview.contentLeft),
 			`zero snap: the commit frame paints the last preview's position, px (painted ${commitRow.contentLeft} + glide so far ${r3(glideSoFar)} against ${lastPreview.contentLeft})`).toBeLessThanOrEqual(0.5);
-		// s97 add. 52/55: AT REST (after the glide), the page has eased to the floor, min(0, room -
+		// AT REST (after the glide), the page has eased to the floor, min(0, room -
 		// extent), derived from this fixture's own geometry - not left hanging indefinitely.
-		// s179/s78: under the canvas the rest is not a floor to ease onto - the page stays where the
+		// under the canvas the rest is not a floor to ease onto - the page stays where the
 		// fingers left it and the pan it held is spent into the room the canvas granted. Measured at
 		// aa437ff1: the last preview frame paints the page at contentLeft -205.00 at 300%, and at rest
 		// the returned-to-100% page sits at -34.33 with panX -0.33 and 2202 px of range beside it. The
@@ -466,7 +466,7 @@ const BAND_CASES = [
 	// 929 px at 67.2%, well inside the 1397.5 px pane by the overlay's own fit, which is the quantity the clamp decides on.
 	{ readable: false, start: 0.6, ratio: 1.03, travel: 360 },
 	{ readable: false, start: 0.6, ratio: 1.12, travel: 360 },
-	// s97: the two Readable-line-length-on arms are DELETED with the rest they asserted. With the
+	// The two Readable-line-length-on arms are DELETED with the rest they asserted. With the
 	// setting on the column is inset, so a drag cannot carry it past the pane's edge at all and this
 	// fixture has no overshoot to stand on; the bound's own behaviour there is OverscrollEdgeBound's.
 ] as const;
@@ -504,7 +504,7 @@ for (const b of BAND_CASES) {
 			// line length on) while the page is plainly narrower than the pane (855 / 929 / 784 px against 1398). A scale that falls
 			// leaves none (0 px at 100% -> 75%). So the scroller's range is reported, and the fit the clamp uses is asserted.
 			if (settled.fitReadout) expect(settled.fitReadout.fitsX, "the overlay's own fit says the page fits at the end scale").toBe(true);
-			// s135/s150: with the canvas off there is no give, so a drag whose ask would carry the page past the
+			// with the canvas off there is no give, so a drag whose ask would carry the page past the
 			// pane's left edge stops AT the edge on every preview frame (the plain bound), never past it. The old
 			// row asserted the give here; the ask itself (travel 360 against a fitting page) is unchanged, so the
 			// bound is exercised, not vacuous.
@@ -516,21 +516,21 @@ for (const b of BAND_CASES) {
 				// that never reached it. Room is read off the drag's own first sample.
 				const room = rows[0].contentLeft - rows[0].viewLeft;
 				expect(b.travel, `premise: the ask exceeded the room (travel ${b.travel}, room ${r3(room)})`).toBeGreaterThan(room + 1);
-				// s179/s78: with the canvas ON the drag is not stopped at the pane's edge. The canvas grants
+				// with the canvas ON the drag is not stopped at the pane's edge. The canvas grants
 				// the travel, the page follows the fingers past the edge, and the lift leaves it there.
 				// Measured at aa437ff1 on this fixture: the last preview frame paints contentLeft -52.92
 				// (1.03 arm) and -67.68 (1.12 arm) against a viewLeft of 300.
 				expect(lastPreview.contentLeft, "a drag under the canvas: the page followed the fingers past the pane's left edge").toBeLessThan(lastPreview.viewLeft - 50);
 			} else expect(lastPreview.contentLeft, "a zoom: the gesture carried the page past the pane's left edge").toBeLessThan(lastPreview.viewLeft - 0.5);
-			// s97 add. 52/55: ZERO SNAP at the commit frame (the first settle sample): it paints where
+			// ZERO SNAP at the commit frame (the first settle sample): it paints where
 			// the last preview frame painted, whatever the glide eases afterward.
 			const commitRow = rows.find((r: any) => r.phase === "band-settle-1");
 			expect(commitRow, "premise: the commit frame was sampled").toBeTruthy();
-			// s97 add. 73, second attempt, test-only. THE ROW STAYS ON THE SCREEN. The first attempt compared
+			// Second attempt, test-only. THE ROW STAYS ON THE SCREEN. The first attempt compared
 		// `panX + bounce.fromX` against the preview's `panX`, which is the app's own arithmetic checked
 		// against itself - `fromX` IS `painted - landed`, so the sum returns `painted` by construction and
-		// a page painting somewhere else entirely would still pass. Withdrawn; that is the add. 40/41
-		// mistake and add. 43 already ruled the shape out.
+		// a page painting somewhere else entirely would still pass. Withdrawn; that is the ruling
+		// mistake and the ruling already ruled the shape out.
 		// What is actually wrong is the SAMPLE TIME: `round-settle-1` is read after the glide has begun,
 		// and the only thing between the commit and that read is the glide's own progress, which the
 		// readout reports exactly - `fromX` where it started, `x` where it is now. Measured over four
@@ -541,9 +541,9 @@ for (const b of BAND_CASES) {
 		const glideSoFar = commitRow.bounce ? commitRow.bounce.fromX - commitRow.bounce.x : 0;
 		expect(Math.abs((commitRow.contentLeft + glideSoFar) - lastPreview.contentLeft),
 			`zero snap: the commit frame paints the last preview's position, px (painted ${commitRow.contentLeft} + glide so far ${r3(glideSoFar)} against ${lastPreview.contentLeft})`).toBeLessThanOrEqual(0.5);
-			// s97 add. 52/55: AT REST (after the glide), the page has eased to the floor - not an
+			// AT REST (after the glide), the page has eased to the floor - not an
 			// unbounded hang.
-			// s179/s78: at rest under the canvas the page is WHERE THE FINGERS LEFT IT - there is no floor
+			// at rest under the canvas the page is WHERE THE FINGERS LEFT IT - there is no floor
 			// to ease onto, because the room the canvas granted absorbs the pan. Measured at aa437ff1:
 			// last preview -52.92 and rest -53.00 on the 1.03 arm, -67.68 and -68.00 on the 1.12 arm.
 			expect(Math.abs(settled.contentLeft - lastPreview.contentLeft),
@@ -556,7 +556,7 @@ for (const b of BAND_CASES) {
 }
 
 /**
- * s103, THE ALLOWANCE, RED-FIRST at 956ef2c9 where the preview is unbounded.
+ * THE ALLOWANCE, RED-FIRST at 956ef2c9 where the preview is unbounded.
  *
  * Alan's contract, from his video of the native scroller: while the fingers are down the page may
  * pass its own room by a small give and then STOPS under them - it does not follow the fingers for
@@ -571,8 +571,8 @@ for (const b of BAND_CASES) {
 const ALLOWANCE_PX = 96;
 const allowanceOf = (row: any): number => ALLOWANCE_PX * (row.externalScale ?? 1);
 
-// RETIRED BY s179 (Alan, 2026-09-20). The two bound cells here drove a two-finger drag with the
-// Infinite Canvas OFF and asserted the plain bound of s135: no give, the preview stops at the
+// RETIRED BY the ruling (Alan, 2026-09-20). The two bound cells here drove a two-finger drag with the
+// Infinite Canvas OFF and asserted the plain bound of the ruling: no give, the preview stops at the
 // floor or the ceiling, and the lift lands on it. With the canvas off the product now ignores
 // every phase of a two-finger gesture, so there is no preview to bound and no landing to read -
 // the premise "the drag really previewed" cannot hold. Under the canvas the same drag has the
@@ -581,7 +581,7 @@ const allowanceOf = (row: any): number => ALLOWANCE_PX * (row.externalScale ?? 1
 
 
 /**
- * s179, THE REFUSAL PIN for this rig. Alan's decision of 2026-09-20 takes the note zoom out of the
+ * THE REFUSAL PIN for this rig. Alan's decision of 2026-09-20 takes the note zoom out of the
  * canvas-off mode: with the Infinite Canvas off a two-finger pinch is ignored in every phase, no
  * preview starts, the page does not move, the scale stays at 100%, and the zoom bar, its buttons,
  * Fit and the zoom commands all read busy together.
@@ -612,7 +612,7 @@ it("canvas off: a pinch is ignored - no preview, the page does not move, the sca
 		const offMount = await call(page, "mount", true, "refusal-pin", false) as any;
 		const offRows = await call(page, "pinch", 0.4, 20, offMount.inkMiddleX, offMount.natural.textCy, "refused") as any[];
 		const before = offRows[0], after = offRows.at(-1);
-		record.push({ cell: "s179 refusal pin", control: { k: onEnd.k, previews: onRows.filter((r: any) => r.preview).length }, before, after });
+		record.push({ cell: "refusal pin", control: { k: onEnd.k, previews: onRows.filter((r: any) => r.preview).length }, before, after });
 		expect(errors).toEqual([]);
 
 		expect(before.k, "premise: the canvas-off note starts at 100%").toBe(1);

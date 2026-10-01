@@ -207,16 +207,26 @@ export function chooseInstance(
 	family: string,
 	path: string,
 	candidates: readonly InstanceClaim[],
-	exists: (path: string) => boolean
+	exists: (path: string) => boolean,
+	/** Deleted claims and the PDF paths that already existed when each was deleted. */
+	pending: ReadonlyMap<string, ReadonlySet<string>> = new Map()
 ): InstanceChoice {
 	for (const c of candidates) {
 		if (c.paths.includes(path)) return { id: c.id, action: "use" };
+	}
+	// A sync rename may CREATE its new path before anyone opens it. Only a
+	// path absent at deletion can take pending ink; an older template cannot.
+	for (const c of candidates) {
+		if (c.paths.every((p) => !exists(p)) &&
+			c.paths.some((p) => pending.has(p) && !pending.get(p)!.has(path))) {
+			return { id: c.id, action: "adopt" };
+		}
 	}
 	for (const c of candidates) {
 		if (c.paths.length === 0) return { id: c.id, action: "adopt" };
 	}
 	for (const c of candidates) {
-		if (c.paths.every((p) => !exists(p))) return { id: c.id, action: "adopt" };
+		if (c.paths.every((p) => !exists(p) && !pending.has(p))) return { id: c.id, action: "adopt" };
 	}
 	return {
 		id: nextInstanceId(

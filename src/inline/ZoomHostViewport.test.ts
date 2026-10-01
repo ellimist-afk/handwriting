@@ -24,6 +24,7 @@ import { describe, expect, it, vi } from "vitest";
 (globalThis as { window?: unknown }).window = globalThis;
 
 import { InkOverlayPlugin } from "./InkOverlay";
+import { TailRenderer } from "../ink/TailRenderer";
 
 type Fields = Record<string, unknown>;
 type Styles = Record<string, string>;
@@ -168,7 +169,26 @@ function rig(supported: boolean | null, baseTransform = "none", themeZoom?: stri
 		cancelAnimationFrame: () => undefined,
 	};
 	const host = element({ clientWidth: 640, clientHeight: 480, ownerDocument: { defaultView: win } });
-	const canvases = [element(), element(), element(), element(), element()];
+	const tailCtx = {
+		setTransform: () => undefined, save: () => undefined, restore: () => undefined,
+		clearRect: () => undefined, drawImage: () => undefined,
+		getLineDash: () => [], setLineDash: () => undefined,
+		lineCap: "butt", lineJoin: "miter", lineWidth: 1,
+		strokeStyle: "#000", fillStyle: "#000", globalAlpha: 1,
+		globalCompositeOperation: "source-over", lineDashOffset: 0,
+		miterLimit: 10, filter: "none", imageSmoothingEnabled: true,
+		shadowBlur: 0, shadowColor: "transparent", shadowOffsetX: 0, shadowOffsetY: 0,
+		font: "10px sans-serif", textAlign: "start", textBaseline: "alphabetic",
+	} as unknown as CanvasRenderingContext2D;
+	const tailCanvas = element({
+		width: 300, height: 150,
+		ownerDocument: { defaultView: { devicePixelRatio: 1 } },
+		getContext: () => tailCtx,
+	});
+	const tail = new TailRenderer(tailCanvas as unknown as HTMLCanvasElement);
+	tail.configureInlineBacking(640, 480, 1, 1, true);
+	tail.restoreFullSurface();
+	const canvases = [element(), element(), tailCanvas, element(), element()];
 	const pane = element({ scrollLeft: 0, scrollTop: 0, clientWidth: 640, clientHeight: 480 });
 	(host as Fields).parentElement = pane;
 	const overlay = Object.create(InkOverlayPlugin.prototype) as Fields;
@@ -203,6 +223,7 @@ function rig(supported: boolean | null, baseTransform = "none", themeZoom?: stri
 		cssHeight: 0,
 		committedCanvas: canvases[0], wetCanvas: canvases[1], tailCanvas: canvases[2],
 		highlightCanvas: canvases[3], highlightWetCanvas: canvases[4],
+		tail,
 		viewportGeneration: 0,
 		viewportPaneObserver: null,
 		viewportStyleObserver: null,
@@ -642,10 +663,57 @@ describe("the transform fallback and a zoom the host carried inline", () => {
  * cached on the overlay.
  */
 describe("the canvas layer boxes after a mid-takeover flip", () => {
+	it("does not rewrite unchanged tail placement on repeated preview frames", () => {
+		const r = rig(false);
+		const canvas = r.canvases[2] as Fields;
+		const tail = r.overlay.tail as TailRenderer;
+		tail.configureInlineBacking(640, 480, 1, 0.125, false);
+		(tail as unknown as {
+			resizeBacking(width: number, height: number, x: number, y: number, mode: "compact"): void;
+		}).resizeBacking(128, 96, 40, 56, "compact");
+		expect([canvas.width, canvas.height], "a live compact bitmap, not the full band").toEqual([128, 96]);
+		const writes: string[] = [];
+		canvas.style = new Proxy(canvas.style as object, {
+			set(target, key, value) {
+				writes.push(String(key));
+				return Reflect.set(target, key, value);
+			},
+		});
+		tail.placeInline(0.125, false);
+		writes.length = 0;
+		tail.placeInline(0.125, false);
+		tail.placeInline(0.125, false);
+		expect(writes, "unchanged layout must not mutate style on preview frames").toEqual([]);
+	});
+
+	it("does not rewrite unchanged full tail placement on repeated preview frames", () => {
+		const r = rig(false);
+		const canvas = r.canvases[2] as Fields;
+		const tail = r.overlay.tail as TailRenderer;
+		tail.configureInlineBacking(640, 480, 1, 0.125, false);
+		tail.restoreFullSurface();
+		expect([canvas.width, canvas.height], "a nonzero full backing").toEqual([640, 480]);
+		const writes: string[] = [];
+		canvas.style = new Proxy(canvas.style as object, {
+			set(target, key, value) {
+				writes.push(String(key));
+				return Reflect.set(target, key, value);
+			},
+		});
+		tail.placeInline(0.125, false);
+		writes.length = 0;
+		tail.placeInline(0.125, false);
+		tail.placeInline(0.125, false);
+		expect(writes, "unchanged full placement must not mutate style on preview frames").toEqual([]);
+	});
+
 	/** 1000 x 800 band at k 0.125: 125 x 100 css px stretched by scale(8). */
 	const flipRig = (stuck: boolean | string): Rig => {
 		const r = rig(true, "none", "1.25", stuck);
 		Object.assign(r.overlay, { cssWidth: 1000, cssHeight: 800, cssScale: 0.125, pinchScaleNow: 0.125 });
+		const tail = r.overlay.tail as TailRenderer;
+		tail.configureInlineBacking(1000, 800, 1, 0.125, true);
+		tail.restoreFullSurface();
 		return r;
 	};
 
@@ -660,9 +728,21 @@ describe("the canvas layer boxes after a mid-takeover flip", () => {
 		apply(r.overlay, 0.1);
 		expect(supportedNow(r.overlay), "the flip happened").toBe(false);
 		for (const [i, c] of r.canvases.entries()) {
+			if (i === 2) continue;
 			expect(c.calls.at(-1), `canvas ${i} placed for the form the path wrote`)
 				.toEqual({ width: "125px", height: "100px", transform: "scale(8)", transformOrigin: "0 0" });
 		}
+		const tailCanvas = r.canvases[2];
+		if (!tailCanvas) throw new Error("expected a tail canvas at r.canvases[2]");
+		const style = tailCanvas.style as Record<string, string>;
+		expect([tailCanvas.width, tailCanvas.height], "full tail backing").toEqual([1000, 800]);
+		expect({
+			left: style.left, top: style.top, width: style.width, height: style.height,
+			transform: style.transform, transformOrigin: style.transformOrigin,
+		}, "tail canvas placed by TailRenderer").toEqual({
+			left: "0px", top: "0px", width: "125px", height: "100px",
+			transform: "scale(8)", transformOrigin: "0 0",
+		});
 	});
 
 	it("leaves the canvases alone when the zoom write took", () => {
@@ -805,6 +885,9 @@ describe("a unity write and a host whose own zoom is inline and important", () =
 	it("still falls back at the shrink when the host had no inline zoom to inherit", () => {
 		const r = rig(true, "none", undefined, "1");
 		Object.assign(r.overlay, { cssWidth: 1000, cssHeight: 800, cssScale: 0.125 });
+		const tail = r.overlay.tail as TailRenderer;
+		tail.configureInlineBacking(1000, 800, 1, 0.125, true);
+		tail.restoreFullSurface();
 		prepare(r.overlay);
 		apply(r.overlay, 1);
 		expect(supportedNow(r.overlay), "a unity write certifies nothing").toBe(true);
@@ -814,9 +897,21 @@ describe("a unity write and a host whose own zoom is inline and important", () =
 		expect(r.host.calls.at(-1)).toEqual({ width: "6400px", height: "4800px", zoom: "", transform: "scale(0.1)", transformOrigin: "0 0" });
 		expect(r.host.props.zoom, "nothing to put back on a host that had nothing").toBeUndefined();
 		for (const [i, c] of r.canvases.entries()) {
+			if (i === 2) continue;
 			expect(c.calls.at(-1), `canvas ${i} re-placed for the transform form`)
 				.toEqual({ width: "125px", height: "100px", transform: "scale(8)", transformOrigin: "0 0" });
 		}
+		const tailCanvas = r.canvases[2];
+		if (!tailCanvas) throw new Error("expected a tail canvas at r.canvases[2]");
+		const style = tailCanvas.style as Record<string, string>;
+		expect([tailCanvas.width, tailCanvas.height], "full tail backing").toEqual([1000, 800]);
+		expect({
+			left: style.left, top: style.top, width: style.width, height: style.height,
+			transform: style.transform, transformOrigin: style.transformOrigin,
+		}, "tail canvas re-placed by TailRenderer").toEqual({
+			left: "0px", top: "0px", width: "125px", height: "100px",
+			transform: "scale(8)", transformOrigin: "0 0",
+		});
 	});
 });
 

@@ -1,4 +1,5 @@
 import { normalizePath } from "obsidian";
+import { INK_FOLDER_MOVING_TEXT } from "../util/DeleteAllBackupNotice";
 import {
 	DEFAULT_INK_FOLDER,
 	SYNCED_INK_FOLDER,
@@ -69,7 +70,9 @@ export function newPageWriter(label = "writer"): PageWriter {
 
 /** Bounded, event-driven retry of a failed write. Not polling. */
 const WRITE_RETRY_MS = 1500;
-const WRITE_MAX_RETRIES = 3;
+export const WRITE_MAX_RETRIES = 3;
+/** Attempts before the write error is raised: the first write and every retry. */
+export const WRITE_ATTEMPTS = 1 + WRITE_MAX_RETRIES;
 
 /**
  * Cheap content identity for the external-change guard. Mtime alone has a
@@ -166,8 +169,13 @@ export interface PreparedExternalAdoption {
 	readonly pageId: string;
 	/** The parsed incoming revision. Clean, inline, this build's schema. */
 	readonly data: PageData;
-	readonly outgoingPath: string;
-	readonly incomingPath: string;
+	/**
+	 * The recovery pair, or absent when the outgoing revision held nothing the
+	 * incoming one lacks: no pair is written for an ordinary sync that only
+	 * added to the page (see `outgoingDiverges`).
+	 */
+	readonly outgoingPath?: string;
+	readonly incomingPath?: string;
 	/** The pair was already on disk and verified; no new artifact was made. */
 	readonly reused: boolean;
 	readonly mtime: number;
@@ -209,6 +217,12 @@ export type ExternalAdoptionPrep =
 export type ExternalChangeObservation = "changed" | "unchanged" | "missing-live-sidecar";
 
 /**
+ * What `load` returns. `transient` is set only with `damaged`, when the read
+ * threw rather than returning bytes that did not parse.
+ */
+export type LoadResult = ParseResult & { transient?: true };
+
+/**
  * Where the outgoing recovery artifact carries its EXACT capture.
  *
  * The persisted codec is lossy on purpose: `packPointsV2` quantizes x/y to 1e-2
@@ -233,12 +247,25 @@ export const EXACT_OUTGOING_KEY = "handwriting:exactOutgoing";
  * capture. Nothing else in the plugin writes a page this way, and no ordinary
  * save reaches it - `serializePage` and the live-sidecar path are untouched.
  */
-function serializeExactOutgoing(outgoing: PageData): string {
+function serializeExactOutgoing(outgoing: PageData, adoptedBy: string | null): string {
 	return serializePage({
 		...outgoing,
-		unknownTop: { ...outgoing.unknownTop, [EXACT_OUTGOING_KEY]: outgoing },
+		unknownTop: {
+			...outgoing.unknownTop,
+			[EXACT_OUTGOING_KEY]: outgoing,
+			...(adoptedBy ? { [ADOPTED_BY_KEY]: adoptedBy } : {}),
+		},
 	});
 }
+
+/**
+ * The device that wrote a pair, on its outgoing leg. The pair sits beside the
+ * live file and syncs with it, and its legs are named for the ADOPTING device:
+ * "outgoing" is that device's revision. Another device reading the pair needs
+ * to know it did not write it, or it offers the adopter's ink as its own. A
+ * per-install id, kept in the device's own local storage, never synced.
+ */
+export const ADOPTED_BY_KEY = "handwriting:adoptedBy";
 
 /**
  * Reopen a recovery artifact the way a recovery tool should: the exact capture
@@ -249,6 +276,45 @@ function serializeExactOutgoing(outgoing: PageData): string {
 export function recoverExactPage(parsed: PageData): PageData {
 	const exact = parsed.unknownTop?.[EXACT_OUTGOING_KEY];
 	return exact !== undefined && exact !== null ? (exact as PageData) : parsed;
+}
+
+/**
+ * Would adopting `incoming` lose anything `outgoing` holds? True when the
+ * outgoing revision has a stroke, text box or image whose id the incoming one
+ * lacks, or has under the same id in a different persisted form.
+ *
+ * Compared as the persisted codec writes them, both sides parsed the same
+ * way: the live file never held more precision than that, so a difference
+ * below it is not ink anyone had. False is the ordinary sync - the other
+ * device only added - and there is then nothing to recover and no pair to
+ * write. Every revision used to write a full pair of files, forever.
+ */
+export function outgoingDiverges(outgoing: PageData, incoming: PageData): boolean {
+	const mine = parsePage(serializePage(outgoing), outgoing.pageId).data;
+	return (
+		lostFrom(mine.strokes, incoming.strokes) ||
+		lostFrom(mine.textBoxes, incoming.textBoxes) ||
+		lostFrom(mine.images, incoming.images)
+	);
+}
+
+/**
+ * Does `page` hold every stroke id of the live file's page? False when the
+ * live bytes do not parse whole: a partial read proves nothing. A page in a
+ * newer format than this build reads is a partial read too, even when every
+ * stroke it shows decoded (parsePage reports it without `damaged`).
+ */
+function holdsEveryStroke(page: PageData, liveText: string | null, pageId: string): boolean {
+	if (liveText === null) return false;
+	const live = parsePage(liveText, pageId);
+	if (live.damaged || live.futureVersion !== undefined) return false;
+	const ids = new Set(page.strokes.map((s) => s.id));
+	return live.data.strokes.every((s) => ids.has(s.id));
+}
+
+function lostFrom(mine: readonly { id: string }[], theirs: readonly { id: string }[]): boolean {
+	const byId = new Map(theirs.map((t) => [t.id, JSON.stringify(t)]));
+	return mine.some((m) => byId.get(m.id) !== JSON.stringify(m));
 }
 
 /**
@@ -278,8 +344,18 @@ export class PageStore {
 	 * every other identity the store keeps is per-pageId.
 	 */
 	private pendingWriter = new Map<string, PageWriter | undefined>();
+	/**
+	 * The newest flush-carrier generation the payload sitting in `pending`
+	 * holds, recorded when that payload entered `pending` and carried with it
+	 * through every requeue. Never re-read from `carriersWritten` when the
+	 * payload is consumed: a failed older save put back into `pending` would
+	 * then claim a carrier written from a newer snapshot. See carriersWritten.
+	 */
+	private pendingCovers = new Map<string, number | undefined>();
 	/** Who composed the bytes currently in the live sidecar. */
 	private lastWriter = new Map<string, PageWriter | undefined>();
+	/** Writers that have gone for good; see `retireWriter`. */
+	private retiredWriters = new Set<PageWriter>();
 	private timers = new Map<string, number>();
 	/** One-shot maximum-dirty-interval timer per page; see MAX_DIRTY_MS. */
 	private maxTimers = new Map<string, number>();
@@ -379,6 +455,14 @@ export class PageStore {
 	/** Bound same-mtime content reads to once per five seconds per polled page. */
 	private contentCheckedAt = new Map<string, number>();
 	/**
+	 * Pages whose last load could not be used: the stamp of the bytes that were
+	 * read and did not parse, or null when the read itself threw. The poll
+	 * watches these even though no known mtime exists for them, so a damaged or
+	 * not-yet-readable page heals when its file changes instead of waiting for a
+	 * reopen. Cleared by any load that is not damaged.
+	 */
+	private unreadable = new Map<string, string | null>();
+	/**
 	 * WHERE EACH PAGE LIVES: the path a page's sidecar was found at, or was
 	 * last written to. One page id, one live sidecar.
 	 *
@@ -431,6 +515,13 @@ export class PageStore {
 	 * completed save (see `absorbProvisional` and `pendingConflict`).
 	 */
 	private displacedProvisional = new Map<string, string>();
+	/** This install's id, written into the pairs it preserves (see ADOPTED_BY_KEY). */
+	private deviceId: string | null = null;
+
+	/** Name the install that writes this store's recovery pairs. */
+	useDeviceId(id: string): void {
+		this.deviceId = id;
+	}
 	/** True between `holdWrites` and `releaseWrites`; see those. */
 	private migrating = false;
 	private failures = new Map<string, number>();
@@ -500,6 +591,21 @@ export class PageStore {
 	 * stands, so no path is chosen or invented here.
 	 */
 	onInkTrashRestored: ((pageId: string, restoredTo: string) => void) | null = null;
+	/**
+	 * Surface a background-flush carrier that was NOT promoted (set by the
+	 * plugin): it was built on other bytes and lacks a stroke the live page
+	 * has, so the live page stands and the carrier's page is kept at `keptAs`.
+	 * Those are this device's own newest strokes; without a word they sit in a
+	 * file nobody knows to look for.
+	 */
+	onFlushKeptAside: ((pageId: string, keptAs: string) => void) | null = null;
+	/**
+	 * Surface a background-flush carrier that WAS promoted over a live page
+	 * (set by the plugin): the carrier's page is now live, and the page it
+	 * replaced is kept at `keptAs`. Not `onRecovered`, whose sentence calls
+	 * the kept file unreadable; the replaced page here was perfectly readable.
+	 */
+	onFlushPromoted: ((pageId: string, keptAs: string) => void) | null = null;
 
 	constructor(
 		private app: PageStoreHost,
@@ -619,6 +725,15 @@ export class PageStore {
 	}
 
 	/**
+	 * Every folder a page can be served from, configured one first. A fork
+	 * found at load is preserved beside the copy that was served, which can be
+	 * the other well-known folder, so the fork command looks in all of them.
+	 */
+	inkFolders(): string[] {
+		return this.searchFolders();
+	}
+
+	/**
 	 * WRITES ARE HELD WHILE THE INK FOLDER IS BEING MOVED.
 	 *
 	 * `changeFolder` settles the queue first, but settling drains it ONCE and
@@ -701,12 +816,97 @@ export class PageStore {
 		const primary = this.path(pageId);
 		const others = [DEFAULT_INK_FOLDER, SYNCED_INK_FOLDER].filter((f) => f !== this.folder);
 		const adapter = this.app.vault.adapter;
-		if (await adapter.exists(primary)) return { path: primary, found: true };
+		if (await adapter.exists(primary)) {
+			for (const folder of others) {
+				const second = normalizePath(`${folder}/${pageId}.json`);
+				if (await adapter.exists(second)) return this.chooseBetweenFolders(pageId, primary, second);
+			}
+			return { path: primary, found: true };
+		}
 		for (const folder of others) {
 			const fallback = normalizePath(`${folder}/${pageId}.json`);
 			if (await adapter.exists(fallback)) return { path: fallback, found: true };
 		}
 		return { path: primary, found: false };
+	}
+
+	/**
+	 * ONE PAGE, TWO WELL-KNOWN FOLDERS. Reached only when both hold the page;
+	 * the ordinary single-folder open never gets here and reads nothing extra.
+	 *
+	 * It happens when this device wrote a page before the synced copy arrived
+	 * (the note synced before its ink) and the session ended before live reload
+	 * adopted the synced one, and after an interrupted folder move. The
+	 * configured folder used to win every time, so a restart served this
+	 * device's early copy for good: the other device's ink hidden, and new ink
+	 * written to a file the other device never sees.
+	 *
+	 *  - Identical bytes: the configured folder, as before.
+	 *  - One copy holds every stroke the other has: that copy, whichever folder
+	 *    it is in. The other is moved aside as a conflict copy by the next
+	 *    write, and announced; never deleted (see absorbProvisional).
+	 *  - Neither holds the other: a real fork. The copy in the synced folder is
+	 *    served, and `load` preserves the other as this device's side of a fork
+	 *    pair, so "fix ink de-sync" offers the decision.
+	 *
+	 * A copy that cannot be read or parsed decides nothing: the configured
+	 * folder is served, as before.
+	 */
+	private async chooseBetweenFolders(
+		pageId: string,
+		primary: string,
+		second: string
+	): Promise<{ path: string; found: true }> {
+		const adapter = this.app.vault.adapter;
+		let a: string;
+		let b: string;
+		try {
+			[a, b] = await Promise.all([adapter.read(primary), adapter.read(second)]);
+		} catch {
+			return { path: primary, found: true };
+		}
+		if (a === b) return { path: primary, found: true };
+		const pa = parsePage(a, pageId);
+		const pb = parsePage(b, pageId);
+		if (pa.damaged || pb.damaged) return { path: primary, found: true };
+		const idsA = new Set(pa.data.strokes.map((s) => s.id));
+		const idsB = new Set(pb.data.strokes.map((s) => s.id));
+		const aHoldsB = [...idsB].every((id) => idsA.has(id));
+		const bHoldsA = [...idsA].every((id) => idsB.has(id));
+		let winner = primary;
+		let loser = second;
+		if (!aHoldsB && bHoldsA) [winner, loser] = [second, primary];
+		if (!aHoldsB && !bHoldsA) {
+			if (folderOf(second) === SYNCED_INK_FOLDER) [winner, loser] = [second, primary];
+			this.twoFolderForks.set(pageId, loser);
+		}
+		this.displacedProvisional.set(pageId, loser);
+		return { path: winner, found: true };
+	}
+
+	/**
+	 * A two-folder fork found by `chooseBetweenFolders`, waiting for `load` to
+	 * preserve the losing copy as this device's side of a fork pair.
+	 */
+	private twoFolderForks = new Map<string, string>();
+
+	/** Write the fork pair for a two-folder fork, on the page's chain. */
+	private async preserveTwoFolderFork(pageId: string, final: string, winnerText: string): Promise<void> {
+		const loser = this.twoFolderForks.get(pageId);
+		if (loser === undefined) return;
+		this.twoFolderForks.delete(pageId);
+		try {
+			await this.chain(pageId, async () => {
+				const text = await this.app.vault.adapter.read(loser);
+				const parsed = parsePage(text, pageId);
+				if (parsed.damaged) return;
+				await this.preserveAdoptionPair(pageId, final, parsed.data, contentStamp(winnerText), winnerText);
+			});
+		} catch (err) {
+			// The losing copy stays where it is, still a live file, so nothing is
+			// lost; the next session finds both folders again and retries.
+			console.error("[handwriting] could not preserve a copy of this page from another folder", pageId, err);
+		}
 	}
 
 	/**
@@ -825,6 +1025,19 @@ export class PageStore {
 		return normalizePath(`${folder}/trash`);
 	}
 
+	/** The trash beside a page's file: the one rule every trash write follows. */
+	private trashDirOf(final: string): string {
+		return this.trashDirIn(folderOf(final));
+	}
+
+	/**
+	 * The trash directory a copy of this page goes to right now: beside the
+	 * file the page is served from, which is not always the configured folder.
+	 */
+	async trashFolderFor(pageId: string): Promise<string> {
+		return this.trashDirOf(await this.resolvePath(pageId));
+	}
+
 	/**
 	 * A never-taken name for the next trash generation (RC4), in the trash that
 	 * belongs to the page's OWN folder.
@@ -835,13 +1048,18 @@ export class PageStore {
 	 * disambiguated with a counter, because two destructions inside the same
 	 * millisecond are entirely possible (and are exercised by the tests).
 	 * Every candidate is probed, so an existing file is never the destination.
+	 *
+	 * `tag`, when given, is appended to every candidate name (the counter
+	 * above still disambiguates within it) and marks the generation as one
+	 * `restoreFromTrash` must never auto-promote — see its own comment.
 	 */
-	private async freeTrashPath(pageId: string, folder: string): Promise<string> {
+	private async freeTrashPath(pageId: string, folder: string, tag?: string): Promise<string> {
 		const adapter = this.app.vault.adapter;
+		const suffix = tag ? `-${tag}` : "";
 		const base = `${this.trashDirIn(folder)}/${pageId}-${this.now()}`;
-		let candidate = normalizePath(`${base}.json`);
+		let candidate = normalizePath(`${base}${suffix}.json`);
 		for (let n = 2; await adapter.exists(candidate); n++) {
-			candidate = normalizePath(`${base}-${n}.json`);
+			candidate = normalizePath(`${base}-${n}${suffix}.json`);
 		}
 		return candidate;
 	}
@@ -860,8 +1078,17 @@ export class PageStore {
 			this.timers.size > 0 ||
 			this.maxTimers.size > 0 ||
 			// A write already on its way to the adapter is not durable either.
-			this.outstandingWrites.size > 0
+			this.outstandingWrites.size > 0 ||
+			// An ink-folder move is running. Nothing need be queued for the
+			// store to be busy: a second move settles, asks this, and must be
+			// told to wait, or it lists and renames the same files again.
+			this.migrating
 		);
+	}
+
+	/** An ink-folder move is running (held from the hold to the release). */
+	get movingFolder(): boolean {
+		return this.migrating;
 	}
 
 	/**
@@ -903,6 +1130,7 @@ export class PageStore {
 	 */
 	private async observeExternalChange(pageId: string, includeUntracked = false): Promise<ExternalChangeObservation> {
 		if (this.hasQueuedWrite(pageId)) return "unchanged";
+		if (this.unreadable.has(pageId)) return this.observeUnreadable(pageId);
 		const known = this.knownMtime.get(pageId);
 		const knownHash = this.knownHash.get(pageId);
 		const folder = this.folder;
@@ -970,6 +1198,38 @@ export class PageStore {
 		return observation;
 	}
 
+	/**
+	 * The poll's view of a page whose last load could not be used.
+	 * There is no known mtime to compare, so the bytes are compared with the
+	 * ones that failed, at most once per five seconds. Different bytes are
+	 * "changed" and the owner re-reads through its heal path. The same bad bytes
+	 * are "unchanged". A read that threw is "changed" again only while the read
+	 * keeps throwing, so the owner's retry runs and can time how long the note
+	 * has gone unread; nothing here writes, and the owner's lock still holds.
+	 */
+	private async observeUnreadable(pageId: string): Promise<ExternalChangeObservation> {
+		const failed = this.unreadable.get(pageId) ?? null;
+		const folder = this.folder;
+		const now = performance.now();
+		const checkedAt = this.contentCheckedAt.get(pageId);
+		if (checkedAt !== undefined && now - checkedAt < 5000) return "unchanged";
+		this.contentCheckedAt.set(pageId, now);
+		let stamp: string | null = null;
+		try {
+			const watched = await this.resolveFor(pageId);
+			// No live file: a damaged .tmp stays as it is until a live file lands.
+			if (!watched.found) return failed === null ? "changed" : "unchanged";
+			stamp = contentStamp(await this.app.vault.adapter.read(watched.path));
+		} catch {
+			stamp = null;
+		}
+		if (this.folder !== folder || this.hasQueuedWrite(pageId) || this.unreadable.get(pageId) !== failed) {
+			return "unchanged";
+		}
+		if (stamp === null) return failed === null ? "changed" : "unchanged";
+		return stamp === failed ? "unchanged" : "changed";
+	}
+
 	async externallyChanged(pageId: string, includeUntracked = false): Promise<boolean> {
 		const observation = await this.observeExternalChange(pageId, includeUntracked);
 		this.externalChangeObservations.set(pageId, observation);
@@ -981,8 +1241,47 @@ export class PageStore {
 		return this.externalChangeObservations.get(pageId) ?? "unchanged";
 	}
 
-	async load(pageId: string): Promise<ParseResult | null> {
+	/**
+	 * The vault paths a PDF sidecar claims, read without taking the file as
+	 * seen. `load` records the file's mtime and hash as the baseline the next
+	 * write is checked against; a read made only to choose an instance must
+	 * not, or a revision no record has loaded is taken as known and the next
+	 * save from a stale record writes over it with no conflict copy. No
+	 * recovery either: that belongs to the load of the instance chosen. Null
+	 * when there is no readable live sidecar.
+	 */
+	async readPdfPaths(pageId: string): Promise<string[] | null> {
 		const adapter = this.app.vault.adapter;
+		try {
+			const final = await this.resolvePath(pageId);
+			if (!(await adapter.exists(final))) return null;
+			const result = parsePage(await adapter.read(final), pageId);
+			return result.damaged ? null : (result.data.pdfPaths ?? []);
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * `restore: false` skips the trash lookup and answers null as if the trash
+	 * were empty, leaving it untouched. For ids that must never come back from
+	 * the trash: a PDF id is content-derived, so a new same-bytes file would
+	 * otherwise revive a retired copy's ink.
+	 *
+	 * A result with `transient` set means the read itself threw: the file may
+	 * be healthy and simply not readable yet (a sync client mid-write, a cloud
+	 * placeholder). It still carries `damaged`, so every caller keeps failing
+	 * closed, and the poll keeps watching the page (see observeUnreadable).
+	 */
+	async load(pageId: string, options: { restore?: boolean } = {}): Promise<LoadResult | null> {
+		const result = await this.loadFromDisk(pageId, options);
+		if (!result?.damaged) this.unreadable.delete(pageId);
+		return result;
+	}
+
+	private async loadFromDisk(pageId: string, options: { restore?: boolean }): Promise<LoadResult | null> {
+		const adapter = this.app.vault.adapter;
+		let readFrom: string | undefined;
 		try {
 			// Not `path()` alone: a page can still be sitting in the default
 			// folder if a folder change was interrupted, or because this device's
@@ -991,6 +1290,7 @@ export class PageStore {
 			// follows this load writes to the file the load read. Inside the
 			// try because it builds paths, and path() asserts.
 			const final = await this.resolvePath(pageId);
+			readFrom = final;
 			if (await adapter.exists(final)) {
 				// Stat BEFORE read, deliberately: if an external writer lands
 				// between the two, the recorded mtime is then OLDER than the
@@ -1011,16 +1311,29 @@ export class PageStore {
 					// merely where this device wrote blind - it is where the
 					// page is. Later resolves stop paying for the extra look.
 					this.provisional.delete(pageId);
-					return result;
+					// Both well-known folders held this page and neither copy
+					// held the other: keep the one not served as a fork pair.
+					await this.preserveTwoFolderFork(pageId, final, text);
+					// A background flush (`flushDispatch`) left its carrier and the
+					// app was killed before the chained save landed: the carrier
+					// holds the newest strokes.
+					return (await this.recoverFlushCarrier(pageId, final, st?.mtime ?? 0, contentStamp(text))) ?? result;
 				}
 				// The main file is corrupt. Exactly one recovery case: its own
 				// interrupted save is a complete, current-format page for this
 				// id. Anything less keeps the read-only lock.
+				this.unreadable.set(pageId, contentStamp(text));
 				return (
-					(await this.promoteTmpOverDamaged(pageId, final, st?.mtime ?? 0, contentStamp(text))) ??
-					result
+					(await this.promoteTmpOverDamaged(pageId, final, st?.mtime ?? 0, contentStamp(text))) ?? {
+						...result,
+						damagedPath: final,
+					}
 				);
 			}
+			// No live sidecar, but a background flush's carrier: promote it,
+			// as an interrupted save would be.
+			const carried = await this.recoverFlushCarrier(pageId, final, 0, null);
+			if (carried !== null) return carried;
 			// No live sidecar. An interrupted save's .tmp is looked for beside
 			// the resolved path first, then beside the page's name in every
 			// other folder it can be served from (findInterruptedSave).
@@ -1038,6 +1351,7 @@ export class PageStore {
 				// Damage is not promoted: it may still be recoverable by hand,
 				// and a corrupt file in the live path is worse than one in a
 				// .tmp nobody is reading.
+				if (result.damaged) this.unreadable.set(pageId, contentStamp(text));
 				if (!result.damaged) {
 					try {
 						// Into the .tmp's OWN folder: a save interrupted in the
@@ -1057,13 +1371,32 @@ export class PageStore {
 						console.error("[handwriting] could not promote a recovered .tmp", pageId, err);
 					}
 				}
-				return { ...result, recovered: true, problem: result.problem ?? "recovered from interrupted write" };
+				return {
+					...result,
+					recovered: true,
+					problem: result.problem ?? "recovered from interrupted write",
+					...(result.damaged ? { damagedPath: tmp } : {}),
+				};
 			}
 		} catch (err) {
-			// The payload exists but cannot be read: that is DAMAGE, not an
-			// empty page. Callers must fail closed (render nothing, write
-			// nothing) or this placeholder becomes the file's new contents.
-			return { data: emptyPage(pageId), recovered: true, damaged: true, problem: String(err) };
+			// Nothing usable came back, so callers must still fail closed
+			// (render nothing, write nothing) or this placeholder becomes the
+			// file's new contents. But a THROW is not a bad payload: the file
+			// may be healthy and not readable yet - a sync client mid-write, a
+			// cloud placeholder, a busy disk at vault open. Reporting it as
+			// damage told users a good file was broken and locked the note
+			// until a reopen. It is `transient`: still `damaged` for
+			// every caller that fails closed on that flag, and watched by the
+			// poll so the next successful read heals it.
+			this.unreadable.set(pageId, null);
+			return {
+				data: emptyPage(pageId),
+				recovered: true,
+				damaged: true,
+				problem: String(err),
+				transient: true as const,
+				...(readFrom !== undefined ? { damagedPath: readFrom } : {}),
+			};
 		}
 		// No live sidecar and no interrupted write. Before calling this page
 		// blank, look in our own trash: a note restored from Obsidian's
@@ -1072,7 +1405,7 @@ export class PageStore {
 		// went. Nothing ever brought it back, so the note reopened empty and
 		// the next stroke began a SECOND sidecar under the same id, diverging
 		// from the copy sitting in the trash folder.
-		const restored = await this.restoreFromTrash(pageId);
+		const restored = options.restore === false ? null : await this.restoreFromTrash(pageId);
 		if (restored === null) this.observedMissing.add(pageId);
 		return restored;
 	}
@@ -1143,6 +1476,14 @@ export class PageStore {
 	 * recycled from `handwriting/` used to put the live file in `.handwriting/`,
 	 * where sync cannot see it, while the other device (which had the deletion)
 	 * opened the note blank and started a second sidecar on its first stroke.
+	 *
+	 * A `-wipe` generation (preserve()'s own Delete-all safety copy) is never
+	 * a candidate here. That copy exists so the user's own trash still holds
+	 * ink they deliberately wiped - it is not this page's last live state.
+	 * Deleting a note right after a wipe recycles nothing new (the live file
+	 * is provably empty), so without this exclusion the wipe copy would be
+	 * the only generation on disk and restoring the note would silently
+	 * bring back ink the user chose to erase.
 	 */
 	private async restoreFromTrash(pageId: string): Promise<ParseResult | null> {
 		const adapter = this.app.vault.adapter;
@@ -1161,7 +1502,9 @@ export class PageStore {
 			}
 			for (const f of files) {
 				const name = f.split("/").pop() ?? "";
-				if (name.startsWith(prefix) && name.endsWith(".json")) candidates.push({ file: f, home });
+				if (name.startsWith(prefix) && name.endsWith(".json") && !name.endsWith("-wipe.json")) {
+					candidates.push({ file: f, home });
+				}
 			}
 		}
 		// Newest first, ACROSS the folders. The names carry a wall-clock stamp
@@ -1315,10 +1658,124 @@ export class PageStore {
 		};
 	}
 
+	/** The background flush's own file beside `final`; never the shared .tmp. */
+	private carrierFor(final: string): string {
+		return `${final}.flush`;
+	}
+
+	/**
+	 * Read a flush carrier: the page it holds and the stamp of the live bytes
+	 * it was built on (null when there was no live file yet). Null when it is
+	 * not a complete, current-format page for this id.
+	 */
+	private parseCarrier(text: string, pageId: string): { page: PageData; base: string | null } | null {
+		let raw: unknown;
+		try {
+			raw = JSON.parse(text);
+		} catch {
+			return null;
+		}
+		if (!raw || typeof raw !== "object") return null;
+		const { flushBase, page } = raw as { flushBase?: unknown; page?: unknown };
+		if (flushBase !== null && typeof flushBase !== "string") return null;
+		if (!page || typeof page !== "object") return null;
+		const parsed = parsePage(JSON.stringify(page), pageId);
+		if (parsed.damaged || parsed.futureVersion !== undefined || parsed.data.pageId !== pageId) return null;
+		return { page: parsed.data, base: flushBase };
+	}
+
+	/**
+	 * A background flush's carrier beside the page.
+	 *
+	 * With a valid live file (`liveStamp` its bytes): a carrier built on
+	 * exactly those bytes is their successor, so it is promoted and the old
+	 * live file is kept beside it as `<name>.superseded-<mtime>.json`. A carrier
+	 * built on anything else is not chosen over the live file - timestamps are
+	 * not evidence, sync keeps mtimes - so its page is kept aside as
+	 * `<name>.flush-conflict-<mtime>.json` and the live file stands. With no
+	 * live file (`liveStamp` null) the carrier is promoted, as an interrupted
+	 * save is. A carrier built on other bytes that still holds every stroke of
+	 * the live page is promoted too: a save in flight when it was written
+	 * landed first. Nothing is deleted except the carrier itself, and only
+	 * once its page is written elsewhere. Null when there is no usable
+	 * carrier, when either file changed under us, or when the carrier was
+	 * kept aside (announced through `onFlushKeptAside`).
+	 */
+	private async recoverFlushCarrier(
+		pageId: string,
+		final: string,
+		liveMtime: number,
+		liveStamp: string | null
+	): Promise<ParseResult | null> {
+		const adapter = this.app.vault.adapter;
+		const carrier = this.carrierFor(final);
+		if (!(await adapter.exists(carrier))) return null;
+		type Outcome =
+			| { kind: "promoted"; keptAs: string | null; text: string }
+			| { kind: "aside"; keptAs: string }
+			| { kind: "none" };
+		const run = async (): Promise<Outcome> => {
+			if (!(await adapter.exists(carrier))) return { kind: "none" };
+			const carrierText = await adapter.read(carrier);
+			const parsed = this.parseCarrier(carrierText, pageId);
+			if (parsed === null) return { kind: "none" };
+			const liveText = (await adapter.exists(final)) ? await adapter.read(final) : null;
+			const liveNow = liveText === null ? null : contentStamp(liveText);
+			if (liveNow !== liveStamp) return { kind: "none" };
+			const pageText = serializePage(parsed.page);
+			// Built on other bytes, it is still the successor when it holds every
+			// stroke the live page has: a save that was already in flight when the
+			// carrier was written can land first and move the live file on. The
+			// containment rule the two-folder choice uses. A carrier that lacks a
+			// live stroke stays aside, and is named to the user.
+			if (liveStamp !== null && parsed.base !== liveStamp && !holdsEveryStroke(parsed.page, liveText, pageId)) {
+				const mtime = (await adapter.stat(carrier).catch(() => null))?.mtime ?? 0;
+				const aside = await this.freeKeptPath(final, "flush-conflict", mtime);
+				await adapter.write(aside, pageText);
+				await adapter.remove(carrier);
+				console.warn("[handwriting] background flush was built on other bytes; kept it as", aside);
+				return { kind: "aside", keptAs: aside };
+			}
+			let keptAs: string | null = null;
+			if (liveStamp !== null) {
+				keptAs = await this.freeKeptPath(final, "superseded", liveMtime);
+				await adapter.rename(final, keptAs);
+			} else {
+				await ensureFolder(adapter, folderOf(final));
+			}
+			await adapter.write(final, pageText);
+			await adapter.remove(carrier);
+			const after = await adapter.stat(final).catch(() => null);
+			if (after) this.knownMtime.set(pageId, after.mtime);
+			this.knownHash.set(pageId, contentStamp(pageText));
+			return { kind: "promoted", keptAs, text: pageText };
+		};
+		let outcome: Outcome;
+		try {
+			outcome = await this.chainBehindAll(pageId, run);
+		} catch (err) {
+			console.error("[handwriting] background flush recovery failed", pageId, err);
+			return null;
+		}
+		if (outcome.kind === "aside") this.onFlushKeptAside?.(pageId, outcome.keptAs);
+		if (outcome.kind !== "promoted") return null;
+		if (outcome.keptAs !== null) this.onFlushPromoted?.(pageId, outcome.keptAs);
+		return {
+			...parsePage(outcome.text, pageId),
+			recovered: true,
+			problem: "recovered strokes from an interrupted background save",
+		};
+	}
+
 	/** A never-taken name for a corrupt main file that is being moved aside. */
 	private async freeDamagedPath(final: string, mtime: number): Promise<string> {
+		return this.freeKeptPath(final, "damaged", mtime);
+	}
+
+	/** A never-taken `<name>.<label>-<mtime>.json` beside `final`. */
+	private async freeKeptPath(final: string, label: string, mtime: number): Promise<string> {
 		const adapter = this.app.vault.adapter;
-		const base = `${stripJson(final)}.damaged-${mtime}`;
+		const base = `${stripJson(final)}.${label}-${mtime}`;
 		let candidate = `${base}.json`;
 		for (let n = 2; await adapter.exists(candidate); n++) {
 			candidate = `${base}-${n}.json`;
@@ -1339,6 +1796,9 @@ export class PageStore {
 		this.displaceForeignBatch(pageId, writer);
 		this.pending.set(pageId, data);
 		this.pendingWriter.set(pageId, writer);
+		// The newest state of the page: every carrier written so far holds it
+		// or an older one.
+		this.pendingCovers.set(pageId, this.carriersWritten.get(pageId));
 		const existing = this.timers.get(pageId);
 		if (existing !== undefined) window.clearTimeout(existing);
 		this.timers.set(
@@ -1370,59 +1830,9 @@ export class PageStore {
 		this.displaceForeignBatch(pageId, writer);
 		this.pending.set(pageId, data);
 		this.pendingWriter.set(pageId, writer);
+		this.pendingCovers.set(pageId, this.carriersWritten.get(pageId));
 		this.clearTimers(pageId);
 		await this.writePending(pageId);
-	}
-
-	/** Schedules waiting on a promise only their caller holds; see `scheduleAfter`. */
-	private deferredSchedules = new Set<Promise<void>>();
-
-	/**
-	 * Run `schedule` (the caller's own `schedule(...)` call, writer included)
-	 * once `after` settles: the canvas view's sidecar, parked behind the
-	 * Markdown save that puts its page id on disk. Tracked here so an unload
-	 * can wait for it (`settleDeferred`) - untracked, `flush()` ran while the
-	 * id save was still going and found nothing queued for the page.
-	 */
-	scheduleAfter(after: Promise<unknown>, schedule: () => void): void {
-		const deferred: Promise<void> = after
-			.then(schedule)
-			.finally(() => this.deferredSchedules.delete(deferred));
-		this.deferredSchedules.add(deferred);
-		runDetached(deferred, "schedule a sidecar after saving its page id");
-	}
-
-	/**
-	 * Best-effort unload: wait (bounded) for every `scheduleAfter` to reach
-	 * `schedule`, so the `flush()` that follows has the batch to write. TRUE
-	 * when all landed, FALSE when the deadline won. Not crash durability.
-	 *
-	 * `PdfInkStore.settle`'s shape, for its reasons: several passes, because a
-	 * schedule registered WHILE this waits would be missed by a single pass;
-	 * and `allSettled`, because one parked schedule that throws must not end
-	 * the wait for the others - `runDetached` reports it, and the rest still
-	 * have to reach the queue before the flush.
-	 */
-	async settleDeferred(maxWaitMs = 2000): Promise<boolean> {
-		let expire: (v: boolean) => void = () => {};
-		const deadline = new Promise<boolean>((r) => {
-			expire = r;
-		});
-		const timer = window.setTimeout(() => expire(true), maxWaitMs);
-		try {
-			for (let pass = 0; pass < 4; pass++) {
-				const inFlight = [...this.deferredSchedules];
-				if (inFlight.length === 0) return true;
-				const timedOut = await Promise.race([
-					Promise.allSettled(inFlight).then(() => false),
-					deadline,
-				]);
-				if (timedOut) return false;
-			}
-			return false;
-		} finally {
-			window.clearTimeout(timer);
-		}
 	}
 
 	/**
@@ -1468,7 +1878,18 @@ export class PageStore {
 	}
 
 	/**
-	 * Hand every dirty sidecar's TMP FILE to the adapter in one synchronous
+	 * Pages whose flush carrier this session wrote, each with the generation
+	 * of the newest one. A landed save removes the carrier only when its
+	 * snapshot holds that generation (pendingCovers): a save already in flight
+	 * when the carrier was written holds OLDER ink, and so does a failed older
+	 * save put back into `pending` behind it. Landing either must not delete
+	 * the only disk copy of the newer strokes.
+	 */
+	private carriersWritten = new Map<string, number>();
+	private carrierGeneration = 0;
+
+	/**
+	 * Hand every dirty sidecar's FLUSH CARRIER to the adapter in one synchronous
 	 * sweep, then chain the normal write behind each one.
 	 *
 	 * The background path on iOS and Android: the webview freezes on
@@ -1559,13 +1980,35 @@ export class PageStore {
 			// look where the freeze left it. Nothing may be awaited here, so
 			// an unresolved page falls back to the configured folder - which
 			// is where an unresolved page would be written anyway.
-			const tmp = this.tmpFor(this.pinnedPath(pageId));
-			const serialized = serializePage(data);
-			return this.app.vault.adapter.write(tmp, serialized);
+			// Its OWN file, never the shared .tmp: a .tmp
+			// beside a valid live file cannot say which bytes it followed, so
+			// load could never safely prefer it. The carrier records the stamp
+			// of the live bytes this session loaded or wrote.
+			const carrier = this.carrierFor(this.pinnedPath(pageId));
+			const base = this.knownHash.get(pageId) ?? null;
+			const text = `{"flushBase":${JSON.stringify(base)},"page":${serializePage(data)}}`;
+			const generation = ++this.carrierGeneration;
+			this.carriersWritten.set(pageId, generation);
+			// The carrier is written from the payload in `pending`, so that
+			// payload now holds this generation.
+			if (this.pending.get(pageId) === data) this.pendingCovers.set(pageId, generation);
+			return this.app.vault.adapter.write(carrier, text);
 		} catch (err) {
 			console.error("[handwriting] background tmp write could not be dispatched", pageId, err);
 			return null;
 		}
+	}
+
+	/**
+	 * Write what is queued for this one page now and wait for it. True when
+	 * nothing is left queued for it; a failed write re-queues its state for the
+	 * bounded retry, and answers false.
+	 */
+	async flushPage(pageId: string): Promise<boolean> {
+		this.clearTimers(pageId);
+		if (this.pending.has(pageId)) await this.writePending(pageId);
+		await this.tails.get(pageId);
+		return !this.pending.has(pageId) && !this.timers.has(pageId);
 	}
 
 	/** Write everything queued right now: page switch, view close, plugin unload. */
@@ -1611,13 +2054,27 @@ export class PageStore {
 			// looking for a fault that is not there.
 			throw new Error(
 				this.migrating
-					? "Handwriting: the ink folder is still moving - try again in a moment"
+					? INK_FOLDER_MOVING_TEXT
 					: "Handwriting: the newest ink could not be written to disk"
 			);
 		}
 		const adapter = this.app.vault.adapter;
 		let dest: string | null = null;
 		const run = async (): Promise<void> => {
+			// Re-asked on the chain. A save already dequeued before the check
+			// above could still be in flight; if it failed, it re-queued the
+			// newest state while this copy waited its turn, and the file below
+			// is older than it. The queued state is what gets copied then, so
+			// the backup holds the ink the caller is about to wipe.
+			const queued = this.pending.get(pageId);
+			if (queued !== undefined) {
+				const final = await this.resolvePath(pageId);
+				await ensureFolder(adapter, this.trashDirOf(final));
+				const to = await this.freeTrashPath(pageId, folderOf(final), "wipe");
+				await adapter.write(to, serializePage(queued));
+				dest = to;
+				return;
+			}
 			// The resolved path, like load: the page may be sitting in the other
 			// well-known folder (an interrupted migration, or a device that
 			// lost data.json). Preserving only what the CONFIGURED folder
@@ -1628,10 +2085,10 @@ export class PageStore {
 			// The trash beside the FILE, not beside the configured folder: a
 			// generation dropped into the other folder's trash is invisible to
 			// the restore path that vault's other devices will take.
-			const trashDir = this.trashDirIn(folderOf(final));
+			const trashDir = this.trashDirOf(final);
 			await ensureFolder(adapter, trashDir);
 			const text = await adapter.read(final);
-			const to = await this.freeTrashPath(pageId, folderOf(final));
+			const to = await this.freeTrashPath(pageId, folderOf(final), "wipe");
 			await adapter.write(to, text);
 			dest = to;
 		};
@@ -1677,7 +2134,7 @@ export class PageStore {
 	async prepareExternalAdoption(
 		pageId: string,
 		outgoing: PageData,
-		expectedSurface: "inline" | "pdf" | "canvas" = "inline"
+		expectedSurface: "inline" | "pdf" = "inline"
 	): Promise<ExternalAdoptionPrep> {
 		const adapter = this.app.vault.adapter;
 		// On the page's own write chain: the artifacts must not interleave with
@@ -1694,15 +2151,7 @@ export class PageStore {
 			const incomingText = await adapter.read(final);
 			const incomingStamp = contentStamp(incomingText);
 			const parsed = parsePage(incomingText, pageId);
-			let surfaceMatches = parsed.data.surface === expectedSurface;
-			if (expectedSurface === "canvas") {
-				try {
-					const raw: unknown = JSON.parse(incomingText);
-					surfaceMatches = !!raw && typeof raw === "object" && !Array.isArray(raw) &&
-						!Object.prototype.hasOwnProperty.call(raw, "surface") &&
-						(raw as { pageId?: unknown }).pageId === pageId;
-				} catch { surfaceMatches = false; }
-			}
+			const surfaceMatches = parsed.data.surface === expectedSurface;
 			if (
 				parsed.damaged ||
 				parsed.futureVersion !== undefined ||
@@ -1722,11 +2171,13 @@ export class PageStore {
 			// mutation too small for the persisted codec still changes the pair
 			// identity and correctly earns a fresh pair rather than reusing one
 			// that describes a revision the record no longer holds.
-			const outgoingText = serializeExactOutgoing(outgoing);
-			const key = `${contentStamp(outgoingText)}|${incomingStamp}`;
-			const pair =
-				(await this.reuseAdoptionPair(pageId, key, outgoingText, incomingText)) ??
-				(await this.writeAdoptionPair(pageId, final, key, outgoingText, incomingText, outgoing));
+			//
+			// A pair only when the incoming revision would lose something the
+			// outgoing one holds. An ordinary sync, where the other device only
+			// added, writes nothing and records no fork.
+			const pair = outgoingDiverges(outgoing, parsed.data)
+				? await this.preserveAdoptionPair(pageId, final, outgoing, incomingStamp, incomingText)
+				: null;
 			// REVALIDATE THE CAPTURED GENERATION after the awaited I/O. A third
 			// revision can have landed while the artifacts were being written.
 			// Everything already written STAYS - it is ink, and it is complete -
@@ -1736,14 +2187,20 @@ export class PageStore {
 			if (after === null || contentStamp(after) !== incomingStamp) {
 				return { kind: "stale", why: "a newer external revision arrived during preservation" };
 			}
+			// The synced copy being adopted may have displaced a local file this
+			// device wrote before it arrived. Adoption writes nothing live, so
+			// nothing else would move that file aside, and after a restart it
+			// would be found first and served for good. Moved beside the winner
+			// now; the outgoing artifact above already holds its ink as well.
+			await this.absorbProvisional(pageId, final);
 			return {
 				kind: "prepared",
 				prepared: {
 					pageId,
 					data: parsed.data,
-					outgoingPath: pair.outgoingPath,
-					incomingPath: pair.incomingPath,
-					reused: pair.reused,
+					outgoingPath: pair?.outgoingPath,
+					incomingPath: pair?.incomingPath,
+					reused: pair?.reused ?? false,
 					// A failed stat proves nothing, and 0 is the safe value: the
 					// next check finds a mismatch, compares the CONTENT stamp,
 					// and settles it. It can cost one extra read; it can never
@@ -1771,6 +2228,22 @@ export class PageStore {
 		// writer owns them now. A stale writer left here would let
 		// reconcileInProcess skip its read and put a stale page back on disk.
 		this.lastWriter.delete(prepared.pageId);
+	}
+
+	/** The recovery pair for one adoption: reused when already on disk, else written. */
+	private async preserveAdoptionPair(
+		pageId: string,
+		final: string,
+		outgoing: PageData,
+		incomingStamp: string,
+		incomingText: string
+	): Promise<{ outgoingPath: string; incomingPath: string; reused: boolean }> {
+		const outgoingText = serializeExactOutgoing(outgoing, this.deviceId);
+		const key = `${contentStamp(outgoingText)}|${incomingStamp}`;
+		return (
+			(await this.reuseAdoptionPair(pageId, key, outgoingText, incomingText)) ??
+			(await this.writeAdoptionPair(pageId, final, key, outgoingText, incomingText, outgoing))
+		);
 	}
 
 	/**
@@ -1899,18 +2372,38 @@ export class PageStore {
 		// page chain. See outstandingWrites.
 		this.beginOutstandingWrite(pageId);
 		try {
+			// The carrier generation this snapshot holds travels with it, from
+			// when it entered `pending`. Reading `carriersWritten` here instead
+			// let a requeued older snapshot claim a newer snapshot's carrier.
+			const covers = this.pendingCovers.get(pageId);
 			this.pending.delete(pageId);
 			this.pendingWriter.delete(pageId);
+			this.pendingCovers.delete(pageId);
 			this.clearTimers(pageId); // the batch is consumed, both timers with it
 			// Serialize writes so two saves for the same page can't interleave
 			// their tmp/rename dance.
-			await this.chain(pageId, () => this.writeNow(pageId, data, writer));
+			await this.chain(pageId, () => this.writeNow(pageId, data, writer, covers));
 		} finally {
 			// Every outcome, including a throw: a leaked claim would block this
 			// page's live reload for the rest of the session. A failed write
 			// has already put the batch back in `pending` by now, so the guard
 			// is continuous across the handover.
 			this.endOutstandingWrite(pageId);
+		}
+	}
+
+	/**
+	 * A writer that will never save again (slides ink switched off; the next
+	 * switch-on makes a new one). Without this the live file stays attributed
+	 * to it, and the new writer's first save is merged against the file as a
+	 * "second in-process writer", which puts back strokes it just erased
+	 * (audit 125). Also covers a save of the retired writer that lands after
+	 * this call: it no longer claims the file.
+	 */
+	retireWriter(writer: PageWriter): void {
+		this.retiredWriters.add(writer);
+		for (const [pageId, last] of this.lastWriter) {
+			if (last === writer) this.lastWriter.set(pageId, undefined);
 		}
 	}
 
@@ -1954,7 +2447,8 @@ export class PageStore {
 	private async writeNow(
 		pageId: string,
 		data: PageData,
-		writer?: PageWriter
+		writer?: PageWriter,
+		coversCarrier?: number
 	): Promise<void> {
 		const adapter = this.app.vault.adapter;
 		// The ink folder is being moved. Nothing may be written until the move
@@ -1968,6 +2462,7 @@ export class PageStore {
 			if (!this.pending.has(pageId)) {
 				this.pending.set(pageId, data);
 				this.pendingWriter.set(pageId, writer);
+				this.pendingCovers.set(pageId, coversCarrier);
 			}
 			if (!this.timers.has(pageId)) {
 				this.timers.set(
@@ -2073,9 +2568,17 @@ export class PageStore {
 			if (!found) this.provisional.add(pageId);
 			if (st) this.knownMtime.set(pageId, st.mtime);
 			this.knownHash.set(pageId, contentStamp(serialized));
+			// The save has landed, so a flush carrier it supersedes is stale. A
+			// carrier written after this snapshot was taken holds newer ink and
+			// stays until the save that covers it lands.
+			const carrier = this.carriersWritten.get(pageId);
+			if (carrier !== undefined && coversCarrier !== undefined && coversCarrier >= carrier) {
+				this.carriersWritten.delete(pageId);
+				await adapter.remove(this.carrierFor(final)).catch(() => undefined);
+			}
 			// Recorded only once the rename has landed, so it always names the
 			// writer whose composition the live file actually holds.
-			this.lastWriter.set(pageId, writer);
+			this.lastWriter.set(pageId, writer !== undefined && this.retiredWriters.has(writer) ? undefined : writer);
 			this.failures.delete(pageId);
 			this.errorNotified.delete(pageId);
 			// The write is durable as of the rename above: now, and only now,
@@ -2096,6 +2599,10 @@ export class PageStore {
 				// Its writer with it: an unattributed retry would skip the
 				// reconcile and put this writer's stale page back on disk.
 				this.pendingWriter.set(pageId, writer);
+				// And the carrier generation it holds, not the newest one: a
+				// newer carrier may have been written while this one was in
+				// flight, and this payload does not hold it.
+				this.pendingCovers.set(pageId, coversCarrier);
 			}
 			const n = (this.failures.get(pageId) ?? 0) + 1;
 			this.failures.set(pageId, n);
@@ -2252,6 +2759,7 @@ export class PageStore {
 	discardPending(pageId: string): void {
 		this.pending.delete(pageId);
 		this.pendingWriter.delete(pageId);
+		this.pendingCovers.delete(pageId);
 		this.clearTimers(pageId);
 	}
 
@@ -2264,8 +2772,10 @@ export class PageStore {
 		// the last write - so below it is what gets recycled, not the disk
 		// file.
 		const queued = this.pending.get(pageId);
+		const queuedCovers = this.pendingCovers.get(pageId);
 		this.pending.delete(pageId);
 		this.pendingWriter.delete(pageId);
+		this.pendingCovers.delete(pageId);
 		this.knownMtime.delete(pageId);
 		this.contentCheckedAt.delete(pageId);
 		this.observedMissing.delete(pageId);
@@ -2293,6 +2803,7 @@ export class PageStore {
 			// Declared out here so the scratch-file sweep below names the same
 			// file the recycle did, even when the recycle threw.
 			let final: string | undefined = pinned;
+			let recycled = false;
 			try {
 				// Wherever the page actually is, like load. Recycling only
 				// what the configured folder holds left the real sidecar
@@ -2364,12 +2875,23 @@ export class PageStore {
 						await adapter.rename(final, await this.freeTrashPath(pageId, home));
 					}
 				}
+				recycled = true;
 			} catch (err) {
 				console.error("[handwriting] sidecar recycle failed", pageId, err);
+				// The queued state was the only copy of the newest strokes, and
+				// it reached neither the trash nor the disk. Queue it again, so
+				// the next flush writes it where the page lived, rather than
+				// dropping it. A newer schedule wins.
+				if (queued !== undefined && !this.pending.has(pageId)) {
+					this.pending.set(pageId, queued);
+					this.pendingCovers.set(pageId, queuedCovers);
+				}
 			}
 			// The scratch file beside the page's OWN sidecar, not beside a
-			// configured path the page may never have used.
-			for (const p of final === undefined ? [] : [this.tmpFor(final)]) {
+			// configured path the page may never have used. Only after a
+			// recycle that landed: when it failed, the .tmp can be the one
+			// copy of the newest strokes.
+			for (const p of final === undefined || !recycled ? [] : [this.tmpFor(final), this.carrierFor(final)]) {
 				try {
 					if (await adapter.exists(p)) await adapter.remove(p);
 				} catch (err) {

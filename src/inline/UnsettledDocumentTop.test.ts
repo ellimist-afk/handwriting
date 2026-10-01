@@ -224,6 +224,8 @@ interface Rig {
 	endStroke(): void;
 	/** How many times the (shadowed) repaint was asked for. */
 	repaints(): number;
+	/** The overlay itself, for the bounce cells that set its bounce fields directly. */
+	raw(): Fields;
 	/**
 	 * The real `InlinePenRouter.sampleFrom` over the overlay's current box:
 	 * how a client coordinate becomes the sample `penDown`/`penRaw` receive.
@@ -433,7 +435,13 @@ function makeRig(): Rig {
 	o.wet = wetLayer;
 	o.highlightWet = { ...wetLayer };
 	o.activeWet = wetLayer;
-	o.tail = { applyDpr: () => undefined, clear: () => undefined, clearAll: () => undefined };
+	o.tail = {
+		applyDpr: () => undefined, clear: () => undefined, clearAll: () => undefined,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 
 	// ---- gesture and erase state
 	o.mode = "ink";
@@ -564,6 +572,7 @@ function makeRig(): Rig {
 			(o.frame as StrokeFrame).end();
 		},
 		repaints: () => repaints,
+		raw: () => o,
 		sample,
 		draw(client) {
 			const cam = o.camera as Camera;
@@ -976,5 +985,109 @@ describe("a document top that settles after the ink was already stored", () => {
 		const shipped = blind.draw(PEN_CLIENT)[0]!.points[0]!;
 		expect(shipped.y).toBeCloseTo(PEN_CLIENT.y - DOC_TOP_EARLY, 6);
 		expect(stroke.y - shipped.y).toBeCloseTo(-PADDING, 6);
+	});
+});
+
+// ---- a bounce off the page's edge ------------------------------------------
+//
+// ON ORION every frame of an edge bounce re-rastered all the committed ink (the
+// scroll probe of 2026-09-29: sched runs via "scroll" 3.4 to 5.3 ms before each
+// repaint, camera unchanged to 0.01 px). The compare at the end of `syncCamera`
+// is exact, and during a bounce the camera is built from rects that ride the
+// bounce translate plus a pan that carries the same offset: the two cancel on
+// paper and not bit for bit, so every repaint's own sync queued the next one.
+// The cure: while a bounce lives, the camera still syncs but asks for no
+// repaint; the bounce's last frame syncs once, and that sync asks for the one
+// repaint a real move owes.
+describe("a bounce off the page's edge", () => {
+	/** A clock and a frame queue the bounce runs on, in place of the window's. */
+	function bounceClock(o: Fields) {
+		let now = 1000;
+		const queue: ((t: number) => void)[] = [];
+		// An own property over the prototype's getter, which reads the editor's window.
+		Object.defineProperty(o, "winRef", { configurable: true, value: {
+			performance: { now: () => now },
+			requestAnimationFrame: (cb: (t: number) => void) => { queue.push(cb); return queue.length; },
+			cancelAnimationFrame: () => undefined,
+		} });
+		o.bounceOffset = { x: 0, y: 0 };
+		o.bounceState = null;
+		o.beginPreviewPaper = () => undefined;
+		o.endPreviewPaper = () => undefined;
+		o.writeViewportPan = () => undefined;
+		return {
+			/** Run one frame `dt` ms on; false when no frame was queued. */
+			frame(dt = 16): boolean {
+				const cb = queue.shift();
+				if (!cb) return false;
+				now += dt;
+				cb(now);
+				return true;
+			},
+		};
+	}
+	/** Every repaint request's via, in order, in place of the rig's counter. */
+	function recordVias(o: Fields): string[] {
+		const vias: string[] = [];
+		const paint = o.repaint as () => void;
+		o.scheduleRepaint = (via?: string) => { vias.push(via ?? "other"); paint(); };
+		return vias;
+	}
+	const proto = InkOverlayPlugin.prototype as unknown as {
+		startOverscrollBounce(this: unknown, hold: object, dx: number, dy: number): boolean;
+		syncCamera(this: unknown): void;
+	};
+
+	it("asks for no repaint while a bounce lives, when the camera is a hair off the one last painted", () => {
+		clearNote();
+		const rig = makeRig();
+		rig.handleResize();
+		rig.syncCamera();
+		const o = rig.raw();
+		const vias = recordVias(o);
+		const cam = (o.camera as Camera).snapshot;
+		// A bounce is live, and the camera last painted differs from this one by rounding noise alone.
+		o.bounceState = { hold: {}, fromX: 20, fromY: 0, startedAt: 0, raf: 0 };
+		o.lastPaintCam = { x: cam.x + 1e-9, y: cam.y, zoom: cam.zoom };
+		rig.syncCamera();
+		expect(vias, "a bounce frame's sync queued a repaint").toEqual([]);
+		// The camera itself still syncs: a real move during the bounce lands on it.
+		rig.setDocumentTop(rig.documentTop() + INCH);
+		rig.syncCamera();
+		expect(vias, "a bounce frame's sync queued a repaint").toEqual([]);
+		expect(rig.cameraY(), "the camera stopped syncing during the bounce").toBeCloseTo(cam.y - INCH, 6);
+	});
+
+	it("asks for exactly one repaint when the bounce ends with the camera moved since the last paint", () => {
+		clearNote();
+		const rig = makeRig();
+		rig.handleResize();
+		rig.syncCamera();
+		const o = rig.raw();
+		const clock = bounceClock(o);
+		const vias = recordVias(o);
+		expect(proto.startOverscrollBounce.call(o, {}, 20, 0), "premise: the bounce started").toBe(true);
+		// Mid-bounce, the painted camera falls a px behind the live one.
+		clock.frame();
+		const painted = o.lastPaintCam as { x: number; y: number; zoom: number };
+		o.lastPaintCam = { x: painted.x - 1, y: painted.y, zoom: painted.zoom };
+		let frames = 1;
+		while (o.bounceState !== null && clock.frame()) frames++;
+		expect(o.bounceState, `premise: the bounce ended (${frames} frames)`).toBeNull();
+		expect(vias, "the bounce's end did not ask once for the repaint the moved camera owes").toEqual(["scroll"]);
+	});
+
+	it("asks for nothing at the bounce's end when the camera did not move", () => {
+		clearNote();
+		const rig = makeRig();
+		rig.handleResize();
+		rig.syncCamera();
+		const o = rig.raw();
+		const clock = bounceClock(o);
+		const vias = recordVias(o);
+		expect(proto.startOverscrollBounce.call(o, {}, 20, 0), "premise: the bounce started").toBe(true);
+		while (o.bounceState !== null && clock.frame()) { /* run it out */ }
+		expect(o.bounceState, "premise: the bounce ended").toBeNull();
+		expect(vias, "a still camera asked for a repaint at the bounce's end").toEqual([]);
 	});
 });

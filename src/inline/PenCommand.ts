@@ -40,6 +40,7 @@
 
 import { toolIsLit } from "./MouseInk";
 import { penInkEnabled, setPenInk } from "./PenInk";
+import { penHardwareSeen } from "./PenToolsMode";
 
 /** What the pen-input paths need that this module cannot reach on its own. */
 export interface PenCommandHost {
@@ -71,9 +72,16 @@ export interface PenCommandHost {
  * pen rather than the highlighter or one of the four tip modes. A highlighter
  * user pressing "Pen on / off" is asking for the pen, not for keyboard mode,
  * which is why this is narrower than `toolIsLit` alone.
+ *
+ * A pen that has written here is lit too, picked or not: pen input on and pen
+ * hardware seen, the strip's own reading (`penDrawsHere`, MobileTools.ts). A
+ * pen contact never sets the picked flag, so on a pen device the first press
+ * used to take the pick-up branch and turn on a pen that was already on
+ * (audit 170).
  */
 export function penIsLit(h: PenCommandHost): boolean {
-	return toolIsLit(penInkEnabled()) && h.tool() === "pen" && !h.tipMode();
+	const lit = toolIsLit(penInkEnabled()) || (penInkEnabled() && penHardwareSeen());
+	return lit && h.tool() === "pen" && !h.tipMode();
 }
 
 /**

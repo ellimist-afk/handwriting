@@ -60,6 +60,7 @@ import { setMouseInk } from "./MouseInk";
 import { PEN_HOVER_CLASS } from "./PenCursor";
 import { fakeEl, installFakeWindow } from "../../test/routerHarness";
 import type { PenSample } from "../input/PointerRouter";
+import { reticleShown } from "../testUtils/ReticleShown";
 
 /**
  * One pointer event. Distinct `pointerId`s per pointer on purpose: the
@@ -278,7 +279,7 @@ describe("a hand on one pane's glass stands the OTHER pane's mouse reticle down"
 		// The mouse hovers over pane B and is then left alone - the reported
 		// state. Pane A has seen nothing at all.
 		b.fire(ptr("pointermove", "mouse", 1, 500, 500));
-		expect(b.cursorStyle.display).toBe("block");
+		expect(reticleShown(b.cursorStyle)).toBe(true);
 		expect(b.cursorStyle.transform).toBe(ringAt(500, 500));
 		expect(b.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(true);
 
@@ -288,9 +289,9 @@ describe("a hand on one pane's glass stands the OTHER pane's mouse reticle down"
 		a.fire(ptr("pointerdown", "touch", 2, 120, 300));
 
 		expect(
-			b.cursorStyle.display,
+			reticleShown(b.cursorStyle),
 			"pane B's ring stayed lit while a finger was writing in pane A"
-		).toBe("none");
+		).toBe(false);
 		expect(
 			b.scrollerClasses.has(PEN_HOVER_CLASS),
 			"`cursor: none` was left over pane B's scroller with no ring under it"
@@ -301,16 +302,16 @@ describe("a hand on one pane's glass stands the OTHER pane's mouse reticle down"
 		b.fire(ptr("pointermove", "mouse", 1, 500, 500));
 		a.fire(ptr("pointerdown", "touch", 2, 120, 300));
 		expect(
-			b.cursorStyle.display,
+			reticleShown(b.cursorStyle),
 			"pane B's ring stayed lit while a finger was writing in pane A"
-		).toBe("none");
+		).toBe(false);
 
 		// The finger leaves pane A. Nothing about the mouse has changed, so
 		// its next hover over pane B is its ordinary one.
 		a.fire(ptr("pointerup", "touch", 2, 120, 300));
 		b.fire(ptr("pointermove", "mouse", 1, 500, 500));
 
-		expect(b.cursorStyle.display, "pane B never got its reticle back").toBe("block");
+		expect(reticleShown(b.cursorStyle), "pane B never got its reticle back").toBe(true);
 		expect(b.cursorStyle.transform).toBe(ringAt(500, 500));
 		expect(b.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(true);
 	});
@@ -321,14 +322,14 @@ describe("a hand on one pane's glass stands the OTHER pane's mouse reticle down"
 		// smudge back in the pane nobody is touching.
 		b.fire(ptr("pointermove", "mouse", 1, 500, 500));
 		a.fire(ptr("pointerdown", "touch", 2, 120, 300));
-		expect(b.cursorStyle.display).toBe("none");
+		expect(reticleShown(b.cursorStyle)).toBe(false);
 
 		b.fire(ptr("pointermove", "mouse", 1, 520, 480));
 
 		expect(
-			b.cursorStyle.display,
+			reticleShown(b.cursorStyle),
 			"a mouse nudge repainted pane B's ring under a hand on pane A"
-		).toBe("none");
+		).toBe(false);
 		expect(
 			b.scrollerClasses.has(PEN_HOVER_CLASS),
 			"a refused sample put `cursor: none` back and left the reader no pointer at all"
@@ -348,7 +349,7 @@ describe("a hand on one pane's glass stands the OTHER pane's mouse reticle down"
 		// global answer goes false on its own with no cleanup call.
 		b.fire(ptr("pointermove", "mouse", 1, 500, 500));
 		a.fire(ptr("pointerdown", "touch", 2, 120, 300));
-		expect(b.cursorStyle.display).toBe("none");
+		expect(reticleShown(b.cursorStyle)).toBe(false);
 		expect(
 			a.router.handOnGlass(),
 			"the finger never registered on pane A's own router"
@@ -361,9 +362,9 @@ describe("a hand on one pane's glass stands the OTHER pane's mouse reticle down"
 		b.fire(ptr("pointermove", "mouse", 1, 500, 500));
 
 		expect(
-			b.cursorStyle.display,
+			reticleShown(b.cursorStyle),
 			"a pane closed with a finger down suppressed the other pane's ring forever"
-		).toBe("block");
+		).toBe(true);
 		expect(b.cursorStyle.transform).toBe(ringAt(500, 500));
 		expect(b.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(true);
 	});
@@ -378,7 +379,7 @@ describe("a hand on one pane's glass stands the OTHER pane's mouse reticle down"
 		expect(a.cursorStyle.transform, "the pen's contact did not take the ring").toBe(
 			ringAt(120, 300)
 		);
-		expect(a.cursorStyle.display).toBe("block");
+		expect(reticleShown(a.cursorStyle)).toBe(true);
 	});
 });
 
@@ -409,16 +410,16 @@ describe("with one pane open the rule is exactly what 1.4.12 shipped", () => {
 
 	it("a finger landing takes the parked mouse's ring down, and its lift gives it back", () => {
 		rig.fire(ptr("pointermove", "mouse", 1, 500, 500));
-		expect(rig.cursorStyle.display).toBe("block");
+		expect(reticleShown(rig.cursorStyle)).toBe(true);
 		expect(rig.cursorStyle.transform).toBe(ringAt(500, 500));
 
 		rig.fire(ptr("pointerdown", "touch", 2, 120, 300));
-		expect(rig.cursorStyle.display, "the one-pane stand-down changed").toBe("none");
+		expect(reticleShown(rig.cursorStyle), "the one-pane stand-down changed").toBe(false);
 		expect(rig.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(false);
 
 		rig.fire(ptr("pointerup", "touch", 2, 120, 300));
 		rig.fire(ptr("pointermove", "mouse", 1, 500, 500));
-		expect(rig.cursorStyle.display, "the one-pane return changed").toBe("block");
+		expect(reticleShown(rig.cursorStyle), "the one-pane return changed").toBe(true);
 		expect(rig.cursorStyle.transform).toBe(ringAt(500, 500));
 		expect(rig.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(true);
 	});

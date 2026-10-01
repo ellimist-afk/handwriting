@@ -1014,6 +1014,8 @@ describe("the backup and the removal are one decision", () => {
 			"locked-future": DELETE_ALL_REFUSED,
 			"locked-duplicate": DELETE_ALL_REFUSED,
 			"locked-legacy": DELETE_ALL_REFUSED,
+			"locked-transient":
+				"Handwriting: this note's ink file could not be read yet. New ink on it is not saved until it loads.",
 			"unknown-readiness": DELETE_ALL_NO_INK,
 			"unknown-holds-ink": DELETE_ALL_REFUSED,
 			"no-capture": DELETE_ALL_REFUSED,

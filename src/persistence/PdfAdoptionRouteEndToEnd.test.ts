@@ -19,13 +19,14 @@ const PATH = `.handwriting/${PDF_ID}.json`;
 // Execute the production host object rather than reconstructing its callbacks.
 const source = mainSource.replace(/\r\n/g, "\n");
 const hostStartMarker = "\t\tthis.pdfStore.attachHost({";
-const hostEndMarker = "\n\t\tsetMouseInk";
+// The registration is one statement; it ends at its own closing line.
+const hostEndMarker = "\n\t\t});\n";
 expect(source.split(hostStartMarker)).toHaveLength(2);
 const hostStart = source.indexOf(hostStartMarker);
 const hostEnd = source.indexOf(hostEndMarker, hostStart);
 expect(hostStart).toBeGreaterThan(0);
 expect(hostEnd).toBeGreaterThan(hostStart);
-const hostRegistration = source.slice(hostStart, hostEnd);
+const hostRegistration = source.slice(hostStart, hostEnd + hostEndMarker.length);
 expect(hostRegistration.match(/this\.pdfStore\.attachHost\(/g)).toHaveLength(1);
 const installPdfPersistenceHost = new Function(
 	"Notice",

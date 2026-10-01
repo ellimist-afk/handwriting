@@ -738,6 +738,31 @@ describe("damaged sidecar fails CLOSED (v0.13.6 permanence pass)", () => {
 		expect(log.calls.filter((c) => c.startsWith("notify:"))).toHaveLength(2);
 	});
 
+	it("a REMOVED sidecar unlocks on reopen, but the notice does not claim ink was restored", async () => {
+		const { host, log } = makeHost({ pageIdInCache: "pg-d", damaged: "pg-d" });
+		const store = new InlineInkStore();
+		store.attachHost(host);
+		await store.ensureLoaded("a.md"); // damaged → locked
+		expect(store.isDamagedLocked("a.md")).toBe(true);
+
+		// The user removes the damaged file outright (the notice's own "or
+		// removed" offer), then reopens the note. Nothing is there to read.
+		host.loadSidecar = async () => null;
+		const fullMessages: string[] = [];
+		host.notify = (m) => fullMessages.push(m);
+		const changed = await store.ensureLoaded("a.md");
+		await settle();
+
+		expect(store.isDamagedLocked("a.md")).toBe(false);
+		expect(changed).toBe(false); // nothing read, nothing merged
+		expect(store.strokes("a.md")).toEqual([]);
+		// The unlock notice must not say the file is "readable again" or
+		// that ink "is restored": nothing was read, nothing was restored.
+		expect(fullMessages).toHaveLength(1);
+		expect(fullMessages[0]).not.toContain("readable again");
+		expect(fullMessages[0]).not.toContain("restored");
+	});
+
 	it("a sidecar still damaged on reopen stays locked, with no second notice", async () => {
 		const { host, log } = makeHost({ pageIdInCache: "pg-d", damaged: "pg-d" });
 		const store = new InlineInkStore();

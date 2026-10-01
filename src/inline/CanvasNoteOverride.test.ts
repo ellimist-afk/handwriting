@@ -1,5 +1,5 @@
 /**
- * s138: the frontmatter side of per-note Infinite Canvas. What a note says, what
+ * The frontmatter side of per-note Infinite Canvas. What a note says, what
  * the global says when the note says nothing, what reaches the listener, and the
  * three things `NotePaper`'s write queue was built for.
  *

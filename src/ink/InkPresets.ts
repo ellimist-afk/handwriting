@@ -19,7 +19,7 @@
  * MobileTools.ts's `handwriting-pop-presets`, which is the truth; design §10
  * asked for presets first and the pop was not rebuilt around it.)
  *
- * Four per tool. Not a measurement - a ruling, and it has a reason: the row
+ * Four per tool. Not a measurement - a decision, and it has a reason: the row
  * hangs under one 28px strip button, and the colour pop beside it already
  * proved what happens when a pop wants more width than a narrow tablet has
  * (batendalyn, Boox Tab XC, 2026-09-02: swatches squeezed into ovals). Four
@@ -184,6 +184,37 @@ export function addPreset(list: ReadonlyArray<InkPreset>, preset: InkPreset): In
 	return withSlots(list, preset.tool, slots);
 }
 
+/**
+ * The slot a save lands in. With an index, that slot when it holds a preset
+ * and the next free one when it does not, so the row never has a gap; without
+ * one, the rule `addPreset` has always had.
+ */
+export function presetSlotFor(
+	list: ReadonlyArray<InkPreset>,
+	tool: InkTool,
+	index?: number
+): number {
+	const count = presetsFor(list, tool).length;
+	if (index === undefined) return count < MAX_PRESETS_PER_TOOL ? count : MAX_PRESETS_PER_TOOL - 1;
+	return Math.max(0, Math.min(index, count, MAX_PRESETS_PER_TOOL - 1));
+}
+
+/**
+ * Save a pen into slot `index`, replacing what is there. A slot past the end
+ * appends instead, in the next free slot, so a hotkey for slot 4 with two
+ * saved cannot leave slots 3 and 4 empty and the chips out of order.
+ */
+export function addPresetAt(
+	list: ReadonlyArray<InkPreset>,
+	preset: InkPreset,
+	index: number
+): InkPreset[] {
+	const mine = presetsFor(list, preset.tool);
+	const slots = [...mine];
+	slots[presetSlotFor(list, preset.tool, index)] = preset;
+	return withSlots(list, preset.tool, slots);
+}
+
 /** Drop one slot. An index nothing occupies leaves the list alone. */
 export function removePreset(
 	list: ReadonlyArray<InkPreset>,
@@ -316,7 +347,7 @@ export function inkPresetsFor(tool: InkTool): InkPreset[] {
  */
 export interface InkPresetActions {
 	apply(tool: InkTool, index: number): void;
-	star(tool: InkTool): void;
+	star(tool: InkTool, index?: number): void;
 	remove(tool: InkTool, index: number): void;
 }
 
@@ -331,9 +362,12 @@ export function applyInkPreset(tool: InkTool, index: number): void {
 	actions?.apply(tool, index);
 }
 
-/** The star was pressed: save what is in hand. */
-export function starInkPreset(tool: InkTool): void {
-	actions?.star(tool);
+/**
+ * The star was pressed, or a save command ran: save what is in hand. The
+ * chip's star names no slot; a "Save ... as preset N" command names N.
+ */
+export function starInkPreset(tool: InkTool, index?: number): void {
+	actions?.star(tool, index);
 }
 
 /** A chip was held or right-clicked. */

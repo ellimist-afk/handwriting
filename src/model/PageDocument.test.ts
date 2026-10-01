@@ -373,7 +373,7 @@ describe("image identity is independent of the attachment path", () => {
 	});
 
 	// The move case that stood here drove `ObjectOps.moveObjects`, which was
-	// the canvas page view's funnel and is deleted in s197. The identity and
+	// the canvas page view's funnel and is deleted. The identity and
 	// geometry claims either side of it are untouched.
 
 	it("deletes one instance and leaves the other", () => {

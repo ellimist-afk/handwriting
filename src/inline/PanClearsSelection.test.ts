@@ -114,7 +114,7 @@ describe("entering pan mode and the live selection", () => {
 		// in the registration but not in the DISSOLVE branch, so a selection
 		// there survived into pan mode and the tip dragged instead of panning.
 		// That was the open half of Alan's own ruling (1.4.9-design.md
-		// §15.11), and s197 closed it by deleting the surface. What is left
+		// §15.11), and the canvas page removal closed it by deleting the surface. What is left
 		// is the PDF walk above, which is the whole of the branch now.
 		//
 		// The earlier name said "every registered surface", which reads as

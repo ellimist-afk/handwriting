@@ -1,11 +1,11 @@
 /**
- * S192: GRID PAPER'S SECOND BOX, everything about it that is not the pixels.
+ * GRID PAPER'S SECOND BOX, everything about it that is not the pixels.
  *
  * `PaperGridProfile.test.ts` reads what the paper PAINTS; this file reads what the fix DOES: which element carries
  * which axis, that no other paper kind grows a box, that the box never feeds the scroll range, that a pinch preview
  * still carries both axes, and that a gesture costs no style write and no forced read it did not cost before.
  *
- * Ruling: s192 add. 5 (slate-artifacts/1.4.20/ARCHITECT-RULING-1420.md). The measurement behind it: two repeating
+ * Decided for 1.4.20. The measurement behind it: two repeating
  * gradients on one LARGE box lose the first layer's rules as the box grows, and one gradient per box is clean at
  * every area measured.
  *
@@ -361,7 +361,7 @@ it("E: grid costs no style write and no forced read that lined paper does not, t
 }, 300_000);
 
 /**
- * H, I, J and the stacking question (s192 add. 6). The stylesheet paints BOTH axes on a grid scroller by default: the
+ * H, I, J and the stacking question. The stylesheet paints BOTH axes on a grid scroller by default: the
  * box is the overlay's, and a scroller with no overlay on it - or one in the frames before the overlay's first pass -
  * would otherwise show lined paper where the user chose grid. The scroller gives up its vertical layer only under
  * `handwriting-paper-grid-split`, which the overlay adds in the same call that puts the box in the page.
@@ -475,7 +475,7 @@ it("J: the preview copy still carries both axes with the split class on", async 
 }, 240_000);
 
 /**
- * THE STACKING QUESTION, measured rather than reasoned about (s192 add. 6). The box is `z-index: -1` inside the
+ * THE STACKING QUESTION, measured rather than reasoned about. The box is `z-index: -1` inside the
  * scroller. A negative child paints behind its PARENT'S OWN BACKGROUND unless that parent is a stacking context, so a
  * theme that gives the scroller an opaque `background-color` could hide the vertical rules outright. This cell counts
  * the vertical rules in the pixels with such a colour in place, against the same strip without it.

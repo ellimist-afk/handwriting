@@ -9,7 +9,7 @@
  * nobody else, on the surviving funnel into `translateStroke`: the inline
  * store's `moveStrokes` (lasso drag, insert-space drag, and the undo/redo of
  * either). The second funnel was `ObjectOps.moveObjects`, which belonged to
- * the canvas page view and went with it in s197.
+ * the canvas page view and went with it.
  */
 
 import { beforeEach, describe, expect, it } from "vitest";

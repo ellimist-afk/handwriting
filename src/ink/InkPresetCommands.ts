@@ -89,12 +89,11 @@ export interface PresetCommandHost {
  * `if (this.settings.colorSizeCommands)` mechanism, so nothing here reads a
  * setting: the caller decides, exactly as it does for the per-colour set.
  *
- * "Save as preset N" ignores its own N when the slot is not the next free
- * one, and that is deliberate rather than unfinished: `addPreset` owns where
- * a star lands (first empty, else replacing the last), and a save command
- * that could write slot 4 while slots 2 and 3 were empty would make the
- * chips' left-to-right order stop meaning anything. The number in the name
- * is what a hotkey user reads on the row after saving.
+ * "Save as preset N" writes slot N, replacing what is there. When N is past
+ * the end of the row it takes the next free slot instead, because a save
+ * command that wrote slot 4 while slots 2 and 3 were empty would make the
+ * chips' left-to-right order stop meaning anything; the notice names the slot
+ * that was actually written.
  */
 export function registerInkPresetCommands(plugin: PresetCommandHost): void {
 	for (const entry of PRESET_COMMANDS) {
@@ -105,7 +104,7 @@ export function registerInkPresetCommands(plugin: PresetCommandHost): void {
 				// An empty slot reports through the host's own Notice rather
 				// than guessing at a neighbour - see `InkPresetHost.apply`.
 				if (entry.kind === "apply") applyInkPreset(entry.tool, entry.index);
-				else starInkPreset(entry.tool);
+				else starInkPreset(entry.tool, entry.index);
 			},
 		});
 	}

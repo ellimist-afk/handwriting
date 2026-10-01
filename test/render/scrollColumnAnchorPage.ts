@@ -53,6 +53,7 @@ import { installObsidianDom } from "./obsidianDom";
 import { editorInfoField } from "./iphoneObsidianStub";
 import { emptyPage, parsePage, serializePage, type PageData } from "../../src/model/PageData";
 import { installZ10Recorder } from "./z10Recorder";
+import { reticleVisible } from "../../src/testUtils/ReticleShown";
 
 installObsidianDom();
 
@@ -496,7 +497,7 @@ const VISIBLE_PX = 0.5;
  * those came back clean.
  */
 async function run(readable: boolean, plant: Plant = "none", pinch = 1, centringTheme = false, offsetDisabled = false, startScrollTop = 0, zoomTo = 0.25, lagOptions?: { axis: "x" | "y" | "both"; routed?: boolean; far?: boolean; rapid?: boolean; infiniteCanvas?: boolean; frames?: number; distance?: number; pixels?: boolean; farVisual?: number; host?: boolean; zoomCycles?: number; fitCommit?: boolean; fitThenPinch?: number[]; z10?: boolean; z10TransformHost?: boolean; z10PlantLimit?: number; z10External?: number; z10ResizeBy?: number }) {
-	const fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null }[] = [];
+	const fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null; bounceSyncs: number; bounceResized: number; bounceMoved: number }[] = [];
 	if (lagOptions) Object.assign(Platform, { isMobile: false, isDesktop: true, isIosApp: false, isDesktopApp: true, isMobileApp: false, isPhone: false, isWin: true });
 	if (centringTheme) installCentringTheme();
 	if (plant === "minimal") installMinimalTheme();
@@ -507,7 +508,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 	// small to push scrollWidth past clientWidth - so hMargin never flipped in
 	// either, and hMargin flipping is the only thing that moves band.left on a
 	// purely vertical scroll.
-	// s179 (Alan, 2026-09-20): the note zoom exists only under the Infinite Canvas. An arm that
+	// Alan, 2026-09-20: the note zoom exists only under the Infinite Canvas. An arm that
 	// pinches therefore mounts with the canvas ON, whatever its plant asks for: with the canvas
 	// off the product ignores every phase of the gesture, so such an arm would measure nothing
 	// and pass on the silence. Arms that never pinch keep the mode their plant chose - the
@@ -594,8 +595,19 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			if (!(overlay as any).commitCameraScale(pinch, { left: 0, top: 0 }, undefined, false, true)) throw new Error(`fit commit at ${pinch} refused`);
 			// Then one real gesture per target from wherever the last one settled,
 			// recording what each settled at (below 10% zoom-out is locked).
+			// Band syncs that move or resize the band while a bounce plays. Past a bound the count is a loop: the guard stops
+			// calling through, so the cell reads the count on its assertion instead of losing the renderer.
+			let bounceSyncs = 0, bounceResized = 0, bounceMoved = 0;
+			const sync = overlay.syncBand.bind(overlay);
+			overlay.syncBand = () => {
+				if (overlay.bounceState && bounceSyncs > 100) return "none";
+				const r = sync();
+				if (r !== "none" && overlay.bounceState) { bounceSyncs++; if (r === "resized") bounceResized++; else bounceMoved++; }
+				return r;
+			};
 			for (const target of lagOptions.fitThenPinch ?? []) {
 				await settle(10);
+				bounceSyncs = 0; bounceResized = 0; bounceMoved = 0;
 				const r = pane.getBoundingClientRect();
 				const focal = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 				const from = overlay.pinchScaleNow;
@@ -603,7 +615,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 				overlay.pinch("move", target / from, focal);
 				overlay.pinch("end", target / from, focal);
 				await settle(10);
-				fitPinchSteps.push({ from, target, pinchScaleNow: overlay.pinchScaleNow, cssScale: overlay.cssScale, offsetWidth: overlay.container ? (overlay.container as HTMLElement).offsetWidth : null });
+				fitPinchSteps.push({ from, target, pinchScaleNow: overlay.pinchScaleNow, cssScale: overlay.cssScale, offsetWidth: overlay.container ? (overlay.container as HTMLElement).offsetWidth : null, bounceSyncs, bounceResized, bounceMoved });
 			}
 		} else {
 			const r = pane.getBoundingClientRect();
@@ -872,7 +884,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 				marginVar: view.dom.style.getPropertyValue("--handwriting-column-margin-left"),
 				// THE TWO CANDIDATE QUANTITIES side by side, and where the ink actually ended up.
 				// `grantX` is what production's fit test reads (the ink claim OR the zoom/scroll grants,
-				// conflated); `inkOnlyX` is add. 10's definition read strictly. The layer rect is the
+				// conflated); `inkOnlyX` is the ruling's definition read strictly. The layer rect is the
 				// painted answer, against the pane it has to stay on.
 				grantX: surfaceExtents.get(rig.path)?.x ?? 0,
 				inkOnlyX: inkFrontier(inlineInk.strokes(rig.path)).x,
@@ -996,7 +1008,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			previewOffFrames: previewOnly.filter((f: any) => f.offX === null || f.offY === null || Math.abs(f.offX) > 1 || Math.abs(f.offY) > 1).length,
 			maxPreviewOff: previewOnly.length ? Math.max(...previewOnly.map((f: any) => Math.max(Math.abs(f.offX ?? 1e9), Math.abs(f.offY ?? 1e9)))) : 0,
 			settleOffX: settled.offX, settleOffY: settled.offYAdj, settleOffYRaw: settled.offY,
-			// s97 add. 67: the bound's own geometry at the settle, so the cell derives the rest add. 52
+			// The bound's own geometry at the settle, so the cell derives the rest the ruling
 			// line 4 puts the page on rather than pinning a number.
 			bound: typeof (overlay as any).overscrollBounceReadout === "function"
 				? (() => { const b = (overlay as any).overscrollBounceReadout(); return { floorX: b.floorX, floorY: b.floorY, bx: b.bx, width: b.width, rawX: b.rawX, cx: b.cx, rawY: b.rawY, cy: b.cy }; })()
@@ -1284,6 +1296,14 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			canvasCount: canvases.length,
 			maxCanvasPx: canvases.length ? Math.max(...canvases.map(c => c.px)) : 0,
 			backingPx: canvases.reduce((n, c) => n + c.px, 0),
+			// The four band layers alone; the tail's compact backing is read apart.
+			bandBackingPx: [...pane.querySelectorAll("canvas")].filter(c => c !== (overlay as any).tailCanvas)
+				.reduce((n, c) => n + (c as HTMLCanvasElement).width * (c as HTMLCanvasElement).height, 0),
+			tailBacking: tailBackingInfo(overlay),
+			// The four band layers alone: without the live tail and without the wet tile.
+			bandLayersBackingPx: [...pane.querySelectorAll("canvas")]
+				.filter(c => c !== (overlay as any).tailCanvas && c !== (overlay as any).wetTileCanvas)
+				.reduce((n, c) => n + (c as HTMLCanvasElement).width * (c as HTMLCanvasElement).height, 0),
 			backingBytes: canvases.reduce((n, c) => n + c.px * 4, 0),
 			// The REAL ceiling, read from the shipped constant. It is per
 			// canvas, not per surface: `backingScale` trims a single canvas's
@@ -2297,9 +2317,9 @@ async function runFocal(readable: boolean, infiniteCanvas: boolean, moving: bool
 						const top = scroller.scrollTop; scroller.scrollTop += 120;
 						readWriteGap = { delta: scroller.scrollTop - top, baseline: snapshot() };
 						request.write?.(value, ...args); readWriteGap.after = snapshot();
-						// s189 (6): A FRAME-SCALE WINDOW, NOT ONE MICROTASK. The compensation this cell is about used to
+						// 6: A FRAME-SCALE WINDOW, NOT ONE MICROTASK. The compensation this cell is about used to
 						// finish inside the settle's own turn, so a snapshot taken on the next line was the whole story.
-						// With the canvas lift easing (s189) the page can still be moving when that line runs, and a cell
+						// With the canvas lift easing the page can still be moving when that line runs, and a cell
 						// that reads one microtask after the write would be deciding on whichever half of the frame it
 						// landed in. The later snapshot is taken a frame on, and the claim is read against it.
 						const w = view.dom.ownerDocument.defaultView ?? window;
@@ -2395,7 +2415,7 @@ async function runFocal(readable: boolean, infiniteCanvas: boolean, moving: bool
 		router.endPinch(new PointerEvent('pointerup', { pointerId: 802, pointerType: 'touch' }), f);
 		const settleGeneration = overlay.viewportGeneration, settleReceipt = overlay.panAnchorHold;
 		 samples.push(sampleFocal('settle-sync', f, reads));
-		// FORTY FRAMES, NOT EIGHT. Under s97 the settle's correction is carried by an ease that runs for
+		// FORTY FRAMES, NOT EIGHT. Under the ruling the settle's correction is carried by an ease that runs for
 		// OVERSCROLL_BOUNCE_MS, 500 ms, and eight frames land inside it - on a headless surface whose frames
 		// run 19 to 23 ms they cover about a fifth of the glide, so a sample taken there reads a page that
 		// is still moving and says nothing about where it came to rest. Forty frames outlast the glide.
@@ -2423,7 +2443,7 @@ async function runFocal(readable: boolean, infiniteCanvas: boolean, moving: bool
 				else if (input === "keyboard") view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
 				else if (input === "pen") drawAt(view, pr.left + 400, pr.top + 200, 905);
 				else if (input === "zoom") overlay.commitCameraScale(1, { left: 0, top: 0 });
-				else if (input === "switch") { (view.state.field(editorInfoField) as any).file.path = `${path}-next.md`; view.dispatch({}); }
+				else if (input === "switch") { (view.state.field(editorInfoField) as any).file = { path: `${path}-next.md` }; view.dispatch({}); }
 				else if (input === "destroy") { view.destroy(); destroyed = true; }
 				else if (input && ['remove','recreate','reconfigureAll','mappedRemove','foreignReplace','setState'].includes(input.replace('Control',''))) {
 					const mode = input.replace('Control','');
@@ -2497,7 +2517,7 @@ async function runCentroidPan(readable: boolean, infiniteCanvas: boolean) {
 	};
 	const event = (type: string) => new PointerEvent(type, { pointerId: 812, pointerType: 'touch' });
 	// The fingers' own input, recorded beside every sample so a preview reads as commanded travel
-	// rather than against a measured number (s79(4)(a)).
+	// rather than against a measured number.
 	let lastY = 0;
 	const move = (spread: number, y: number) => { lastY = y; touch(spread, y); return router.updatePinch(event('pointermove')); };
 	const sample = (phase: string) => {
@@ -2519,11 +2539,11 @@ async function runCentroidPan(readable: boolean, infiniteCanvas: boolean) {
 		const hold = overlay.panAnchorHold;
 		const immediate = sample(`${phase}-lift`);
 		router.touchPos.clear(); await settle(8);
-		// s97 add. 72: THIS RUNNER HAD NO ARRIVED WAIT AT ALL. `-settled` is 8 frames after the lift,
+		// THIS RUNNER HAD NO ARRIVED WAIT AT ALL. `-settled` is 8 frames after the lift,
 		// about 130 ms into a 500 ms glide, and `jump` was read from it - so the row that asks the ease
 		// to close the whole 300.00 was reading it 44 per cent of the way down the cubic: measured
 		// -246.35, and (1 - 0.44)^3 x 300 = 53 px left, which is exactly the shortfall. The sibling
-		// runner's rows were fixed at add. 68/69; this one was missed because its `end()` is its own.
+		// runner's rows were fixed at the ruling; this one was missed because its `end()` is its own.
 		// Wait the glide out in real time, then sample the arrival.
 		const bouncing = (): boolean => typeof (overlay as any).overscrollBounceReadout === "function"
 			&& (overlay as any).overscrollBounceReadout().active;
@@ -2543,8 +2563,8 @@ async function runCentroidPan(readable: boolean, infiniteCanvas: boolean) {
 			syncJump: immediate.contentTop - before.contentTop, jump: after.contentTop - before.contentTop });
 	};
 	const begin = async (phase: string, y: number) => {
-		// s97 add. 68: WAIT FOR THE EASE BEFORE THE NEXT GESTURE. Fingers landing mid-glide now stop the
-		// page where it is (add. 66), which is the contract - but it means a gesture started while the
+		// WAIT FOR THE EASE BEFORE THE NEXT GESTURE. Fingers landing mid-glide now stop the
+		// page where it is, which is the contract - but it means a gesture started while the
 		// previous release was still gliding leaves that release short of its own rest, and the release
 		// rows read an uninterrupted ease: measured, the seed release arrived at -237.12 against the
 		// -300.00 it owed, with the cancel traced to this very call, 83.6 px of ease still to run. The
@@ -2565,7 +2585,7 @@ async function runCentroidPan(readable: boolean, infiniteCanvas: boolean) {
 		const original = JSON.stringify(inlineInk.strokes(path));
 		touch(400, 400); router.beginPinch(event('pointerdown')); move(100, 400); await frame();
 		await end('seed', 400);
-		// s97 add. 62: THE WINDOW OPENS AFTER THE SEED'S EASE, not during it. Measured: at
+		// THE WINDOW OPENS AFTER THE SEED'S EASE, not during it. Measured: at
 		// `unengaged-before` the bounce readout was still active with fromX 524.06 / fromY 300 and y
 		// 29.05 still to run, pan 0 and scrollLeft 0 on both samples - so `unengagedDelta` was reading
 		// the tail of the previous gesture's glide, not a page the unengaged gesture had moved, and it
@@ -2638,12 +2658,12 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 		overlay.scheduleRepaint('boundary-ink'); await settle(10);
 	}
 	const inkBefore = JSON.stringify(inlineInk.strokes(path));
-	// s79(3) INSTRUMENTED READ, test-time only and off by default. The settle-side push already lives on
-	// the product path at this head and comes out before landing (s79(6)); this arms it for the two named
+	// THE INSTRUMENTED READ, test-time only and off by default. The settle-side push already lives on
+	// the product path at this head and comes out before landing; this arms it for the two named
 	// cells and nothing else, so one run can say which of the three named causes is the real one.
 	if (debug) { (globalThis as any).__HW_PAN_DEBUG = true; (globalThis as any).__HW_SETTLE_PAN = []; }
 	const router = overlay.router, rows: any[] = [], releases: any[] = [];
-	// s79(4)(a) WANTS THE FINGERS' DISPLACEMENT, NOT A MEASURED NUMBER. The rig already owns the only
+	// THE RULE WANTS THE FINGERS' DISPLACEMENT, NOT A MEASURED NUMBER. The rig already owns the only
 	// inputs that displacement is made of - the centroid it placed the touches at and the spread between
 	// them - so it records them beside every sample and the cell derives the expected exposure from them.
 	// Nothing here reads a position back out of the product.
@@ -2667,7 +2687,7 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 				storeFrontierX: surfaceExtents.get(path)?.x ?? null,
 				strokeFrontierX: inkFrontier(inlineInk.strokes(path))?.x ?? null,
 				fitReadout: o.panFitReadout ? o.panFitReadout() : null,
-				// s150 add. 2: why this frame was or was not bounded, straight from the gate.
+				// Why this frame was or was not bounded, straight from the gate.
 				dragGate: (o as any).dragGateReadout ? (o as any).dragGateReadout() : null,
 			});
 		}
@@ -2678,32 +2698,32 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 		const before = sample(`${phase}-before-lift`); router.endPinch(event('pointerup'), centroid(y));
 		const immediate = sample(`${phase}-lift`), hold = overlay.panAnchorHold;
 		router.touchPos.clear(); await settle(8); const after = sample(`${phase}-settled`);
-		// ARRIVED (s75 add.1). The `-settled` sample above is read 8 frames after the lift - about 133 ms
+		// ARRIVED. The `-settled` sample above is read 8 frames after the lift - about 133 ms
 		// into an ease that runs for ~500 ms - so it is a GLIDE READ, not a position: three identical
 		// repeats measured 787.38 / 869.06 / 838.65 there, while the rest itself is 689.5027 on every one.
 		// A cell that never observes the ARRIVED state cannot guard the design's own promise that a drag
 		// on a fitting page returns to its rest. Wait for the ease to END: two consecutive frames agreeing
 		// within 0.1 px, bounded to 60 frames so a stuck glide FAILS the cell instead of hanging the suite.
-		// s97 add. 59: BOTH AXES, and the overlay's own bounce state. This loop watched
+		// BOTH AXES, and the overlay's own bounce state. This loop watched
 		// contentOriginLeft alone, which is X: on the top-margin arms the ease runs on Y, so the
 		// wait ended while it was still running and `-arrived` was a mid-glide sample - measured
 		// 47.26 of 450 at repeat-0-arrived with the ease itself correct (painted 484, landed 34,
-		// difference 450, the number the cell asks for). Same instrument defect as s75 add. 1.
-		// s97 add. 62: THE EASE CAN START AFTER THE FIRST FRAMES. The settle that owes it runs on a
+		// difference 450, the number the cell asks for). Same instrument defect as the ruling.
+		// THE EASE CAN START AFTER THE FIRST FRAMES. The settle that owes it runs on a
 		// later pass, so a wait that only asks "is it running now" can pass two steady frames before it
 		// begins and sample a position the glide then leaves: measured, the seed release read -239.26
 		// against -300.00 while the bounce was still to start, and the same glide was still running when
 		// the next window opened. So first give it up to 12 frames to appear, then wait it out.
 		const bouncing = (): boolean => typeof (overlay as any).overscrollBounceReadout === "function"
 			&& (overlay as any).overscrollBounceReadout().active;
-		// s97 add. 68: the ease may start several frames after the lift, and two identical frames before
+		// The ease may start several frames after the lift, and two identical frames before
 		// it starts are not an arrival. The loop below will not accept steadiness until it has SEEN the
 		// ease running, so a release whose glide begins late is still read at its rest (measured: the
 		// seed release read -237.76 against the -300.00 it owed while the wait returned early).
 		let seen = false;
 		for (let w = 0; w < 40 && !bouncing(); w++) await frame();
 		if (bouncing()) seen = true;
-		// s97 add. 69: THE BOUND IS WALL CLOCK, NOT FRAMES. Headless rAF runs far faster than 16 ms, so a
+		// THE BOUND IS WALL CLOCK, NOT FRAMES. Headless rAF runs far faster than 16 ms, so a
 		// 90-frame cap expired inside the 500 ms glide and the arrived sample was still mid-ease:
 		// measured, the seed release read -227.95 / -247.26 against the -300.00 it owed while the ease's
 		// own input was the full 300.00 (capture blank 300.00 with pan 300.00, landed 0.00), which is
@@ -2724,7 +2744,7 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 		const arrived: any = sample(`${phase}-arrived`);
 		// recorded so an assertion can say "the ease never ended" instead of pinning a moving value
 		arrived.eased = easeSteady >= 2; arrived.easeFrames = easeFrames;
-		// s97 add. 59: `jump`/`jumpX` are read from the ARRIVED sample, not from `-settled`. The comment
+		// `jump`/`jumpX` are read from the ARRIVED sample, not from `-settled`. The comment
 		// above says what `-settled` is - 8 frames, about 133 ms into a 500 ms ease - so a cell asking
 		// "the ease closes it after" against it was reading the glide: measured -120.20 / -270.44 /
 		// -351.43 on three arms whose eases were correct. `syncJump` stays on the lift-instant sample,
@@ -2747,7 +2767,7 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 			await begin(); const before = sample('reachable-before'); move(400, 240); await frame(); const after = sample('reachable-move');
 			move(400, 650); await frame(); sample('reachable-top'); await end('reachable', 650);
 			await begin(400);
-			// GESTURE-START SAMPLES for the exposure law (s79(4)). The law reads a live sample as the exposure the
+			// GESTURE-START SAMPLES for the exposure law. The law reads a live sample as the exposure the
 			// gesture STARTED with plus the centroid's travel since, so every arm whose live samples return to the
 			// starting spread needs one row taken at that spread. `-begin` rather than `-start`: the `-start` suffix
 			// is what the cells match to mean A RESTING POSITION, and these are taken with the fingers already down.
@@ -2759,13 +2779,13 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 			overlay.commitCameraScale(.5, { left: 0, top: 0 }); await settle(8);
 			await begin(400); sample('mixed-begin'); move(200, 450); move(400, 375); await frame(); sample('mixed-coalesced'); await end('mixed', 375);
 			overlay.commitCameraScale(.5, { left: 0, top: 0 }); await settle(8);
-			// The pending arm needs its own begin row for s79(4)(a) (s79 add. 6(i)): its live exposure at the
+			// The pending arm needs its own begin row for the ruling: its live exposure at the
 			// lift is derived as begin + travel, because the arm deliberately coalesces its two moves with no
 			// frame between them and therefore has no `-before-lift` sample to read. Adding a frame here would
 			// destroy the very condition the arm exists to test.
 			await begin(); sample('pending-begin'); move(400, 650); move(400, 575);
 			router.endPinch(event('pointerup'), centroid(575)); router.touchPos.clear(); sample('pending-lift'); await settle(8); sample('pending-settled');
-			// AN ARRIVED SAMPLE FOR THE PENDING ARM (s79 add. 11). `pending-settled` is read 8 frames after
+			// AN ARRIVED SAMPLE FOR THE PENDING ARM. `pending-settled` is read 8 frames after
 			// the lift, which since 48c53add is mid-ease and not a position: it reads 149.996 / 129.842 on
 			// the Infinite-Canvas-on arms where the arrival is 0. Every other arm already waits for the
 			// ease to end before it claims a position; this one did not, so it takes the same wait.
@@ -2832,7 +2852,7 @@ async function runMarginPayment(readable: boolean, infiniteCanvas: boolean, exte
 	const sample = (phase: string) => {
 		const left = contentOriginLeft(view.contentDOM)!, host = view.dom.getBoundingClientRect().left;
 		// The RESOLVED margin, not the custom property: the property is written unclamped and the stylesheet clamps it
-		// against the auto term, and it is the resolved one that carries the page (measured, s70).
+		// against the auto term, and it is the resolved one that carries the page (measured).
 		const resolvedMargin = parseFloat(getComputedStyle(sizer).marginLeft);
 		const row = { phase, offset: left - host, left, resolvedMargin, scale: overlay.pinchScaleNow,
 			panX: overlay.viewportPan.x, scrollLeft: view.scrollDOM.scrollLeft,
@@ -2883,7 +2903,7 @@ async function runPinchReticle(target: number, moving: boolean, external = 1) {
 	const rows: any[] = [];
 	const sample = (phase: string) => {
 		const cursor = overlay.penCursorEl as HTMLElement, r = cursor.getBoundingClientRect();
-		rows.push({ phase, visible: getComputedStyle(cursor).display !== 'none', errorX: (r.left + r.right) / 2 - x, errorY: (r.top + r.bottom) / 2 - y, width: r.width });
+		rows.push({ phase, visible: reticleVisible(getComputedStyle(cursor)), errorX: (r.left + r.right) / 2 - x, errorY: (r.top + r.bottom) / 2 - y, width: r.width });
 	};
 	const touch = (ratio: number) => { router.touchPos.set(852, { x: pr.left + 400 - 150 * ratio, y: 300 }); router.touchPos.set(853, { x: pr.left + 400 + 150 * ratio, y: 300 }); };
 	const event = (type: string) => new PointerEvent(type, { pointerId: 853, pointerType: 'touch' });
@@ -2957,14 +2977,14 @@ async function runInfiniteTraversal(readable: boolean, infiniteCanvas: boolean, 
 				const last = sample(`${axis}-${i}-before-lift`);
 				router.endPinch(event('pointerup'), { x: pr.left + 800 - (axis === 'x' ? 800 : 0), y: 600 - (axis === 'y' ? 800 : 0) });
 				router.touchPos.clear();
-				// s97 add. 62: THE LIFT'S OWN FRAME. This sample is the one the `expectedJump` rows below
+				// THE LIFT'S OWN FRAME. This sample is the one the `expectedJump` rows below
 				// are about - what the commit did, before any ease has run - and it was taken 10 frames
 				// after the lift, which is inside the 500 ms glide: measured 79.71 and 551.82 where the
 				// rows ask for 0. The settle still runs, and the rest is still read at `-done` below.
 				const after = sample(`${axis}-${i}-after`);
 				await settle(10);
 				after.jumpX = after.x - last.x; after.jumpY = after.y - last.y;
-				// s189 (Alan 2026-09-21): under the canvas the settle measures the painted travel, so the last move a pending
+				// Alan 2026-09-21: under the canvas the settle measures the painted travel, so the last move a pending
 				// cadence never painted (200 px) is eased after the lift and no longer lands in the lift's own frame. Measured
 				// at d624596d plus the travelled flag: jump 0 where this row read -200. The rest is still read at `-done`.
 				const pendingJump = infiniteCanvas ? 0 : -200;
@@ -3027,7 +3047,8 @@ async function runExpandedDrawCoverage(mode: 'zoom' | 'traverse' | 'resize' | 's
  const geometry=()=>({pane:pane.getBoundingClientRect().toJSON(),scroller:scroller.getBoundingClientRect().toJSON(),band:overlay.container.getBoundingClientRect().toJSON(),ink:overlay.inkLayer.getBoundingClientRect().toJSON(),canvas:overlay.committedCanvas.getBoundingClientRect().toJSON(),backing:{width:overlay.committedCanvas.width,height:overlay.committedCanvas.height},scale:overlay.cssScale,pan:{...overlay.viewportPan},scroll:{left:scroller.scrollLeft,top:scroller.scrollTop},grant:{...surfaceExtents.get(path)}});
  const pixelsAt=(x:number,y:number)=>[overlay.wetCanvas,overlay.tailCanvas,overlay.committedCanvas].map((canvas:HTMLCanvasElement)=>{
   const r=canvas.getBoundingClientRect(),inside=x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;
-  if(!inside)return {inside,pixels:0};
+  // A 0x0 canvas (the wet canvas released while the page scrolled) holds no pixels to read.
+  if(!inside||!(canvas.width>0&&canvas.height>0))return {inside,pixels:0};
   const bx=canvas.width/r.width,by=canvas.height/r.height,left=Math.max(0,Math.floor((x-r.left-9)*bx)),top=Math.max(0,Math.floor((y-r.top-9)*by)),w=Math.min(canvas.width-left,Math.ceil(18*bx)),h=Math.min(canvas.height-top,Math.ceil(18*by));
   const data=canvas.getContext('2d')!.getImageData(left,top,w,h).data;let pixels=0;
   for(let i=0;i<data.length;i+=4)if(data[i+3]!>20&&data[i+2]!>180&&data[i]!<60&&data[i+1]!<60)pixels++;
@@ -3114,7 +3135,7 @@ async function runExpandedDrawCoverage(mode: 'zoom' | 'traverse' | 'resize' | 's
    // write, before the frame that would have re-pinned the band. Zero scrolls
    // arrive during the contact; the band is simply stale for all of it.
    if(mode.startsWith('far-mark')){scroller.scrollLeft+=240/overlay.cssScale;scroller.scrollTop+=240/overlay.cssScale;scroller.dispatchEvent(new Event('scroll',{bubbles:true}));if(!mode.startsWith('far-mark-immediate'))await frame();}
-   // Carry cost and per-move coverage (review of 03c445f0, F2 and F3): the
+   // Carry cost and per-move coverage (review of 03c445f0): the
    // carry is wrapped for this contact only and restored below; coverage is
    // read after every move, not once at the end.
    const carries:number[]=[],perMove:{move:number;right:boolean;bottom:boolean}[]=[];
@@ -3133,10 +3154,10 @@ async function runExpandedDrawCoverage(mode: 'zoom' | 'traverse' | 'resize' | 's
     await frame();
    }
    const wet=pixelsAt(x1,y),during=geometry();
-   // s189 (2) [Architect]: THE INK IS GLUED TO THE PAGE, SO THE READ FOLLOWS THE PAGE. A pen that lands inside
-   // half a second of a lift cancels the settle's ease; add. 66 folds the remainder into the pan so the page
+   // 2: THE INK IS GLUED TO THE PAGE, SO THE READ FOLLOWS THE PAGE. A pen that lands inside
+   // half a second of a lift cancels the settle's ease; the ruling folds the remainder into the pan so the page
    // stays under the pen while the stroke is drawn, and at the lift `resumeStrandedPan` finishes the glide the
-   // pen cut (s132, add. 66 - the same contract as canvas off). The stroke rides the page, as ink must, so a
+   // pen cut. The stroke rides the page, as ink must, so a
    // fixed screen point reads empty afterwards through no fault of the ink. Measured on this rig with the canvas
    // ease on: under the pen at the lift 38 committed pixels on both cancelling arms, mappingError 0, and the
    // ink's scanned box matching the pen's x to 0.1 px while its y sat exactly the ease's remainder away
@@ -3215,7 +3236,7 @@ async function runExpandedDrawCoverage(mode: 'zoom' | 'traverse' | 'resize' | 's
 
 /** Ordered clipping before one paint, including scale-only rejected movement. */
 async function runConstraintOrder(mode: 'coalesced' | 'pending' | 'scale' | 'mixed' | 'corner', infiniteCanvas = false) {
-	// s150 add. 1: THE ARM STATES ITS OWN MODE. It passed `true` for `mount`'s `infiniteCanvas` argument and
+	// THE ARM STATES ITS OWN MODE. It passed `true` for `mount`'s `infiniteCanvas` argument and
 	// never said so - every arm ran canvas-ON while the cell titles claimed nothing either way. That was close
 	// to harmless while the two modes differed little on this path; with the band it decides whether the drag
 	// is bounded at all. Measured when the flag was first threaded: coalesced capped at the 96 px give on a
@@ -3234,7 +3255,7 @@ async function runConstraintOrder(mode: 'coalesced' | 'pending' | 'scale' | 'mix
 		const r = view.contentDOM.getBoundingClientRect();
 		const row = { phase, x: contentOriginLeft(view.contentDOM), y: r.top, scale: overlay.pinchScaleNow,
 			constraint: overlay.pinchAnchor?.constraint ? { ...overlay.pinchAnchor.constraint } : null,
-			// s150 add. 2: the gate's own inputs on this frame, so a red on this arm says which clamp took it.
+			// The gate's own inputs on this frame, so a red on this arm says which clamp took it.
 			panY: overlay.panY ? overlay.panY() : null, panX: overlay.panX ? overlay.panX() : null,
 			gate: (overlay as any).dragGateReadout ? (overlay as any).dragGateReadout() : null };
 		rows.push(row); return row;
@@ -3248,7 +3269,7 @@ async function runConstraintOrder(mode: 'coalesced' | 'pending' | 'scale' | 'mix
 	const end = async (dx = 0, dy = 0) => {
 		router.endPinch(event('pointerup'), { x: start.x + dx, y: start.y + dy });
 		const hold = overlay.panAnchorHold; router.touchPos.clear(); sample('immediate'); await settle(8); sample('settled');
-		// s189: `settled` is 8 frames after the lift, inside the 500 ms ease under the canvas. Read the rest once it has ended.
+		// `settled` is 8 frames after the lift, inside the 500 ms ease under the canvas. Read the rest once it has ended.
 		for (let f = 0; f < 90 && overlay.overscrollBounceReadout && overlay.overscrollBounceReadout().active; f++) await frame();
 		sample('arrived');
 		return { outcome: hold?.outcome, held: !!overlay.panAnchorHold };
@@ -3468,7 +3489,7 @@ async function runScrollDraw(zoom: number, scroll: boolean, infiniteCanvas: bool
 	pickStripColor('Blue', '#0000ff');
 	if (!overlay.commitCameraScale(zoom, { left: 0, top: 0 })) throw new Error('zoom refused');
 	await new Promise(r => setTimeout(r, 150)); await settle(8);
-	const blank = () => ({ resize: 0, repaint: 0, extent: 0, band: 0, reallocations: 0, allocatedPixels: 0, clearCalls: 0, clearArea: 0, fills: 0, pathCommands: 0, rectReads: 0, rafRequests: 0, maxPendingRaf: 0, eventMs: 0, methods: {} as Record<string, number> });
+	const blank = () => ({ resize: 0, repaint: 0, extent: 0, band: 0, reallocations: 0, wetReallocations: 0, allocatedPixels: 0, clearCalls: 0, clearArea: 0, fills: 0, pathCommands: 0, rectReads: 0, rafRequests: 0, maxPendingRaf: 0, eventMs: 0, methods: {} as Record<string, number> });
 	let counts = blank(), active = true;
 	const pendingRaf = new Set<number>();
 	let destroyed = false;
@@ -3488,7 +3509,7 @@ async function runScrollDraw(zoom: number, scroll: boolean, infiniteCanvas: bool
 	window.cancelAnimationFrame = id => { pendingRaf.delete(id); cancelRaf(id); };
 	const proto = HTMLCanvasElement.prototype;
 	const dimensions = ['width','height'].map(key => [key, Object.getOwnPropertyDescriptor(proto,key)!] as const);
-	for (const [key,d] of dimensions) Object.defineProperty(proto,key,{...d,set(value:number){ if(active && view.dom.contains(this)){counts.reallocations++;counts.allocatedPixels+=key==='width'?value*this.height:value*this.width;}d.set!.call(this,value);}});
+	for (const [key,d] of dimensions) Object.defineProperty(proto,key,{...d,set(value:number){ if(active && view.dom.contains(this)){counts.reallocations++;if(this===overlay.wetCanvas)counts.wetReallocations++;counts.allocatedPixels+=key==='width'?value*this.height:value*this.width;}d.set!.call(this,value);}});
 	const ctxProto=CanvasRenderingContext2D.prototype;
 	const clear=ctxProto.clearRect, fill=ctxProto.fill, line=ctxProto.lineTo, curve=ctxProto.bezierCurveTo;
 	ctxProto.clearRect=function(...args:Parameters<typeof clear>){if(active && view.dom.contains(this.canvas)){counts.clearCalls++;counts.clearArea+=Math.abs(args[2]*args[3]);}return clear.apply(this,args);};
@@ -3524,10 +3545,13 @@ async function runScrollDraw(zoom: number, scroll: boolean, infiniteCanvas: bool
 			const red = i*8;
 			pickStripColor('Probe', `#${red.toString(16).padStart(2,'0')}00ff`);
 			counts=blank();saveCost={calls:0,ms:0,bytes:0};
+			// Whether the wet canvas was already released when the cycle began, and when its pen-down came.
+			const wetReleasedAtStart=overlay.wetDeferred===true;
 			const before=scroller.scrollLeft;
 			if(scroll)scroller.scrollLeft+=240/zoom;
 			if(cadence==='frame')await frame();
 			if(cadence==='settled')await settle(8);
+			const wetReleasedBeforeDraw=overlay.wetDeferred===true;
 			const x=pr.left+pr.width*.65,y=pr.top+100+i*25,t=performance.now();
 			pen('pointerdown',x,y,.2,t);
 			for(let j=1;j<=4;j++){await frame();pen('pointermove',x+j*16,y+Math.sin(j)*12,.2+j*.15,t+j*16);}
@@ -3536,7 +3560,7 @@ async function runScrollDraw(zoom: number, scroll: boolean, infiniteCanvas: bool
 			const immediateBlue=blueAt(x,y,red);
 			await frame();
 			const canvas=overlay.committedCanvas as HTMLCanvasElement;
-			rows.push({cycle:i,scrollBefore:before,scrollAfter:scroller.scrollLeft,grant:surfaceExtents.get(path),viewport:{width:scroller.clientWidth,height:scroller.clientHeight},backing:{width:canvas.width,height:canvas.height},inputWork,work:structuredClone(counts),save:{...saveCost},bandRect:rect.call(canvas).toJSON(),immediateBlue,frameBlue:blueAt(x,y,red),strokes:inlineInk.strokes(path).length,queued:overlay.repaintQueued});
+			rows.push({cycle:i,wetReleasedAtStart,wetReleasedBeforeDraw,scrollBefore:before,scrollAfter:scroller.scrollLeft,grant:surfaceExtents.get(path),viewport:{width:scroller.clientWidth,height:scroller.clientHeight},backing:{width:canvas.width,height:canvas.height},inputWork,work:structuredClone(counts),save:{...saveCost},bandRect:rect.call(canvas).toJSON(),immediateBlue,frameBlue:blueAt(x,y,red),strokes:inlineInk.strokes(path).length,queued:overlay.repaintQueued});
 		}
 		await settle(8);
 		let lifecycle: any = null;
@@ -3559,7 +3583,8 @@ async function runScrollDraw(zoom: number, scroll: boolean, infiniteCanvas: bool
 				overlay.router.abandonActiveStroke();
 				overlay.cancelFingerInkForPinch();
 			} else if (ending==='switch') {
-				(view.state.field(editorInfoField) as any).file.path = `${path}-next.md`;
+				// A switch hands the view a different file object; the same object with a new path is a rename.
+				(view.state.field(editorInfoField) as any).file = { path: `${path}-next.md` };
 				view.dispatch({});
 			} else { view.destroy(); destroyed=true; }
 			const afterResetDeferred=!!overlay.bandSyncDeferred;
@@ -4583,7 +4608,7 @@ function tileOwnScale(transform: string): number {
 function tileCanvases() {
 	const o = paneScrollRig!.overlay as any;
 	const layer = o.inkLayer as HTMLElement;
-	const fields = ["highlightCanvas", "highlightWetCanvas", "committedCanvas", "wetCanvas", "tailCanvas"];
+	const fields = ["highlightCanvas", "highlightWetCanvas", "committedCanvas", "wetCanvas", "tailCanvas", "wetTileCanvas"];
 	const all = Array.from(layer.querySelectorAll("canvas")) as HTMLCanvasElement[];
 	return all.map((c, index) => {
 		c.setAttribute("data-hw-tile-probe", String(index));
@@ -4606,6 +4631,14 @@ function tileBackingAt(canvases: HTMLCanvasElement[], x: number, y: number) {
 	let pixels = 0; const tiles: number[] = [];
 	canvases.forEach((c, i) => { const h = paneScrollInkNear(c, x, y); if (h.inside) { pixels += h.pixels; if (h.pixels > 0) tiles.push(i); } });
 	return { pixels, tiles };
+}
+/** The inline tail's own backing, read apart from the four band layers: its bitmap, grid, tile and origin. */
+function tailBackingInfo(o: any) {
+	const c = o?.tailCanvas as HTMLCanvasElement | undefined, t = o?.tail as any, cfg = t?.inlineBacking;
+	if (!c || !cfg) return null;
+	return { w: c.width, h: c.height, grid: cfg.grid as number | null, tileW: cfg.tileW as number, tileH: cfg.tileH as number,
+		backing: cfg.backing as number, fullW: Math.round(cfg.width * cfg.backing), fullH: Math.round(cfg.height * cfg.backing),
+		originX: t.originX as number, originY: t.originY as number, mode: t.backingMode as string };
 }
 function runTileRead(points: { label: string; x: number; y: number }[], withBacking = true) {
 	const rig = paneScrollRig!;
@@ -4636,6 +4669,7 @@ function runTileRead(points: { label: string; x: number; y: number }[], withBack
 		engineZoom: CSS.supports("zoom", "0.5"), hostZoom: o.hostZoomSupported() as boolean,
 		band: o.band ? { ...o.band } : null,
 		canvases, tiles, layersPerTile: tiles.length ? canvases.length / tiles.length : 0, seams: { x: seamsX, y: seamsY },
+		tailBacking: tailBackingInfo(o),
 		reallocs: inkCanvasReallocs(),
 		strokes: inlineInk.strokes(rig.path).length,
 		acq, hits,
@@ -4651,7 +4685,9 @@ function runTileRead(points: { label: string; x: number; y: number }[], withBack
 function runTileHash() {
 	const o = paneScrollRig!.overlay as any;
 	const els = Array.from((o.inkLayer as HTMLElement).querySelectorAll("canvas")) as HTMLCanvasElement[];
-	return els.map(c => { const d = c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data; let h = 2166136261; for (let i = 0; i < d.length; i++) { h ^= d[i]!; h = Math.imul(h, 16777619); } return (h >>> 0).toString(16); });
+	// A canvas with no backing (the highlight pair before any highlighter use) has nothing to read and getImageData
+	// refuses a 0 width: it gets a marker in its own slot, so every other index still names the same canvas.
+	return els.map(c => { if (c.width === 0 || c.height === 0) return "0x0"; const d = c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data; let h = 2166136261; for (let i = 0; i < d.length; i++) { h ^= d[i]!; h = Math.imul(h, 16777619); } return (h >>> 0).toString(16); });
 }
 
 // ---- G3 TEAR: a text-layer anchor and an ink anchor at the same place, read per compositor frame from outside ----
@@ -4829,7 +4865,7 @@ async function runTearForcedRefreshPlant(pinch: number, scrollLayout: number, pa
 	// returns false (a no-op) if its OWN guard (frame.locked, no container, no
 	// layout) refuses - that is a DIFFERENT finding from "it ran and the hold
 	// survived", and this must not conflate the two.
-	// FORCE the change the refresh compares against, so a re-commit happens on any rig (F2, REVIEW-a1e7a2e6).
+	// FORCE the change the refresh compares against, so a re-commit happens on any rig.
 	const layout = overlay.viewportLayout as { columnLocal: number | null };
 	layout.columnLocal = (layout.columnLocal ?? 0) + 1;
 	const ran: boolean = overlay.refreshViewportColumn();
@@ -4856,11 +4892,12 @@ function runTearBacking() {
 	return names.map(n => {
 		const c = o[n] as HTMLCanvasElement;
 		const r = c.getBoundingClientRect();
-		return { name: n, backing: { w: c.width, h: c.height }, rect: { w: r.width, h: r.height }, expectedBacking: { w: Math.round(r.width * dpr), h: Math.round(r.height * dpr) }, transform: getComputedStyle(c).transform };
+		return { name: n, backing: { w: c.width, h: c.height }, rect: { w: r.width, h: r.height }, expectedBacking: { w: Math.round(r.width * dpr), h: Math.round(r.height * dpr) }, transform: getComputedStyle(c).transform,
+			released: n === "wetCanvas" && o.wetDeferred === true };
 	});
 }
 /**
- * s93, step 7: SEED THE NOTE BY EXTENT, so the rig's committed-ink repaint has
+ * Step 7: SEED THE NOTE BY EXTENT, so the rig's committed-ink repaint has
  * something to cost.
  *
  * The device trace named the site: one 3536.8 ms task at pinch-end, of which
@@ -5118,7 +5155,7 @@ async function runTearPinchCounted(from: number, to: number, steps: number, cx: 
 
 /** The router's two-finger pinch, `steps` moves one animation frame apart, from scale `from` to `to`, centred on (cx, cy). */
 /**
- * s93: the same gesture with COALESCED moves. `runTearPinch` awaits a frame
+ * The same gesture with COALESCED moves. `runTearPinch` awaits a frame
  * after every `updatePinch`, so it can never stack two moves inside one frame;
  * a touchscreen delivers several per frame. This fires `burst` moves back to
  * back with no await, THEN yields one frame, for `frames` frames.
@@ -5306,3 +5343,23 @@ async function runTearZoomOp(op: "by" | "fit" | "reset", factor: number) {
 	return { result, ...runTearScaleRead() };
 }
 Object.assign((window as any).scrollColumnAnchor, { runTearScaleRead, runTearZoomOp });
+/**
+ * The tool the next real pen-down draws with, and a thick nib for it (the same x8 runTearMount gives the pen), so a
+ * highlighter stroke at 10% leaves pixels a reader can find.
+ */
+function runTearSetTool(tool: "pen" | "highlighter") {
+	setInlineTool(tool); setInkSizeMult(tool, 8);
+	return getInlineTool();
+}
+/**
+ * Where the highlight pair sits in the whole-layer read (runTileHash), and the hash that read gives a canvas of the
+ * pair's size holding nothing, so a test can tell a painted highlight layer from an empty one without trusting the
+ * overlay's own bookkeeping.
+ */
+function runTearHighlightProbe() {
+	const o = tearRig!.overlay as any;
+	const els = Array.from((o.inkLayer as HTMLElement).querySelectorAll("canvas")) as HTMLCanvasElement[];
+	const blank = (c: HTMLCanvasElement) => { if (c.width === 0 || c.height === 0) return "0x0"; let h = 2166136261; for (let i = 0; i < c.width * c.height * 4; i++) { h ^= 0; h = Math.imul(h, 16777619); } return (h >>> 0).toString(16); };
+	return (["highlightCanvas", "highlightWetCanvas"] as const).map(n => { const c = o[n] as HTMLCanvasElement; return { name: n, index: els.indexOf(c), blankHash: blank(c) }; });
+}
+Object.assign((window as any).scrollColumnAnchor, { runTearSetTool, runTearHighlightProbe });

@@ -206,6 +206,11 @@ describe("a pdf's eraser-mode chip persists the same way a note's does", () => {
 		expect((first.settings as Record<string, unknown>).eraserMode).toBe("stroke");
 
 		captured.spec.setEraserWholeStroke(false);
+		// A save reads the file before it writes, so it lands a tick later.
+		for (let i = 0; i < 5; i++) {
+			await (first.settingsWriting as Promise<void> | null);
+			await Promise.resolve();
+		}
 
 		const bytes = first.saved as Record<string, unknown> | null;
 		if (!bytes) throw new Error("the pdf chip's choice never reached a save");

@@ -47,7 +47,7 @@ import type { InkStroke } from "./ink/Stroke";
  * raised - that case must claim neither a restoration nor an interrupted save,
  * and the case below pins exactly that.
  *
- * THE CANVAS HALF IS GONE WITH THE CANVAS PAGE (s197). These cases used to be
+ * THE CANVAS HALF IS GONE WITH THE CANVAS PAGE. These cases used to be
  * driven through the deleted canvas page view's `loadPage`, and the doubling
  * they guarded against was that view's own bare interrupted-save notice, firing
  * for an event
@@ -56,7 +56,7 @@ import type { InkStroke } from "./ink/Stroke";
  * that second speaker no longer exists to be re-introduced. What remains, and
  * is driven here, is the store-and-binding half: one event, one sentence, one
  * notice, and the surface adding nothing of its own. Two claims that could only
- * be shown through the view are listed by name in the s197 RESULT.md.
+ * be shown through the view are listed by name in the removal evidence.
  */
 
 const PAGE_ID = "recovered-trash-restore";
@@ -256,7 +256,7 @@ describe("the events that must NOT be swept up with it", () => {
 	// every recovery notice there is.
 	// The bare interrupted-save recovery: a .tmp beside no live sidecar. The
 	// store recovers it; only the deleted canvas page view ever announced it, so
-	// after s197 the recovery is silent and no trash notice may appear either.
+	// after the view went the recovery is silent and no trash notice may appear either.
 	it("CONTROL: a bare interrupted-save recovery claims no trash restore", async () => {
 		const { open } = rig(seedBareInterrupted);
 		await open();

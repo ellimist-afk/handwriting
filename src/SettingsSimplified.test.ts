@@ -2,7 +2,7 @@
  * THREE ROWS OUT OF THE SETTINGS TAB, ONE KEPT (1.4.20, Alan's settings
  * simplification).
  *
- *   Pressure sensitivity  BACK (s236). Removing the row pinned the setting on,
+ *   Pressure sensitivity  BACK. Removing the row pinned the setting on,
  *                         and saved strokes are shaped at render time, so a
  *                         vault that had chosen off redrew its old ink under
  *                         the pressure law and the ink became illegible. The
@@ -54,7 +54,8 @@ type Plugin = { settings: Record<string, unknown>; saved: Record<string, unknown
 
 function fakePlugin(raw: unknown): Plugin {
 	const plugin = Object.create(HandwritingPlugin.prototype) as Record<string, unknown>;
-	plugin.loadData = (): Promise<unknown> => Promise.resolve(raw);
+	// Obsidian reads a missing data.json as null; undefined means it could not be read.
+	plugin.loadData = (): Promise<unknown> => Promise.resolve(raw === undefined ? null : raw);
 	plugin.saved = null;
 	plugin.saveData = (data: Record<string, unknown>): Promise<void> => {
 		plugin.saved = { ...data };
@@ -66,7 +67,10 @@ function fakePlugin(raw: unknown): Plugin {
 	plugin.settingsWriteAgain = false;
 	plugin.store = { useInkFolder: () => {}, load: () => null, schedule: () => {} };
 	plugin.pdfStore = { attachHost: () => {} };
-	plugin.app = { workspace: { onLayoutReady: () => {} } };
+	plugin.app = {
+		workspace: { onLayoutReady: () => {} },
+		vault: { adapter: { exists: async () => false, list: async () => ({ files: [], folders: [] }) } },
+	};
 	plugin.applyPaperTo = (): void => {};
 	plugin.applyBooxMode = (): void => {};
 	plugin.manifest = { version: "1.4.20" };
@@ -261,7 +265,7 @@ describe("pressure sensitivity is stored, not pinned", () => {
 
 	it("applies the loaded value at startup", () => {
 		expect(MAIN).toContain("setPressureSensitivity(this.settings.pressureSensitivity);");
-		// Two call sites since s236 restored the row: this one at startup, and
+		// Two call sites since the row was restored: this one at startup, and
 		// the `setControlValue` case that the toggle goes through.
 		expect(MAIN.match(/setPressureSensitivity\(/g), "two call sites in main.ts").toHaveLength(2);
 	});

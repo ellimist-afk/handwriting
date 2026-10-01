@@ -16,6 +16,8 @@ export interface SlidesActions {
 	status(): SlidesStatus;
 	run(action: SlidesAction): boolean;
 	finishGesture(): void;
+	/** Repaint committed ink after a render-only setting changes. */
+	repaintSettings?(): void;
 	onChange(fn: () => void): () => void;
 }
 
@@ -30,9 +32,7 @@ export function slideActionAvailable(status: SlidesStatus, action: SlidesAction)
 export function isSlidesControl(target: EventTarget | null, root: HTMLElement): boolean {
 	let el = target as HTMLElement | null;
 	while (el && el !== root) {
-		if (/^(button|input|select|textarea|summary|a)$/i.test(el.tagName ?? "") ||
-			el.getAttribute?.("role") === "button" || el.isContentEditable ||
-			el.classList?.contains("slides-close-btn") ||
+		if (el.classList?.contains("slides-close-btn") ||
 			el.classList?.contains("controls") ||
 			el.classList?.contains("handwriting-slides-tools")) return true;
 		el = el.parentElement;

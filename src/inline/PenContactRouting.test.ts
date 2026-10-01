@@ -160,7 +160,13 @@ function noteSurface(): Surface {
 	// not move into the shared function, and a live selection would let it
 	// answer for a contact this file is asking a different question about.
 	view.selection = new SelectionModel();
-	view.tail = { clear: () => undefined, drawHead: () => undefined, draw: () => undefined };
+	view.tail = {
+		clear: () => undefined, drawHead: () => undefined, draw: () => undefined,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 
 	view.syncCamera = () => undefined;
 	view.captureProbeGeometry = () => undefined;

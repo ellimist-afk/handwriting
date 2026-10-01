@@ -55,3 +55,4 @@ export function normalizePath(path: string): string {
 	return path;
 }
 export function setIcon(): void {}
+export function getIcon(): null { return null; }

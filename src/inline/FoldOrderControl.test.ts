@@ -17,7 +17,8 @@
  * this says anything about how the control LOOKS. That half is Alan's screen.
  */
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { Platform } from "obsidian";
 import controlSrc from "./FoldOrderControl.ts?raw";
 import css from "../../styles.css?raw";
 import { codeOnly } from "../CodeOnly";
@@ -405,6 +406,18 @@ function drag(h: Harness, from: number, steps: number, opts: { escape?: boolean 
 
 const label = (id: string): string => stripButtonFace(id)?.label ?? id;
 
+/**
+ * A list of the rows this device shows, with the Keyboard id put back in the
+ * slot the default order gives it: the id a mouse-only device has no row for,
+ * which a drag must leave where it was saved (audit 120).
+ */
+function withKeyboardInPlace(list: readonly string[]): string[] {
+	const keyboard = "handwriting:pen-ink-toggle";
+	const out = [...list];
+	out.splice(priorityFromFoldOrder(normalizeFoldOrder([])).indexOf(keyboard), 0, keyboard);
+	return out;
+}
+
 // ------------------------------------------------------------- the mapping
 
 describe("fold order: the list and the setting are the same array backwards", () => {
@@ -563,7 +576,7 @@ describe("fold order: the control against a fake tree", () => {
 		// Written to the SETTING as a fold order - reversed - which is the one
 		// direction this control could get backwards without anything looking
 		// wrong until the pane narrowed.
-		expect(h.applied[0]).toEqual(foldOrderFromPriority(expectedList));
+		expect(h.applied[0]).toEqual(foldOrderFromPriority(withKeyboardInPlace(expectedList)));
 		// And read back: the list now says what was saved, not what was asked.
 		expect(h.rows().map((r) => r.dataset.commandId)).toEqual(expectedList);
 		h.control.destroy();
@@ -607,7 +620,7 @@ describe("fold order: the control against a fake tree", () => {
 		const expectedList = [...before];
 		expectedList.splice(3, 1);
 		expectedList.splice(2, 0, moved);
-		expect(h.applied[0]).toEqual(foldOrderFromPriority(expectedList));
+		expect(h.applied[0]).toEqual(foldOrderFromPriority(withKeyboardInPlace(expectedList)));
 		expect(h.rows()[2]?.querySelector(".handwriting-fold-grip")?.focused).toBe(true);
 		h.control.destroy();
 	});
@@ -1156,6 +1169,49 @@ describe("fold order: the line follows the window", () => {
 		expect(strip?.classes.has("is-more-open")).toBe(false);
 		narrowTo(h, 476);
 		expect(strip?.classes.has("is-more-needed")).toBe(true);
+		h.control.destroy();
+	});
+});
+
+describe("fold order: Keyboard on a phone and a hidden id keeps its place (audit 120)", () => {
+	const KEYBOARD = "handwriting:pen-ink-toggle";
+	beforeEach(() => {
+		resetPenToolsForTest();
+		setStripFoldOrder(DEFAULT_FOLD_ORDER);
+	});
+	afterEach(() => {
+		Platform.isIosApp = false;
+		Platform.isPhone = false;
+	});
+
+	it("an iPhone lists the Keyboard row, because its strip has the button", () => {
+		Platform.isIosApp = true;
+		Platform.isPhone = true;
+		const h = build();
+		expect(h.rows().map((r) => r.dataset.commandId)).toEqual(
+			priorityFromFoldOrder(normalizeFoldOrder([]))
+		);
+		h.control.destroy();
+	});
+
+	it("a drag on a device with no Keyboard button leaves Keyboard where it was saved", () => {
+		const h = build();
+		expect(h.rows().map((r) => r.dataset.commandId)).not.toContain(KEYBOARD);
+		const at = normalizeFoldOrder([]).indexOf(KEYBOARD);
+		drag(h, 3, -2);
+		expect(h.applied).toHaveLength(1);
+		expect(h.applied[0]?.indexOf(KEYBOARD)).toBe(at);
+		expect(h.saved().indexOf(KEYBOARD)).toBe(at);
+		h.control.destroy();
+	});
+
+	it("Reset still writes the default order", () => {
+		const h = build();
+		drag(h, 3, -2);
+		const reset = h.pane.all("handwriting-fold-reset")[0] ?? h.pane.querySelector(".handwriting-fold-reset");
+		expect(reset).toBeTruthy();
+		reset?.fire("click");
+		expect(h.saved()).toEqual(normalizeFoldOrder([]));
 		h.control.destroy();
 	});
 });

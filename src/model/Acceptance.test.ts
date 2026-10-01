@@ -82,7 +82,7 @@ describe("B: first stroke claims identity before any sidecar (model half)", () =
 	});
 	// The on-disk ordering (id write AWAITED before store.schedule) lived in
 	// the canvas page view's scheduleSidecar, verified on the test Surface.
-	// That view was deleted in s197; the ordering rule itself is the inline
+	// That view was deleted; the ordering rule itself is the inline
 	// surface's now (InlineInkStore's claim-then-write path).
 });
 

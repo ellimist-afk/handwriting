@@ -237,6 +237,210 @@ async function tableShot(page: Page) {
 	return { bytes, rect };
 }
 
+for (const dpr of [1, 2]) {
+	it(`static-block: own-note table and callout never copy ink, DPR ${dpr}`, async () => {
+		const reference = await open(dpr, true), subject = await open(dpr, false);
+		try {
+			const before = await subject.page.evaluate(() => window.issue22.addInk());
+			expect(before.raster.count, "non-empty original ink premise").toBeGreaterThan(100);
+			await subject.page.evaluate(() => window.issue22.insertTable());
+			const clean = await tableShot(reference.page);
+			const cleanPixels = await reference.page.evaluate(bytes => window.issue22.pixels(bytes), clean.bytes);
+			expect(cleanPixels.dark, "independent table is visibly rendered").toBeGreaterThan(200 * dpr * dpr);
+			const first = await subject.page.evaluate(() => window.issue22.postprocessOwnBlock("table"));
+			const second = await subject.page.evaluate(() => window.issue22.postprocessOwnBlock("table"));
+			const callout = await subject.page.evaluate(() => window.issue22.postprocessOwnBlock("callout"));
+			const afterChange = await subject.page.evaluate(() => window.issue22.notifyOwnBlockInkChanged());
+			const actual = await capture(subject.page, dpr, "static-block", "subject");
+			const pixels = await subject.page.evaluate(({ bytes, reference }) => window.issue22.pixels(bytes, reference),
+				{ bytes: actual.table.bytes, reference: clean.bytes });
+			console.log("ISSUE22_STATIC", JSON.stringify({ dpr, first, second, callout, afterChange,
+				pixels, originalPixels: actual.originalPixels, errors: subject.errors }));
+			expect.soft(first.children, "own table registered no render child").toBe(0);
+			expect.soft(second.children, "own table rerender registered no child").toBe(0);
+			expect.soft(callout.children, "own callout registered no render child").toBe(0);
+			expect.soft(first.staticCanvases + second.staticCanvases + callout.staticCanvases + afterChange,
+			"own blocks and notification have no static canvas").toBe(0);
+			assertOriginal(actual.state, before);
+			expect.soft(actual.originalPixels?.largest ?? 0, "original ink remains visible").toBeGreaterThan(100);
+			expect.soft(pixels.missingDark, "table paint remains present").toBeLessThan(48 * dpr * dpr);
+			expect.soft(pixels.largest, "no extra visible ink component over table").toBeLessThan(24 * dpr * dpr);
+			expect.soft(pixels.addedDark, "no extra dark ink over table").toBeLessThan(48 * dpr * dpr);
+			expect.soft(subject.errors).toEqual([]);
+		} finally { await subject.page.close(); await reference.page.close(); }
+	});
+	for (const kind of ["detached-container", "delayed"] as const) {
+		it(`static-block: ${kind} own Live Preview boundary stays ink-free, DPR ${dpr}`, async () => {
+			const reference = await open(dpr, true), subject = await open(dpr, true);
+			try {
+				const before = await subject.page.evaluate(() => window.issue22.addInk());
+				expect(before.raster.count, "non-empty note ink premise").toBeGreaterThan(100);
+				const clean = await reference.page.evaluate(k => window.issue22.postprocessOwnBlockBoundary(k), kind);
+				const actual = await subject.page.evaluate(k => window.issue22.postprocessOwnBlockBoundary(k), kind);
+				const afterChange = await subject.page.evaluate(() => window.issue22.notifyOwnBlockInkChanged());
+				const cleanShot = [...await reference.page.screenshot({ clip: clean.rect, animations: "disabled" })];
+				const actualShot = [...await subject.page.screenshot({ clip: actual.rect, animations: "disabled" })];
+				const pixels = await subject.page.evaluate(({ bytes, reference }) => window.issue22.pixels(bytes, reference),
+					{ bytes: actualShot, reference: cleanShot });
+				const originalRect = actual.original.raster.screen!;
+				const originalShot = [...await subject.page.screenshot({ clip: originalRect, animations: "disabled" })];
+				const visible = await subject.page.evaluate(bytes => window.issue22.pixels(bytes), originalShot);
+				console.log("ISSUE22_BOUNDARY", JSON.stringify({ kind, dpr, clean, actual, afterChange, pixels, visible }));
+				expect.soft(actual.children).toBe(kind === "delayed" ? 1 : 0);
+				expect.soft(actual.staticCanvases).toBe(0);
+				expect.soft(afterChange, "notification cannot revive own block").toBe(0);
+				expect.soft(actual.rect).toEqual(clean.rect);
+				expect.soft(actual.original.strokes).toEqual(before.strokes);
+				expect.soft(actual.original.selectable).toEqual(["issue22-original"]);
+				expect.soft(visible.largest, "original ink stays visible").toBeGreaterThan(100);
+				expect.soft(pixels.largest, "own block has no extra ink component").toBeLessThan(24 * dpr * dpr);
+				expect.soft(pixels.addedDark, "own block has no extra dark ink").toBeLessThan(48 * dpr * dpr);
+				expect.soft(subject.errors).toEqual([]); expect.soft(reference.errors).toEqual([]);
+			} finally { await subject.page.close(); await reference.page.close(); }
+		});
+	}
+	for (const kind of ["reading", "embed", "other-note", "delayed", "unloaded", "popout"] as const) {
+		it(`static-block: ${kind} rendered control keeps correct target ink, DPR ${dpr}`, async () => {
+			const reference = await open(dpr, true), subject = await open(dpr, true);
+			try {
+				const clean = await reference.page.evaluate(k => window.issue22.postprocessRenderedControl(k, false), kind);
+				const actual = await subject.page.evaluate(k => window.issue22.postprocessRenderedControl(k, true), kind);
+				console.log("ISSUE22_RENDER_CONTROL", JSON.stringify({ kind, dpr, clean, actual }));
+				expect.soft(actual.children, "real callback registered a render child").toBe(1);
+				if (kind === "other-note") expect.soft(actual.insideCallout,
+					"note B embed is inside note A callout").toBe(true);
+				expect.soft(actual.storeCount).toBe(1);
+				if (kind === "unloaded") {
+					expect.soft(actual.canvasCount, "unloaded wait never paints").toBe(0);
+				} else {
+					expect.soft(actual.canvasCount, "genuine rendered context owns one canvas").toBe(1);
+					expect.soft(actual.raster?.count ?? 0, "target note has non-empty painted ink").toBeGreaterThan(100);
+					expect.soft(clean.canvasCount, "empty control has no bitmap").toBe(0);
+					const painted = [...await subject.page.screenshot({ clip: actual.rect, animations: "disabled" })];
+					const unpainted = [...await reference.page.screenshot({ clip: clean.rect, animations: "disabled" })];
+					const pixels = await subject.page.evaluate(({ bytes, reference }) => window.issue22.pixels(bytes, reference),
+						{ bytes: painted, reference: unpainted });
+					expect.soft(pixels.largest, "embedded target ink appears in browser composite").toBeGreaterThan(100);
+				}
+				expect.soft(subject.errors).toEqual([]); expect.soft(reference.errors).toEqual([]);
+			} finally { await subject.page.close(); await reference.page.close(); }
+		});
+	}
+	it(`cell-paste: nested cell consumes marker without changing note ink or history, DPR ${dpr}`, async () => {
+		const subject = await open(dpr, true);
+		try {
+			await subject.page.evaluate(() => window.issue22.addInk());
+			const seeded = await subject.page.evaluate(() => window.issue22.seedParentTextEdit());
+			expect(seeded.parentUndo, "real parent text edit exists").toBeGreaterThan(0);
+			await subject.page.evaluate(() => window.issue22.focusCell());
+			const selection = await subject.page.evaluate(() => window.issue22.seedCellSelection());
+			expect(selection.cellSelection).toEqual({ anchor: 1, head: 3 });
+			expect(selection.parentSelection.head,
+				"synthetic host forwarded cell selection to parent").toBeGreaterThan(3);
+			const marker = await subject.page.evaluate(() => window.issue22.prepareInkPaste());
+			expect(marker).toMatch(/^handwriting-ink\/v1 /);
+			const refusal = await subject.page.evaluate(() => window.issue22.cellPasteProbe("current"));
+			console.log("ISSUE22_CELL_PASTE", JSON.stringify({ dpr, refusal }));
+			expect.soft(refusal.event.prevented, "recognized marker is consumed").toBe(true);
+			expect.soft(refusal.event.bubbled, "recognized marker does not bubble").toBe(0);
+			expect.soft(refusal.after.parentDoc).toBe(refusal.before.parentDoc);
+			expect.soft(refusal.after.cellDoc).toBe(refusal.before.cellDoc);
+			expect.soft(refusal.after.parentSelection).toEqual(refusal.before.parentSelection);
+			expect.soft(refusal.after.cellSelection).toEqual(refusal.before.cellSelection);
+			expect.soft(refusal.after.parentUndo).toBe(refusal.before.parentUndo);
+			expect.soft(refusal.after.cellUndo).toBe(refusal.before.cellUndo);
+			expect.soft(refusal.after.ids).toEqual(refusal.before.ids);
+			expect.soft(refusal.after.points).toEqual(refusal.before.points);
+			expect.soft(refusal.after.selected).toEqual(refusal.before.selected);
+			expect.soft(refusal.after.persistenceWrites).toBe(refusal.before.persistenceWrites);
+			expect.soft(refusal.after.notices).toContain("Handwriting: click outside the table to paste ink.");
+			const command = await subject.page.evaluate(() => window.issue22.capturedCommandCellRefusal());
+			expect.soft(command.map(c => c.routine)).toEqual([false, true]);
+			for (const result of command) {
+				expect.soft(result.accepted).toBe(true);
+				expect.soft(result.after.notices,
+					"real refused command emits exactly one actionable notice").toEqual([
+					"Handwriting: click outside the table to paste ink.",
+				]);
+				expect.soft(result.after.ids).toEqual(result.before.ids);
+				expect.soft(result.after.points).toEqual(result.before.points);
+				expect.soft(result.after.parentUndo).toBe(result.before.parentUndo);
+				expect.soft(result.after.cellUndo).toBe(result.before.cellUndo);
+				expect.soft(result.after.persistenceWrites).toBe(result.before.persistenceWrites);
+			}
+			const undoneText = await subject.page.evaluate(() => window.issue22.cellUndoParent());
+			expect.soft(undoneText.prevented, "cell Mod-z routed to parent").toBe(true);
+			expect.soft(undoneText.after.parentDoc,
+				"parent undo removes the earlier text edit").toBe(undoneText.before.parentDoc.slice(0, -4));
+			expect.soft(undoneText.after.parentUndo).toBe(undoneText.before.parentUndo - 1);
+			expect.soft(undoneText.after.ids).toEqual(undoneText.before.ids);
+			expect.soft(undoneText.after.persistenceWrites).toBe(undoneText.before.persistenceWrites);
+			await subject.page.evaluate(() => window.issue22.destroyCell());
+			const retained = await subject.page.evaluate(() => window.issue22.pasteSnapshot());
+			expect.soft(retained.ids).toEqual(undoneText.before.ids);
+			expect.soft(retained.persistenceWrites).toBe(undoneText.before.persistenceWrites);
+			expect.soft(retained.parentDoc).toBe(undoneText.after.parentDoc);
+			const allowed = await subject.page.evaluate(() => window.issue22.parentPasteAndUndo());
+			console.log("ISSUE22_PARENT_PASTE", JSON.stringify({ dpr, allowed }));
+			expect.soft(allowed.event.prevented, "top-level marker is consumed").toBe(true);
+			expect.soft(allowed.after.ids).toHaveLength(2);
+			expect.soft(allowed.after.points[1]?.[0]?.x,
+				"refused paste did not advance first normal stagger").toBe(96);
+			expect.soft(allowed.after.selected).toEqual([allowed.after.ids[1]]);
+			expect.soft(allowed.after.parentUndo).toBe(allowed.before.parentUndo + 1);
+			expect.soft(allowed.after.persistenceWrites,
+				"allowed paste schedules the sidecar").toBeGreaterThan(allowed.before.persistenceWrites);
+			expect.soft(allowed.undid).toBe(true);
+			expect.soft(allowed.afterUndo.ids).toEqual(allowed.before.ids);
+			expect.soft(allowed.redid).toBe(true);
+			expect.soft(allowed.afterRedo.ids).toEqual(allowed.after.ids);
+			expect.soft(subject.errors).toEqual([]);
+		} finally { await subject.page.close(); }
+	});
+}
+
+it("cell-paste: normal text and stale marker retain their distinct handling", async () => {
+	const subject = await open(1, true);
+	try {
+		await subject.page.evaluate(() => window.issue22.focusCell());
+		await subject.page.evaluate(() => window.issue22.prepareInkPaste());
+		const stale = await subject.page.evaluate(() => window.issue22.cellPasteProbe("stale"));
+		const text = await subject.page.evaluate(() => window.issue22.cellPasteProbe("text"));
+		console.log("ISSUE22_CELL_CONTROLS", JSON.stringify({ text, stale }));
+		expect.soft(text.event.bubbled, "ordinary paste reaches CodeMirror").toBeGreaterThan(0);
+		expect.soft(text.after.cellDoc).toContain("ordinary text");
+		expect.soft(text.after.parentDoc).toContain("ordinary text");
+		expect.soft(text.after.ids).toEqual(text.before.ids);
+		expect.soft(stale.event.prevented, "stale marker is consumed").toBe(true);
+		expect.soft(stale.event.bubbled).toBe(0);
+		expect.soft(stale.after.ids).toEqual(stale.before.ids);
+		expect.soft(stale.after.notices).toContain("Handwriting: that ink was copied before the app restarted");
+		expect.soft(subject.errors).toEqual([]);
+	} finally { await subject.page.close(); }
+});
+
+it("cell-paste: missing owner and a separate same-note pane cannot receive cell history", async () => {
+	const subject = await open(1, true);
+	try {
+		await subject.page.evaluate(() => window.issue22.addInk());
+		await subject.page.evaluate(() => window.issue22.addLegitimatePane(false));
+		await subject.page.evaluate(() => window.issue22.focusCell(false));
+		await subject.page.evaluate(() => window.issue22.prepareInkPaste());
+		const refusal = await subject.page.evaluate(() => window.issue22.cellPasteProbe("current"));
+		console.log("ISSUE22_MISSING_OWNER", JSON.stringify(refusal));
+		expect.soft(refusal.event.prevented).toBe(true);
+		expect.soft(refusal.event.bubbled).toBe(0);
+		expect.soft(refusal.after.ids).toEqual(refusal.before.ids);
+		expect.soft(refusal.after.parentUndo).toBe(refusal.before.parentUndo);
+		expect.soft(refusal.after.cellUndo).toBe(refusal.before.cellUndo);
+		expect.soft(refusal.after.otherUndo).toBe(refusal.before.otherUndo);
+		expect.soft(refusal.after.otherDoc).toBe(refusal.before.otherDoc);
+		expect.soft(refusal.after.persistenceWrites).toBe(refusal.before.persistenceWrites);
+		expect.soft(refusal.after.notices).toContain("Handwriting: click outside the table to paste ink.");
+		expect.soft(subject.errors).toEqual([]);
+	} finally { await subject.page.close(); }
+});
+
 for (const dpr of [1, 2]) for (const order of ["ink-first", "table-first"] as const) {
 	it(`${order}: table insertion preserves one editable stroke without a raster duplicate, DPR ${dpr}`, async () => {
 		const reference = await open(dpr, true);

@@ -144,6 +144,64 @@ describe("the locks", () => {
 		for (let i = 0; i < 5; i++) store.commit("pdf-a", stroke(`s${i}`, 1));
 		expect(notices.length).toBe(1);
 	});
+
+	it("reopens a damaged sidecar after a sound read and keeps ink drawn during the lock", async () => {
+		const saved: PageData[] = [];
+		const answers = [sidecar("pdf-a", [], { damaged: true }), sidecar("pdf-a", [stroke("old", 1)])];
+		const store = new PdfInkStore();
+		store.attachHost({
+			load: async () => answers.shift() ?? null,
+			schedule: (_id, data) => void saved.push(data),
+			notice: () => {},
+		});
+		await store.ensureLoaded("pdf-a");
+		store.commit("pdf-a", stroke("during", 2));
+		expect(saved).toEqual([]);
+		expect(await store.ensureLoaded("pdf-a")).toBe(true);
+		expect(store.strokes("pdf-a").map((s) => s.id).sort()).toEqual(["during", "old"]);
+		store.commit("pdf-a", stroke("after", 2));
+		expect(saved.at(-1)!.strokes.map((s) => s.id).sort()).toEqual(["after", "during", "old"]);
+	});
+
+	it("poll retries a damage lock but never lifts it on another damaged read", async () => {
+		const saved: PageData[] = [];
+		const answers = [
+			sidecar("pdf-a", [], { damaged: true }),
+			sidecar("pdf-a", [], { damaged: true }),
+			sidecar("pdf-a", [stroke("old", 1)]),
+		];
+		const store = new PdfInkStore();
+		store.attachHost({
+			load: async () => answers.shift() ?? null,
+			schedule: (_id, data) => void saved.push(data),
+			notice: () => {},
+		});
+		await store.ensureLoaded("pdf-a");
+		expect(await store.reloadExternal("pdf-a")).toBe(false);
+		store.commit("pdf-a", stroke("during", 2));
+		expect(saved).toEqual([]);
+		expect(await store.reloadExternal("pdf-a")).toBe(true);
+		expect(store.strokes("pdf-a").map((s) => s.id).sort()).toEqual(["during", "old"]);
+	});
+
+	it("coalesces concurrent retries without merging the recovered ink twice", async () => {
+		let reads = 0;
+		let finish!: (result: ParseResult) => void;
+		const pending = new Promise<ParseResult>((resolve) => { finish = resolve; });
+		const store = new PdfInkStore();
+		store.attachHost({
+			load: async () => ++reads === 1 ? sidecar("pdf-a", [], { damaged: true }) : pending,
+			schedule: () => {}, notice: () => {},
+		});
+		await store.ensureLoaded("pdf-a");
+		const first = store.ensureLoaded("pdf-a");
+		const second = store.ensureLoaded("pdf-a");
+		expect(reads).toBe(2);
+		expect(await second).toBe(false);
+		finish(sidecar("pdf-a", [stroke("old", 1)]));
+		expect(await first).toBe(true);
+		expect(store.strokes("pdf-a").map((s) => s.id)).toEqual(["old"]);
+	});
 });
 
 describe("writing", () => {
@@ -290,5 +348,33 @@ describe("path claims (instance identity)", () => {
 		store.commit("pdf-a", stroke("s1", 1));
 		// Pre-instance data round-trips without inventing a pdfPaths field.
 		expect(saved.at(-1)!.pdfPaths).toEqual([]);
+	});
+});
+
+describe("a live erase on one page", () => {
+	it("applies to its page alone and folds back into the slots that page's strokes held", () => {
+		const store = new PdfInkStore();
+		const a = stroke("a", 1), x = stroke("x", 2), b = stroke("b", 1), y = stroke("y", 2);
+		store.replaceAll("doc", [a, x, b, y]);
+		// Split b into two pieces, indexed against page 1's list [a, b].
+		const b1 = stroke("b1", 1), b2 = stroke("b2", 1);
+		store.applyLivePage("doc", { type: "replace", path: "doc", removed: [b], removedAt: [1], inserted: [b1, b2], insertedAt: [1, 2] });
+		expect(store.strokesOnPage("doc", 1).map((s) => s.id), "the page as the gesture left it").toEqual(["a", "b1", "b2"]);
+		expect(store.strokesOnPage("doc", 2).map((s) => s.id), "other pages untouched").toEqual(["x", "y"]);
+		expect(store.hasInk("doc")).toBe(true);
+		// A whole-document read folds the page back: page order kept, the extra piece after the page's last slot.
+		expect(store.strokes("doc").map((s) => s.id)).toEqual(["a", "x", "b1", "b2", "y"]);
+		expect(store.stats().strokes).toBe(5);
+	});
+
+	it("a save mid-gesture writes the folded document", () => {
+		const { store, saved } = harness(sidecar("doc", []));
+		return store.ensureLoaded("doc").then(() => {
+			const a = stroke("a", 1), x = stroke("x", 2);
+			store.replaceAll("doc", [a, x]);
+			store.applyLivePage("doc", { type: "replace", path: "doc", removed: [a], removedAt: [0], inserted: [], insertedAt: [] });
+			store.save("doc");
+			expect(saved.at(-1)!.strokes.map((s) => s.id)).toEqual(["x"]);
+		});
 	});
 });

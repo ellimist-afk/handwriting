@@ -159,6 +159,11 @@ export class PalmShield {
 	 */
 	readonly recent: RecentContact[] = [];
 
+	/** Whether this contact remains rejected for its current lifetime. */
+	hasSwallowedContact(identifier: number): boolean {
+		return this.swallowed.has(identifier);
+	}
+
 	private record(t: TouchLike, swallowed: boolean): void {
 		this.recent.push({ radiusX: t.radiusX ?? 0, radiusY: t.radiusY ?? 0, swallowed });
 		if (this.recent.length > RECENT_CONTACT_CAP) this.recent.shift();

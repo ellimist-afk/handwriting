@@ -2,10 +2,12 @@
  * WHAT AN EXTERNAL ADOPTION COSTS ON DISK, measured by executing the shipped
  * `PageStore.prepareExternalAdoption` rather than replicating it.
  *
- * The claim under test is a ship-blocker: that the outgoing recovery artifact
- * is several times the size of the sidecar it preserves, that a pair is
+ * The claim under test was a ship-blocker: that the outgoing recovery artifact
+ * is several times the size of the sidecar it preserves, that a pair was
  * written on EVERY adoption rather than only on divergence, and that nothing
- * ever removes one. All three are asserted here against the real store with a
+ * ever removes one. A pair is now written only when the incoming revision
+ * would lose something the outgoing one holds, so the size cells below adopt
+ * a revision that lacks one stroke. All three are asserted here against the real store with a
  * capturing adapter, so the numbers come from the real serializer and the real
  * write path, not from a reconstruction of them.
  *
@@ -99,6 +101,11 @@ function artifacts(c: Captured): { outgoing: string; incoming: string } {
 	return { outgoing: c.files.get(out!)!, incoming: c.files.get(inc!)! };
 }
 
+/** `page` with its last stroke gone: the other device erased one, so a pair is due. */
+function lessLast(page: PageData): PageData {
+	return { ...page, strokes: page.strokes.slice(0, -1) };
+}
+
 /** Drive the real store through one adoption and hand back what it wrote. */
 async function adopt(outgoing: PageData, incoming: PageData) {
 	const liveText = serializePage(incoming);
@@ -112,7 +119,7 @@ async function adopt(outgoing: PageData, incoming: PageData) {
 describe("the outgoing recovery artifact costs several times the sidecar it preserves", () => {
 	it("carries a second, UNPACKED copy of the whole page", async () => {
 		const page = pageOf(200);
-		const r = await adopt(page, page);
+		const r = await adopt(page, lessLast(page));
 
 		const parsed = JSON.parse(r.outgoing) as Record<string, unknown>;
 		// The nested capture is there, and it is the unpacked form: `points`
@@ -138,7 +145,7 @@ describe("the outgoing recovery artifact costs several times the sidecar it pres
 	it("is about three times the sidecar, across every realistic geometry", async () => {
 		for (const pts of [8, 40, 400]) {
 			const page = pageOf(300, pts);
-			const r = await adopt(page, page);
+			const r = await adopt(page, lessLast(page));
 
 			const ratio = r.outgoing.length / r.liveText.length;
 			const msg = `${pts} pts: outgoing ${r.outgoing.length}B vs sidecar ${r.liveText.length}B = ${ratio.toFixed(2)}x`;
@@ -149,7 +156,7 @@ describe("the outgoing recovery artifact costs several times the sidecar it pres
 
 	it("the pair together is about four and a half times the sidecar at worst", async () => {
 		const page = pageOf(300, 400);
-		const r = await adopt(page, page);
+		const r = await adopt(page, lessLast(page));
 
 		const pair = (r.outgoing.length + r.incoming.length) / r.liveText.length;
 		expect(pair, `pair ${pair.toFixed(2)}x`).toBeGreaterThan(3.8);
@@ -158,7 +165,7 @@ describe("the outgoing recovery artifact costs several times the sidecar it pres
 
 	it("the incoming leg is the other device's bytes and costs one sidecar", async () => {
 		const page = pageOf(500);
-		const r = await adopt(page, page);
+		const r = await adopt(page, lessLast(page));
 
 		// The incoming leg is verbatim, so it is the cheap half. The pair's
 		// total cost is dominated by the outgoing artifact.
@@ -171,8 +178,8 @@ describe("the outgoing recovery artifact costs several times the sidecar it pres
 	 * what makes the absolute numbers on a real page large.
 	 */
 	it("the multiplier is independent of how many strokes the page has", async () => {
-		const small = await adopt(pageOf(100), pageOf(100));
-		const large = await adopt(pageOf(1000), pageOf(1000));
+		const small = await adopt(pageOf(100), lessLast(pageOf(100)));
+		const large = await adopt(pageOf(1000), lessLast(pageOf(1000)));
 
 		const rs = small.outgoing.length / small.liveText.length;
 		const rl = large.outgoing.length / large.liveText.length;
@@ -180,36 +187,45 @@ describe("the outgoing recovery artifact costs several times the sidecar it pres
 	});
 });
 
-describe("a pair is written on EVERY adoption, not only on divergence", () => {
+describe("a pair is written only when the incoming revision would lose something", () => {
 	/**
-	 * THE SENTENCE THAT DECIDES WHETHER THIS BLOCKS. A receive-only device -
-	 * one that never edited the note - still pays the full artifact cost,
-	 * because nothing compares the two revisions before writing.
+	 * A receive-only device - one that never edited the note - used to pay the
+	 * full artifact cost on every revision, because nothing compared the two
+	 * revisions before writing. Now nothing is written unless the outgoing
+	 * revision holds something the incoming one lacks.
 	 */
-	it("writes the pair even when the incoming revision is a strict superset", async () => {
-		const mine = pageOf(100);
-		const theirs = pageOf(140); // everything of mine, plus more
+	async function pairsAfter(mine: PageData, theirs: PageData): Promise<string[]> {
+		const c = capturing({ [LIVE]: serializePage(theirs) });
+		const store = new PageStore({ vault: { adapter: c.adapter } }, FOLDER);
+		const prep = await store.prepareExternalAdoption(PAGE, mine);
+		expect(prep.kind).toBe("prepared");
+		return [...c.files.keys()].filter((p) => p.includes(".conflict-external-"));
+	}
 
-		const r = await adopt(mine, theirs);
-
-		expect(r.outgoing.length).toBeGreaterThan(0);
-		expect(r.incoming.length).toBeGreaterThan(0);
+	it("writes nothing when the incoming revision is a strict superset", async () => {
+		expect(await pairsAfter(pageOf(100), pageOf(140))).toEqual([]);
 	});
 
-	it("writes the pair even when the two revisions are byte-identical", async () => {
-		const page = pageOf(100);
+	it("writes nothing when the two revisions are byte-identical", async () => {
+		expect(await pairsAfter(pageOf(100), pageOf(100))).toEqual([]);
+	});
 
-		const r = await adopt(page, page);
+	it("writes the pair when the incoming revision lacks a stroke the outgoing one has", async () => {
+		expect(await pairsAfter(pageOf(100), lessLast(pageOf(100)))).toHaveLength(2);
+	});
 
-		// Nothing diverged at all and a full pair is still on disk.
-		expect(r.outgoing.length).toBeGreaterThan(r.liveText.length);
+	it("writes the pair when a stroke kept its id but changed", async () => {
+		const mine = pageOf(100);
+		const theirs = pageOf(100);
+		theirs.strokes[0] = { ...theirs.strokes[0]!, color: "#123456" };
+		expect(await pairsAfter(mine, theirs)).toHaveLength(2);
 	});
 });
 
 describe("nothing removes an artifact", () => {
 	it("the adoption path never calls remove", async () => {
 		const page = pageOf(100);
-		const r = await adopt(page, page);
+		const r = await adopt(page, lessLast(page));
 
 		expect(r.c.removed).toEqual([]);
 	});
@@ -266,7 +282,7 @@ function countingJson() {
 describe("what one adoption costs the CPU, counted rather than timed", () => {
 	it("parses and re-stringifies the inflated artifact, so the cost is paid on ~3x twice", async () => {
 		const page = pageOf(300, 40);
-		const liveText = serializePage(page);
+		const liveText = serializePage(lessLast(page));
 		const c = capturing({ [LIVE]: liveText });
 		const store = new PageStore({ vault: { adapter: c.adapter } }, FOLDER);
 
@@ -297,7 +313,7 @@ describe("what one adoption costs the CPU, counted rather than timed", () => {
 
 	it("a reused pair skips the write and the parse but still pays the serialise", async () => {
 		const page = pageOf(300, 40);
-		const liveText = serializePage(page);
+		const liveText = serializePage(lessLast(page));
 		const c = capturing({ [LIVE]: liveText });
 		const store = new PageStore({ vault: { adapter: c.adapter } }, FOLDER);
 

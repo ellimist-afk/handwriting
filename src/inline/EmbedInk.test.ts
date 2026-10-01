@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
 	attachEmbedInk,
+	embedInkChanged as embedInkChangedFor,
 	embedInkExtent,
+	embedInkFileOpened,
+	embedInkRenamed,
+	embedInkRepaintAll,
+	initEmbedInkRefresh,
 	embedInkLayerCount,
 	embedInkMarker,
 	embedInkNeedsPaint,
 	embedInkAnchor,
+	embedInkBounds,
 	embedInkRootFor,
 	embedInkRootIsEmbed,
 	embedInkScale,
@@ -69,6 +75,19 @@ describe("embedInkScale", () => {
 
 	it("has nothing to say about an empty layer", () => {
 		expect(embedInkScale(0, 0, 2)).toBe(1);
+	});
+
+	it("keeps a tall narrow page's backing store under the browser's per-side canvas limit (audit 189)", () => {
+		// About 10,000 lines of ink in an ordinary-width note: the area budget
+		// alone floors the scale at 0.25, and 0.25 * h still clears the
+		// browser's own per-side limit, so the canvas silently fails to size
+		// and every stroke in it vanishes from reading view and embeds.
+		const w = 700;
+		const h = 280_000;
+		const scale = embedInkScale(w, h, 3);
+		expect(w * scale).toBeLessThanOrEqual(65_000);
+		expect(h * scale).toBeLessThanOrEqual(65_000);
+		expect(scale).toBeGreaterThan(0); // still a picture, only softer
 	});
 });
 
@@ -222,6 +241,9 @@ describe("teardownEmbedInk", () => {
 	it("removes the canvas, the marker and our position patch", () => {
 		const root = fakeRoot();
 		attachEmbedInk(root as unknown as HTMLElement, "note.md", []);
+		// What paint records when it is the one that made a static root relative.
+		// Without it the inline `relative` is the host's own and stays.
+		root.attrs.set("data-handwriting-embed-position", "");
 		expect(embedInkLayerCount()).toBe(1);
 		root.removed.length = 0; // attach's own empty-canvas cleanup is not the subject
 
@@ -256,11 +278,26 @@ describe("teardownEmbedInk", () => {
 	});
 });
 
+/** A fake sizer for `embedInkAnchor`: offsets, and an optional `.mod-header` child. */
+type FakeSizer = {
+	offsetLeft: number;
+	offsetTop: number;
+	offsetParent: unknown;
+	querySelector: (sel: string) => { offsetHeight: number } | null;
+};
+
+function fakeSizer(offsetLeft: number, offsetTop: number, headerHeight?: number): FakeSizer {
+	return {
+		offsetLeft,
+		offsetTop,
+		offsetParent: null,
+		querySelector: (sel: string) =>
+			headerHeight !== undefined && sel.includes("mod-header") ? { offsetHeight: headerHeight } : null,
+	};
+}
+
 /** A root for `embedInkAnchor`: a class list and one optional child sizer. */
-function fakeAnchorRoot(
-	cls: string,
-	sizer: { offsetLeft: number; offsetTop: number; offsetParent: unknown } | null
-) {
+function fakeAnchorRoot(cls: string, sizer: FakeSizer | null) {
 	return {
 		classList: { contains: (c: string) => c === cls },
 		querySelector: (sel: string) => (sel.includes("markdown-preview-sizer") ? sizer : null),
@@ -269,7 +306,7 @@ function fakeAnchorRoot(
 
 describe("embedInkAnchor", () => {
 	it("offsets a reading view's layer by its sizer, so the ink does not move", () => {
-		const sizer = { offsetLeft: 32, offsetTop: 32, offsetParent: null as unknown };
+		const sizer = fakeSizer(32, 32);
 		const root = fakeAnchorRoot("markdown-preview-view", sizer);
 		sizer.offsetParent = root;
 		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 32 });
@@ -283,12 +320,70 @@ describe("embedInkAnchor", () => {
 	it("keeps the last offset for a reading view that is not laid out", () => {
 		// `display: none` gives every offset the value 0, which is a real
 		// coordinate and not a missing one.
-		const root = fakeAnchorRoot("markdown-preview-view", {
-			offsetLeft: 0,
-			offsetTop: 0,
-			offsetParent: null,
-		});
+		const root = fakeAnchorRoot("markdown-preview-view", fakeSizer(0, 0));
 		expect(embedInkAnchor(root as unknown as HTMLElement)).toBeNull();
+	});
+
+	it("adds the sizer's own header height to top, so ink does not land under the inline title/properties (audit 18)", () => {
+		// Editor y=0 is `.cm-content`'s top, always below the header. The
+		// reading-view sizer's first section IS the header, so anchoring to
+		// the sizer's own top (no adjustment) put every stroke that high
+		// in the editor.
+		const sizer = fakeSizer(32, 100, 48);
+		const root = fakeAnchorRoot("markdown-preview-view", sizer);
+		sizer.offsetParent = root;
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 148 });
+	});
+
+	it("a note with no inline title and no Properties (no header section) is unaffected", () => {
+		const sizer = fakeSizer(32, 100); // no header arg: querySelector(".mod-header") is null
+		const root = fakeAnchorRoot("markdown-preview-view", sizer);
+		sizer.offsetParent = root;
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 100 });
+	});
+
+	it("keeps the header height while the renderer has detached the header section (audit 18)", () => {
+		// Deep in a long note the reading view detaches the header section and
+		// hands its height to the pusher's margin: the text stays put, so the
+		// anchor must too.
+		let attached = true;
+		const sizer = {
+			offsetLeft: 32,
+			offsetTop: 100,
+			offsetParent: null as unknown,
+			querySelector: (sel: string) => (attached && sel.includes("mod-header") ? { offsetHeight: 48 } : null),
+		};
+		const root = fakeAnchorRoot("markdown-preview-view", sizer);
+		sizer.offsetParent = root;
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 148 });
+		attached = false;
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 148 });
+	});
+
+	it("print: the layer starts below the file-name title, not at the title (audit 18 print half)", () => {
+		// Obsidian's print container: a markdown-preview-view with NO sizer,
+		// the file-name h1 first, then the note's sections.
+		const first = { offsetTop: 44 };
+		const h1 = { offsetTop: 0, offsetHeight: 44, nextElementSibling: first };
+		const root = {
+			classList: { contains: (c: string) => c === "markdown-preview-view" },
+			querySelector: (sel: string) => (sel === ":scope > h1" ? h1 : null),
+		};
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 0, top: 44 });
+	});
+
+	it("print: a container with no title, or not laid out, keeps the stylesheet's origin", () => {
+		const bare = {
+			classList: { contains: (c: string) => c === "markdown-preview-view" },
+			querySelector: () => null,
+		};
+		expect(embedInkAnchor(bare as unknown as HTMLElement)).toBeNull();
+		const h1 = { offsetTop: 0, offsetHeight: 0, nextElementSibling: { offsetTop: 0 } };
+		const hidden = {
+			classList: { contains: (c: string) => c === "markdown-preview-view" },
+			querySelector: (sel: string) => (sel === ":scope > h1" ? h1 : null),
+		};
+		expect(embedInkAnchor(hidden as unknown as HTMLElement)).toBeNull();
 	});
 });
 
@@ -406,5 +501,91 @@ describe("embed min-height (the embed grows to hold ink that would otherwise cli
 		attachEmbedInk(root as unknown as HTMLElement, "note.md", []);
 		teardownEmbedInk();
 		expect(root.style.minHeight).toBe("500px");
+	});
+});
+
+describe("embedInkBounds - ink left of the text column is kept (audit 24)", () => {
+	it("moves the layer's origin left and widens it to cover a negative-x stroke", () => {
+		const b = embedInkBounds([strokeWithBBox(-40.5, 10, 30, 5), strokeWithBBox(20, 10, 60, 5)]);
+		expect(b.x).toBe(-41);
+		expect(b.w).toBe(121); // from -41 to 80
+		expect(b.y).toBe(0);
+	});
+});
+
+/**
+ * Registry hooks (audits 25, 118, 119). Zero strokes on purpose, as in the
+ * teardown suite: `paint` records its marker before it needs a canvas, so the
+ * marker attribute is the observable for "this root was (re)painted for this
+ * path at this revision".
+ */
+describe("embed ink registry hooks", () => {
+	const MARKER = "data-handwriting-embed-ink";
+	function root(classes: string[], inside?: { contains(n: unknown): boolean }) {
+		const attrs = new Map<string, string>();
+		return {
+			attrs,
+			isConnected: true,
+			classList: { contains: (c: string) => classes.includes(c) },
+			style: { position: "relative", removeProperty() {} },
+			querySelector: () => null,
+			getAttribute: (k: string) => attrs.get(k) ?? null,
+			setAttribute: (k: string, v: string) => void attrs.set(k, v),
+			removeAttribute: (k: string) => void attrs.delete(k),
+			ownerDocument: { defaultView: { addEventListener() {}, removeEventListener() {} } },
+			inside,
+		};
+	}
+
+	it("audit 25: repaintAll re-marks every shown root, though no note changed", () => {
+		teardownEmbedInk();
+		initEmbedInkRefresh(() => []);
+		const a = root(["markdown-preview-view"]);
+		const b = root(["markdown-embed-content"]);
+		attachEmbedInk(a as unknown as HTMLElement, "a.md", []);
+		attachEmbedInk(b as unknown as HTMLElement, "b.md", []);
+		const before = [a.attrs.get(MARKER), b.attrs.get(MARKER)];
+		embedInkRepaintAll();
+		expect(a.attrs.get(MARKER)).not.toBe(before[0]);
+		expect(b.attrs.get(MARKER)).not.toBe(before[1]);
+		teardownEmbedInk();
+	});
+
+	it("audit 118: a rename moves the layer and its revision to the new path", () => {
+		teardownEmbedInk();
+		initEmbedInkRefresh(() => []);
+		const r = root(["markdown-preview-view"]);
+		attachEmbedInk(r as unknown as HTMLElement, "old.md", []);
+		embedInkChangedFor("old.md");
+		embedInkChangedFor("old.md"); // revision 2
+		embedInkRenamed("old.md", "new.md");
+		// The revision travels (2) and the rename's own repaint bumps it (3): a
+		// counter that restarted at the new path would read 1 and could collide
+		// with a marker an earlier layer of that path already holds.
+		expect(r.attrs.get(MARKER)).toBe(embedInkMarker("new.md", 3));
+		// It answers to the new path now, and no longer to the old one.
+		const before = r.attrs.get(MARKER);
+		embedInkChangedFor("old.md");
+		expect(r.attrs.get(MARKER)).toBe(before);
+		embedInkChangedFor("new.md");
+		expect(r.attrs.get(MARKER)).not.toBe(before);
+		teardownEmbedInk();
+	});
+
+	it("audit 119: opening another note in a reading-view tab re-keys that tab's root only", () => {
+		teardownEmbedInk();
+		initEmbedInkRefresh(() => []);
+		const view = { contains: (n: unknown) => n === tab || n === embedInTab };
+		const tab = root(["markdown-preview-view"]);
+		const embedInTab = root(["markdown-embed-content"]);
+		const otherTab = root(["markdown-preview-view"]);
+		for (const r of [tab, embedInTab, otherTab]) attachEmbedInk(r as unknown as HTMLElement, "prev.md", []);
+		const marks = [tab, embedInTab, otherTab].map((r) => r.attrs.get(MARKER));
+		embedInkFileOpened(view as unknown as { contains(n: Node): boolean }, "empty.md");
+		expect(tab.attrs.get(MARKER)).not.toBe(marks[0]);
+		expect(tab.attrs.get(MARKER)?.includes("empty.md")).toBe(true);
+		expect(embedInTab.attrs.get(MARKER)).toBe(marks[1]);
+		expect(otherTab.attrs.get(MARKER)).toBe(marks[2]);
+		teardownEmbedInk();
 	});
 });

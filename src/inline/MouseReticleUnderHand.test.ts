@@ -58,6 +58,7 @@ import { resetPenInkForTest, setPenInk } from "./PenInk";
 import { PEN_HOVER_CLASS } from "./PenCursor";
 import { fakeEl, installFakeWindow } from "../../test/routerHarness";
 import type { PenSample } from "../input/PointerRouter";
+import { reticleShown } from "../testUtils/ReticleShown";
 
 /**
  * One pointer event. Distinct `pointerId`s per pointer on purpose: the
@@ -258,7 +259,7 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 	it("a finger landing takes the parked mouse's ring down, and its lift gives it back", () => {
 		// The mouse hovers and is then left alone - the reported state.
 		rig.fire(ptr("pointermove", "mouse", 1, 500, 500));
-		expect(rig.cursorStyle.display).toBe("block");
+		expect(reticleShown(rig.cursorStyle)).toBe(true);
 		expect(rig.cursorStyle.transform).toBe(ringAt(500, 500));
 		expect(rig.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(true);
 
@@ -267,9 +268,9 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 		rig.fire(ptr("pointerdown", "touch", 2, 120, 300));
 
 		expect(
-			rig.cursorStyle.display,
+			reticleShown(rig.cursorStyle),
 			"the mouse's ring was left floating on the page under the writing hand"
-		).toBe("none");
+		).toBe(false);
 		expect(
 			rig.scrollerClasses.has(PEN_HOVER_CLASS),
 			"`cursor: none` was left over the scroller with no ring under it"
@@ -280,7 +281,7 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 		rig.fire(ptr("pointerup", "touch", 2, 120, 300));
 		rig.fire(ptr("pointermove", "mouse", 1, 500, 500));
 
-		expect(rig.cursorStyle.display, "the mouse never got its reticle back").toBe("block");
+		expect(reticleShown(rig.cursorStyle), "the mouse never got its reticle back").toBe(true);
 		expect(rig.cursorStyle.transform).toBe(ringAt(500, 500));
 		expect(rig.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(true);
 	});
@@ -290,12 +291,12 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 		// the tablet, or by the other hand, must not put the smudge back.
 		rig.fire(ptr("pointermove", "mouse", 1, 500, 500));
 		rig.fire(ptr("pointerdown", "touch", 2, 120, 300));
-		expect(rig.cursorStyle.display).toBe("none");
+		expect(reticleShown(rig.cursorStyle)).toBe(false);
 
 		rig.fire(ptr("pointermove", "mouse", 1, 520, 480));
 
-		expect(rig.cursorStyle.display, "a mouse nudge repainted the ring under the hand").toBe(
-			"none"
+		expect(reticleShown(rig.cursorStyle), "a mouse nudge repainted the ring under the hand").toBe(
+			false
 		);
 		expect(
 			rig.scrollerClasses.has(PEN_HOVER_CLASS),
@@ -313,7 +314,7 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 
 		// A pen approaches - hover only, never touching the glass.
 		rig.fire(ptr("pointermove", "pen", 3, 120, 300));
-		expect(rig.cursorStyle.display).toBe("block");
+		expect(reticleShown(rig.cursorStyle)).toBe(true);
 		expect(rig.cursorStyle.transform, "the pen's hover did not take the ring").toBe(
 			ringAt(120, 300)
 		);
@@ -325,7 +326,7 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 			rig.cursorStyle.transform,
 			"the mouse stole the ring back from a pen that is on its way to the page"
 		).toBe(ringAt(120, 300));
-		expect(rig.cursorStyle.display).toBe("block");
+		expect(reticleShown(rig.cursorStyle)).toBe(true);
 	});
 
 	it("a pen on the glass keeps it: nothing can paint a mouse ring mid-contact, not even a direct call", () => {
@@ -369,7 +370,7 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 
 		rig.fire(ptr("pointermove", "mouse", 1, 500, 500));
 
-		expect(rig.cursorStyle.display).toBe("block");
+		expect(reticleShown(rig.cursorStyle)).toBe(true);
 		expect(rig.cursorStyle.transform).toBe(ringAt(500, 500));
 		expect(rig.cursorStyle.width).toBe("18px");
 		expect(rig.cursorStyle.height).toBe("18px");
@@ -394,14 +395,14 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 			rig.router.handOnGlass(),
 			"a mouse gesture was mistaken for a hand and would hide its own ring"
 		).toBe(false);
-		expect(rig.cursorStyle.display, "the mouse lost the ring of its own gesture").toBe("block");
+		expect(reticleShown(rig.cursorStyle), "the mouse lost the ring of its own gesture").toBe(true);
 		expect(rig.cursorStyle.transform).toBe(ringAt(500, 500));
 		expect(rig.inst.mouseStroke, "the gesture was not recorded as a mouse's").toBe(true);
 	});
 
 	it("Keyboard mode cannot repaint a claimed mouse cursor after the hide fanout", () => {
 		rig.fire(ptr("pointermove", "mouse", 1, 500, 500));
-		expect(rig.cursorStyle.display).toBe("block");
+		expect(reticleShown(rig.cursorStyle)).toBe(true);
 		setPenInk(false);
 		rig.proto.hidePenCursor.call(rig.inst);
 		rig.inst.mouseStroke = true;
@@ -410,13 +411,13 @@ describe("the mouse's hover reticle stands down while a hand is on the glass", (
 			{ x: 520, y: 480, pressure: 0.5, timestamp: 0, tiltX: 0, tiltY: 0 },
 			"mouse"
 		);
-		expect(rig.cursorStyle.display).toBe("none");
+		expect(reticleShown(rig.cursorStyle)).toBe(false);
 		expect(rig.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(false);
 		rig.proto.showPenCursor.call(
 			rig.inst,
 			{ x: 530, y: 470, pressure: 0.5, timestamp: 0, tiltX: 0, tiltY: 0 }
 		);
-		expect(rig.cursorStyle.display).toBe("none");
+		expect(reticleShown(rig.cursorStyle)).toBe(false);
 		expect(rig.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(false);
 	});
 });

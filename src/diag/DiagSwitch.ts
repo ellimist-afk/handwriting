@@ -74,6 +74,20 @@ export function endRecordingForReport(): boolean {
 	return true;
 }
 
+/**
+ * Ends the recording a report was opened from, and only that one. A report window can outlive its recording:
+ * an upload that finishes after a new recording began must not stop the new one. Returns false, doing
+ * nothing, when a newer recording has started since `epoch` was read.
+ */
+export function endRecordingIfCurrent(epoch: number): boolean {
+	if (epoch !== recordingEpoch) return false;
+	if (enabled) {
+		enabled = false;
+		onChanged?.();
+	}
+	return true;
+}
+
 /** One-line banner for trace outputs produced while the switch is off. */
 export const DIAG_OFF_NOTE =
 	"Handwriting diagnostics are off. Run 'Diagnostics: begin recording', reproduce, then copy again.";

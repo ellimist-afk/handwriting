@@ -181,7 +181,13 @@ function makeRig(): Rig {
 	const renderer = { applyDpr: () => undefined, clear: () => undefined };
 	o.wet = renderer;
 	o.highlightWet = renderer;
-	o.tail = { applyDpr: () => undefined, clearAll: () => undefined };
+	o.tail = {
+		applyDpr: () => undefined, clearAll: () => undefined,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 
 	// Scale state, exactly as the field initializers leave it.
 	o.contentStyle = null;

@@ -1,5 +1,5 @@
 /**
- * s136: the page side of WheelZoom.test.ts. Mounts through scrollColumnAnchorPage's
+ * The page side of WheelZoom.test.ts. Mounts through scrollColumnAnchorPage's
  * tear rig (the plain note, real overlay) and dispatches REAL WheelEvents with
  * `ctrlKey` on the scroller - the shape Chromium gives a Windows precision-touchpad
  * pinch - then reads the overlay's scale of record, the note's painted rect and the
@@ -11,7 +11,7 @@ import * as Overlay from "../../src/inline/InkOverlay";
 
 const overlayForPath = Overlay.overlayForPath;
 /**
- * s137: Infinite Canvas is the gate, so this is the same switch the mode uses.
+ * Infinite Canvas is the gate, so this is the same switch the mode uses.
  * Every cell but the canvas-off row mounts with it on.
  */
 const setCanvas = (on: boolean): void => Overlay.setScrollExpansionEnabled(on);
@@ -80,7 +80,7 @@ async function watch(maxFrames: number): Promise<Read[]> {
 		await frame();
 		const r = read();
 		rows.push(r);
-		// s189: a lift under the canvas now eases its measured travel, so "at rest" also means no ease is playing.
+		// A lift under the canvas now eases its measured travel, so "at rest" also means no ease is playing.
 		const easing = !!(overlay().overscrollBounceReadout && overlay().overscrollBounceReadout().active);
 		if (!r.preview && !r.give && !easing) break;
 	}

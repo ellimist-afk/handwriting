@@ -1,5 +1,5 @@
 /**
- * s137, slice B: the page side of CanvasModeZoom.test.ts. Mounts through scrollColumnAnchorPage's
+ * Slice B: the page side of CanvasModeZoom.test.ts. Mounts through scrollColumnAnchorPage's
  * tear rig and drives the REAL router (beginPinch / updatePinch / endPinch with two touch contacts),
  * with the note's canvas answer set either globally or per note through the override module's test
  * seam. Reports what each frame showed; decides nothing.
@@ -57,7 +57,7 @@ async function pinchTo(to: number, steps: number, cx: number, cy: number): Promi
 }
 
 /**
- * s185: THE CLAIM, NOT THE ZOOM. `pinchTo` above calls `router.beginPinch` directly, so it can
+ * THE CLAIM, NOT THE ZOOM. `pinchTo` above calls `router.beginPinch` directly, so it can
  * never see whether the router would have claimed the contacts in the first place - which is the
  * whole of the canvas-off defect Alan reported ("it should stay obsidian stock behavior"). This
  * driver puts two real `pointerdown` events on the surface the router listens to and reports what

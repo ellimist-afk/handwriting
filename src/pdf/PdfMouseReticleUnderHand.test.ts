@@ -1,3 +1,20 @@
+
+/** Extend the existing cursor fixture with its owned clipping parent. */
+function cursorChildren(createCursor: () => any): (options?: { cls?: string }) => any {
+	return (options) => {
+		const cursor = createCursor();
+		if (options?.cls !== "handwriting-pdf-cursor-viewport") return cursor;
+		const viewport = {
+			parentElement: cursor.parentElement,
+			classList: { contains: (cls: string) => cls === "handwriting-pdf-cursor-viewport" },
+			setCssStyles() {},
+			createDiv: () => cursor,
+			remove() { cursor.remove(); viewport.parentElement = null; },
+		};
+		cursor.parentElement = viewport;
+		return viewport;
+	};
+}
 /**
  * "Product ruling: hide the mouse reticle when a finger or pen is active."
  * (Alan, 1.4.12.) `MouseReticleUnderHand.test.ts` (src/inline/) is this rule
@@ -98,7 +115,7 @@ describe("PdfInkController reticle - the mouse stands down while a hand is on th
 		cursorStyle = { display: "none" };
 		const el = fakeEl() as ReturnType<typeof fakeEl> & Record<string, unknown>;
 		el.querySelector = () => null;
-		el.createDiv = () => ({
+		el.createDiv = cursorChildren(() => ({
 			setAttribute: () => {},
 			remove: () => {},
 			classList: { add: () => {}, remove: () => {}, toggle: () => {} },
@@ -106,7 +123,7 @@ describe("PdfInkController reticle - the mouse stands down while a hand is on th
 				Object.assign(cursorStyle, styles);
 			},
 			parentElement: el,
-		});
+		}));
 		scroller = el;
 		probe.current = {
 			scroller: el,

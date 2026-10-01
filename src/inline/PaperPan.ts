@@ -92,7 +92,7 @@ const onPitch = (v: number, pitch: number) => Number.isFinite(v) && Math.abs(v -
 /**
  * The scroller's resolved background onto the preview paper. Attachment stays the element's own: it does not scroll.
  *
- * s192: `extra` is a SECOND element whose layers join the first's, in that order - grid paper's vertical rules,
+ * `extra` is a SECOND element whose layers join the first's, in that order - grid paper's vertical rules,
  * which live on their own box inside the scroller because two repeating gradients on one large box lose the first
  * layer's rules. The preview's own box is the pane plus a pitch of margin, a shape measured clean with both layers
  * on it, so the copy carries the axes together and the gesture sees one paper.

@@ -1,5 +1,5 @@
 /**
- * THE ONE-TIME NOTICE FOR VAULTS UPGRADING OUT OF 1.4.20 (s236 add. 9).
+ * THE ONE-TIME NOTICE FOR VAULTS UPGRADING OUT OF 1.4.20.
  *
  * 1.4.20 removed the Pressure sensitivity row and pinned the setting on, and
  * saved strokes are shaped at render time, so a vault that had chosen pressure
@@ -18,7 +18,7 @@
  * entry yet, so that toast never ran: the moment the version bump added one, the
  * real `whatsNewFragment` called Obsidian's `createFragment`, which does not
  * exist in this environment, and the notice was never reached. Three arms went
- * red in the package gate (s238 add. 5). The fake fragment below is what lets
+ * red in the package gate. The fake fragment below is what lets
  * the due-toast path run here, and the last arm holds that path open.
  *
  * WHAT THIS CANNOT PROVE. The `obsidian` package ships no runtime, so the real
@@ -101,11 +101,20 @@ class FakeEl {
 (globalThis as unknown as { createFragment: () => FakeEl }).createFragment = () =>
 	new FakeEl("fragment");
 
-/** The table as the version bump will leave it: today's, plus a 1.4.21 entry. */
-const NOTES_WITH_1421: Record<string, string[]> = { ...RELEASE_NOTES, "1.4.21": ["Ink hotfix"] };
+/**
+ * The version this rig lands on, and the table as the version bump will leave
+ * it: today's entries plus one keyed to that same version. The key has to be
+ * the landing version - a table with any other key leaves the what's-new toast
+ * with nothing to say, which is how the first version of this cell was green.
+ */
+const LANDING = "1.4.21";
+const NOTES_WITH_LANDING: Record<string, string[]> = {
+	...RELEASE_NOTES,
+	[LANDING]: ["Ink hotfix"],
+};
 
-/** Alan's copy, verbatim. Do not paraphrase or re-case. */
-const PRESSURE_NOTICE = "Handwriting: ink too wide? Settings, Pen, Pressure sensitivity, off.";
+/** Alan's copy, re-cased to sentence case for the checker's rule; the wording is unchanged. Do not paraphrase. */
+const PRESSURE_NOTICE = "Handwriting: ink too wide? Settings, pen, pressure sensitivity, off.";
 
 const proto = HandwritingPlugin.prototype as unknown as {
 	loadSettings(this: unknown): Promise<void>;
@@ -208,16 +217,26 @@ describe("the one-time notice for vaults arriving from 1.4.20", () => {
 	it("still shows when the what's-new toast is due as well", async () => {
 		const plugin = await launched(
 			{ lastSeenVersion: "1.4.20", pressureSensitivity: true },
-			"1.4.21",
-			NOTES_WITH_1421
+			LANDING,
+			NOTES_WITH_LANDING
 		);
-		// Both toasts, and the notice is not the one that goes missing.
+		// The what's-new toast is DUE, named rather than counted. The entry is
+		// keyed to the landing version, and if it were keyed to anything else
+		// this toast would not be built at all - which is the exact way the
+		// first version of this cell passed while proving nothing.
+		const title = notices.messages.find(
+			(m): m is FakeEl => m instanceof FakeEl
+		);
+		expect(title, "the what's-new toast was built").toBeDefined();
+		expect(title?.children[0]?.text, "its title names the landing version").toBe(
+			`Handwriting ${LANDING}`
+		);
 		expect(notices.messages.length, "two toasts on this launch").toBe(2);
 		expect(pressureNotices()).toHaveLength(1);
-		expect(plugin.saved?.lastSeenVersion, "the version still moved on").toBe("1.4.21");
+		expect(plugin.saved?.lastSeenVersion, "the version still moved on").toBe(LANDING);
 	});
 
-	// The reason the notice moved above the what's-new block (s238 add. 5). That
+	// The reason the notice moved above the what's-new block. That
 	// block swallows its own failure and returns early, on purpose, so anything
 	// after it is skipped on that path - and this notice is the point of the
 	// release it ships in. Faking the failure is the only way to hold that open:
@@ -231,7 +250,7 @@ describe("the one-time notice for vaults arriving from 1.4.20", () => {
 			const plugin = await launched(
 				{ lastSeenVersion: "1.4.20", pressureSensitivity: true },
 				"1.4.21",
-				NOTES_WITH_1421
+				NOTES_WITH_LANDING
 			);
 			expect(pressureNotices(), "the pressure notice survived").toHaveLength(1);
 			// The what's-new block still leaves the version unrecorded so its own

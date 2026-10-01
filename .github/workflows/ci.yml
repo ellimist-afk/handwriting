@@ -16,7 +16,13 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Sized from run 35748516123, not guessed. Everything before the render
+    # suite takes 1m56s there; the render step then ran 13m19s and was still
+    # going when the 15 minute cap cancelled it, so its true length is not yet
+    # known - only that it is over 13m19s. 40 leaves room for that unknown and
+    # for a slow runner. Splitting render into its own job is the better shape
+    # and is a bigger change than a release hotfix should carry.
+    timeout-minutes: 40
     # A push to a branch in this repo and the pull_request GitHub opens for
     # that same branch are the same commit; without this a same-repo PR ran
     # the whole matrix twice. pull_request still runs for a fork PR, which

@@ -62,14 +62,37 @@ interface HitEntry {
 const MAX_ENTRIES = 80;
 const HOVER_THROTTLE_MS = 200;
 
-let contextProvider: ((clientX: number, clientY: number) => HitProbeContext | null) | null =
-	null;
+type ContextProvider = (clientX: number, clientY: number) => HitProbeContext | null;
 
-/** The overlay registers this so probe rows carry its coordinate context. */
-export function setHitProbeContext(
-	fn: ((clientX: number, clientY: number) => HitProbeContext | null) | null
-): void {
-	contextProvider = fn;
+/**
+ * One provider per pane, keyed by the overlay's editor root (audit 176). A
+ * single slot let every mount overwrite another pane's context and every
+ * unmount clear it for all.
+ */
+const contextProviders = new Map<Element, ContextProvider>();
+
+/**
+ * Each overlay registers a provider for its own root, so probe rows carry its
+ * coordinate context, and passes null to remove its own; another pane's
+ * entry is never touched.
+ */
+export function setHitProbeContext(fn: ContextProvider | null, root: Element): void {
+	if (fn) contextProviders.set(root, fn);
+	else contextProviders.delete(root);
+	if (fn && enabled) listenOn(windowOf(root));
+}
+
+/** The provider of the pane the event happened in, if one is registered. */
+function contextFor(e: PointerEvent, within?: Element): HitProbeContext | null {
+	const node = (within ?? e.target) as Node | null;
+	for (const [root, fn] of contextProviders) {
+		if (node && root.contains(node)) return fn(e.clientX, e.clientY);
+	}
+	return null;
+}
+
+function windowOf(root: Element): Window {
+	return root.ownerDocument?.defaultView ?? window;
 }
 
 const entries: HitEntry[] = [];
@@ -78,7 +101,20 @@ let lastHoverAt = 0;
 let lastHoverKey = "";
 /** Window-capture pointerdown seen and not yet matched to a router down. */
 let pendingGlobalDown: { id: number; at: number } | null = null;
-let windowDownFn: ((e: Event) => void) | null = null;
+/** The capture listener, per window: the main one and any popout a pane lives in. */
+const windowDownFns = new Map<Window, (e: Event) => void>();
+
+function listenOn(win: Window): void {
+	if (windowDownFns.has(win)) return;
+	const fn = (e: Event) => {
+		const pe = e as PointerEvent;
+		if (pe.pointerType === "pen") {
+			pendingGlobalDown = { id: pe.pointerId, at: performance.now() };
+		}
+	};
+	windowDownFns.set(win, fn);
+	win.addEventListener("pointerdown", fn, { capture: true });
+}
 
 export function isHitProbeEnabled(): boolean {
 	return enabled;
@@ -88,17 +124,11 @@ export function setHitProbeEnabled(on: boolean): void {
 	if (on === enabled) return;
 	enabled = on;
 	if (on) {
-		const fn = (e: Event) => {
-			const pe = e as PointerEvent;
-			if (pe.pointerType === "pen") {
-				pendingGlobalDown = { id: pe.pointerId, at: performance.now() };
-			}
-		};
-		windowDownFn = fn;
-		window.addEventListener("pointerdown", fn, { capture: true });
-	} else if (windowDownFn) {
-		window.removeEventListener("pointerdown", windowDownFn, { capture: true });
-		windowDownFn = null;
+		listenOn(window);
+		for (const root of contextProviders.keys()) listenOn(windowOf(root));
+	} else {
+		for (const [win, fn] of windowDownFns) win.removeEventListener("pointerdown", fn, { capture: true });
+		windowDownFns.clear();
 		pendingGlobalDown = null;
 	}
 }
@@ -120,7 +150,7 @@ export function describeEl(el: EventTarget | Element | null | undefined): string
 }
 
 function describeStacked(el: Element): StackedEl {
-	const cs = getComputedStyle(el);
+	const cs = (el.ownerDocument?.defaultView ?? window).getComputedStyle(el);
 	const r = el.getBoundingClientRect();
 	return {
 		desc: describeEl(el),
@@ -133,9 +163,11 @@ function describeStacked(el: Element): StackedEl {
 	};
 }
 
-function stackAt(clientX: number, clientY: number): { top: string; stack: StackedEl[] } {
-	const top = document.elementFromPoint(clientX, clientY);
-	const all = document.elementsFromPoint(clientX, clientY);
+/** Read in the event's own document: a popout's elements are not in the main one. */
+function stackAt(e: PointerEvent): { top: string; stack: StackedEl[] } {
+	const doc = (e.target as Node | null)?.ownerDocument ?? document;
+	const top = doc.elementFromPoint(e.clientX, e.clientY);
+	const all = doc.elementsFromPoint(e.clientX, e.clientY);
 	return { top: describeEl(top), stack: all.slice(0, 8).map(describeStacked) };
 }
 
@@ -150,7 +182,7 @@ export function hitProbeHover(e: PointerEvent): void {
 	const now = performance.now();
 	if (now - lastHoverAt < HOVER_THROTTLE_MS) return;
 	lastHoverAt = now;
-	const { top, stack } = stackAt(e.clientX, e.clientY);
+	const { top, stack } = stackAt(e);
 	const key = `${top}@${Math.round(e.clientX / 20)},${Math.round(e.clientY / 20)}`;
 	if (key === lastHoverKey) return;
 	lastHoverKey = key;
@@ -167,14 +199,14 @@ export function hitProbeHover(e: PointerEvent): void {
 		routerSaw: false,
 		claimed: false,
 		downTarget: "",
-		ctx: contextProvider?.(e.clientX, e.clientY) ?? null,
+		ctx: contextFor(e),
 	});
 }
 
 /** Every pen pointerdown the router received; `claimed` says what it did. */
 export function hitProbeDown(e: PointerEvent, claimed: boolean, scrollEl: Element): void {
 	if (!enabled) return;
-	const { top, stack } = stackAt(e.clientX, e.clientY);
+	const { top, stack } = stackAt(e);
 	const path = typeof e.composedPath === "function" ? e.composedPath() : [];
 	record({
 		t: performance.now(),
@@ -189,7 +221,7 @@ export function hitProbeDown(e: PointerEvent, claimed: boolean, scrollEl: Elemen
 		routerSaw: true,
 		claimed,
 		downTarget: describeEl(e.target),
-		ctx: contextProvider?.(e.clientX, e.clientY) ?? null,
+		ctx: contextFor(e, scrollEl),
 	});
 	pendingGlobalDown = null;
 	lastHoverKey = "";

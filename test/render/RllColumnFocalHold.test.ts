@@ -100,7 +100,7 @@ function sample(phase) {
 		lineLeft: r2(lr.left), lineRight: r2(lr.right), lineWidth: r2(lr.width), scrollerLocal: r2(s.clientWidth), scrollerBox: r2(s.offsetWidth), sizerLeft: r2(rig.sizer.offsetLeft), sizerWidth: r2(rig.sizer.offsetWidth), sizerMarginLeft: getComputedStyle(rig.sizer).marginLeft,
 		columnPx: overlay.viewportLayout ? r2(overlay.viewportLayout.column) : null,
 		columnBoxPx: overlay.viewportLayout && overlay.viewportLayout.columnBox !== undefined ? r2(overlay.viewportLayout.columnBox) : null,
-		// s97 add. 52/53: room and extent, the two terms of the settle's floor (min(0, room - extent)),
+		// room and extent, the two terms of the settle's floor (min(0, room - extent)),
 		// read the same way the settle reads them - paneWidth/externalScale off viewportLayout, the ink
 		// extent off surfaceExtents - so a cell can derive its own expected rest instead of pinning one.
 		paneWidthPx: overlay.viewportLayout ? r2(overlay.viewportLayout.paneWidth) : null,
@@ -109,7 +109,7 @@ function sample(phase) {
 		// The scrollbar gutter in screen px on this frame: Readable line length centres the column beside it.
 		gutter: r2(sr.width - s.clientWidth * sr.width / s.offsetWidth),
 		inkN: ink ? ink.n : 0, inkLeft: ink && ink.n ? r2(ink.left) : null, inkRight: ink && ink.n ? r2(ink.right) : null,
-		// s183 add. 2, test-only: backingInk scans the committed canvas's BACKING STORE, so inkN 0 says
+		// Test-only: backingInk scans the committed canvas's BACKING STORE, so inkN 0 says
 		// only that nothing is rasterised there - it cannot tell a lost stroke from one the page has slid
 		// away from. These three read the model and the canvas box instead: the stroke's own note-space x,
 		// how many strokes the note still holds, and where the canvas that would paint them actually sits.
@@ -124,16 +124,16 @@ function sample(phase) {
 
 window.standingPan = {
 	async mount(readable, tag, lines, noInk, title) {
-		// s179 (Alan, 2026-09-20): the pinch zoom exists only under the Infinite Canvas now, so a
+		// Alan, 2026-09-20: the pinch zoom exists only under the Infinite Canvas now, so a
 		// rig that pinches mounts with the canvas ON. The canvas-on settle laws apply here: the
-		// page stays where the fingers left it, no centring and no fit window (s78, s97).
+		// page stays where the fingers left it, no centring and no fit window.
 		setPenInk(true); setScrollExpansionEnabled(true);
 		setInlineTool("pen"); setInkColorHex("pen", "#ff00ff"); setInkSizeMult("pen", 4);
 		const path = "standing-pan-" + readable + "-" + (tag || "gesture") + ".md";
 		const pane = document.body.appendChild(document.createElement("div"));
 		pane.className = "markdown-source-view mod-cm6" + (readable ? " is-readable-line-width" : "");
 		pane.style.cssText = "position:relative;margin-left:" + HOST_LEFT + "px;width:" + PANE_W + "px;height:" + PANE_H + "px;overflow:hidden";
-		// s115: a lines count of 0 IS AN EMPTY NOTE, which the old lines-or-400 form could not express. Alan's note is a fresh
+		// A lines count of 0 IS AN EMPTY NOTE, which the old lines-or-400 form could not express. Alan's note is a fresh
 		// "Untitled" with nothing in it, and an empty note has no line element to measure a column from -
 		// the one ingredient the 400-line fixtures cannot carry.
 		const doc = lines === 0 ? "" : Array.from({ length: lines || 400 }, (_, i) => "line " + i + " alpha beta gamma delta epsilon zeta").join("\\n");
@@ -141,7 +141,7 @@ window.standingPan = {
 			editorInfoField.init(() => ({ app: { commands: { executeCommandById: () => false } }, file: { path }, editor: {} })), inkOverlayExtension(),
 			EditorView.theme({ "&": { width: PANE_W + "px", height: PANE_H + "px" }, ".cm-scroller": { overflowY: "auto", overflowX: "hidden" }, ".cm-content": { fontFamily: "monospace", fontSize: "16px", lineHeight: "24px" } })] }) });
 		const sizer = installSizer(view);
-		// s191: Obsidian mounts the inline title as a SIZER CHILD, beside the contentContainer, not inside .cm-content -
+		// Obsidian mounts the inline title as a SIZER CHILD, beside the contentContainer, not inside .cm-content -
 		// which is why the own-lines freeze written on the .cm-content children never reached it. Opt-in, so every
 		// other arm keeps the geometry it was written against.
 		let titleEl = null;
@@ -159,20 +159,20 @@ window.standingPan = {
 	/** Known 10 px down on the committed canvas; both readers must read it back. Removed before returning. */
 	async plant(on) { rig.overlay.committedCanvas.style.translate = on ? "0 10px" : ""; await settle(2); return sample(on ? "plant-on" : "plant-off"); },
 	/**
-	 * s115: READABLE LINE LENGTH TURNED OFF IN SESSION, which is what Alan did on the device and is not the
-	 * same fixture as one mounted with it off (s105 add. 3: mounted off, the rig reads left edge 0 and can
+	 * READABLE LINE LENGTH TURNED OFF IN SESSION, which is what Alan did on the device and is not the
+	 * same fixture as one mounted with it off (mounted off, the rig reads left edge 0 and can
 	 * never see this). Obsidian carries the setting as a class on the pane, so the toggle is the class plus
 	 * the re-measure the overlay would get from the real setting change. Returns a sample either side so a
 	 * cell can see what the toggle itself moved before any gesture runs.
 	 */
 	/**
-	 * s119: THE INSET FLAG AND ITS THREE INPUTS, read straight off the overlay rather than inferred from
+	 * THE INSET FLAG AND ITS THREE INPUTS, read straight off the overlay rather than inferred from
 	 * where the page ended up. columnInset is InkOverlay.ts :8068, columnBoxLocal <= scroller.clientWidth
 	 * minus the slack; this returns both sides of that comparison plus the flag and the margin var, so a
 	 * cell can say WHICH side moved when the flag flips.
 	 */
 	/**
-	 * s119: A TAKEOVER AT THE CURRENT ZOOM. prepareViewportLayout builds the layout ONCE (:7894, guarded on
+	 * A TAKEOVER AT THE CURRENT ZOOM. prepareViewportLayout builds the layout ONCE (:7894, guarded on
 	 * viewportLayout being null) and that build is the only caller of measureNaturalColumn(null) - the only
 	 * basis measured LIVE rather than natural. In the rig the first build always happens on the first zoom
 	 * frame, while the host is still at scale 1, so it can never see a counter-sized scroller. On the device
@@ -189,7 +189,7 @@ window.standingPan = {
 		return this.insetRead(tag);
 	},
 	/**
-	 * s120: A THEME-LIKE NARROW COLUMN WITH NO SETTING CLASS. Obsidian's own setting caps the line through
+	 * A THEME-LIKE NARROW COLUMN WITH NO SETTING CLASS. Obsidian's own setting caps the line through
 	 * .is-readable-line-width; a theme can cap it with its own rule and no class at all. That is the case
 	 * the setting gate has to keep working for, and it is the only way this rig can make columnInset read
 	 * true with the class absent - which is the state Alan's device was in.
@@ -214,7 +214,7 @@ window.standingPan = {
 	},
 	async setReadable(on) {
 		const before = sample(on ? "toggle-on-before" : "toggle-off-before");
-		// s115: THE CSS VARIABLE ITSELF, read rather than inferred from where the page ended up. The
+		// THE CSS VARIABLE ITSELF, read rather than inferred from where the page ended up. The
 		// stylesheet clamps the sizer's margin between 0 and this var, and an UNSET var makes the clamp
 		// fall back to its own centring calc - so "unset" and "0px" put the page in different places.
 		const varBefore = rig.view.dom.style.getPropertyValue("--handwriting-column-margin-left");
@@ -287,7 +287,7 @@ window.standingPan = {
 		return rows;
 	},
 	/**
-	 * s191: THE TITLE'S LEFT EDGE AGAINST THE FIRST LINE'S, both read off their own boxes, plus the text edge inside
+	 * THE TITLE'S LEFT EDGE AGAINST THE FIRST LINE'S, both read off their own boxes, plus the text edge inside
 	 * each (the line carries padding, the title does not). The FIRST line, not lineEl's sixth: the title sits above the
 	 * first line on screen, and that is the pair Alan compares.
 	 */
@@ -325,7 +325,7 @@ window.standingPan = {
 	async fit() { const r = rig.overlay.fitHandwriting(); await settle(12); await new Promise(res => setTimeout(res, 50)); await settle(4); return { r, row: sample("fit") }; },
 	/** After a wait in real time, not frames: a deferred repaint runs on a timer. The overscroll glide is half a second, so
 	 * a settle's own frames are not enough: wait it out rather than read a page still on its way to rest. */
-	// s184: turn the Infinite Canvas on for THIS page after mount, so one cell can read the canvas-on settle in a file
+	// Turn the Infinite Canvas on for THIS page after mount, so one cell can read the canvas-on settle in a file
 	// whose other cells mount canvas off. handleResize takes the new mode through the ordinary box write.
 	async canvasOn() {
 		setScrollExpansionEnabled(true);
@@ -434,7 +434,8 @@ const record: unknown[] = [];
  * its users. Alan's vault runs Minimal - it is what candidate 1 was installed into, and where it did nothing.
  */
 const THEME = process.env.HW_RLL_THEME || "default";
-const THEME_FILES: Record<string, string> = { Minimal: "C:/Users/alanl/Obsidian/ObsidianVaults/vault test 2/.obsidian/themes/Minimal/theme.css" };
+// The vendored Minimal 9.0.2 (fixtures/, same file MinimalCameraScale.test.ts loads), not a vault on one machine.
+const THEME_FILES: Record<string, string> = { Minimal: fileURLToPath(new URL("./fixtures/minimal-9.0.2-theme.css", import.meta.url)) };
 const THEME_CSS = THEME === "default" ? "" : readFileSync(THEME_FILES[THEME] ?? THEME, "utf8");
 
 beforeAll(async () => {
@@ -480,13 +481,13 @@ const LIVE_TOL_PX = 1;
  */
 const restMiss = (r: any) => r2((r.lineLeft + r.lineRight) / 2 - (r.viewLeft + r.viewRight - r.barScreen) / 2);
 /**
- * s121 [Architect, on Alan's "it should be left aligned"]: THE COLUMN'S LEFT BORDER AGAINST OBSIDIAN'S OWN
+ * THE COLUMN'S LEFT BORDER AGAINST OBSIDIAN'S OWN
  * NATURAL MARGIN, painted at this scale. The plugin adds no centring at any zoom; what remains is the margin
  * Obsidian itself gives the readable column, which is a host-local quantity and so shrinks with the zoom -
  * 341 host px reads 34 screen px at 10%, not mid-pane. `restMiss` measured CENTRING and is kept only for the
  * 100% frames, where Obsidian's own layout does centre the column and nothing of ours is written.
  *
- * s186 add. 1 [Architect]: READ AGAINST THE CLAMP, NOT AGAINST ONE CARRIER. The old form subtracted the SIZER's
+ * READ AGAINST THE CLAMP, NOT AGAINST ONE CARRIER. The old form subtracted the SIZER's
  * margin, which is the carrier under Obsidian's own theme and zero under a theme that centres its own lines: the
  * same landing then read 0 under one theme and the whole inset under the other, and eleven cells stood red on
  * Minimal for a difference that is not on screen. What puts the column where it is under both is the stylesheet's
@@ -525,7 +526,7 @@ const leftMiss = (r: any) => r2((r.lineLeft - r.viewLeft) - columnRestLeft(r));
  * path that assumes none (measured, a scroll frame at 25% with the setting on ran 4.5 -> 5.9 ms against 1.4.19).
  *
  * KNOWN, with its number: under Minimal a zoom-out to 25% leaves 2075 local px of blank surface to the right of the
- * page, carried by the resting translate. It is not reachable, and it is gone at 100%. OPEN for the line's architect:
+ * page, carried by the resting translate. It is not reachable, and it is gone at 100%. OPEN, still to decide:
  * whether to keep it, or to stop freezing `.cm-content` under a theme that re-centres its own lines and let the ink
  * origin follow the line box per frame instead - a larger change than this candidate, and not one to make unasked.
  */
@@ -660,14 +661,14 @@ for (const arm of RLL_ARMS) {
  * (PinchScale.ts's MAX_PINCH_SCALE, or either InkOverlay.ts guard, or MobileTools.ts's button) and
  * this reddens on its own first assertion - the gesture settles at 400%, not 600%.
  */
-it("s189: the lift SLIDES the 111.25 px hold home, no jump (Alan 2026-09-21, the slide is in 1.4.20; supersedes s183 add. 1): RLL on, zoom-in to 600% about the text's start: the held column stays under the fingers while it fits the pane, reaches the real ceiling, and lands on its margin at the lift on a finite scroll", async () => {
+it("the lift SLIDES the 111.25 px hold home, no jump (Alan 2026-09-21, the slide is in 1.4.20; supersedes the ruling): RLL on, zoom-in to 600% about the text's start: the held column stays under the fingers while it fits the pane, reaches the real ceiling, and lands on its margin at the lift on a finite scroll", async () => {
 	const { page, errors, mounted, n } = await open(true, "hold-600");
 	try {
 		const c0 = n.textLeft + 40, cy = n.textCy as number;
 		const rows = await call(page, "pinchPath", 6, 30, c0, c0, cy, "hold600", 0) as any[];
 		const later = await call(page, "later", 400, "later") as any;
 		const l = live(rows, n, c0, c0, 30), settled = rows.at(-1), lastPreview = rows[30], firstSettle = rows[31];
-		// s186 add. 1: THE LINE BOX, not `.cm-content`. Under a theme that centres its own lines the content box is the
+		// THE LINE BOX, not `.cm-content`. Under a theme that centres its own lines the content box is the
 		// whole scroller, so a ramp frame never "fits the pane" by it and the premise below picks an empty set - eleven
 		// Minimal reds, one of them this cell's. The line is the column under both themes, which is what the premise means.
 		const fits = (f: (typeof l.frames)[number]) => {
@@ -690,15 +691,15 @@ it("s189: the lift SLIDES the 111.25 px hold home, no jump (Alan 2026-09-21, the
 		expect(fitting.length, "premise: the ramp's early frames still fit the pane").toBeGreaterThan(0);
 		expect(maxMissFitting, "the text line against the focal hold, on the frames that still fit the pane, px").toBeLessThanOrEqual(LIVE_TOL_PX);
 		expect(l.scrollMoved, "no preview frame wrote the scroll, px").toBe(0);
-		// THE SETTLE, as s97 add. 52 shapes it (2026-09-18, after this row was written): the first frame
+		// THE SETTLE, as a later ruling shapes it (2026-09-18, after this row was written): the first frame
 		// after the lift holds the text exactly where the last preview frame left it - no snap - and
 		// then the page EASES onto the bound (the column's edge may not rest inside the pane, so the
 		// positive pan the focal hold carried goes back to 0 through the bounce, never in one frame).
 		// The old form read the text after that ease had finished and called the ease a jump: measured
 		// at 4cedb14e, settle-1 0.00 px from the last preview frame, then 111.25 px eased over about
 		// thirty frames at 6x; the same shape at 4x (203.25) and 2x (295.25) on the shipped base.
-		// HISTORY: s183 add. 1 (2026-09-20) accepted an instant reset for 1.4.20 and this row pinned it for a day.
-		// s189 (Alan, 2026-09-21, "i want it all in 1.4.20"): THE SLIDE LANDED. The settle takes its painted capture under
+		// HISTORY: the ruling (2026-09-20) accepted an instant reset for 1.4.20 and this row pinned it for a day.
+		// Alan, 2026-09-21, "i want it all in 1.4.20": THE SLIDE LANDED. The settle takes its painted capture under
 		// the canvas too, so the first frame after the lift paints the last preview's position and the pan the hold carried
 		// goes home through the ease. Measured at d624596d: last preview 447.25 carrying panX 111.25, first settle 447.25,
 		// ease active, rest 336.00. The rest is still DERIVED from the hold, not a pinned number.
@@ -720,7 +721,7 @@ it("s189: the lift SLIDES the 111.25 px hold home, no jump (Alan 2026-09-21, the
  * The lift may still move the column by the rest's own correction: the pane's centre is not the column's centre (the
  * scrollbar gutter), so a hold about it lands a few px off rest and the bounce takes it home.
  */
-it("s183: a round trip about one focal point does NOT come back, and that is the design: it lands 2096.25 px left, parked in the room the canvas granted: RLL on, zoom-out to 25% and back to 100% about the pane's centre, held both ways", async () => {
+it("a round trip about one focal point does NOT come back, and that is the design: it lands 2096.25 px left, parked in the room the canvas granted: RLL on, zoom-out to 25% and back to 100% about the pane's centre, held both ways", async () => {
 	const { page, errors, mounted, n } = await open(true, "round");
 	try {
 		const c = mounted.pane.left + mounted.pane.width / 2, cy = n.textCy as number;
@@ -734,27 +735,27 @@ it("s183: a round trip about one focal point does NOT come back, and that is the
 		console.log("RLLFOCAL-ROUND " + JSON.stringify({ c: r2(c), naturalTextLeft: n.textLeft, outMaxMiss: r2(lo.maxMiss), outSettledTextLeft: outSettled.textLeft, inMaxMiss: r2(li.maxMiss),
 			lastPreviewTextLeft: lastPreview.textLeft, settledTextLeft: settled.textLeft, liftMoved: r2(settled.textLeft - lastPreview.textLeft), laterTextLeft: later.textLeft,
 			settledScrollLeft: settled.scrollLeft, rangeX: settled.rangeX, panX: settled.panX, laterScrollLeft: later.scrollLeft, laterRangeX: later.rangeX, laterPanX: later.panX, lastPreviewRestMiss: restMiss(lastPreview),
-			// s186 add. 2: the lift's own frame, so a red here hands the Architect the three numbers the ruling asks for.
+			// The lift's own frame, so a red here hands review the three numbers the ruling asks for.
 			firstSettleTextLeft: firstSettle?.textLeft ?? null, firstSettleBounce: firstSettle?.bounce?.active ?? null, firstSettlePanX: firstSettle?.panX ?? null }));
 		expect(errors).toEqual([]);
 		expect(outSettled.k, "out to 25%").toBeCloseTo(0.25, 3);
 		expect(settled.k, "back to 100%").toBeCloseTo(1, 3);
 		expect(lo.maxMiss, "zoom-out held, px").toBeLessThanOrEqual(LIVE_TOL_PX);
-		// s124: THE COLUMN NOW RESTS AT ITS OWN MARGIN AT 25%, not centred, so the pane's centre sits 2454 host px into the
+		// THE COLUMN NOW RESTS AT ITS OWN MARGIN AT 25%, not centred, so the pane's centre sits 2454 host px into the
 		// blank beside it. Holding that point under the fingers back to 100% would carry the column 1840 px off the pane;
 		// the constraint reducer's visibility floor (PAN_MIN_VISIBLE_PX, 24 px of the page kept inside the pane) refuses
 		// the part that would, exactly as it already did for a full-width page with the setting off. So each zoom-in
 		// preview frame is either held under the fingers OR pinned with the page's right edge 24 px inside the pane.
 		for (const r of back.slice(1, 31)) {
 			if (!r.preview) continue;
-			// s186 add. 1: the pinned term reads the LINE box's right edge, for the reason the fit predicate above does -
+			// The pinned term reads the LINE box's right edge, for the reason the fit predicate above does -
 			// `.cm-content` is the whole scroller under a theme that centres its own lines, so the floor it measured there
 			// was never the page's edge and no frame could satisfy this branch.
 			const miss = Math.abs(r.textLeft - held(outSettled, c, c, r.k)), pinned = Math.abs(r.lineRight - r.viewLeft - 24);
 			expect(Math.min(miss, pinned), `zoom-in frame at k ${r2(r.k)}: neither held under the fingers (miss ${r2(miss)} px) nor pinned at the pane's visibility floor (${r2(pinned)} px off it)`).toBeLessThanOrEqual(LIVE_TOL_PX);
 		}
 		expect(Math.abs(settled.textLeft - lastPreview.textLeft), "the lift moves the column by no more than the rest's correction, px").toBeLessThanOrEqual(Math.abs(restMiss(lastPreview)) + LIVE_TOL_PX);
-		// s186 add. 2 [Architect]: WHAT THAT CORRECTION IS MADE OF, which this cell never read. The bound above is
+		// WHAT THAT CORRECTION IS MADE OF, which this cell never read. The bound above is
 		// restMiss-relative, so a correction of any size passes it: measured, the lift moves the column 991.25 px
 		// under Minimal and 1017.25 px under Obsidian's own theme, both at 1cd3f8c3, because the zoom-in leg's
 		// preview is pinned at the visibility floor with the words off the pane's left edge and the lift brings the
@@ -762,7 +763,7 @@ it("s183: a round trip about one focal point does NOT come back, and that is the
 		// cell makes at its lift are made here: the first frame after the lift is where the last preview frame left
 		// the column, and the correction is handed to the bounce rather than paid in one frame.
 		expect(Math.abs(firstSettle.textLeft - lastPreview.textLeft), "no jump between the last preview frame and the first frame after the lift, px").toBeLessThanOrEqual(1);
-		// s189 add. 1 (C): THE EASE CLAIM IS OWED ONLY WHERE THE PAGE TRAVELS. s183 rewrote this cell after the line above was
+		// C: THE EASE CLAIM IS OWED ONLY WHERE THE PAGE TRAVELS. A later ruling rewrote this cell after the line above was
 		// written: the round trip now parks in the room the canvas granted and the lift moves nothing (measured at d624596d,
 		// both themes: last preview, first settle, settled and later identical, bounce inactive). A page already at its rest owes
 		// no correction, so there is no ease to hand one to. Where it does travel to its rest, that travel is eased.
@@ -770,26 +771,26 @@ it("s183: a round trip about one focal point does NOT come back, and that is the
 		if (owedTravel > 1) expect(firstSettle.bounce?.active ?? false, `the ${r2(owedTravel)} px correction is handed to the ease at the lift`).toBe(true);
 		else expect(firstSettle.bounce?.active ?? false, "nothing is owed at the lift, so no ease starts").toBe(false);
 		expect(later.bounce?.active ?? false, "the bounce has ended").toBe(false);
-		// s183: same ruling as RoundTripRoom's twin cell, same number, derived the same way. The column
+		// Same ruling as RoundTripRoom's twin cell, same number, derived the same way. The column
 		// does not come back; its whole displacement is the scroll the settle parked plus the standing pan.
 		// Measured at f3dc4420: natural 647.25, later -1449.00, scrollLeft 2096, panX -0.25, room 9967.
 		expect(later.scrollLeft, "the settle parked a sideways scroll in the granted room").toBeGreaterThan(0);
 		expect(later.rangeX, "and the room it parked in is the canvas's own grant").toBeGreaterThanOrEqual(later.scrollLeft);
 		expect(Math.abs(later.textLeft - (n.textLeft - later.scrollLeft + later.panX)), "the displacement is the parked scroll plus the standing pan, and nothing else, px").toBeLessThanOrEqual(LIVE_TOL_PX);
 		expect(Math.abs(later.textLeft - n.textLeft), "and it does NOT return: it lands left of where it stood, px").toBeGreaterThan(LIVE_TOL_PX);
-		// s183 add. 4, option (b): this cell no longer calls expectRestCarried. Half of that helper is
+		// Option (b): this cell no longer calls expectRestCarried. Half of that helper is
 		// overturned here - it asserts nothing is scrolled into the room, and under the canvas the settle
 		// parks 2096 px of scroll there on purpose, which the rows above now state. Its OTHER half still
 		// holds and is kept inline: the rest is the column's margin, with no pan standing at rest.
 		// The helper and its three other callers are untouched.
 		expect(Math.abs(later.panX), `back at 100%: the rest is the column's margin (${restCarrier(later)}), no pan (panX ${later.panX})`).toBeLessThanOrEqual(0.5);
-		// s183: REPLACED. "No sideways scroll left behind" was the canvas-off room contract; under the
+		// REPLACED. "No sideways scroll left behind" was the canvas-off room contract; under the
 		// canvas the settle parks in granted room on purpose, which is what the rows above now assert.
 		// What still has to hold is that the scroll it parked is REACHABLE room and not past the end.
 		expect(later.scrollLeft, "the parked scroll is inside the room, not past its end").toBeLessThanOrEqual(later.rangeX);
 		// NOT ASSERTED: the zoom-in's own writing-room claim still grants 200 px of sideways room here, as it did on 1.4.19
 		// and 31b13737; at scroll 0 with the column at rest it shows nothing, and giving it back is T2's shrink, not this.
-		// s183 add. 5: REPLACED. This row asked that the column comes to rest on Obsidian's own margin
+		// REPLACED. This row asked that the column comes to rest on Obsidian's own margin
 		// after the trip, which is the canvas-off rest law; it read 2096.25 px off that margin. Under the
 		// canvas the settle parks in granted room on purpose, and where the column ends is already the
 		// claim three rows above: the displacement is the parked scroll plus the standing pan and nothing
@@ -817,7 +818,7 @@ it("RLL off, zoom-out to 25% about the pane's centre: unchanged, no pan and the 
 		expect(errors).toEqual([]);
 		expect(settled.k).toBeCloseTo(0.25, 3);
 		expect(settled.columnLocal, "premise: no column inset with the setting off").toBe(0);
-		// THE SAME LIVE PIN, on x with the setting off. "No preview pan" was the pre-s79 law: with the
+		// THE SAME LIVE PIN, on x with the setting off. "No preview pan" was the earlier law: with the
 		// fingers down the page follows them, and whether it took pan to do so is not the promise - where
 		// the page ENDED UP is. The arm already measures that: `anchored` is the text against the focal
 		// law, so the hold is what gets asserted and the pan term is left to the readout.
@@ -825,7 +826,7 @@ it("RLL off, zoom-out to 25% about the pane's centre: unchanged, no pan and the 
 		// distinction is the whole of this pin. `anchored` measures the text against the ORIGIN edge, so it
 		// reads the hold as drift: 524.06 px by k = 0.25. Measured against the FOCAL POINT, the same frames
 		// read 0.000 - to eight decimal places at every k this arm samples, 1.0 down to 0.25. The page is
-		// exactly under the fingers the whole way out, which is s79(1)(a) and carries no setting qualifier.
+		// exactly under the fingers the whole way out, which is the ruling and carries no setting qualifier.
 		// So "no preview pan" was the live edge pin wearing a different hat: the pan is HOW the hold is
 		// paid, and forbidding it forbids the hold. The pan stays in the readout; the hold is the claim.
 		const heldAtFocal = (r: any) => r2(r.textLeft - (c + (n.textLeft - c) * r.k));
@@ -923,7 +924,7 @@ for (const readable of [true, false]) {
 				record.push({ arm: "y-" + readable, shape, fy, natural: n, rows });
 				expect(errors).toEqual([]);
 				expect(settled.k, "the zoom reached its scale").toBeCloseTo(shape.to, 3);
-				// s179/s180: under the canvas a blank note never "fits" its pane while the fingers are down -
+				// under the canvas a blank note never "fits" its pane while the fingers are down -
 				// the grant is there from the start, so no preview frame reports fitsY and the old premise
 				// (more than 20 fitting frames) reads 0. The hold itself is what this arm is for, so it is
 				// asked of EVERY preview frame instead of the fitting subset, which is the stricter form.
@@ -981,13 +982,13 @@ it("NO GESTURE, RLL on: the zoom button to 50% lands the column on its margin, a
 		expect(z.row.k, "to 50%").toBeCloseTo(0.5, 3);
 		expect(Math.abs(leftMiss(z.row)), `the column lands on Obsidian's own margin, scaled, with no gesture, px (read ${leftMiss(z.row)})`).toBeLessThanOrEqual(LIVE_TOL_PX);
 		expectRestCarried(z.row, "the button's rest");
-		// s124: the touch is a 2 percent pinch about the pane's centre, so it moves the column off its margin by a few px
+		// The touch is a 2 percent pinch about the pane's centre, so it moves the column off its margin by a few px
 		// while the fingers are down; with no centred rest to absorb that, the lift returns it to the margin through the
-		// bounce (s107: nothing moves at the lift unless the page went past an edge, then it eases back). The claim is the
+		// bounce. The claim is the
 		// landing, not the absence of the ease.
 		record.push({ arm: "button-bounced", bounced });
 		expect(later.bounce?.active ?? false, "the return has ended").toBe(false);
-		// s179/s180: there is no centred rest to come back to under the canvas (s78: the page stays
+		// there is no centred rest to come back to under the canvas (the page stays
 		// where the fingers left it, no centring), so the old row - the column back on its margin
 		// after the touch - is the canvas-off law. Measured at aa437ff1 it reads 14.01 px off that
 		// margin. The canvas claim is the stricter one this rig can make: the lift leaves the column
@@ -1067,7 +1068,7 @@ const FIT_ARMS = [
 	{ name: "ink past the column that still fits keeps the page and its ink inside the pane", dx: 3000, height: 3000, width: 0, expect: "inside" },
 	// RENAMED to what it now guards. It was written when the fit test asked the granted extent, ink room
 	// and all, so a note with ink wider than its page did not fit at Fit's scale and the arm's subject was
-	// Fit declining to reframe. The landing asks the PAGE box instead (s79(3): the fit test was being asked
+	// Fit declining to reframe. The landing asks the PAGE box instead (the ruling: the fit test was being asked
 	// of the wrong box), and that box fits - measured, contentX 1452.220 -> 1364.352 against a pane of
 	// 1383.005, which crosses under it. So the arm's old subject no longer exists and its premise is false.
 	// What it guards now is the other side of the same case: the page box fits, the ink does not, and Fit
@@ -1131,7 +1132,7 @@ for (const arm of FIT_ARMS) {
 					// scroller and sits at the pane's left edge whatever the page does, so it cannot witness the column.
 					expect(f.row.inkRight, "the ink stays inside the pane's right edge").toBeLessThanOrEqual(f.row.viewRight + 0.5);
 					expect(f.row.lineLeft, "and the column inside its left edge").toBeGreaterThanOrEqual(f.row.viewLeft - 0.5);
-					// s186 add. 1: the scroll-payment clause is gone. It asked HOW the landing was paid (a positive
+					// The scroll-payment clause is gone. It asked HOW the landing was paid (a positive
 					// `scrollLeft` from `ownLinesPageBoxScrollLeft`) rather than where anything lands, and at this
 					// fixture's scale nothing needs paying - measured, the ink's right edge 6.19 px inside the pane
 					// with the scroll at 0. The two claims above are the contract and both hold.
@@ -1174,7 +1175,7 @@ for (const arm of FIT_ARMS) {
 		expect(errors).toEqual([]);
 		expect(later.k, "the button zoomed out").toBeCloseTo(0.25, 3);
 		expect(Math.abs(leftMiss(later)), "premise: the column is on Obsidian's own margin, scaled").toBeLessThanOrEqual(LIVE_TOL_PX);
-		// s179/s180: under the Infinite Canvas the room is granted on purpose - measured at aa437ff1,
+		// under the Infinite Canvas the room is granted on purpose - measured at aa437ff1,
 		// 1775 px on the fresh note and 5820 after the button zoom-out - so "no reachable room" is no
 		// longer the claim. What survives, and is the part that would hurt on the device, is that
 		// nothing is scrolled into that room by the zoom itself.
@@ -1299,7 +1300,7 @@ for (const readable of [true, false]) {
 		} finally { await page.close(); }
 	}, 180_000);
 
-	it(`s183: the blank canvas after the trip is finding 2's consequence, not lost ink: the stroke survives in the note and never moves, the words simply leave the pane with the page, ${tag}`, async () => {
+	it(`the blank canvas after the trip is finding 2's consequence, not lost ink: the stroke survives in the note and never moves, the words simply leave the pane with the page, ${tag}`, async () => {
 		const { page, errors, mounted, n } = await open(readable, `ink-round-${readable}`);
 		try {
 			const c = mounted.pane.left + mounted.pane.width / 2, cy = n.textCy as number;
@@ -1312,7 +1313,7 @@ for (const readable of [true, false]) {
 			expect(errors).toEqual([]);
 			expect(later.k, "back to 100%").toBeCloseTo(1, 3);
 			inkPremise(mounted.pane, atQuarter, "at 25% before the return");
-			// s183 add. 2: THE READOUT THAT SETTLED THIS. backingInk scans the committed canvas's BACKING
+			// THE READOUT THAT SETTLED THIS. backingInk scans the committed canvas's BACKING
 			// STORE, so inkN 0 says only that nothing is rasterised there - it cannot tell a lost stroke from
 			// one the page has slid away from. Measured at f3dc4420 with the model read directly: the note
 			// still holds its 1 stroke at every phase and its first point stays at note x 86.00 throughout,
@@ -1331,7 +1332,7 @@ for (const readable of [true, false]) {
 			// eslint-disable-next-line no-console
 			console.log("RLLINK " + JSON.stringify({ theme: THEME, arm: "round-25-100", readable, rest, live, panX: later.panX, textMoved: r2(later.textLeft - n.textLeft) }));
 			expect(later.textCy, "premise: the words are back on screen to read").toBeGreaterThan(0);
-			// s97 add. 52(5): ZERO SNAP. The commit frame (the first settle sample) must carry the same
+			// ZERO SNAP. The commit frame (the first settle sample) must carry the same
 			// PAINTED position the last preview frame painted - nothing may jump in the frame of the lift,
 			// whatever the settle later eases. `panX` alone is the rest the settle wrote (restPanX, the
 			// ease's END), not what is painted: the overscroll bounce rides on top as a visual offset
@@ -1347,20 +1348,20 @@ for (const readable of [true, false]) {
 			// candidate 1 never had. Y carries the pre-existing, documented offset above (lines 878-882,
 			// "not this candidate's") and expectInkOnLine already tolerates it there; holding zero-snap to
 			// it here would assert a claim this brief never measured or ruled on.
-			// s183 add. 4: THE READOUT MOVED TO WHAT THE READER SEES. `painted` is panX + bounce.x and has
+			// THE READOUT MOVED TO WHAT THE READER SEES. `painted` is panX + bounce.x and has
 			// no scroll term, so under the canvas it reported a 2096 px snap that never happened on screen:
 			// measured at eaffa1d4, textLeft is -1449.00 on both sides of the lift (-1790.25 both sides with
 			// Readable line length off) while panX goes -2096.25 to -0.25 and scrollLeft goes 0 to 2096. The
 			// pan is handed to the native scroll in one frame and the page does not move. Asserting the text's
 			// own painted position covers both terms and loses no power: the same readout moves 447.25 to
-			// 336.00 across the lift on the 600 arm, which is the reset s183 add. 1 accepts for 1.4.20.
+			// 336.00 across the lift on the 600 arm, which is the reset the ruling accepts for 1.4.20.
 			expect(Math.abs(commitRow.textLeft - lastPreviewRow.textLeft), "zero snap x: the commit frame paints the text where the last preview frame painted it, px").toBeLessThanOrEqual(LIVE_TOL_PX);
 			// Kept as a printed decomposition, not a claim: pan and scroll may trade places in that frame.
 			// eslint-disable-next-line no-console
 			console.log("RLLINK-LIFT " + JSON.stringify({ readable, lastPreviewTextLeft: lastPreviewRow.textLeft, commitTextLeft: commitRow.textLeft, lastPreviewPanX: lastPreview.x, commitPanX: commitFrame.x, lastPreviewScrollLeft: lastPreviewRow.scrollLeft, commitScrollLeft: commitRow.scrollLeft }));
-			// s97 add. 52(5)/53: AT REST, the words are back within 1 px of a fixed target, DERIVED from
-			// this fixture's own geometry (add. 53: not pinned from a run). floor = min(0, room - extent),
-			// the same expression add. 52's cx floors on (InkOverlay.ts, the add. 49 site): room =
+			// AT REST, the words are back within 1 px of a fixed target, DERIVED from
+			// this fixture's own geometry (not pinned from a run). floor = min(0, room - extent),
+			// the same expression the ruling's cx floors on (InkOverlay.ts, the ruling site): room =
 			// max(0, paneWidth * externalScale - PAN_MIN_VISIBLE_PX) (InkOverlay.ts:109, 24), extent =
 			// max(columnBox, surfaceExtents(x) * fontZoom) * (k * externalScale). RLL on stays native (0):
 			// the inset column fits its room by construction. `later()` already waits out the overscroll
@@ -1371,7 +1372,7 @@ for (const readable of [true, false]) {
 			const extent = Math.max(later.columnBoxPx ?? 0, later.extentX * later.fontZoom) * effective;
 			const restOffsetPx = Math.abs(later.textLeft - n.textLeft);
 			const restTargetPx = readable ? 0 : Math.abs(Math.min(0, room - extent));
-			// s183 add. 5: REPLACED. This row asked that the words come back to a rest DERIVED for a page
+			// REPLACED. This row asked that the words come back to a rest DERIVED for a page
 			// that parks no scroll - target 0 px with Readable line length on, 3746 px with it off. Measured
 			// at ee14c3da the words sit 2096.25 px from where they started in both arms, so the row read
 			// 2096.25 against 0 and 1649.75 against 3746 - in each case the parked scroll itself. Under the
@@ -1386,19 +1387,19 @@ for (const readable of [true, false]) {
 }
 
 /**
- * s115 RED-FIRST, Alan on the device (vault test 2, 20c182e1): Infinite Canvas off, Readable line length
+ * RED-FIRST, Alan on the device (vault test 2, 20c182e1): Infinite Canvas off, Readable line length
  * turned OFF in session, pinch out to 10% - and the page sits CENTRED in the pane with "Untitled" mid-top.
- * The contract (s105/s107) is top-left at every zoom with the setting off.
+ * The contract is top-left at every zoom with the setting off.
  *
  * WHY THE TOGGLE IS THE WHOLE CELL. A fixture mounted with the setting off reads left edge 0 and always
- * did (s105 add. 3), so it cannot see this defect at all. What Alan did was turn it off in a session that
+ * did, so it cannot see this defect at all. What Alan did was turn it off in a session that
  * had it on, and a quantity frozen while it was on is what survives the change. So: mount ON, pinch once
  * so the resting column margin is established, toggle OFF, then pinch out to 10% and read the left edge.
  *
  * Expected RED at 20c182e1 on the last row: the page's left edge must sit on the pane's, and does not.
  */
-it("s115, RLL turned off in session: the page is at the pane's left edge after a pinch out to 10%", async () => {
-	const { page, errors, mounted } = await open(true, "s115-toggle");
+it("RLL turned off in session: the page is at the pane's left edge after a pinch out to 10%", async () => {
+	const { page, errors, mounted } = await open(true, "toggle");
 	try {
 		const centre = mounted.pane.left + mounted.pane.width / 2, cy = mounted.natural.textCy as number;
 		// With the setting ON, establish the resting column margin the way a real session would.
@@ -1412,7 +1413,7 @@ it("s115, RLL turned off in session: the page is at the pane's left edge after a
 		expect(errors).toEqual([]);
 		const rest = out.at(-1);
 		// eslint-disable-next-line no-console
-		console.log("S115 " + JSON.stringify({
+		console.log("RLL-OFF " + JSON.stringify({
 			onColumnLocal: settledOn.columnLocal, onLeftEdge: r2(settledOn.contentLeft - settledOn.viewLeft),
 			toggledColumnLocal: toggled.after.columnLocal, toggledLeftEdge: r2(toggled.after.contentLeft - toggled.after.viewLeft),
 			toggledSizerTransform: toggled.after.sizerTransform, toggledPanX: toggled.after.panX,
@@ -1423,14 +1424,14 @@ it("s115, RLL turned off in session: the page is at the pane's left edge after a
 		// THE CLAIM. Top-left with the setting off: the page's own left edge sits on the scroller's.
 		expect(Math.abs(rest.contentLeft - rest.viewLeft),
 			`the page is at the pane's left edge with the setting off (content ${rest.contentLeft}, pane ${rest.viewLeft})`).toBeLessThanOrEqual(1);
-		// AND IT IS NOT HELD THERE BY A PAN OR A SCROLL: the margin is the carrier, as s105 requires.
+		// AND IT IS NOT HELD THERE BY A PAN OR A SCROLL: the margin is the carrier, as a later ruling requires.
 		expect(Math.abs(rest.panX), `no pan stands at the rest (panX ${rest.panX})`).toBeLessThanOrEqual(0.5);
 		expect(rest.scrollLeft, "and nothing is scrolled into its room").toBe(0);
 	} finally { await page.close(); }
 }, 180_000);
 
 /**
- * s115 SECOND ARM, and the one that asks the question the first arm cannot. The first arm pinches ONCE
+ * SECOND ARM, and the one that asks the question the first arm cannot. The first arm pinches ONCE
  * WITH THE SETTING ON before the toggle, which writes `--handwriting-column-margin-left` on the host; after
  * the toggle it is rewritten to 0px and the page is at the edge. That is not what Alan necessarily did.
  *
@@ -1440,8 +1441,8 @@ it("s115, RLL turned off in session: the page is at the pane's left edge after a
  * are indistinguishable from the page's position alone unless the var is read. This arm toggles the
  * setting off with no gesture at all beforehand, then pinches out, and reads the var at every step.
  */
-it("s115, RLL turned off with no prior gesture: the page is at the pane's left edge after a pinch out to 10%", async () => {
-	const { page, errors, mounted } = await open(true, "s115-nogesture");
+it("RLL turned off with no prior gesture: the page is at the pane's left edge after a pinch out to 10%", async () => {
+	const { page, errors, mounted } = await open(true, "nogesture");
 	try {
 		const centre = mounted.pane.left + mounted.pane.width / 2, cy = mounted.natural.textCy as number;
 		const toggled = await call(page, "setReadable", false) as any;
@@ -1464,7 +1465,7 @@ it("s115, RLL turned off with no prior gesture: the page is at the pane's left e
 }, 180_000);
 
 /**
- * s115 THIRD ARM, and the one that matches what Alan actually had [Architect, s115 ruling]: a fresh
+ * THIRD ARM, and the one that matches what Alan actually had: a fresh
  * "Untitled" note, Readable line length already OFF from a previous session, no gesture at all before the
  * pinch. The two arms above both mount with the setting ON and toggle it, and both are GREEN - so the
  * toggle is not the ingredient. What neither of them carries is an EMPTY note.
@@ -1476,8 +1477,8 @@ it("s115, RLL turned off with no prior gesture: the page is at the pane's left e
  * Alan saw. Unproven until this runs: the two arms above showed the var unset and the page STILL at the
  * edge, so an unset var is not on its own enough.
  */
-it("s115, fresh empty note with RLL off from the start: the page is at the pane's left edge after a pinch out to 10%", async () => {
-	const { page, errors, mounted } = await open(false, "s115-empty", 0, true);
+it("fresh empty note with RLL off from the start: the page is at the pane's left edge after a pinch out to 10%", async () => {
+	const { page, errors, mounted } = await open(false, "empty", 0, true);
 	try {
 		const centre = mounted.pane.left + mounted.pane.width / 2, cy = mounted.natural.textCy as number;
 		const out = await call(page, "pinch", 0.1, 12, centre, cy, "empty-out") as any[];
@@ -1498,7 +1499,7 @@ it("s115, fresh empty note with RLL off from the start: the page is at the pane'
 }, 180_000);
 
 /**
- * s115 THIRD ARM, and the one that matches what Alan actually had [Architect, s115 ruling]: a fresh
+ * THIRD ARM, and the one that matches what Alan actually had: a fresh
  * "Untitled" note, Readable line length already OFF from a previous session, no gesture at all before the
  * pinch. The two arms above both mount with the setting ON and toggle it, and both are GREEN - so the
  * toggle is not the ingredient. What neither of them carries is an EMPTY note.
@@ -1510,8 +1511,8 @@ it("s115, fresh empty note with RLL off from the start: the page is at the pane'
  * Unproven until this runs: arms 1 and 2 showed the var unset and the page STILL at the edge, so an unset
  * var is not on its own enough.
  */
-it("s115, fresh empty note with RLL off from the start: the page is at the pane's left edge after a pinch out to 10%", async () => {
-	const { page, errors, mounted } = await open(false, "s115-empty", 0, true);
+it("fresh empty note with RLL off from the start, repeat arm: the page is at the pane's left edge after a pinch out to 10%", async () => {
+	const { page, errors, mounted } = await open(false, "empty", 0, true);
 	try {
 		const centre = mounted.pane.left + mounted.pane.width / 2, cy = mounted.natural.textCy as number;
 		const out = await call(page, "pinch", 0.1, 12, centre, cy, "empty-out") as any[];
@@ -1532,7 +1533,7 @@ it("s115, fresh empty note with RLL off from the start: the page is at the pane'
 }, 180_000);
 
 /**
- * s119 RED-FIRST: THE INSET FLAG MUST NOT MOVE WITH THE ZOOM.
+ * RED-FIRST: THE INSET FLAG MUST NOT MOVE WITH THE ZOOM.
  *
  * Alan's device (Orion, fresh Untitled, Readable line length off, pinched to 10%) reported
  * --handwriting-column-margin-left written at 4292.7px and the sizer 432.46 px right of the scroller.
@@ -1549,15 +1550,15 @@ it("s115, fresh empty note with RLL off from the start: the page is at the pane'
  * THE CONTROL IS THE COMMENT'S OWN CASE: with the setting off the page is the full 1383, so it is never
  * inset at any zoom. Expected RED at 20c182e1 on the 25% and 10% rows.
  */
-it("s119, RLL off: the page is never inset, at any zoom", async () => {
-	const { page, errors, mounted } = await open(false, "s119-zoom");
+it("RLL off: the page is never inset, at any zoom", async () => {
+	const { page, errors, mounted } = await open(false, "zoom");
 	try {
 		const centre = mounted.pane.left + mounted.pane.width / 2, cy = mounted.natural.textCy as number;
 		const reads: any[] = [await call(page, "insetRead", "start-100") as any];
 		for (const to of [0.5, 0.25, 0.1]) {
 			await call(page, "pinch", to, 10, centre, cy, "z-" + to);
 			reads.push(await call(page, "insetRead", "at-" + to) as any);
-			// s119: AND THE SAME ZOOM AFTER A RE-MEASURE. The zoom alone never re-asks the question -
+			// AND THE SAME ZOOM AFTER A RE-MEASURE. The zoom alone never re-asks the question -
 			// refreshViewportColumn (:7977) does, and it measures with box = layout.width, which IS the
 			// counter-sized host while zoomed out. A pane nudge is the rig's way to schedule that refresh;
 			// on the device a theme or workspace style change does it for free.
@@ -1566,7 +1567,7 @@ it("s119, RLL off: the page is never inset, at any zoom", async () => {
 		}
 		expect(errors).toEqual([]);
 		// eslint-disable-next-line no-console
-		console.log("S119 " + JSON.stringify(reads));
+		console.log("INSET " + JSON.stringify(reads));
 		// PREMISE: this is the comment's own 1383 case - a page that fills the scroller in its natural layout.
 		const start = reads[0];
 		expect(start.contentW, "premise: the page fills its scroller with the setting off").toBeGreaterThanOrEqual(start.clientWidth - 2);
@@ -1585,7 +1586,7 @@ it("s119, RLL off: the page is never inset, at any zoom", async () => {
 }, 180_000);
 
 /**
- * s119 RED-FIRST, THE TAKEOVER PATH [Architect ruling]. The zoom sweep above proved the flag does not move
+ * RED-FIRST, THE TAKEOVER PATH. The zoom sweep above proved the flag does not move
  * with the zoom, because every re-measure restores the natural basis first. One caller does not:
  * prepareViewportLayout's first build calls measureNaturalColumn(null) at :7928, which measures the host as
  * it stands. Counter-sized, that is a 13825 px scroller against a 1383 px line, and 1383 fits inside it with
@@ -1595,8 +1596,8 @@ it("s119, RLL off: the page is never inset, at any zoom", async () => {
  * Expected RED at 20c182e1: columnInset true after a rebuild at 25% and at 10%, with the margin var written
  * non-zero and the page standing right of the pane's left edge.
  */
-it("s119, RLL off: a takeover while zoomed out does not make the page inset", async () => {
-	const { page, errors, mounted } = await open(false, "s119-takeover");
+it("RLL off: a takeover while zoomed out does not make the page inset", async () => {
+	const { page, errors, mounted } = await open(false, "takeover");
 	try {
 		const centre = mounted.pane.left + mounted.pane.width / 2, cy = mounted.natural.textCy as number;
 		const reads: any[] = [];
@@ -1609,7 +1610,7 @@ it("s119, RLL off: a takeover while zoomed out does not make the page inset", as
 		// eslint-disable-next-line no-console
 		console.log("S119T " + JSON.stringify(reads));
 		for (const r of reads) {
-			// s121 add. 3: the FLAG is not the contract and is not the fix site - columnInset still reads true
+			// The FLAG is not the contract and is not the fix site - columnInset still reads true
 			// on a page that fits its scroller, and that is allowed. What may never happen is a centring margin
 			// written off the back of it. Read the outcome, not the flag.
 			expect(r.marginVar === "" || Number.parseFloat(r.marginVar) <= 0.5,
@@ -1621,22 +1622,22 @@ it("s119, RLL off: a takeover while zoomed out does not make the page inset", as
 }, 180_000);
 
 /**
- * s120's pair lived here: a theme-narrow column with and without the setting class, pinning that the centring
- * margin was written only with the setting on. s121 superseded that ruling outright - the plugin never adds a
+ * The ruling's pair lived here: a theme-narrow column with and without the setting class, pinning that the centring
+ * margin was written only with the setting on. The ruling superseded that ruling outright - the plugin never adds a
  * centring margin under either setting - so the cells are removed rather than re-pinned. Alan's own device row
  * (setting off, narrow line, 10%: no centring var written) survives as the red-first above.
  */
 
-// s184 (Alan, Orion, 2026-09-20, Minimal, Readable line length on, Infinite Canvas on): "as I zoom out the left edge
+// Alan, Orion, 2026-09-20, Minimal, Readable line length on, Infinite Canvas on: "as I zoom out the left edge
 // is further and further into empty space". The settle landed at pan 0 every time (device trace); what moved was the
 // column's home - the theme re-centred its lines in the host the plugin widens by 1/k: 392, 998, 1554, 1697 host px
-// across three pinches. s121 (Alan direct): the plugin centres nowhere. Under a theme that centres its own lines the
+// across three pinches. Alan direct: the plugin centres nowhere. Under a theme that centres its own lines the
 // line inset is now frozen at its 100% value, so the column's left edge sits at nativeLeft x k after every lift.
 // RED before the fix (the column lands at the centre of the widened box), GREEN after. Meaningful only under
 // HW_RLL_THEME=Minimal (the own-lines premise is asserted, not assumed); under Obsidian's own theme the sizer carries
 // the column and this cell asserts the freeze that already held there.
-it("s184: a theme that centres its own lines keeps the column at its 100% inset after every zoom-out under the canvas", async () => {
-	const { page, errors, mounted, n } = await open(true, "s184-own-lines", undefined, true);
+it("a theme that centres its own lines keeps the column at its 100% inset after every zoom-out under the canvas", async () => {
+	const { page, errors, mounted, n } = await open(true, "own-lines", undefined, true);
 	try {
 		const on = await call(page, "canvasOn") as any;
 		expect(on.k, "premise: 100% at the start").toBeCloseTo(1, 3);
@@ -1645,31 +1646,31 @@ it("s184: a theme that centres its own lines keeps the column at its 100% inset 
 		const c = mounted.pane.left + mounted.pane.width / 2, cy = on.textCy as number;
 		const rows: any[] = [];
 		for (const to of [0.5, 0.3]) {
-			await call(page, "pinch", to, 30, c, cy, "s184-" + to);
-			const later = await call(page, "later", 400, "s184-later-" + to) as any;
+			await call(page, "pinch", to, 30, c, cy, "pinch-" + to);
+			const later = await call(page, "later", 400, "later-" + to) as any;
 			const left = later.lineLeft - later.viewLeft, expected = home * later.k;
 			rows.push({ to, k: later.k, ownLines: later.ownLines, left: r2(left), expected: r2(expected), panX: later.panX, scrollLeft: later.scrollLeft });
 			expect(later.k, "premise: the pinch landed near its target").toBeCloseTo(to, 1);
 			expect(Math.abs(left - expected), `after the lift at ${to}: the column's left edge is its 100% inset scaled (${r2(expected)}), not the centre of the widened box (read ${r2(left)})`).toBeLessThanOrEqual(1);
 		}
-		console.log("RLLFOCAL-S184 " + JSON.stringify({ home: r2(home), rows }));
-		record.push({ arm: "s184-own-lines", home: r2(home), rows });
+		console.log("RLLFOCAL-OWNLINES " + JSON.stringify({ home: r2(home), rows }));
+		record.push({ arm: "own-lines", home: r2(home), rows });
 		expect(errors).toEqual([]);
 	} finally { await page.close(); }
 }, 300_000);
 
-// s191 (Alan, Orion, 2026-09-21, Minimal, Readable line length on, Infinite Canvas on, 20.7%): "the untitled title moves
+// Alan, Orion, 2026-09-21, Minimal, Readable line length on, Infinite Canvas on, 20.7%: "the untitled title moves
 // to the right as i pinch outward", while the text and the ink stay left. Obsidian hangs the inline title off the SIZER,
 // beside the contentContainer, and Minimal centres it there with `margin-inline: var(--content-margin) !important`
 // (theme.css:1860-1867) inside a sizer the owned host widens by 1/k - so it re-centres further right on every zoom-out
 // while the frozen lines stay put. RED at c978650e (the title box lands 513.44 px right of the line box at 25%), GREEN
 // at the fix. Meaningful under HW_RLL_THEME=Minimal; under Obsidian's own theme the plugin's own reset already holds the
 // title at the sizer's left edge, and this cell asserts that it still does.
-it("s191: the inline title takes the same frozen inset as the lines after every zoom-out", async () => {
-	const { page, errors, mounted } = await open(true, "s191-title-freeze", undefined, true, true);
+it("the inline title takes the same frozen inset as the lines after every zoom-out", async () => {
+	const { page, errors, mounted } = await open(true, "title-freeze", undefined, true, true);
 	try {
 		await call(page, "canvasOn");
-		const at100 = await call(page, "titleRead", "s191-100") as any;
+		const at100 = await call(page, "titleRead", "pinch-100") as any;
 		expect(at100.k, "premise: 100% at the start").toBeCloseTo(1, 3);
 		expect(at100.titleLeft, "premise: the rig mounted an inline title as a sizer child").not.toBeNull();
 		const rows: any[] = [at100];
@@ -1678,11 +1679,11 @@ it("s191: the inline title takes the same frozen inset as the lines after every 
 		// text starts 2 px left of the line's text (the line carries 6 px of padding, the title none). Under Obsidian's own
 		// theme both boxes start at 641.25. That offset is the theme's own padding, not what Alan saw move.
 		expect(Math.abs(at100.titleLeft - at100.lineLeft), `premise at 100%: title and line start together within the theme's own padding (title ${at100.titleLeft}, line ${at100.lineLeft})`).toBeLessThanOrEqual(8);
-		const c = mounted.pane.left + mounted.pane.width / 2, cy = (await call(page, "sample", "s191-cy") as any).textCy as number;
+		const c = mounted.pane.left + mounted.pane.width / 2, cy = (await call(page, "sample", "cy") as any).textCy as number;
 		for (const to of [0.25, 0.15]) {
-			await call(page, "pinch", to, 30, c, cy, "s191-" + to);
-			await call(page, "later", 400, "s191-later-" + to);
-			const r = await call(page, "titleRead", "s191-read-" + to) as any;
+			await call(page, "pinch", to, 30, c, cy, "pinch-" + to);
+			await call(page, "later", 400, "later-" + to);
+			const r = await call(page, "titleRead", "read-" + to) as any;
 			rows.push(r);
 			expect(r.k, "premise: the pinch landed near its target").toBeCloseTo(to, 1);
 			// The freeze exists only once the overlay has built its layout, which it does on the first zoom frame - so the
@@ -1694,8 +1695,8 @@ it("s191: the inline title takes the same frozen inset as the lines after every 
 			expect(Math.abs(r.titleLeft - r.lineLeft), `after the lift at ${to}: the title's left edge is the first line's (title ${r.titleLeft}, line ${r.lineLeft})`).toBeLessThanOrEqual(1);
 		}
 		// eslint-disable-next-line no-console
-		console.log("RLLFOCAL-S191 " + JSON.stringify(rows));
-		record.push({ arm: "s191-title-freeze", rows });
+		console.log("RLLFOCAL-TITLE " + JSON.stringify(rows));
+		record.push({ arm: "title-freeze", rows });
 		expect(errors).toEqual([]);
 	} finally { await page.close(); }
 }, 300_000);

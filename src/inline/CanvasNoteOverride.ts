@@ -1,5 +1,5 @@
 /**
- * s138: INFINITE CANVAS PER NOTE - the plumbing half.
+ * INFINITE CANVAS PER NOTE - the plumbing half.
  *
  * The Infinite Canvas setting becomes the DEFAULT, and any note may override it
  * for itself in its own frontmatter (`handwriting-canvas: true` / `false`),
@@ -8,7 +8,7 @@
  * metadata cache, writes the key back, and answers one question -
  * `canvasForNote(path, globalDefault)`. It paints nothing, owns no DOM, and
  * knows nothing about zoom, momentum or the zoom bar; the overlay and the
- * toolbar are wired separately (s138 slice B).
+ * toolbar are wired separately.
  *
  * The shape is `NotePaper`'s, deliberately and with its queue duplicated rather
  * than extracted: see the note on `save` below.
@@ -28,7 +28,7 @@ export type NoteCanvasChoice = true | false | "default";
  * are accepted, case-insensitively for the string form.
  *
  * `yes`, `no`, `on` and `off` are NOT accepted and fall back to the default
- * (ruled s143). YAML 1.1 read those as booleans and YAML 1.2 reads them as
+ * as ruled. YAML 1.1 read those as booleans and YAML 1.2 reads them as
  * plain strings; Obsidian's parser is the one that decides, not this file, so a
  * note written with `handwriting-canvas: yes` would mean one thing today and
  * possibly another after an upstream bump. A value this file does not
@@ -110,7 +110,7 @@ export class CanvasNoteOverride {
 	 * `processFrontMatter` writer the paper picker uses.
 	 *
 	 * THE QUEUE, THE REVISION GUARD AND THE OPTIMISTIC MAP ARE `NotePaper`'s,
-	 * COPIED (NotePaper.ts :99-:119, ruled s143: duplicate with a citation, do
+	 * COPIED (NotePaper.ts :99-:119, ruled: duplicate with a citation, do
 	 * not extract - extraction would edit NotePaper.ts, which this slice does
 	 * not own). Each part earns itself there and here alike: writes to one file
 	 * are serialised so two quick toggles cannot interleave inside

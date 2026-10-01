@@ -70,10 +70,14 @@ function pasteRig(path: string): PasteRig {
 			scroll.top = extentReady ? Math.max(0, value) : 0;
 		},
 	};
+	const dom = {
+		ownerDocument: { defaultView: { getComputedStyle: () => ({ position: "relative" }) } },
+		parentElement: null,
+		closest: (selector: string): unknown => selector === ".markdown-source-view" ? root : null,
+	};
+	const root = { ownerDocument: dom.ownerDocument, querySelector: () => dom };
 	const view = {
-		dom: {
-			ownerDocument: { defaultView: { getComputedStyle: () => ({ position: "relative" }) } },
-		},
+		dom,
 		scrollDOM,
 		state: {
 			field: () => (fileReady ? { file: { path } } : undefined),

@@ -112,6 +112,10 @@ function makeRig(): Rig {
 	view.highlightWet = { ...wet };
 	view.highlightWetCanvas = { setCssStyles: () => undefined };
 	view.tail = {
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
 		// The size is optional on the real method and the pen-up sites pass
 		// it - it is what selects the no-box fallback - so it is recorded.
 		clear: (w?: number, h?: number) => {

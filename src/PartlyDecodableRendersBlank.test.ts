@@ -55,7 +55,7 @@ import surfaceSrc from "./slides/SlidesInkSurface.ts?raw";
  * slides (`SlidesInkSurface.ts:2274`) all return before adopting. Every
  * surface in the plugin now refuses. The canvas page view was the one that
  * did NOT - it set `spatialDamaged`, fell through, rendered the remnant and
- * went read-only - and it was deleted in s197, so the behaviour this file
+ * went read-only - and it was deleted, so the behaviour this file
  * argues for has no implementation left to point at. Slides is cited rather
  * than harnessed here: its load path needs a live deck, and the refusal is
  * the same two lines.

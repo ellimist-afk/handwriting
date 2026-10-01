@@ -9,10 +9,9 @@
  * stabilizer's whole 1/1024 cap. The camera origin then wobbles with the
  * rounding, the stabilizer refuses to hold it, and every frame of a scroll
  * costs a camera-only full redraw: 7-11 per round, 57-133 ms of repaint
- * (L1 U1, measured on branch lag-far-extent).
+ * (measured at the far extent).
  *
- * MEASURED, AND IT DECIDES THE SHAPE OF THIS FILE (L1c/E0-RESULT.md, outcome
- * O1). The rounding follows the SCREEN coordinate, not the element's offset
+ * MEASURED, AND IT DECIDES THE SHAPE OF THIS FILE. The rounding follows the SCREEN coordinate, not the element's offset
  * inside the scrolled content. Two zero-size probes at the same far extent:
  * one 200 px inside the viewport whose offset inside the content was 17418 to
  * 46123 px read 9.3e-6 to 1.2e-5 displayed px of noise; one sitting ON the
@@ -31,7 +30,7 @@
  * at most half the rung spacing plus a viewport, so a scale error of relative
  * e costs e x 1024 layout px instead of e x 114822.
  *
- * WHY A FIXED LADDER AND NOT ONE PROBE THAT MOVES (ruling 2B RP-1/RP-2).
+ * WHY A FIXED LADDER AND NOT ONE PROBE THAT MOVES.
  * A single probe would have to be re-placed as the reader scrolls, and every
  * re-placement is a `style.top` write inside `contentDOM`. Measured on
  * @codemirror/view 6.38.6: `DOMObserver.flush` calls `view.requestMeasure()`
@@ -52,7 +51,7 @@
  * and an appended child resolves against the SCROLLER (InkOverlay sets the
  * scroller `position: relative`; the app stylesheet puts no position rule on
  * `.cm-content` or `.cm-sizer`), which would stop it following a reflow above
- * the content. That construction is correct arithmetically - QE2 parity read 0
+ * the content. That construction is correct arithmetically - the parity check read 0
  * at both extents - and it REGRESSED two suites: `InsertSpacePrecision`'s
  * insert-space boundary moved an extra stroke, and three `retained-pan` arms
  * stored no stroke at all. A/B on the same tree, extension removed vs present,
@@ -70,7 +69,7 @@
  * the document at all. It is still in the scrolled, scaled flow, so a title or
  * properties block growing above the content moves it with the content.
  *
- * THE PADDING TERM IS NOT A PRICE (ruling 2C P-4). `anchorTop` has always been
+ * THE PADDING TERM IS NOT A PRICE. `anchorTop` has always been
  * `contentDOM rect top + declaredPaddingTop(cssPaddingTop, scaleY)`; the
  * position-0 widget merely absorbed that term into its own rect by sitting
  * after the padding. The wrapper sits at `.cm-content`'s BORDER-BOX top, so the
@@ -89,21 +88,22 @@
  *  - `overflow: hidden` on the wrapper. Absolutely positioned descendants can
  *    extend a scroller's scrollable overflow, and the top rung sits at the far
  *    end of the spacer; the ladder must add no scroll range of its own.
- *    QE4c plants its removal.
+ *    The ladder growth test plants its removal.
  */
 
 import type { EditorView } from "@codemirror/view";
+import { editorInfoField } from "obsidian";
 
 /**
  * Layout px between rungs. Worst distance from the band to the nearest rung is
  * half of this, so the residual the believed scale divides is at most 1024
  * layout px: at cssScale 1 that is 1024 screen px, ulp32 6.1e-5, about 5e-5 of
- * noise at E0's measured 0.6-0.8 ulp - five times under cap/4. At 0.10 to 0.15
- * it is 100 to 150 screen px, which is the regime E0 measured directly.
+ * noise at the measured 0.6-0.8 ulp - five times under cap/4. At 0.10 to 0.15
+ * it is 100 to 150 screen px, which is the regime the first measurement read directly.
  */
 export const RUNG_SPACING = 2048;
 
-/** Beyond this the ladder doubles its spacing instead of growing (RP-4).
+/** Beyond this the ladder doubles its spacing instead of growing.
  * Alan's 114822 layout px note needs 57 rungs; four times it needs 225. */
 export const MAX_RUNGS = 1024;
 
@@ -129,7 +129,7 @@ export function documentAnchorLadder(view: EditorView): DocumentAnchorLadder | n
 }
 
 /**
- * P-3: is the wrapper still where the arithmetic assumes, checked with DOM
+ * Is the wrapper still where the arithmetic assumes, checked with DOM
  * PROPERTIES ONLY - no rect, no computed style, no layout.
  *
  * The invariant is not "it exists" but "it is the in-flow element immediately
@@ -159,8 +159,8 @@ function makeRung(index: number, spacing: number): HTMLElement {
  * pair. Idempotent: a second call with a live wrapper keeps the one it has.
  */
 export function mountDocumentAnchor(view: EditorView): DocumentAnchorLadder | null {
-	// F-4: once refused, never again for this view.
-	if (refused.has(view)) return null;
+	// Once refused, never again for this note in this view.
+	if (documentAnchorRefused(view)) return null;
 	const held = ladders.get(view);
 	if (held && anchorIsLive(held.wrapper, view)) return held;
 	const host = view.contentDOM.parentElement;
@@ -168,7 +168,7 @@ export function mountDocumentAnchor(view: EditorView): DocumentAnchorLadder | nu
 	// `position: relative` (InkOverlay sets it), so the rungs would resolve
 	// against the VIEWPORT's scroll box and stop following the document.
 	if (!host || host === view.scrollDOM) return null;
-	// RE-INSERT rather than leave a second one behind: P-3 can fail because
+	// RE-INSERT rather than leave a second one behind: the placement check can fail because
 	// something re-parented the content, and the old wrapper is then a detached
 	// or misplaced element answering with the wrong rect.
 	held?.wrapper.remove();
@@ -183,14 +183,14 @@ export function mountDocumentAnchor(view: EditorView): DocumentAnchorLadder | nu
 	wrapper.className = "handwriting-document-anchor";
 	wrapper.contentEditable = "false";
 	wrapper.setAttribute("aria-hidden", "true");
-	// P-1 exactly. `position: relative` makes the wrapper the rungs' containing
+	// The placement rule exactly. `position: relative` makes the wrapper the rungs' containing
 	// block, so their `top` counts from the content's own top edge and not from
 	// the scroller. `display: flow-root` stops a child's margin escaping into
 	// the gap between this and `.cm-content`. Height, margin, padding and border
 	// are all zero so nothing below moves. `overflow: hidden` keeps the rungs
-	// out of the scroller's range (kept as insurance - QE4c did not show it
-	// load-bearing, and ruling 2C says not to claim it is).
-	// A-1/A-2 (ruling 2E). OUT OF FLOW, with every offset AUTO.
+	// out of the scroller's range (kept as insurance - the ladder growth test did not show it
+	// load-bearing, so it is not claimed to be).
+	// OUT OF FLOW, with every offset AUTO.
 	//
 	// `position: relative` cost us U2. The sibling clause in
 	// `ownedColumnLayoutLeft` (InkOverlay.ts 4113-4117) returns null for any
@@ -224,7 +224,7 @@ export function mountDocumentAnchor(view: EditorView): DocumentAnchorLadder | nu
 	wrapper.style.cssText = "position:absolute;top:auto;left:auto;right:auto;bottom:auto;align-self:flex-start;" +
 		"width:0;height:0;margin:0;padding:0;border:0;overflow:hidden;pointer-events:none;user-select:none";
 	wrapper.appendChild(makeRung(0, RUNG_SPACING));
-	// P-1: IMMEDIATELY BEFORE contentDOM in contentDOM's own parent. Not
+	// Placement: IMMEDIATELY BEFORE contentDOM in contentDOM's own parent. Not
 	// `firstChild` of a class-named container - the invariant is the sibling
 	// relationship, and `anchorIsLive` checks exactly that every sync.
 	host.insertBefore(wrapper, view.contentDOM);
@@ -241,15 +241,23 @@ export function unmountDocumentAnchor(view: EditorView): void {
 }
 
 /**
- * F-2/F-4: views whose anchor failed the parity gate. The refusal lasts the
- * VIEW'S LIFETIME - a theme that displaces the wrapper would otherwise mount
- * and unmount it on every extent update, and a fixed theme is allowed to take
- * effect on the next note open instead.
+ * Views whose anchor failed the parity gate, with the note that was
+ * open when it failed. The refusal lasts while that note stays open - a theme
+ * that displaces the wrapper would otherwise mount and unmount it on every
+ * extent update - and a fixed theme is allowed to take effect on the next note
+ * open instead. Keyed by the note as well as the view because Obsidian reuses
+ * one view for every note a tab opens: a refusal held by the view alone kept
+ * the whole tab on the shipped path for its life (audit 117).
  */
-const refused = new WeakSet<EditorView>();
+const refused = new WeakMap<EditorView, string | null>();
+
+/** The note a view is showing, as the refusal records it. */
+function refusalNote(view: EditorView): string | null {
+	return view.state.field(editorInfoField, false)?.file?.path ?? null;
+}
 
 /**
- * The parity bar, per extent, in displayed CSS px. Ruling 2A's form: the
+ * The parity bar, per extent, in displayed CSS px. The design's form: the
  * irreducible rect noise of the operand E exists to remove, plus the rung's
  * own conversion. A flat 2.5e-5 is not reachable at any distance and never was.
  */
@@ -265,24 +273,24 @@ export function anchorParityBar(contentTop: number, rungTopLayout: number, cssSc
 export const anchorRefusals: { count: number; last: { implied: number; shipped: number; bar: number; delta: number; reason: string } | null } = { count: 0, last: null };
 
 /**
- * F-2: the ladder disagreed with `anchorTop` by more than the bar, so it is
+ * The ladder disagreed with `anchorTop` by more than the bar, so it is
  * taken out of service for this view and every consumer - the camera, its
  * read-only twin, the diagnostics - falls back to the shipped path TOGETHER.
  *
- * F-5, correctness over latency, said plainly: a refused ladder means this note
+ * Correctness over latency, said plainly: a refused ladder means this note
  * keeps the shipped lag under this theme, and keeps correct ink. The record
  * below is what makes that visible rather than silent.
  */
 export function refuseDocumentAnchor(view: EditorView, detail: { implied: number; shipped: number; bar: number; reason: string }): void {
-	refused.add(view);
+	refused.set(view, refusalNote(view));
 	unmountDocumentAnchor(view);
 	anchorRefusals.count++;
 	anchorRefusals.last = { ...detail, delta: Math.abs(detail.implied - detail.shipped) };
 }
 
-/** Has this view's anchor been taken out of service for good? */
+/** Has this view's anchor been taken out of service for the note it shows? */
 export function documentAnchorRefused(view: EditorView): boolean {
-	return refused.has(view);
+	return refused.has(view) && refused.get(view) === refusalNote(view);
 }
 
 /**
@@ -300,7 +308,7 @@ export function ladderShape(extentLayoutPx: number): { count: number; spacing: n
 /**
  * Bring the ladder up to the extent the plugin has just granted.
  *
- * CALLED FROM `updateExtent` AND NOWHERE ELSE (RP-4): that is already a write
+ * CALLED FROM `updateExtent` AND NOWHERE ELSE: that is already a write
  * moment, so the one childList mutation it makes costs the CodeMirror measure
  * that any mutation costs, on a frame that was doing layout work anyway. The
  * widget's height is 0 estimated and 0 measured, so the height map does not
@@ -309,7 +317,7 @@ export function ladderShape(extentLayoutPx: number): { count: number; spacing: n
  * Returns the ladder's rung count, or 0 when there is no ladder to grow.
  */
 export function growDocumentAnchorLadder(view: EditorView, extentLayoutPx: number): number {
-	// P-3's repair point: `updateExtent` is a quiet plugin write moment, so a
+	// The placement check's repair point: `updateExtent` is a quiet plugin write moment, so a
 	// wrapper that lost its place is re-inserted HERE and never on a scroll.
 	const held = mountDocumentAnchor(view);
 	if (!held) return 0;
@@ -333,7 +341,7 @@ export function growDocumentAnchorLadder(view: EditorView, extentLayoutPx: numbe
 }
 
 /**
- * WHICH RUNG TO READ, arithmetically (RP-2). A wrong answer costs distance and
+ * WHICH RUNG TO READ, arithmetically. A wrong answer costs distance and
  * never correctness, so this clamps rather than refusing: an out-of-range k
  * would read a rung that does not exist, and the nearest one that does is
  * always a legal anchor.

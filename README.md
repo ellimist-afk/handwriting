@@ -36,7 +36,7 @@ Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 * pressure sensitivity
 * palm rejection
 * pen toolbar with auto-hide
-* pinch to zoom
+* pinch to zoom (pdfs always; notes with **Infinite canvas** on)
 * ink prediction + smoothing
 * lined, grid, and dotted paper background
 * export ink as svg or pdf
@@ -54,8 +54,8 @@ iphone
 
 ---
 
-> **ipad users**
->
+### ipad notes
+
 > turn off Scribble or ios will draw its own black ink over your strokes, and its scratch-out gesture may delete ink.
 >
 > **iPad Settings → Apple Pencil → Scribble → Off**
@@ -160,11 +160,13 @@ with a mouse, pause at the end of a stroke and select **Snap**.
 
 ---
 
-> **sync notes**
->
+### obsidian sync notes
+
 > `.handwriting/` is a hidden folder. many sync services do not sync hidden folders by default, including Obsidian Sync, iCloud and Dropbox.
 >
 > if you use one of these services, enable **Compatibility with Obsidian Sync, iCloud and Dropbox** in Handwriting settings.
+>
+> Obsidian Sync also needs **Sync all other types** turned on (Settings, Sync, selective sync). ink is saved as `.json` files, and Obsidian Sync skips those by default.
 
 ---
 
@@ -228,7 +230,7 @@ run `Bug report: send`.
 
 press `Upload` and the report comes straight to me 🙂 paste the id it gives you into your issue or the reddit thread so I know where it came from.
 
-for those of you nervous about sending bug reports: specifically what the report sends are pen coordinates and timings- nothing else. 
+for those of you nervous about sending bug reports: the report holds your pen strokes (coordinates and timings), the device and window size, the ink settings that were active, and, if you undid or redid while recording, the undo or redo key, the cursor offset and the scroll position. it never holds your note's text. 
 
 and i guarantee nothing will leave your device unless you press `Upload` button. still uncomfortable with telemetry? `Copy` and `Save to Vault` buttons are offline ways to do bug reports
 

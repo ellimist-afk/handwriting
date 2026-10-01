@@ -39,8 +39,8 @@
  * `.obsidian/themes/Minimal/theme.css` (Minimal 9.0.2, MIT, (c) Steph Ango;
  * the licence header is preserved at the top of the fixture, and
  * `minimal-9.0.2-manifest.json` beside it pins the version). Vendored rather
- * than read from a vault path because a test that reads a path under
- * `C:\Users\alanl` measures this machine and finds nothing on CI. The point
+ * than read from a vault path because a test that reads a path on one
+ * machine's disk measures that machine and finds nothing on CI. The point
  * of loading it whole is that the question is "does ANY rule in this theme
  * scale an ancestor", and a hand-picked subset cannot answer a question
  * about rules nobody thought to pick.
@@ -587,10 +587,8 @@ describe("Q1: a font-size change is a reflow, and the camera models it as a zoom
 
 describe("Q1: `syncCamera` alone re-measures cssScale but not the font zoom", () => {
 	/**
-	 * CONFIRMED DEFECT, not fixed on this branch, so it is declared as an
-	 * expected failure per the repo's `it.fails` convention (see
-	 * `src/persistence/PageStoreTwoDocuments.test.ts` for where that idiom
-	 * was chosen and why).
+	 * The defect this test once declared as an expected failure was fixed at
+	 * dc0bbc5a. The assertion below is an ordinary `it` and expects success.
 	 *
 	 * `InkOverlay.mount` wires TWO observers:
 	 *   - `ResizeObserver(view.dom)` -> `handleResize`, which is the ONLY

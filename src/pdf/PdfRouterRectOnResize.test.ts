@@ -1,3 +1,20 @@
+
+/** Extend the existing cursor fixture with its owned clipping parent. */
+function cursorChildren(createCursor: () => any): (options?: { cls?: string }) => any {
+	return (options) => {
+		const cursor = createCursor();
+		if (options?.cls !== "handwriting-pdf-cursor-viewport") return cursor;
+		const viewport = {
+			parentElement: cursor.parentElement,
+			classList: { contains: (cls: string) => cls === "handwriting-pdf-cursor-viewport" },
+			setCssStyles() {},
+			createDiv: () => cursor,
+			remove() { cursor.remove(); viewport.parentElement = null; },
+		};
+		cursor.parentElement = viewport;
+		return viewport;
+	};
+}
 /**
  * The defect this pins: `InlinePenRouter` caches the pane element's
  * `getBoundingClientRect()` in `this.rect` and refreshes it in exactly ONE
@@ -149,7 +166,7 @@ function fakePane(rect: Rect) {
 		setPointerCapture() {},
 		releasePointerCapture() {},
 		querySelector: () => null,
-		createDiv: () => {
+		createDiv: cursorChildren(() => {
 			cursorEl = {
 				setAttribute: () => {},
 				remove: () => {},
@@ -160,7 +177,7 @@ function fakePane(rect: Rect) {
 				parentElement: el,
 			};
 			return cursorEl;
-		},
+		}),
 	};
 	el.contains = (n: unknown) => n === el;
 	return {

@@ -47,10 +47,10 @@ import REAL_OBSIDIAN_CSS from "./obsidianReadableWidth";
 const READABLE_LINE_WIDTH_CSS = REAL_OBSIDIAN_CSS;
 /** The guard's one predicate, shared by the guarded arms and their positive control: a write with the host's zoom off its base. */
 /**
- * s112, test-only: WHAT A PREVIEW FRAME IS ENTITLED TO WITH INFINITE CANVAS OFF.
+ * Test-only: WHAT A PREVIEW FRAME IS ENTITLED TO WITH INFINITE CANVAS OFF.
  *
- * These cells encoded s79(1)(a) - the page follows the fingers 1:1 from where the gesture began, for
- * ever. That is the superseded contract. Alan's, s103 then s107, is that the page follows past its edge
+ * These cells encoded the ruling - the page follows the fingers 1:1 from where the gesture began, for
+ * ever. That is the superseded contract. Alan's, ruled in two steps, is that the page follows past its edge
  * by a give and then STOPS under the fingers, and the lift eases the give back. So the exposure a
  * preview frame may show is the 1:1 figure CAPPED AT THE GIVE, per axis, and only with the setting off:
  * Infinite Canvas on grants the room, so there the old figure stands untouched.
@@ -68,17 +68,17 @@ const READABLE_LINE_WIDTH_CSS = REAL_OBSIDIAN_CSS;
  * back inside the edge is not overscroll - which `Math.min` gives for free.
  */
 const OVERSCROLL_GIVE_PX = 96;
-// s135: THE BAND IS THE CANVAS'S NOW, and only on the ceiling side. With the canvas ON a preview follows
+// THE BAND IS THE CANVAS'S NOW, and only on the ceiling side. With the canvas ON a preview follows
 // the fingers 1:1 toward the page's own origin edge until it has spent the give, then it stops; travel the
 // other way is into room the page grows into, and `Math.min` leaves it alone, which is the floor term the
 // band no longer carries. With the canvas OFF there is no band at all - `dragFrame` is false there, so the
-// preview takes the PLAIN BOUND instead (s150): floor and ceiling, no give. `panFloor` is
+// preview takes the PLAIN BOUND instead: floor and ceiling, no give. `panFloor` is
 // `min(0, room - extent)`, so on a page that FITS its room both ends are 0 and the preview pan is pinned
 // there - a fitting note does not scroll with the canvas off, which is what stock Obsidian does and what
-// the mode now means (s150 add. 1). A drag frame therefore moves the page nowhere, and the exposure a row
+// the mode now means. A drag frame therefore moves the page nowhere, and the exposure a row
 // reports is the one it began with. An unbounded preview instead drifted 21.21 px past the fingers on a
 // fitting page, measured at every travel on the tiny arm, which is what this replaced.
-// s150 add. 1, ONE RULE, and the `fits` split it replaces was wrong. With the canvas off the preview pan is
+// ONE RULE, and the `fits` split it replaces was wrong. With the canvas off the preview pan is
 // clamped to [floor, 0] on a drag frame, so a step that asks to go POSITIVE is refused at the ceiling and one
 // that asks to go negative is carried until the floor. In this cell's exposure terms, with the pan starting at
 // 0, that is `from + min(travel, 0)` - measured on all three arms of the same run: `reachable` -250 + 40 stays
@@ -633,7 +633,7 @@ it("committed ink stays on the text column in composited pixels: zoom out, scrol
 	// Alan's configuration (Readable line length ON) with Infinite Canvas ON
 	// and OFF, each with its Readable-OFF control. The held zoom-in-from-0.1
 	// leg is asserted by the `fails` arm below, not here.
-	// s179: the two canvas-off arms are retired. A zoom-out, scroll, zoom-in sequence cannot happen
+	// The two canvas-off arms are retired. A zoom-out, scroll, zoom-in sequence cannot happen
 	// with the canvas off any more - the pinch is ignored and the zoom commands read busy.
 	await pixelRegime(true, true);
 	await pixelRegime(false, true);
@@ -669,7 +669,7 @@ it("committed ink stays on the text column at an external scale of 0.8", async (
 // the mark survived it.
 it("committed ink stays in the pane on every frame of a held zoom-in from 10%", async () => {
 	await pixelRegime(true, true, { leg: "held-zoom-in", pauseAt: [2, 7.5] });
-	// s179: the canvas-off arm is retired; a held zoom-in has no canvas-off form now.
+	// The canvas-off arm is retired; a held zoom-in has no canvas-off form now.
 }, 600_000);
 
 // HELD-PINCH COVERAGE, k=0.6: the "in" phase's own ratios array (three lines above the
@@ -681,13 +681,13 @@ it("committed ink stays in the pane on every frame of a held zoom-in from 10%", 
 // pauseAt=[6] lands on k=0.6 exactly - a designed step of the ramp, not an
 // interpolation between the two documented points. Regime: RLL ON
 // (readable=true), IC OFF (infiniteCanvas=false), external 1.0 and 0.8, per
-// the brief's "first pass". READ since (M, REVIEW-HELD-PINCH-receipts.md):
+// the brief's "first pass". READ since (M, the held-pinch review receipts):
 // the run's own record has pinchScaleNow 0.600 at the pause and the fixed
 // tree green. This cell is a STILL hold (no pauseAction): it shows the mark
 // survives a hold at k=0.6, nothing about a resize or stroke during one; the
 // trigger cell below covers that.
 it("committed ink stays in the pane through a held zoom-in at k=0.6, RLL on, IC on, external 1.0 and 0.8", async () => {
-	// s179: this pair ran with the canvas OFF. The mechanism it covers - a mark surviving a held
+	// This pair ran with the canvas OFF. The mechanism it covers - a mark surviving a held
 	// preview at k=0.6, at two external scales - lives under the canvas now, so the arms move
 	// there rather than retiring: canvas off has no held preview at all.
 	await pixelRegime(true, true, { leg: "held-zoom-in", pauseAt: [6] });
@@ -706,7 +706,7 @@ it("committed ink stays in the pane through a held zoom-in at k=0.6, RLL on, IC 
 // (healer-bisect/{fixed,plant}-triggerarms.log) - this cell is read only
 // after that calibration.
 for (const action of ["stroke", "resize"] as const) {
-	// s19: resize loops external 1 only - at 0.8 the fixture's 1 px host
+	// Resize loops external 1 only - at 0.8 the fixture's 1 px host
 	// resize is 0.8 px in the guard's space, under the quiet-window threshold
 	// (resizesPastGuard 0 on both FIXED and PLANT, ruled an instrument limit,
 	// not a source finding). Stroke loops external 1 and 0.8 - the PLANT red
@@ -714,7 +714,7 @@ for (const action of ["stroke", "resize"] as const) {
 	const externals = action === "stroke" ? [1, 0.8] as const : [1] as const;
 	const externalLabel = action === "stroke" ? "external 1.0 and 0.8" : "external 1.0";
 	it(`committed ink stays in the pane through a held zoom-in at k=0.6 with a ${action} during the pause, RLL on, IC on and off, ${externalLabel}`, async () => {
-		// s179: canvas-off arm retired, a held zoom cannot happen with the canvas off.
+		// Canvas-off arm retired, a held zoom cannot happen with the canvas off.
 		for (const infiniteCanvas of [true]) {
 			for (const external of externals) {
 				const r = await pixelRegime(true, infiniteCanvas, { leg: "held-zoom-in", pauseAt: [6], pauseAction: action, external });
@@ -738,7 +738,7 @@ for (const action of ["stroke", "resize"] as const) {
 // (the plugin's own ResizeObserver). Each pause frame records whether it fired
 // (`pause.fired`) and whether the mark survived; the two are read together.
 for (const action of ["stroke", "resize", "font", "watchdog", "host"] as const) it(`committed ink stays in the pane through a held zoom-in from 10% with a ${action} during the pauses`, async () => {
-	// s179: canvas-off arm retired, a held zoom cannot happen with the canvas off.
+	// Canvas-off arm retired, a held zoom cannot happen with the canvas off.
 	for (const infiniteCanvas of [true]) {
 		const r = await pixelRegime(true, infiniteCanvas, { leg: "held-zoom-in", pauseAt: [2, 7.5], pauseAction: action });
 		for (const f of r.frames.filter((f: any) => f.pause)) {
@@ -761,13 +761,13 @@ for (const action of ["stroke", "resize", "font", "watchdog", "host"] as const) 
 			if (action === "host") { expect.soft(fired.resizesPastGuard, `${f.label}: the host change never reached handleResize past the guard`).toBeGreaterThanOrEqual(1); expect.soft(fired.heldAfter, `${f.label}: the host change ended the hold`).toBe(true); expect.soft(fired.camChanged || fired.backingChanged, `${f.label}: the basis changed under the hold`).toBe(false); }
 			if (action === "watchdog") { expect.soft(fired.heldAfter, `${f.label}: the watchdog left the hold on`).toBe(false); expect.soft(fired.camChanged, `${f.label}: the watchdog did not settle (camera unchanged)`).toBe(true); }
 
-			// THE MARK MUST NOT LEAVE THE FINGERS ON THE FIRST PREVIEW FRAME (s73/s74). A hold starts by
+			// THE MARK MUST NOT LEAVE THE FINGERS ON THE FIRST PREVIEW FRAME. A hold starts by
 			// re-laying the column under the gesture; whatever that costs, the frame that does it must pay
 			// it, so the point under the fingers is where it was at the settle. This asserts the SCREEN and
 			// nothing else - no pan value, no margin value, no mechanism - so it stays true however the
 			// payment is made, or if a later fix removes the need to make one.
 			//
-			// HISTORY, so the number is not lost: before the s72 payment fix the settle left the margin at
+			// HISTORY, so the number is not lost: before the payment fix the settle left the margin at
 			// 5507.03 and the first preview frame dropped it to the 341.25 inset. The IC-off leg paid the
 			// difference as pan (582.80) and its mark held at 1001.53; the IC-on leg paid 0.000 and its mark
 			// moved 656.18 -> 418.73 on frame ONE, while this cell was still green there at off=1.13. Every
@@ -853,7 +853,7 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 	for (const zoomTo of [0.25, 2])
 		for (const top of [0, 2000])
 			for (const readable of [true, false])
-				// s179 (Alan, 2026-09-20): the canvas-off half of this sweep is retired. The note zoom
+				// Alan, 2026-09-20: the canvas-off half of this sweep is retired. The note zoom
 				// exists only under the Infinite Canvas now, so "a pinch holds the note under the focal
 				// point with the canvas off" is a claim about a gesture the product ignores. The refusal
 				// is pinned once for this rig in ZoomFreezeTouch.test.ts.
@@ -917,10 +917,10 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 		).toBeLessThanOrEqual(tol);
 	}
 
-	// RETIRED BY s179. The block here asserted that a settle with the canvas OFF comes to rest
+	// RETIRED BY the ruling. The block here asserted that a settle with the canvas OFF comes to rest
 	// centred on the page's content box rather than on its text column. That rest is the canvas-off
 	// settle law, and there is no canvas-off zoom to settle any more. Under the canvas the law is
-	// s78/s97: the page stays where the fingers left it, no centring and no fit window, which the
+	// the page stays where the fingers left it, no centring and no fit window, which the
 	// settle assertions below state for the arms that remain.
 
 	for (const { label, r } of results) {
@@ -949,7 +949,7 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 			`${label}: the zoom left the focal point behind on ${r.previewOffFrames} PREVIEW frames, by up to ` +
 				`${r.maxPreviewOff.toFixed(2)}px. Frames: ${JSON.stringify(r.focalFrames.filter((f: any) => f.phase.startsWith("k=")).map((f: any) => [f.phase, f.offX]))}`
 		).toBe(0);
-		// THE SETTLE LANDS ON ITS NATURAL REST, AND OWES ONLY THE REMAINDER IT CANNOT REACH (s79(1)(b)).
+		// THE SETTLE LANDS ON ITS NATURAL REST, AND OWES ONLY THE REMAINDER IT CANNOT REACH.
 		// The bound here used to be `offFrames <= (readable && !restSettle ? 0 : offFrames)`, which is
 		// x <= x wherever readable is false or restSettle is true - 8 of these 16 arms, including the two
 		// that settle 267.656px off and the four that settle 785.999px off. On the other 8 it demanded a
@@ -967,8 +967,8 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 		// arms, where the settled frame reports maxScrollLeft 0 or 692 while the page plainly held: with
 		// Infinite Canvas off the hold rides the pan, not the scroller's extent.
 		// Hoisted out of the block below so the IC close-law re-pin at :992 can read the same `owed` this
-		// settle-law assertion computed, instead of asking the pre-s79 "did it land exactly on the focal
-		// point" question that s85 add.2(1) retired here.
+		// settle-law assertion computed, instead of asking the earlier "did it land exactly on the focal
+		// point" question that the ruling retired here.
 		let owed = 0;
 		{
 			const preview = r.focalFrames.filter((f: any) => f.phase.startsWith("k="));
@@ -982,27 +982,27 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 				? Math.max(0, (arrived.fit.viewportX - r.w0 * eff) / 2)
 				: (r.columnLeftAtStart - arrived.paneLeft) * eff);
 			const target = natural - lift.markerLeft; owed = Math.min(target, 0);
-			// s97 add. 67, test-only: OLD LAW. This asked the settle to rest on the focal point, with no
-			// term for add. 52 line 4's bounce back. Traced on the RLL-on IC-off top=0 k->2 arm: the page
+			// Test-only: OLD LAW. This asked the settle to rest on the focal point, with no
+			// term for the ruling's bounce back. Traced on the RLL-on IC-off top=0 k->2 arm: the page
 			// hangs 365.625 px where its room allows 26 (floorX -26), the settle clamps rawX -365.625 to
 			// cx -26 and the ease closes exactly rawX - cx = 339.625, landing the page ON ITS FLOOR. So
 			// the rest is the bound applied to what the focal hold wanted, which the cell now derives
 			// from the overlay's own floor instead of pinning a constant.
-			// THE REST IS WHAT THE BOUND LEFT, and nothing else: the page comes to rest where add. 52 line
+			// THE REST IS WHAT THE BOUND LEFT, and nothing else: the page comes to rest where the line
 			// 4 put it, so the marker sits exactly minus what the bound took off the pan. Measured on both
 			// arms this covers: k->2, rawX -365.625 clamped to cx -26 on floorX -26, took -339.625, rest
 			// +339.625; k->0.25, took +267.656, rest -267.656. The old row asked for the focal point with
-			// no bounce term at all, which is add. 47 without add. 52.
+			// no bounce term at all, which is the bounce-back rule without its ease.
 			const floorX = r.bound ? r.bound.floorX : 0;
 			const took = r.bound ? r.bound.rawX - r.bound.cx : 0;
 			// Infinite Canvas ON keeps 3578f29e's own settle, where the rest is the owed scroll and the
 			// bound takes nothing (measured: k->0.25 IC on, took 0.000, rest -786.094 against owed
-			// -786.098). Infinite Canvas OFF is add. 52 line 4's bounce, where the rest is exactly what
+			// -786.098). Infinite Canvas OFF is the ruling's bounce, where the rest is exactly what
 			// the bound left.
 			// Where the bound took nothing, the rest is the owed scroll, 3578f29e's own law and still the
 			// law with Infinite Canvas on (k->0.25 IC on: took 0.000, rest -786.094 against owed -786.098;
 			// RLL off IC off: took 0.000, rest -786.00 against owed -786.090). Where it took something,
-			// add. 52 line 4 eased the page onto the bound and the rest is exactly what the bound left
+			// The ruling eased the page onto the bound and the rest is exactly what the bound left
 			// (k->2: took -339.625, rest +339.625; k->0.25 RLL on: took +267.656, rest -267.656).
 			const restLaw = Math.abs(took) > 1e-6 ? -took : owed;
 			expect(
@@ -1017,14 +1017,14 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 			// and the Y JUMP by the close law below; this is the arrived frame itself. 16/16, worst 0.035px.
 			expect(Math.abs(r.settleOffY!), `${label}: the settle came to rest ${r.settleOffY}px off vertically`).toBeLessThanOrEqual(1);
 		}
-		// NOTHING MOVES AFTER THE LIFT, under Infinite Canvas (s78). The commit is where the gesture
+		// NOTHING MOVES AFTER THE LIFT, under Infinite Canvas. The commit is where the gesture
 		// ends: the arrived sample must stand where the committed frame stood, so a centring ease after
 		// the fingers are up is a failure and not a settle. Read as a DELTA between the two frames, so
 		// it says "did not move" rather than "landed at a number".
 		if (r.plant === "pinchFocalIC") {
-			// s189 (Alan 2026-09-21, the slide is in 1.4.20): `post1` is 14 frames after the lift, inside the 500 ms ease that
+			// Alan 2026-09-21, the slide is in 1.4.20: `post1` is 14 frames after the lift, inside the 500 ms ease that
 			// now carries the settle's own close under the canvas (measured: -22.70 px between post1 and the rest on top=0
-			// k->0.25, the same close that used to land in the lift's frame). What s78 forbids is unchanged: a move that is NOT
+			// k->0.25, the same close that used to land in the lift's frame). What the ruling forbids is unchanged: a move that is NOT
 			// the settle's close - a centring ease. The rest law above pins where the ease may end; this pins that nothing
 			// moves once it has ended, read from `post2` (14 frames + 400 ms after the lift, past the ease).
 			const post = r.focalFrames.find((f: any) => f.phase === "post2"), arrived = r.focalFrames.find((f: any) => f.phase === "settle");
@@ -1039,8 +1039,8 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 		// and `settleRestMissX` measures the COLUMN's centre - the wrong box once ink reaches past it,
 		// which the content-box assertion above asserts properly.
 		if (r.plant === "pinchFocalIC") {
-			// s85 add.2(1): the close law owes the settle law's own remainder, not a landing exactly on the
-			// focal point - that pre-s79 question is what the retired `toBe(false)` form was still asking.
+			// The ruling: the close law owes the settle law's own remainder, not a landing exactly on the
+			// focal point - that the earlier question is what the retired `toBe(false)` form was still asking.
 			const delta = r.settleOffX! - owed;
 			expect(
 				Math.abs(delta) <= 1 && Math.abs(r.settleOffY!) <= 1,
@@ -1053,11 +1053,11 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 		// a centred column that fits settles on its rest: that
 		// move is the rest's, carried by the bounce, and endsOff above reads it.
 		// B - the committed frame stands where the last preview frame stood - is INFINITE CANVAS's
-		// contract (s78). With the setting off the settle is supposed to move: a page that fits returns
+		// contract. With the setting off the settle is supposed to move: a page that fits returns
 		// to its centred rest, one that does not lands where the no-room law puts it, and both are
 		// asserted by their own regime above rather than by forbidding the movement here.
-		// THE X JUMP IS THE CLOSE, NOT A FAILED STAND, the same s85 add.2(1) re-pin as the Y sibling
-		// below: `|settleJumpX| <= 1` was the pre-s79 stand read at the commit instant; the close it
+		// THE X JUMP IS THE CLOSE, NOT A FAILED STAND, the same re-pin as the Y sibling
+		// below: `|settleJumpX| <= 1` was the earlier stand read at the commit instant; the close it
 		// owes is the same remainder the settle law above computed (`owed`), not zero.
 		if (r.plant === "pinchFocalIC") {
 			const deltaX = r.settleJumpX! - owed;
@@ -1067,8 +1067,8 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 					`delta ${deltaX.toFixed(3)}; under Infinite Canvas it stays where the fingers left it`
 			).toBe(true);
 		}
-		// THE Y JUMP IS THE CLOSE, NOT A FAILED STAND. `|settleJumpY| <= 1` was the pre-s79 stand
-		// read at the commit instant; the same s79(1)(b) law the ZOSP settle carries applies here on
+		// THE Y JUMP IS THE CLOSE, NOT A FAILED STAND. `|settleJumpY| <= 1` was the earlier stand
+		// read at the commit instant; the same law the ZOSP settle carries applies here on
 		// Y. exposureY is exactly -topBoundaryShift (min(0, focalAtTop*r - focal.y)), so the expected
 		// jump -max(exposureY, 0) IS the last preview frame's own topBoundaryShift, recorded per
 		// frame and surfaced as settleJumpYLaw. Measured: top=0 carries -300 and top=2000 carries 0,
@@ -1166,7 +1166,7 @@ for(const mode of ['zoom','traverse','resize','scroll-zoom','scroll-fast','scrol
     expect.soft(row.during.canvas.right,`${mode} ${row.from} contact coverage reaches the pane`).toBeGreaterThanOrEqual(row.during.pane.right-1);
     expect.soft(row.after.canvas.right,`${mode} ${row.from} settled coverage reaches the pane`).toBeGreaterThanOrEqual(row.after.pane.right-1);
     expect.soft(row.after.scroller.right,`${mode} ${row.from} scroller reaches the pane`).toBeGreaterThanOrEqual(row.after.pane.right-1);
-    // Coverage THROUGHOUT the contact (F2-5), from the second move on: the
+    // Coverage THROUGHOUT the contact from the second move on: the
     // first move is the one that lands before the carry frame has run.
     for(const m of row.perMove.slice(1))expect.soft(m.right&&m.bottom,`${mode} ${row.from} coverage at move ${m.move}`).toBe(true);
     if(mode==='far-mark-immediate-font')expect.soft(row.fontZoom,`${mode} really ran at a font zoom`).toBeCloseTo(1.25,2);
@@ -1180,9 +1180,9 @@ for(const mode of ['zoom','traverse','resize','scroll-zoom','scroll-fast','scrol
    expect.soft(row.mappingError,`${mode} ${row.from} physical note mapping`).not.toBeNull();
    expect.soft(row.mappingError,`${mode} ${row.from} physical note mapping`).toBeLessThan(.1);
    expect.soft(row.wet.reduce((n:number,s:any)=>n+s.pixels,0),`${mode} ${row.from} wet endpoint`).toBeGreaterThan(0);
-   // s189 (2) [Architect ruling, 2026-09-21]: TWO READS, BECAUSE THE INK IS GLUED TO THE PAGE AND THE PAGE MAY
+   // 2: TWO READS, BECAUSE THE INK IS GLUED TO THE PAGE AND THE PAGE MAY
    // STILL BE MOVING. An arm that draws within half a second of a lift cancels the settle's ease; the page then
-   // finishes that glide once the pen is up (resumeStrandedPan, s132 and add. 66, the same on both settings) and
+   // finishes that glide once the pen is up (resumeStrandedPan, the ruling, the same on both settings) and
    // carries the stroke with it. The old single read - committed pixels at a fixed screen point after the settle
    // - called that a lost stroke. Measured: 38 committed pixels under the pen at the lift, mappingError 0, and
    // the ink's own box off by exactly the ease remainder afterwards (160.00 scroll-fast, 20.50 scroll-zoom).
@@ -1196,7 +1196,7 @@ for(const mode of ['zoom','traverse','resize','scroll-zoom','scroll-fast','scrol
  }finally{await page.close();}
 });
 
-// s179 (Alan, 2026-09-20): the note zoom exists only under the Infinite Canvas, so a gesture
+// Alan, 2026-09-20: the note zoom exists only under the Infinite Canvas, so a gesture
 // delivered with the canvas off does nothing at all. The canvas-off arms of this sweep would
 // pass on that silence, so they are retired; the refusal is pinned once for this rig in
 // ZoomFreezeTouch.test.ts.
@@ -1220,8 +1220,8 @@ for (const readable of [false,true]) for (const infiniteCanvas of [true]) {
 				if (scenario === "takeover") expect(r.takeoverDelta).toBeGreaterThan(0);
 				// A PREVIEW FRAME IS ASKED THE PREVIEW'S OWN QUESTION. `driftX` measures the marker against a
 				// target the oracle CAPS at the marker's natural unpanned position (scrollColumnAnchorPage.ts:2313,
-				// `Math.min(origin + displacement, natural)`), which is the pre-s79 live edge pin written into the
-				// oracle itself. s79(1)(a) retires that pin: with the fingers down the page follows them past the
+				// `Math.min(origin + displacement, natural)`), which is the earlier live edge pin written into the
+				// oracle itself. The ruling retires that pin: with the fingers down the page follows them past the
 				// margin, so a capped target is the wrong question to ask of a preview sample and the whole of the
 				// reported drift is the cap. Measured on all four cells, every red preview sample: targetX 824.0625
 				// against a focal 1348.125, and 562.0312 against 1371.375 and then 1394.625 - and 1348.125 - 824.0625
@@ -1232,9 +1232,9 @@ for (const readable of [false,true]) for (const infiniteCanvas of [true]) {
 				// oracle's ceiling did. Preview frames take that reading; the settle keeps the capped one, which it
 				// already satisfies at 0 on every post-lift sample.
 				// WHAT THIS NOW COVERS: the zoom-preview focal hold that Family C disclosed as unasserted at
-				// s79 add. 6(iv) - `zoom-out` and `scale-only-out` take no absolute x assertion there because the
+				// The ruling - `zoom-out` and `scale-only-out` take no absolute x assertion there because the
 				// rig cannot express the focal law. These four cells can, and do.
-				// s97 add. 45: THE POST-LIFT SAMPLES ARE A GLIDE, NOT A POSITION. Alan's contract is that the page
+				// THE POST-LIFT SAMPLES ARE A GLIDE, NOT A POSITION. Alan's contract is that the page
 				// is where he left it and that there is ZERO SNAP, so a correction the settle owes is carried by
 				// an ease over OVERSCROLL_BOUNCE_MS instead of landing in the frame of the lift. Every post-lift
 				// phase here - `commit-call`, `settle-sync`, `settle-0` onward - sits inside that glide, so
@@ -1261,7 +1261,7 @@ for (const readable of [false,true]) for (const infiniteCanvas of [true]) {
 				const last = settled.at(-1);
 				if (last) {
 					const [dx, dy] = driftOf(last);
-					// THE LAZY ARM ARRIVES 0.5625 px OUT, AND THAT IS A KNOWN SNAP [s97 add. 36, add. 45]. Where the
+					// THE LAZY ARM ARRIVES 0.5625 px OUT, AND THAT IS A KNOWN SNAP. Where the
 					// preview lags the fingers the bound clamps the settle's target by about half a pixel, and the
 					// bounce will not animate a correction under OVERSCROLL_BOUNCE_MIN_PX, which is 2 - so that half
 					// pixel is written in the frame of the lift and never eased. Measured 0.5625 on y, every run.
@@ -1277,7 +1277,7 @@ for (const readable of [false,true]) for (const infiniteCanvas of [true]) {
 	}
 }
 
-// s179 (Alan, 2026-09-20): the note zoom exists only under the Infinite Canvas, so a gesture
+// Alan, 2026-09-20: the note zoom exists only under the Infinite Canvas, so a gesture
 // delivered with the canvas off does nothing at all. The canvas-off arms of this sweep would
 // pass on that silence, so they are retired; the refusal is pinned once for this rig in
 // ZoomFreezeTouch.test.ts.
@@ -1304,20 +1304,20 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) {
 			// 650 - and read from the fixture's own recorded finger position rather than from that number.
 			const downStart = phase('down-3-start');
 			const downTravel = phase('down-3-650').centroidY - downStart.centroidY;
-			// s112: PAST THE MARGIN BY THE GIVE, then it stops. This arm runs at external 1. See `previewExposure`.
+			// PAST THE MARGIN BY THE GIVE, then it stops. This arm runs at external 1. See `previewExposure`.
 			const wantDown3 = previewExposure(downStart.contentTop, downTravel, 1, infiniteCanvas);
 			expect(Math.abs(phase('down-3-650').contentTop - wantDown3),
 				`repeated pan follows the fingers to the give and stops (travel ${downTravel} -> expected ${wantDown3.toFixed(2)}, measured ${phase('down-3-650').contentTop.toFixed(2)})`).toBeLessThan(.5);
 			expect(phase('down-3-650').textOverlapY, 'no text remains at the vertical bound').toBeGreaterThan(0);
 			// More downward gestures must stop accumulating at the same boundary.
-			// s97 add. 66, test-only, OLD-LAW ROW UNDER A MID-BOUNCE GRAB. Both samples are `-650` PREVIEW
+			// Test-only, OLD-LAW ROW UNDER A MID-BOUNCE GRAB. Both samples are `-650` PREVIEW
 			// frames, and nothing bounds a preview (`bounded = settling && ...`). Since a cancelled ease now
 			// leaves its remainder on the page, a gesture that grabs mid-glide starts further along and its
 			// fingers-down exposure reads that remainder plus its own travel - measured 28.99 and 53.62 px
 			// of difference, and the size moves with how much glide was left when the fingers landed. The
 			// claim that survives is about the TRAVEL: each gesture accumulates the same amount from its own
 			// start. Rest equality across releases is asserted by the arrived rows.
-			// s112: THE CAP BREAKS TWO-GESTURE EQUALITY BY CONSTRUCTION, so the equality row is withdrawn
+			// THE CAP BREAKS TWO-GESTURE EQUALITY BY CONSTRUCTION, so the equality row is withdrawn
 			// and replaced by the law it was standing in for. Two gestures that both run past the give
 			// cannot accumulate the same amount from their own starts: each STOPS at the give from
 			// wherever it began, so their travels differ by exactly the difference in their starts. The
@@ -1328,7 +1328,7 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) {
 			const wantDown2 = previewExposure(down2Start.contentTop, phase('down-2-650').centroidY - down2Start.centroidY, 1, infiniteCanvas);
 			expect(Math.abs(phase('down-2-650').contentTop - wantDown2),
 				`the previous gesture stops at the same give (expected ${wantDown2.toFixed(2)}, measured ${phase('down-2-650').contentTop.toFixed(2)})`).toBeLessThan(.5);
-			// s112: A REVERSAL INSIDE THE GIVE MOVES NOTHING, and the bare -75 here was the old law. Once the
+			// A REVERSAL INSIDE THE GIVE MOVES NOTHING, and the bare -75 here was the old law. Once the
 			// fingers have pushed the page to the give it STOPS; pulling back 75 still asks for a position
 			// beyond the give, so the band returns the same capped value and the page does not move until the
 			// ask comes back inside. Asserted as the difference of the two capped positions rather than as a
@@ -1342,7 +1342,7 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) {
 			// A fresh reverse gesture must move immediately and recover usable space.
 			expect(phase('reverse-575').contentTop - phase('reverse-start').contentTop).toBeCloseTo(-75, 1);
 			expect(phase('reverse-500').contentTop - phase('reverse-start').contentTop).toBeCloseTo(-150, 1);
-			// s97: THE RELEASE DOES NOT MOVE, which is the bound this cell held before the candidate and
+			// THE RELEASE DOES NOT MOVE, which is the bound this cell held before the candidate and
 			// holds again. Its own note above recorded the difference exactly: the older law "said the release
 			// does not move, which held while an ease carried the close over later frames", and the candidate
 			// closed the edge in the frame of the lift instead. Alan's "page is where you leave it" restores
@@ -1352,9 +1352,9 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) {
 				expect(release.outcome).toBe('converged'); expect(release.held).toBe(false);
 				const atLift = phase(`${release.phase}-before-lift`);
 				for (const key of ['syncJump', 'jump'] as const) {
-					// s97 add. 59, test-only. `syncJump` is the LIFT instant and stays 0 with Infinite Canvas
-					// off: the commit frame paints the last preview's position (add. 47). `jump` is read at
-					// the ARRIVED sample, after the ease, and under add. 52 line 4 the page eases back until
+					// Test-only. `syncJump` is the LIFT instant and stays 0 with Infinite Canvas
+					// off: the commit frame paints the last preview's position. `jump` is read at
+					// the ARRIVED sample, after the ease, and under the ruling the page eases back until
 					// no blank stands beside it - so it closes the blank the lift left, which is the same
 					// quantity the Infinite-Canvas branch already expected. Expecting 0 there was the old
 					// "page is where you leave it" law: measured -200.00 against 200.00 at the lift, and
@@ -1385,8 +1385,8 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) for (
 			const rowAt = (name: string) => r.rows.find((s: any) => s.phase === name);
 			// THE SAME THREE LAWS THE LEFT/TOP BOUNDS CELLS TAKE, on this arm's own axis. What they replace
 			// is the one-sided `exposure < .5` on every row, plus a second copy of it one scope up on four
-			// named phases - the pre-s79 live edge pin, which says the top margin is never exposed. With the
-			// fingers down the page follows them past it (s79(1)(a)), so the exposure IS the travel; at the
+			// named phases - the earlier live edge pin, which says the top margin is never exposed. With the
+			// fingers down the page follows them past it, so the exposure IS the travel; at the
 			// lift the edge closes in that same frame; and the arrival sits at the closed position.
 			// Every term comes from the run's own rows: this rig records the fingers' own centroid beside
 			// each sample, and the gesture-begin rows the laws are read against.
@@ -1404,7 +1404,7 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) for (
 				const b = beginOf(row.phase);
 				if (b && Math.abs(row.scale - b.scale) < 1e-9) {
 					const travel = row.centroidY - b.centroidY;
-					// s112: 1:1 UP TO THE GIVE, then it stops. See `previewExposure`.
+					// 1:1 UP TO THE GIVE, then it stops. See `previewExposure`.
 					const want1to1 = previewExposure(b.exposure, travel, external, infiniteCanvas);
 					expect.soft(Math.abs(row.exposure - want1to1),
 						`${row.phase}: a preview follows the fingers to the give and stops ` +
@@ -1414,22 +1414,22 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) for (
 				if (/-(lift|arrived)$/.test(row.phase)) {
 					const bl = rowAt(row.phase.replace(/-(lift|arrived)$/, '-before-lift'));
 					const b0 = rowAt(row.phase.replace(/-(lift|arrived)$/, '-begin'));
-					// s112: where it is derived rather than sampled, it takes the same cap the preview took.
+					// Where it is derived rather than sampled, it takes the same cap the preview took.
 					const live = bl ? bl.exposure
 						: b0 ? previewExposure(b0.exposure, row.centroidY - b0.centroidY, external, infiniteCanvas) : null;
-					// s97 add. 58, rewritten test-only to add. 47 + add. 52 line 4: the LIFT row holds the
+					// Rewritten test-only to the rulings: the LIFT row holds the
 					// exposure the fingers left (zero snap - the commit frame paints the last preview's
 					// position), and the ARRIVED row, after the ease, is the closed one. Asserting the
-					// closed position at the lift is the old law: it demands the jump add. 47 forbids.
-					// IC OFF ONLY: add. 54 keeps Infinite Canvas ON on 3578f29e's path, where the bound's
+					// closed position at the lift is the old law: it demands the jump the ruling forbids.
+					// IC OFF ONLY: the ruling keeps Infinite Canvas ON on 3578f29e's path, where the bound's
 					// share eases from the commit and the exposure is already closed at the lift.
-					// s97 add. 59: NOT the pending arm. It coalesces its two moves with no frame between
+					// NOT the pending arm. It coalesces its two moves with no frame between
 					// them and takes its lift sample in the same task as endPinch, so it has no
 					// `-before-lift` frame for the commit to paint and its live exposure is derived, not
 					// sampled (the harness says so at `pending-begin`). Measured there: exposure 0 at the
 					// lift against a derived 375. The arrived row still carries the arm's claim.
 					const atLift = /-lift$/.test(row.phase) && !/^pending-/.test(row.phase);
-					// s150 add. 1, the same rule as the two-axis site below: with the canvas on, a give standing at
+					// The same rule as the two-axis site below: with the canvas on, a give standing at
 					// the lift (a positive pan) is released and the exposure it stood on closes the whole way.
 					const liftPanY = bl ? (bl as any).panY : null;
 					const gaveOnY = infiniteCanvas && typeof liftPanY === 'number' && liftPanY > .5;
@@ -1440,7 +1440,7 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) for (
 						`measured ${row.exposure.toFixed(2)})`).toBeLessThan(.5);
 					continue;
 				}
-				// `-settled` is read mid-glide and takes no absolute assertion (s75 add. 1); a scale-changing
+				// `-settled` is read mid-glide and takes no absolute assertion; a scale-changing
 				// preview is the focal law, not displacement, and takes none either; a true rest keeps the
 				// edge bound it already satisfies.
 				if (/^(natural|reachable-start)$/.test(row.phase)) {
@@ -1453,7 +1453,7 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) for (
 			// room below the text exists on a tiny note too and the reverse is
 			// legal at every size. The top edge itself is still pinned, by the
 			// exposure checks above.
-			// s112: A REVERSAL INSIDE THE GIVE MOVES ONLY WHAT THE GIVE ALLOWS, and the bare -75 was the old
+			// A REVERSAL INSIDE THE GIVE MOVES ONLY WHAT THE GIVE ALLOWS, and the bare -75 was the old
 			// law. Once the fingers have pushed the page to the give it STOPS, so pulling back 75 may still
 			// be asking for a position beyond the give, and the page does not move until the ask comes back
 			// inside. Asserted as the difference of two capped positions rather than as a constant, so the
@@ -1463,16 +1463,16 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) for (
 			const wantRevTop = revCap('reverse-75') - revCap('repeat-2-650');
 			expect(phase('reverse-75').top - phase('repeat-2-650').top,
 				`boundary reversal moves only what the give allows (expected ${wantRevTop.toFixed(2)})`).toBeCloseTo(wantRevTop, 1);
-			// s79(4)(c) in the candidate's shape: the release moves by exactly the exposure that stood at
+			// The ruling in the candidate's shape: the release moves by exactly the exposure that stood at
 			// the lift, because the close lands in that frame rather than over an ease.
 			for (const release of r.releases) {
 				expect(release.held).toBe(false);
-				// s97, as above: the lift holds and the ease closes the exposure over the frames after it.
+				// As above: the lift holds and the ease closes the exposure over the frames after it.
 				const atLift = rowAt(`${release.phase}-before-lift`);
 				for (const key of ['syncJump', 'jump'] as const) {
-					// s97 add. 59, test-only, same split as the site above: the lift instant holds (add. 47),
-					// the arrived sample has eased the blank away (add. 52 line 4).
-					// s150 add. 1, the same rule as the three sites above: a give standing at the lift comes home in
+					// Test-only, same split as the site above: the lift instant holds,
+					// the arrived sample has eased the blank away.
+					// The same rule as the three sites above: a give standing at the lift comes home in
 					// full, whatever the sign of the exposure it stood on. Measured on this cell's own probe rows
 					// (`top boundary preserves natural margin: RLL=false IC=true tiny=false external=1`): panY runs
 					// 0 -> 40 -> 96 across the drag, stopping at the give, with exposure -250 -> -210 -> -154, and
@@ -1491,7 +1491,7 @@ for (const readable of [false, true]) for (const infiniteCanvas of [true]) for (
 			// the left/top bounds cells: it encoded the live edge pin plus the -75 that arm used to show at
 			// the lift, the sample is read mid-ease, and the settle law computes the closed position from
 			// the arm's own begin row instead. The row loop above asserts it at `pending-arrived`.
-			// s150 add. 1: `reachableDelta` is `after.top - before.top`, the page's own travel across the drag.
+			// `reachableDelta` is `after.top - before.top`, the page's own travel across the drag.
 			// With the canvas OFF the plain bound pins a page that fits, so that travel is 0 - measured on this
 			// cell's probe rows, pan 0 and exposure parked at its -250 margin on every row of the arm. The 40 px
 			// is what the give used to buy, and it is the canvas's now.
@@ -1510,7 +1510,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			expect(r.naturalLeft).toBeGreaterThanOrEqual((tiny ? 12 : readable ? 300 : 0) * external - .1);
 			expect(r.naturalInset).toBeGreaterThanOrEqual(68 * external - .1);
 			expect(r.inkUnchanged).toBe(true);
-			// THE FITTING REGIME IS CENTRED (a000a659's own cells, s67(3)/(6), s75). Where the page fits, its
+			// THE FITTING REGIME IS CENTRED (a000a659's own cells, the ruling). Where the page fits, its
 			// rest IS the centred rest and the blank beside it is that rest - not a bug - a drag is PERMITTED,
 			// and the settle returns it. These cells were written under the PRE-centring law and pinned the
 			// exposure near zero, so they reddened when the law changed rather than when behaviour broke.
@@ -1524,7 +1524,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			// IS the 0.2527. So the offset was the wrong span term, the tolerance is back to 0.5, and nothing
 			// here needs slack to pass.
 			// PRODUCTION'S OWN FITS PREDICATE, COMPUTED HERE FROM MEASURED GEOMETRY - never by calling production
-			// (s75 add.10). InkOverlay.ts:6499-6501 at a6af159f, with PAN_FIT_SLACK_PX = 1 from :118:
+			//. InkOverlay.ts:6499-6501 at a6af159f, with PAN_FIT_SLACK_PX = 1 from :118:
 			//     width = max(columnBox, inkExtent * fontZoom) * effective
 			//     span  = paneWidth * externalScale - gutterX
 			//     fits  = columnInset && width > 0 && width <= span + 1
@@ -1540,33 +1540,33 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			// own predicate with span 1383.005365 and PAN_FIT_SLACK_PX = 1 they DISAGREE for k in (0.131860, 0.135628]
 			// - 13.19% to 13.56% zoom, above the 10% floor and reachable by hand. Nothing here samples inside it, so
 			// agreement between the two terms is OBSERVED AT THE SCALES TRIED, never proven about the values. Do not
-			// cite it as "the conflation is harmless". Endpoints are the Reviewer re-derivation from the predicate;
-			// an earlier Engineer pair (k<=0.131765, k<=0.135530) differs in the fourth decimal and is superseded, not
-			// contradicted - same 0.0038-wide window. s80: Architect ruled no synthetic boundary cell is owed, because
+			// cite it as "the conflation is harmless". Endpoints are a review re-derivation from the predicate;
+			// an earlier review pair (k<=0.131765, k<=0.135530) differs in the fourth decimal and is superseded, not
+			// contradicted - same 0.0038-wide window. Review ruled no synthetic boundary cell is owed, because
 			// a 0.0038-wide window buys provenance rather than release safety. This line is the record instead.
 			//
 			// (2) THE SCROLL TWIN IS UNTESTED HERE, AND THAT IS A FINDING ABOUT 64c09387, MEASURED NOT GUESSED.
 			// ownLinesPageBoxScrollLeft:6472 carries a BYTE-IDENTICAL copy of the width expression above. Removing the
-			// ink term from it (DROP_INK_TERM/SCROLL, s75-dropink-0917T064652Z) reddened NOTHING on all sixteen arms,
+			// ink term from it (DROP_INK_TERM/SCROLL) reddened NOTHING on all sixteen arms,
 			// while the same removal at columnRestCentred:6499 reddened ten. A green plant has three causes and the
-			// plant alone cannot separate them, so s80-scrollcanary-0917T065111Z put a throw at three depths, with a
+			// plant alone cannot separate them, so a canary run put a throw at three depths, with a
 			// throw in columnRestCentred as the positive control: CONTROL red 18/18 (throws do propagate), ENTRY red
 			// 18/18 (the function IS called on every arm), GATE green (the width line is never reached - an early
 			// return at :6470 fires first), DEEP green. So the scroll-side ink term is NOT exercised by this cell set:
 			// UNTESTED, not decorative. The re-pin at that site is unproven here and must not be described as green.
-			// THE GUARD IS NAMED, MEASURED not inferred (s80 add.1, s80-guardname-0917T065805Z): splitting the
+			// THE GUARD IS NAMED, MEASURED not inferred: splitting the
 			// four-term guard at :6470 into four throws reddened exactly ONE name on all eighteen arms,
 			// GUARD_6470_ownLines. So `layout.ownLines` is falsy here and the function bails one line above the
 			// width expression on every arm. The other three terms (!layout, !(effective > 0), !isFinite(left))
 			// never fire. Recorded because a guess had picked the same term before the run - the term is in this
 			// record on the strength of the run, not the guess. Whether ownLines being off on all eighteen arms is
 			// a property of this fixture rather than of production is NOT established here, and 1.4.20 does not owe
-			// a cell for it: unproven and disclosed is the ruled state (Architect, s80 add.1 (2)).
+			// a cell for it: unproven and disclosed is the ruled state (review).
 			const fitsAt = (row: any) => {
 				const g = row.g;
 				if (!g || !g.columnInset || infiniteCanvas) return null;
 				const effective = g.externalScale * row.scale;
-				// INK TERM FROM THE FIXTURE'S OWN GEOMETRY (s75 add.15(3)): `inkOnlyX` is inkFrontier over the
+				// INK TERM FROM THE FIXTURE'S OWN GEOMETRY: `inkOnlyX` is inkFrontier over the
 				// strokes THIS FIXTURE drew. Production's own term is `surfaceExtents.get(path).x`, which is
 				// max(inkX, zoom.x, scroll.x) at InkOverlay.ts:9846-9848. Deriving this side from that field
 				// would be checking production against itself, so the predicate uses ink alone and the
@@ -1576,7 +1576,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 				// between `inkOnlyX` and `conflatedX` on these fixtures is CHUNK QUANTISATION, not the zoom or
 				// scroll terms: SurfaceExtent.ts:28/30 set EXTENT_CHUNK = EXTENT_HEADROOM = 256 and `grownAxis`
 				// (:129) stores ceil((ink + 256) / 256) * 256. Measured exact on two independent fixtures -
-				// 10204.4 -> 10496 here, 10208 -> 10496 on the Builder's - so the gap is always in [256, 512).
+				// 10204.4 -> 10496 here, 10208 -> 10496 on the - so the gap is always in [256, 512).
 				// Both earlier theories (granted room; zoom.x) were retracted on measurement. It matters
 				// because the quantised value moves in 256 px steps: this fixture's frontier sits only ~35.6 px
 				// below the 10240 block edge, so a small change to the seeded ink jumps the grant to 10752 and
@@ -1595,7 +1595,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			// widened its tolerance to 1.0 to absorb. Measured against Family A's known-good rest: the content-box
 			// span is out by 0.2530, production's span by 0.0003. So this asserts at 0.5 and needs no slack.
 			// `naturalLeft` IS A ONCE-CAPTURED BASELINE AND THAT IS CORRECT HERE, stated rather than left implicit
-			// (Reviewer, 2026-09-17). It is not a per-phase geometry term at all: it is the fixture's definition of
+			// (review, 2026-09-17). It is not a per-phase geometry term at all: it is the fixture's definition of
 			// the zero point for exposureX, and the rig subtracts the SAME `naturalLeft * pinchScaleNow` when it
 			// builds `expectedLeft`. So in every assertion below the term appears on both sides and CANCELS:
 			//     exposureX - rest = (left - domLeft - naturalLeft*s) - ((span - width)/2 - naturalLeft*s)
@@ -1611,7 +1611,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			// `-settled` is 8 frames into a ~500 ms glide (three identical repeats measured 787.38 / 869.06 /
 			// 838.65) and `natural` / `zoom-out*` converge 655.05 -> 675.81 -> 689.50. A glide sample gets NO
 			// absolute assertion - pinning one is how this cell went stale in the first place.
-			// THE EXPOSURE LAW, replacing a bare-displacement pin (s79(4)). The pin this replaces read a live
+			// THE EXPOSURE LAW, replacing a bare-displacement pin. The pin this replaces read a live
 			// sample as `rest + (finger position - 200)`, which silently assumes two things: that the gesture
 			// starts AT the centred rest, and that every gesture starts at centroid 200. Neither is a property
 			// of the design; both happen to be true of the repeat arms, which is why the old pin was green.
@@ -1652,13 +1652,13 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			// `--handwriting-column-margin-left` (applyViewportBox), which is `columnRestCentred` when a page
 			// fits and the natural `columnLocal` fallback when it does not. Two independently derived answers
 			// to one question: mine from the fixture's own planted ink, production's from its own field.
-			// WHY THIS EXISTS: add.10 requires the cell to recompute production's formula rather than call it,
+			// WHY THIS EXISTS: a later ruling requires the cell to recompute production's formula rather than call it,
 			// which means any production change to that formula silently desynchronises this cell - it keeps
 			// passing while testing something else. This assertion turns that silence into a failure. It is
 			// EXPECTED to fire if production's ink term and the fixture's ever disagree on these arms; that is
 			// the bug being detected, and the fix is not to relax this.
 			// HOW INDEPENDENT THIS ACTUALLY IS - ASYMMETRIC, and the comment above overstates it if read alone
-			// (disclosure added 2026-09-17, Reviewer F2 on 64c09387; accepted as written, no assertion relaxed).
+			// (disclosure added 2026-09-17, review on 64c09387; accepted as written, no assertion relaxed).
 			// On the FITTING branch `mine` is computed here from the fixture's own planted ink, so magnitude and
 			// verdict are both independent of production. On the NON-FITTING branch `mine` falls back to
 			// `g.columnLocal` - production's OWN field - so the magnitude is production compared against itself
@@ -1674,10 +1674,10 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 				// natural fallback. Comparing a margin against a computed rest during a drag compares two different
 				// quantities. The first cut of this assertion did exactly that and fired on 13 phases - every one of
 				// them mid-gesture (-350/-500/-650/-before-lift/reverse-75) and not one of them at rest, which is
-				// what identified the mistake as mine rather than production's. Same rule as add.1 for positions:
+				// what identified the mistake as mine rather than production's. Same rule as the ruling for positions:
 				// only a sample that IS a position gets an absolute assertion.
 				if (!(row.phase === 'natural' || /(^|-)start$/.test(row.phase) || /-arrived$/.test(row.phase))) continue;
-				// s121: THE FITS BRANCH IS GONE WITH THE CENTRED REST. This computed the centring itself -
+				// THE FITS BRANCH IS GONE WITH THE CENTRED REST. This computed the centring itself -
 				// (span - width) / 2 - and checked production wrote the same. On Alan's word ("I don't want it
 				// to center anywhere") the plugin adds no centring at any zoom, so the margin production writes
 				// is Obsidian's own column inset and nothing else. `fitsAt` is still read for the message,
@@ -1690,26 +1690,26 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 					`production's conflated extent ${g.conflatedX}, columnBox ${g.columnBox}, span ${(g.layoutWidth * g.externalScale - g.gutterScreen).toFixed(2)}`).toBeLessThan(1);
 			}
 			for (const row of r.rows) {
-				// THE ONE-SIDED Y BOUND IS RETIRED BY s79(4)(f), not dropped. It said the top margin is
+				// THE ONE-SIDED Y BOUND IS RETIRED BY the ruling, not dropped. It said the top margin is
 				// never exposed, which was only ever true because an edge cap ran on every preview frame
 				// and pinned y - the branch regression 48c53add removes. Y now takes the same laws as x
 				// below: the fingers' travel while they are down, B at the lift, the closed position on
 				// arrival. That is strictly stronger than "did not move", and keeping both would fail
 				// every corner arm by construction.
 				const f = fitsAt(row);
-				// NOT FITTING -> THE BOUNDS LAW (s67(3), s75 add.10): no centred rest exists at this scale, the
+				// NOT FITTING -> THE BOUNDS LAW: no centred rest exists at this scale, the
 				// column sits at its natural margin and scroll pays where range exists. Its original one-sided
 				// bound, unchanged.
 				if (!f) {
-					// s79(4)(a)-(c) ON THE NON-FITTING BRANCH. Everything below replaces the pre-s79
+					// The ruling ON THE NON-FITTING BRANCH. Everything below replaces the earlier
 					// one-sided `exposureX < .5`, which asserted that the left margin is NEVER exposed.
-					// s79(1)(a) makes a preview exposure LAWFUL - fingers down is unbounded by any edge -
+					// The ruling makes a preview exposure LAWFUL - fingers down is unbounded by any edge -
 					// so that bound was asserting the opposite of the ruled design on every preview row,
 					// and the 18 Family C reds were it firing on lawful behaviour.
 					//
 					// EVERY TERM COMES FROM THE RUN'S OWN ROWS. Nothing measured is pasted in. The two
 					// laws below were each checked against all 356 same-scale live rows of the recorded
-					// run (s79-4-rows-d83ae98e.json) before being written: the drag law holds on 344 of
+					// run before being written: the drag law holds on 344 of
 					// 344 live rows (the 12 apparent misses are all `reachable-start`, which is a REST
 					// row sampled before the gesture begins and is excluded here), and the settle law
 					// reproduces every `-lift`, `-settled` and `-arrived` sample exactly.
@@ -1720,7 +1720,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 						// arms - its begin row sits at -250 (ext 1) / -312.5 (ext 1.25) because
 						// commitCameraScale(.5, { left: 500 }) put the committed scroll there, and the
 						// same +450 of travel then lands at +200 / +137.5, not at +450.
-						// s79(4)(f): THE Y AXIS IS IDENTICAL AND NOW TESTED. `naturalTop` is the edge on y
+						// The ruling: THE Y AXIS IS IDENTICAL AND NOW TESTED. `naturalTop` is the edge on y
 						// exactly as `naturalLeft` is on x, and since 48c53add the page follows the fingers
 						// on both: measured on the corner arms, exposureY tracks exposureX to the digit
 						// (450.000 / 375.000 / 200.000 off a begin row at -250.000). Before that commit y
@@ -1732,7 +1732,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 						] as [string, number, number][]) {
 							const travel = centroid - (ax === 'left' ? b.centroidX : b.centroidY);
 							const from = ax === 'left' ? b.exposureX : b.exposure;
-							// s112: 1:1 UP TO THE GIVE on this axis, then it stops. See `previewExposure`.
+							// 1:1 UP TO THE GIVE on this axis, then it stops. See `previewExposure`.
 							const wantAx = previewExposure(from, travel, external, infiniteCanvas);
 							expect.soft(Math.abs(exposure - wantAx),
 								`${row.phase}: a preview follows the fingers to the give and stops, ${ax} ` +
@@ -1747,7 +1747,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 						// 200 that never returned and a 677 that over-returns.
 						const bl = rowAt(row.phase.replace(/-(lift|settled|arrived)$/, '-before-lift'));
 						// WHERE THERE IS NO `-before-lift` ROW, DERIVE THE EXPOSURE THAT STOOD AT THE LIFT
-						// RATHER THAN SKIP THE ROW (s79 add. 6(i)). The `pending-*` arm coalesces its two
+						// RATHER THAN SKIP THE ROW. The `pending-*` arm coalesces its two
 						// moves with no frame between them, so it has no live sample at all - adding one
 						// would destroy the condition it exists to test. Its live exposure is still fully
 						// determined by the fixture's own inputs: law (a) at the last centroid it fed the
@@ -1756,12 +1756,12 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 						// `-75` constant here encoded the live edge pin and the pending -75 at lift, not
 						// a settle law, and it is withdrawn.
 						const b0 = rowAt(row.phase.replace(/-(lift|settled|arrived)$/, '-begin'));
-						// s112: the derived branch takes the same cap the preview took, per axis.
+						// The derived branch takes the same cap the preview took, per axis.
 						const liveOf = (ax: 'left' | 'top') => bl ? (ax === 'left' ? bl.exposureX : bl.exposure)
 							: b0 ? previewExposure(ax === 'left' ? b0.exposureX : b0.exposure,
 								ax === 'left' ? (row as any).centroidX - b0.centroidX : (row as any).centroidY - b0.centroidY,
 								external, infiniteCanvas) : null;
-						// WHICH SAMPLE TAKES WHICH LAW, and it is the s75 add. 1 rule, not a convenience.
+						// WHICH SAMPLE TAKES WHICH LAW, and it is the rule, not a convenience.
 						// `-lift` is B: the frame the fingers left, before any ease has run. It must still
 						// carry the whole exposure - that is what "the page stays where the fingers left
 						// it" means, and it is the same statement as the `syncJump` bound below.
@@ -1781,10 +1781,10 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 						// sample is read the exposure is already closed. `-lift` therefore takes the SAME
 						// law as `-arrived` - the closed position and no further - and the Infinite-Canvas
 						// scoping that distinguished them is retired with the ease that justified it.
-						// s97 add. 58: the lift/arrived split is BACK, for add. 47. The comment above retired
-						// it with the ease that justified it; add. 52 line 4 brings that ease back, so the
+						// The lift/arrived split is BACK, for the ruling. The comment above retired
+						// it with the ease that justified it; the ruling brings that ease back, so the
 						// lift row holds what the fingers left and only the arrived row is closed.
-						// s97 add. 59: the pending arm has no lift frame to hold - it coalesces its moves and
+						// The pending arm has no lift frame to hold - it coalesces its moves and
 						// samples the lift in the same task as endPinch - so it is exempt here too.
 						const settledRow = /-(arrived|lift)$/.test(row.phase), atLift = /-lift$/.test(row.phase) && !/^pending-/.test(row.phase);
 						if (settledRow || atLift) for (const [ax, exposure] of [
@@ -1792,7 +1792,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 						] as ['left' | 'top', number][]) {
 							const live = liveOf(ax);
 							if (live === null) continue;
-							// s150 add. 1: WITH THE CANVAS ON, A GIVE HELD AT THE LIFT IS RELEASED, so the
+							// WITH THE CANVAS ON, A GIVE HELD AT THE LIFT IS RELEASED, so the
 							// exposure it stood on closes the whole way rather than stopping at 0 from below.
 							// Measured on the probe rows of `natural left/top bounds: left RLL=false IC=true
 							// tiny=false external=1`: `reachable` held pan +96 - the give exactly - with
@@ -1822,7 +1822,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 						// A TRUE REST ROW (`natural`, `reachable-start`): no gesture is live, so the page
 						// IS at its rest and the edge bound is the right question. Kept one-sided and
 						// unchanged. On the four tiny / Infinite-Canvas-off cells this still reads the
-						// s75 add.10 centring (655.05 at `natural`) and stays red: that is s79(4)(e),
+						// the centring (655.05 at `natural`) and stays red: that is the ruling,
 						// which needs a fits verdict this branch does not have, and it is reported rather
 						// than tuned.
 						expect.soft(row.exposureX, `${row.phase}: left exposure at rest`).toBeLessThan(.5);
@@ -1834,11 +1834,11 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 				const begin = isRest ? null : beginOf(row.phase);
 				if (begin && Math.abs((row as any).scale - begin.scale) < 1e-6) {
 					const travel = (row as any).centroidX - begin.centroidX;
-					// s112, REWRITTEN UNDER s121: the ceiling was `rest + give`, where `rest` was the CENTRED
-					// rest - and s121 retired that quantity outright on Alan's word ("I don't want it to center
+					// REWRITTEN UNDER the ruling: the ceiling was `rest + give`, where `rest` was the CENTRED
+					// rest - and the ruling retired that quantity outright on Alan's word ("I don't want it to center
 					// anywhere"). `columnRestPan` is null always now, so the drag band's X ceiling is the same
 					// `0 + give` its Y ceiling always was, and the rest an arm begins at IS its natural place.
-					// Measured at the s121 state: begin exposure -0.01, travel 150/300/450, capped at 95.99 -
+					// Measured at that state: begin exposure -0.01, travel 150/300/450, capped at 95.99 -
 					// the give, from the natural rest. So this row takes the same general law as every other
 					// preview row in this file, and the special case goes with the quantity that justified it.
 					const wantDrag = previewExposure(begin.exposureX, travel, external, infiniteCanvas);
@@ -1847,17 +1847,17 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 						`(begin ${begin.phase} exposure ${begin.exposureX.toFixed(2)} + travel ${travel}, ` +
 						`measured ${(row as any).exposureX.toFixed(2)}, centred rest ${rest.toFixed(2)})`).toBeLessThan(.5);
 				} else if (isRest) {
-					// s97: a fitting page rests WHERE THE FINGERS LEFT IT, bounded. The centred rest is gone with
+					// A fitting page rests WHERE THE FINGERS LEFT IT, bounded. The centred rest is gone with
 					// the settle under Infinite Canvas off, so what is asserted there is the bound itself - no
 					// blank beside the page, exposure at or below zero - rather than a computed centre. With the
 					// setting on the centred rest still stands and is still asserted.
 					if (infiniteCanvas) expect.soft(Math.abs(row.exposureX - rest),
 						`${row.phase}: a fitting page rests centred (computed ${rest.toFixed(2)}, measured ${row.exposureX.toFixed(2)})`).toBeLessThan(.5);
-					// s97 add. 62, test-only. THE BLANK THIS ROW MEANT IS THE PAN'S, NOT THE THEME'S. On the
+					// Test-only. THE BLANK THIS ROW MEANT IS THE PAN'S, NOT THE THEME'S. On the
 					// tiny fixture the column is 16 px wide in a 1398 px pane, so the theme centres it and
 					// leaves 655.05 px of margin - measured with panX 0 and scrollLeft 0 at every rest,
 					// i.e. the page is exactly at its host layout and the overlay carries nothing. Asking
-					// `exposureX` for 0 there asks a 16 px column not to be centred. add. 52's ceiling is
+					// `exposureX` for 0 there asks a 16 px column not to be centred. The ruling's ceiling is
 					// about the pan: at rest the page may not stand right of its own layout, which is
 					// `panX <= 0`, and a fitting page carries no pan at all.
 					else expect.soft(Math.abs(row.panX),
@@ -1874,13 +1874,13 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			// cell-wide `centredRegime`, so one fitting row anywhere silenced this bound on all four named phases.
 			// Each of them answers the fits question at its own scale, and a phase that fits is already asserted
 			// properly by the row loop above (drag delta, or rest at `-start`/`-arrived`).
-			// RETIRED BY s79(4)(a), not deleted quietly. All four of these named phases are PREVIEW rows
+			// RETIRED BY the ruling, not deleted quietly. All four of these named phases are PREVIEW rows
 			// with the fingers down, and this bound said the left margin never moves on them - the
-			// pre-s79 law, asserted a second time one scope up from the row loop. s79(1)(a) makes that
+			// the earlier law, asserted a second time one scope up from the row loop. The ruling makes that
 			// movement lawful and the row loop above now asserts each of them against the fingers' own
 			// travel, which is a strictly stronger statement than "did not move": it pins WHERE the page
 			// went, not merely that it stayed. Keeping both would fail every arm by construction.
-			// s112: A REVERSAL INSIDE THE GIVE MOVES ONLY WHAT THE GIVE ALLOWS, and the bare -75 was the old
+			// A REVERSAL INSIDE THE GIVE MOVES ONLY WHAT THE GIVE ALLOWS, and the bare -75 was the old
 			// law. Once the fingers have pushed the page to the give it STOPS, so pulling back 75 may still
 			// be asking for a position beyond the give, and the page does not move until the ask comes back
 			// inside. Asserted as the difference of two capped positions rather than as a constant, so the
@@ -1904,7 +1904,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 				// drag back to the rest, so `jumpX` measures the design working, not a defect. That the return
 				// LANDS is asserted properly by the `-arrived` sample against the computed rest. Vertical keeps
 				// its bound: nothing centres on y.
-				// PER RELEASE, NOT PER CELL (Reviewer, 2026-09-17). This used the cell-wide `centredRegime`, which is
+				// PER RELEASE, NOT PER CELL (review, 2026-09-17). This used the cell-wide `centredRegime`, which is
 				// `rows.some(fitsAt)` - so ONE fitting row anywhere in the cell dropped the horizontal jump bounds for
 				// EVERY release in it, including releases where the page did not fit at that moment. That is exactly the
 				// single-verdict-across-phases defect this commit's row loop was written to remove, left standing one
@@ -1916,19 +1916,19 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 				// THE Y BOUND HERE IS RETIRED TOO. It read "no release moves vertically at all", which was
 				// true only while y was pinned by the preview-time edge cap. Since 48c53add a release
 				// closes on y exactly as it does on x, and both axes are asserted together below.
-				// s79(4)(c) ON X: the release moves by EXACTLY the closing of the exposure that stood at
+				// The ruling ON X: the release moves by EXACTLY the closing of the exposure that stood at
 				// the lift, -max(exposure_before_lift, 0). The bound this replaces asserted the release
-				// never moves horizontally, which is the same pre-s79 law as the row bound and is false
+				// never moves horizontally, which is the same the earlier law as the row bound and is false
 				// wherever a lawful preview exposure stood at the lift.
 				// BOTH KEYS TAKE IT, and that is a measured finding rather than a convenience: syncJumpX
 				// (the sample immediately after `endPinch`) already equals jumpX (8 frames later) on every
 				// arm of every cell in the recorded run - -200, -450, -450, -375, -137.5, 0, 0 on the
 				// ext 1.25 left cell, and the same equality everywhere else. So on X the exposure is
-				// closed AT the lift, not over the ease. s79(4)(c) reads "syncJump/syncJumpX < 0.5 stay
+				// closed AT the lift, not over the ease. The ruling reads "syncJump/syncJumpX < 0.5 stay
 				// (B at the commit)"; that is true of Y and NOT of X at this head, and the divergence is
 				// reported rather than absorbed by keeping a bound that cannot hold.
 				if (atRelease && !releaseFits) {
-					// s79(4)(c) AS ORIGINALLY WRITTEN, on both axes. B is asserted at the commit instant:
+					// The ruling AS ORIGINALLY WRITTEN, on both axes. B is asserted at the commit instant:
 					// nothing moves on the frame of the lift, because the close is delivered by the ease
 					// that starts there. Since 48c53add that holds on every Infinite-Canvas-on release of
 					// every cell - syncJump and syncJumpX are 0 on 7 of 7 - and `-arrived` reaches the
@@ -1947,26 +1947,26 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 					// SAME SNAP, SAME REASON, elsewhere: this is why NO_BOUNCE reddened nothing on Family
 					// A. A setting-off fitting page reaches its rest by snap, not by ease, so a plant that
 					// refuses the ease had nothing to catch there.
-					// s79(4)(c), SCOPED BY MEASUREMENT RATHER THAN BY SETTING. The bound this replaces said
+					// The ruling, SCOPED BY MEASUREMENT RATHER THAN BY SETTING. The bound this replaces said
 					// nothing moves on the frame of the lift, because an ease carried the close. That ease is
 					// not there: handing the edge cap's share to it displaced stored ink by up to 652.331 px
 					// from the pen, so the share came back out and the close is a same-frame write in BOTH
 					// settings - the shape Infinite Canvas off already had. `syncJump*` therefore carries the
 					// whole close, and it is asserted as the closing below rather than bounded near zero.
-					// s97, AND THE SETTING DECIDES. With Infinite Canvas OFF the ease is back and carries the
+					// AND THE SETTING DECIDES. With Infinite Canvas OFF the ease is back and carries the
 					// whole close, so nothing moves on the frame of the lift - the shape the note above says
 					// this cell had before the edge cap's share was taken out of the ease. With the setting ON
 					// the close is still the same-frame write, because handing the correction to the ease there
 					// displaces committed ink (five of the expanded-viewport arms, measured), so that path is
 					// unchanged and so is its assertion.
-					// s150 add. 1: A GIVE STANDING AT THE LIFT COMES HOME IN FULL. `-max(exposure, 0)` was the
+					// A GIVE STANDING AT THE LIFT COMES HOME IN FULL. `-max(exposure, 0)` was the
 					// close of an exposure that could only stand on the ceiling side; with the canvas on, the
 					// page is held at the give and the release carries the WHOLE exposure back, whatever its
 					// sign - measured, `reachable` stood at exposureX -154 with pan +96 and its syncJumpX is
 					// +154. The row's own pan at the lift says whether a give stood.
 					for (const [key, src] of [['syncJumpX', 'exposureX'], ['syncJump', 'exposure']] as [string, string][]) {
-						// s97 add. 59, test-only, same split as the two sites above.
-						// s150 add. 1: A GIVE HELD AT THE LIFT COMES HOME IN FULL, and nothing else changes.
+						// Test-only, same split as the two sites above.
+						// A GIVE HELD AT THE LIFT COMES HOME IN FULL, and nothing else changes.
 						// Measured across three rows of the same cell: `reachable` pan +96 / exposure -154 closes
 						// +154; `repeat-0` pan +96 / exposure +96 closes -96; `mixed` pan -25 / exposure -25 closes
 						// 0. Neither key alone separates those - both of the first two stand at pan +96, both of
@@ -1987,7 +1987,7 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 					// closes toward the edge and never by more than the exposure that stood at the lift.
 					// The arrival is what pins the close in full, on the `-arrived` row above.
 					for (const [key, src] of [['jumpX', 'exposureX'], ['jump', 'exposure']] as [string, string][]) {
-						// s150 add. 1: the direction that REDUCES the exposure, which is the other way round when
+						// The direction that REDUCES the exposure, which is the other way round when
 						// the lift stood inside its rest (canvas on only - that is where a give can hold it there).
 						const at = (atRelease as any)[src] as number;
 						const inward = infiniteCanvas && at < 0;
@@ -2007,16 +2007,16 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			}
 			if (!tiny) {
 				expect(phase('reachable-start').scrollLeft).toBeGreaterThan(100);
-				// s150 add. 1, as at :1471: the 40 px is the page's own travel, which the give used to buy. With the
+				// As at :1471: the 40 px is the page's own travel, which the give used to buy. With the
 				// canvas off a page that fits is pinned by the plain bound and travels nowhere.
 				expect(r.reachableX).toBeCloseTo(infiniteCanvas ? 40 : 0, 1); expect(r.anchorUnchanged).toBe(true);
-				// WITHDRAWN, s79 add. 6(i): the X constant here read -75 and measured +0 on every
+				// WITHDRAWN, the ruling: the X constant here read -75 and measured +0 on every
 				// Infinite-Canvas-on non-tiny cell. It encoded the live edge pin plus the pending -75 at
 				// the lift, never a settle law. `pending-lift` and `pending-settled` now take the same
 				// computed settled law as every other settled row, in the loop above. Y keeps its shipped
 				// law on the line below.
 				// THE VERTICAL -75 IS WITHDRAWN TOO, on the same measurement that retired its horizontal
-				// twin and for the reason the horizontal one was withdrawn under s79 add. 6(i): it
+				// twin and for the reason the horizontal one was withdrawn under the ruling: it
 				// encoded the live edge pin plus the -75 the arm used to show at the lift, and it is
 				// not a settle law. Two things now make it unwritable as a constant. `pending-settled`
 				// is read 8 frames after the lift, which since 48c53add is MID-EASE and not a position
@@ -2032,22 +2032,22 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 	}, 120000);
 }
 
-// s79(3) THE INSTRUMENTED READ, one run, two cells, no fix. READ ONLY: it asserts nothing about the
+// THE INSTRUMENTED READ, one run, two cells, no fix. READ ONLY: it asserts nothing about the
 // product, because its whole job is to say WHICH of the three causes the ruling names is the real one
 // before a line of the fix is written.
 //
-// The cell is the one s79 add. 1 names: corner / RLL on / IC on / not tiny / external 1, whose
+// The cell is the one the ruling names: corner / RLL on / IC on / not tiny / external 1, whose
 // zoom-out-settled and reachable-settled both stand at 200 px of exposed margin at e27fbcf0. Printed
 // per sampled row: exposureX, scale, panX, scrollLeft, pageInkX, columnBox, pageContentWidth and both
 // frontiers; per settle frame: rightX, windowX, the edge nativeLeft * effective the clamp should use,
 // and the terms around them.
 //
-// RE-POINTED at s79 add. 1: cause (i) is VOID and the 677 shape is explained (the pre-existing tiny /
-// Infinite-Canvas-off cells taking the s75 add. 10 centring at the zoom-out's k), so that probe is
+// RE-POINTED at the ruling: cause (i) is VOID and the 677 shape is explained (the pre-existing tiny /
+// Infinite-Canvas-off cells taking the centring at the zoom-out's k), so that probe is
 // dropped. What is left to confirm is cause (iii) on ONE Infinite-Canvas-ON cell: that the settle
 // arrives with windowX = NO_PAN_WINDOW and rightX = +Infinity, both turned off by the setting, which
 // is why nothing closes the exposure. Confirmation, not a gate.
-it('s79 settle read: the terms behind the 200 and the 677, instrument only', async () => {
+it('settle read: the terms behind the 200 and the 677, instrument only', async () => {
 	const cells = [
 		{ label: '200-cell', axis: 'corner' as const, readable: true, infiniteCanvas: true, tiny: false, external: 1 },
 	];
@@ -2062,7 +2062,7 @@ it('s79 settle read: the terms behind the 200 and the 677, instrument only', asy
 			const rows = r.rows.filter((x: any) => want.includes(x.phase));
 			out.push({ ...c, naturalLeft: r.naturalLeft, rows, settlePan: r.settlePan });
 			console.log(`
-S79 READ ${c.label}: ${c.axis} RLL=${c.readable} IC=${c.infiniteCanvas} tiny=${c.tiny} external=${c.external}`);
+READ ${c.label}: ${c.axis} RLL=${c.readable} IC=${c.infiniteCanvas} tiny=${c.tiny} external=${c.external}`);
 			console.log(`  naturalLeft=${r.naturalLeft}`);
 			for (const row of rows) console.log(`  ${row.phase.padEnd(22)} exposureX=${row.exposureX?.toFixed(3)} scale=${row.scale} panX=${row.panX} scrollLeft=${row.scrollLeft} pageInkX=${row.pageInkX} columnBox=${row.columnBox} pageContentWidth=${row.pageContentWidth?.toFixed?.(3)} store=${row.storeFrontierX} strokes=${row.strokeFrontierX?.toFixed?.(3)} fits=${JSON.stringify(row.fitReadout && { fitsX: row.fitReadout.fitsX, contentX: row.fitReadout.contentX, viewportX: row.fitReadout.viewportX })}`);
 			for (const sp of (r.settlePan ?? [])) console.log(`  SETTLE settling=${sp.settling} IC=${sp.scrollExpansionEnabled} rightX=${sp.rightX} windowX={fits:${sp.windowXfits},min:${sp.windowXmin},max:${sp.windowXmax}} x=${sp.x?.toFixed?.(3)} rawX=${sp.rawX?.toFixed?.(3)} cx=${sp.cx?.toFixed?.(3)} panXBefore=${sp.panXBefore} nativeLeft=${sp.nativeLeft} effective=${sp.effective} edge=${(sp.nativeLeft ?? 0) * (sp.effective ?? 1)} restX=${sp.restX} rest=${sp.rest} settleBound=${sp.settleBound} fitsX=${sp.fitsX} fitsPageX=${sp.fitsPageX} spanX=${sp.spanX} pageX=${sp.pageX} width=${sp.width}`);
@@ -2140,7 +2140,7 @@ for (const target of [.25, 2]) for (const moving of [false, true]) for (const ex
 	}, 120000);
 }
 
-// s179: with the canvas off the note can only be at 100% - the pinch is ignored and the zoom bar,
+// With the canvas off the note can only be at 100% - the pinch is ignored and the zoom bar,
 // its buttons, Fit and the zoom commands all read busy - so the canvas-off arms keep only the
 // native scroll at zoom 1. A canvas-off arm at .1, or one that gestures, is a state the product
 // cannot be in; the refusal itself is pinned in ZoomFreezeTouch.test.ts.
@@ -2172,7 +2172,7 @@ for (const readable of [false, true]) for (const infiniteCanvas of [false, true]
 				if (restArm && row.phase.startsWith('x-')) continue;
 				expect.soft(Math.abs(row.jumpX - row.expectedJumpX), row.phase).toBeLessThan(.5); expect.soft(Math.abs(row.jumpY - row.expectedJumpY), row.phase).toBeLessThan(.5);
 			}
-			// s121: `restMissX` measures the column against the pane's CENTRE, and the plugin no longer centres
+			// `restMissX` measures the column against the pane's CENTRE, and the plugin no longer centres
 			// anything (Alan: "I don't want it to center anywhere"). What the column must come back to is
 			// Obsidian's own inset, painted at this scale - `left` below already pins that no scroll carries it.
 			if (restArm) for (const row of r.rows.filter((s: any) => s.phase.startsWith('x-') && s.phase.endsWith('-done'))) {
@@ -2219,7 +2219,7 @@ for (const zoom of [.1, 1]) for (const lines of [20, 400]) {
 	}, 120000);
 }
 
-// s150 add. 1: BOTH MODES, because the arm's regime is now what decides whether its drag is bounded, and it
+// BOTH MODES, because the arm's regime is now what decides whether its drag is bounded, and it
 // used to inherit whichever one the previous cell happened to leave behind. Ten cells instead of five; each
 // mounts its own page, so the cost is the mount, not a new fixture.
 for (const infiniteCanvas of [true]) for (const mode of ['coalesced', 'pending', 'scale', 'mixed', 'corner'] as const) {
@@ -2241,7 +2241,7 @@ for (const infiniteCanvas of [true]) for (const mode of ['coalesced', 'pending',
 			// y. Measured at this head, all five modes land exactly there on both axes -
 			// x = 385.3125 = naturalLeftBoundary, y = 0 = naturalTop - whatever the gesture was.
 			const naturalTop = r.before.constraint.geometry.naturalTop;
-			// s189 (Alan 2026-09-21, the slide is in 1.4.20): under the canvas the close no longer completes in the frame of
+			// Alan 2026-09-21, the slide is in 1.4.20: under the canvas the close no longer completes in the frame of
 			// the lift. The sample taken in the lift's own task paints the last live position (zero snap) and the ease
 			// carries the page to the closed position, which `settled` still reads on both axes below.
 			if (infiniteCanvas) {
@@ -2249,7 +2249,7 @@ for (const infiniteCanvas of [true]) for (const mode of ['coalesced', 'pending',
 				expect(Math.abs(at.y - r.last.y), `immediate: the lift paints the last live position, y (last ${r.last.y}, measured ${at.y})`).toBeLessThanOrEqual(1);
 				expect(Math.abs(at.x - r.last.x), `immediate: the lift paints the last live position, x (last ${r.last.x}, measured ${at.x})`).toBeLessThanOrEqual(1);
 			}
-			// `settled` is read mid-glide under the canvas and takes no absolute assertion (s75 add. 1); `arrived` is the rest.
+			// `settled` is read mid-glide under the canvas and takes no absolute assertion; `arrived` is the rest.
 			for (const name of infiniteCanvas ? ['arrived'] : ['immediate', 'settled']) {
 				const at = phase(name);
 				expect(Math.abs(at.y - naturalTop), `${name}: the settle closes to the natural top ` +
@@ -2257,12 +2257,12 @@ for (const infiniteCanvas of [true]) for (const mode of ['coalesced', 'pending',
 				expect(Math.abs(at.x - r.naturalLeftBoundary), `${name}: the settle closes to the natural left ` +
 					`(natural ${r.naturalLeftBoundary}, measured ${at.x})`).toBeLessThan(.5);
 			}
-			// THE LAST LIVE SAMPLE FOLLOWS THE FINGERS, s79(1)(a) and (4)(a), on both axes and from the
+			// THE LAST LIVE SAMPLE FOLLOWS THE FINGERS, the ruling, on both axes and from the
 			// fixture's own inputs: the page moves by exactly the travel of the constraint's own client
 			// point since `before`, not by a figure recorded next to the moves.
 			// `pending` is the exception the arm exists for - its input is never applied, so the page
 			// does not move at all however far the client point travelled.
-			// s150 add. 2: THE DIFFERENCE OF TWO CAPPED POSITIONS, not the cap of a difference - the same shape
+			// THE DIFFERENCE OF TWO CAPPED POSITIONS, not the cap of a difference - the same shape
 			// `wantRevTop` already uses above. Measured on the corner arm: the pan ask is +400 at `before` and
 			// +375 at `last`, so both samples are already past the bound and the page stands in the same place
 			// on each. Canvas off, cy is 0 on every row (the plain bound's ceiling refuses the whole ask) and
@@ -2272,7 +2272,7 @@ for (const infiniteCanvas of [true]) for (const mode of ['coalesced', 'pending',
 			const askY = (s: any) => s.constraint.clientY - r.start.constraint.clientY;
 			const travelX = r.last.constraint.clientX - r.before.constraint.clientX;
 			const travelY = r.last.constraint.clientY - r.before.constraint.clientY;
-			// s150 add. 1: BOUNDED, like the rest of the file. "Follows the fingers 1:1" was the pre-s135
+			// BOUNDED, like the rest of the file. "Follows the fingers 1:1" was the earlier
 			// contract; the band caps a canvas-mode drag at the give on the ceiling side, and with the canvas
 			// off the pan is clamped to [floor, 0] so a positive ask is refused. `previewExposure` is that rule,
 			// and the page's travel is the bounded position less where it started.
@@ -2287,12 +2287,12 @@ for (const infiniteCanvas of [true]) for (const mode of ['coalesced', 'pending',
 			// `before` IS A PREVIEW SAMPLE, not a rest, and the old assertion read it as one. The arm takes
 			// `begin()` and then, on the corner mode only, `move(400, 650, 400)` and a frame BEFORE sampling
 			// (scrollColumnAnchorPage.ts:3107-3112) - so the fingers are already down and have already
-			// travelled. Asserting it sits at the natural boundary was the pre-s79 live pin again; it passed
+			// travelled. Asserting it sits at the natural boundary was the earlier live pin again; it passed
 			// at base only because the page was not yet allowed to follow the fingers there.
 			// Law (a) instead, against the gesture's own start sample and its own client travel, no literal:
 			const beforeTravelX = r.before.constraint.clientX - r.start.constraint.clientX;
 			const beforeTravelY = r.before.constraint.clientY - r.start.constraint.clientY;
-			// s150 add. 2: TO THE BOUND, the same rule as the `last` rows below. The corner arm's move is +650
+			// TO THE BOUND, the same rule as the `last` rows below. The corner arm's move is +650
 			// on x, far past either bound: measured 0 with the canvas off, where the plain bound's ceiling
 			// refuses the whole ask, and 96 with it on, the give exactly. `start` is the gesture's own origin,
 			// so the cap of the travel and the difference of two capped positions are the same thing here.
@@ -2307,7 +2307,7 @@ for (const infiniteCanvas of [true]) for (const mode of ['coalesced', 'pending',
 	}, 120000);
 }
 
-// s179: the last arm was zoom .1 with the canvas OFF. A note cannot be at 10% with the canvas
+// The last arm was zoom .1 with the canvas OFF. A note cannot be at 10% with the canvas
 // off - the pinch is ignored and the zoom bar, its buttons, Fit and the zoom commands read busy -
 // so that arm is retired. The canvas-off regime keeps its 100% coverage elsewhere in this file.
 for (const [zoom, scroll, infiniteCanvas, cadence] of [[.1,true,true,'immediate'],[.1,false,true,'immediate'],[1,true,true,'immediate'],[.1,true,true,'frame'],[.1,true,true,'settled']] as const) {
@@ -2322,9 +2322,17 @@ for (const [zoom, scroll, infiniteCanvas, cadence] of [[.1,true,true,'immediate'
 			// Prove the scroll arm actually moves at the requested zoom.
 			for(const row of r.rows)if(scroll)expect.soft(row.scrollAfter-row.scrollBefore,`cycle${row.cycle} live scroll`).toBeGreaterThan(100/zoom);
 			expect(r.pendingRaf).toBe(0);expect(r.queued).toBe(false);expect(r.bandSyncDeferred).toBe(false);
-			// Fixed viewport band movement must not reallocate canvas backing stores.
+			// Fixed viewport band movement must not reallocate canvas backing stores. The one exception is the wet canvas: the
+			// cycle's scroll releases it (width and height to 0) when it was not released already, and the pen-down sizes it
+			// again (width and height) when it was released. Nothing else is written.
 			for(const row of r.rows) {
-				expect.soft(row.work.reallocations).toBe(0);
+				// PREMISE. The expected writes below are computed from the flag the page read off the overlay, so a build that never
+				// releases the wet canvas reads the flag false, expects none, sees none and passes. After a cadence frame or a settle
+				// the scroll has had its chance to release it: assert that it did, before the draw, and only then count the writes.
+				if(scroll&&cadence!=='immediate')expect.soft(row.wetReleasedBeforeDraw,`cycle${row.cycle} premise: the scroll released the wet canvas before the draw`).toBe(true);
+				const wetWrites=(row.wetReleasedBeforeDraw?2:0)+(row.wetReleasedBeforeDraw&&!row.wetReleasedAtStart?2:0);
+				expect.soft(row.work.wetReallocations,`cycle${row.cycle} wet canvas release and allocation`).toBe(wetWrites);
+				expect.soft(row.work.reallocations-row.work.wetReallocations,`cycle${row.cycle} other reallocations`).toBe(0);
 				expect.soft(row.frameBlue.inside,`cycle${row.cycle} canvas coverage`).toBe(true);
 				for(const pixels of row.frameBlue.thirds)expect.soft(pixels,`cycle${row.cycle} latest stroke segment`).toBeGreaterThan(0);
 			}
@@ -2492,7 +2500,7 @@ it('navigation between settle read and write survives', async () => {
 		await page.addStyleTag({ content: css + READABLE_LINE_WIDTH_CSS }); await page.addScriptTag({ content: script });
 		const r = await page.evaluate(() => (window as any).scrollColumnAnchor.runFocal(true, true, true, 'ordinary', 'scrollReadWrite')); report.push(r);
 		expect(r.readWriteGap).not.toBeNull(); expect(r.readWriteGap.delta).toBeGreaterThan(0);
-		// s189 (6): read a FRAME on, not one microtask. With the canvas lift easing, the page can still be moving
+		// 6: read a FRAME on, not one microtask. With the canvas lift easing, the page can still be moving
 		// when the write returns, so the claim - navigation between the settle's read and its write leaves the page
 		// where it began - is read against the snapshot taken a frame later, falling back to the immediate one
 		// where the frame never came.

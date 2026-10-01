@@ -8,7 +8,7 @@
  * the tip is a workaround for not having a finger, so on anything with glass
  * it was a button spending a slot on a gesture the user already had (alan,
  * 2026-09-05, on the strip being too wide for a phone) - until the same day's
- * later ruling put Pan back on every device and gave the width problem to the
+ * later decision put Pan back on every device and gave the width problem to the
  * fold list instead ("pan in the fold list fine"). The read is kept, with its
  * tests: it is cheap, it is the only standard reading of the device fact, and
  * a per-device DEFAULT fold order is the obvious next customer for it.

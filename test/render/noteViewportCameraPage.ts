@@ -20,12 +20,12 @@ const blockedIds=new Set<string>();
 const save = (id:string,page:PageData) => { writes++; pages.set(id,serializePage(page)); };
 inlineInk.attachHost({readPageId:p=>ids.get(p)??null,claimId:async(p,id)=>{writes++;ids.set(p,id);return{pageId:id};},loadSidecar:async id=>{if(blockedIds.has(id))await new Promise<void>(r=>heldLoads.set(id,r));return pages.has(id)?parsePage(pages.get(id)!,id):null;},scheduleSidecar:save,scheduleSidecarNow:async(id,p)=>save(id,p),notify:()=>{}});
 const settle = async () => { for(let i=0;i<8;i++) await new Promise<void>(r=>requestAnimationFrame(()=>r())); };
-// s189: a lift under the canvas eases its measured travel for up to 500 ms. `rest` is `settle` plus waiting that ease out, for a
+// A lift under the canvas eases its measured travel for up to 500 ms. `rest` is `settle` plus waiting that ease out, for a
 // cell whose reading is the page AT REST; `settle` stays as it was for cells that read the lift itself.
 const rest = async () => { await settle(); for(let f=0;f<90&&[...rigs.values()].some(r=>r.overlay?.overscrollBounceReadout?.().active);f++) await new Promise<void>(r=>requestAnimationFrame(()=>r())); };
 async function run(zoom:number,candidate:boolean,axis: "x" | "y" = "y",font=1,cancel=false) {
 	const path = `viewport-${zoom}-${axis}-${font}-${cancel}.md`;
-	// s179 add.6: this rig drives the zoom bar buttons, gated busy with the canvas off (s179(1)) - canvas on so
+	// This rig drives the zoom bar buttons, gated busy with the canvas off - canvas on so
 	// the bar stays live; the fling below then runs under canvas's own shorter tau (InlinePenRouter.ts CANVAS_FLING_TAU_MS).
 	setScrollExpansionEnabled(true);
  surfaceExtents.grow(path,{x:250000,y:250000});
@@ -208,7 +208,7 @@ function snap(id:string) {
  const {host,view,overlay,path}=rigs.get(id)!;
  const cr=view.contentDOM.getBoundingClientRect(),sr=view.scrollDOM.getBoundingClientRect(),scale=overlay.cssScale,font=overlay.fontZoom;
  const paperStyle=getComputedStyle(view.scrollDOM);
- // The pin, same pair/names as `run()`'s (F3): the harness engine's own
+ // The pin, same pair/names as `run()`'s the harness engine's own
  // CSS-zoom support, and the overlay's separately cached gate.
  const engineZoom=CSS.supports("zoom","0.5"),hostZoom=(overlay as any).hostZoomSupported() as boolean;
  return {engineZoom,hostZoom,paddingTop:Number.parseFloat(getComputedStyle(view.contentDOM).paddingTop),paper:{image:paperStyle.backgroundImage,attachment:paperStyle.backgroundAttachment},state:overlay.getNoteViewportState(),doc:view.state.doc.toString(),writes,history:undoDepth(view.state),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),extent:surfaceExtents.get(path),scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop,width:view.scrollDOM.scrollWidth,height:view.scrollDOM.scrollHeight},viewport:{x:sr.x,y:sr.y,width:sr.width,height:sr.height},ink:inlineInk.strokes(path).map(s=>({id:s.id,x:cr.left+s.bbox.x*scale*font,y:view.documentTop+s.bbox.y*scale*font,right:cr.left+(s.bbox.x+s.bbox.width)*scale*font,bottom:view.documentTop+(s.bbox.y+s.bbox.height)*scale*font})),layout:Array.from({length:Math.min(100,view.state.doc.length+1)},(_,i)=>{const c=view.coordsAtPos(i)!;return[(c.left-cr.left)/scale,(c.top-cr.top)/scale];}),buttons:[...host.querySelectorAll(".handwriting-note-viewport-controls button")].map(b=>b.getBoundingClientRect().toJSON()),backings:[...host.querySelectorAll("canvas")].map(c=>c.width*c.height),selection:view.state.selection.main.toJSON(),selected:overlay.selection.strokeIds,handles:host.querySelectorAll(".handwriting-selection-handle").length};
@@ -467,7 +467,7 @@ async function growTo(id:string,x:number,y:number){surfaceExtents.grow(rigs.get(
  return {kind,phase,before,joined,busy,result,refused,completed,undone,redone,released,retry,after,recovery,pointScale};
 };
 
-// C1 (s90 add. 11): the converged-pinch-settle path closes the reload gate.
+// C1: the converged-pinch-settle path closes the reload gate.
 // 7c95786e's InkOverlay.ts carries `settled()` in the `hold.ready` branch of the settle
 // measure's write, and that call is in NEITHER parent of the merge. mountedSyncCameraSettlement
 // above drives the Zoom out BUTTON, which never builds a pan-anchor hold, so it does not reach
@@ -682,10 +682,11 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  if(options.end==="blur")window.dispatchEvent(new Event("blur"));
  else if(options.end==="unmount")r.overlay.unmount();
  else if(options.end==="switch"){
-  const info=r.view.state.field(editorInfoField) as any;
-  info.file.path=otherPath;r.view.dispatch({});await settle();
+  // A switch hands the view a different file object; the same object with a new path is a rename.
+  const info=r.view.state.field(editorInfoField) as any,own=info.file;
+  info.file={path:otherPath};r.view.dispatch({});await settle();
   otherAfter=structuredClone(inlineInk.strokes(otherPath));
-  info.file.path=path;r.view.dispatch({});
+  info.file=own;r.view.dispatch({});
  }else penEvent(options.end??"pointerup",contact.x,contact.y+dy*scale,921);
  await settle();
  const after=capture();

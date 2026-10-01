@@ -1,5 +1,5 @@
 /**
- * s136: the arithmetic of a ctrl+wheel zoom run. Ratios against the run's
+ * The arithmetic of a ctrl+wheel zoom run. Ratios against the run's
  * start, the units the browser may report deltas in, and the quiet time that
  * stands in for a lift no touchpad pinch ever sends.
  */
@@ -83,7 +83,7 @@ describe("WheelZoomRun", () => {
 	it("takes deltaMode 1 as lines, so one notch of a line-reporting mouse is 16 px of travel", () => {
 		const lines = new WheelZoomRun();
 		const pixels = new WheelZoomRun();
-		// s199: four lines, not three, so BOTH arms open as mouse-wheel runs and the comparison is
+		// Four lines, not three, so BOTH arms open as mouse-wheel runs and the comparison is
 		// still about the unit conversion alone. Three lines is 48 px, under the notch, and a run that
 		// opened on 48 pixel px is a touchpad run at the other gain.
 		const a = lines.feed(at(0, -4, 1));
@@ -120,7 +120,7 @@ describe("WheelZoomRun", () => {
 		const next = run.feed(at(1000, -10, 0, 800, 800));
 		expect(next.map(s => s.phase)).toEqual(["start", "move"]);
 		expect(next[0]!.centroid).toEqual({ x: 800, y: 800 });
-		// s199: 10 px with deltaMode 0 opens a TOUCHPAD run, so the gain is the touchpad one.
+		// 10 px with deltaMode 0 opens a TOUCHPAD run, so the gain is the touchpad one.
 		expect(next[1]!.ratio).toBeCloseTo(Math.exp(10 * TOUCHPAD_ZOOM_K), 12);
 	});
 
@@ -134,7 +134,7 @@ describe("WheelZoomRun", () => {
 });
 
 /**
- * s199: a touchpad pinch zooms 1.5 times as far as the same travel on a mouse wheel. The kind is
+ * A touchpad pinch zooms 1.5 times as far as the same travel on a mouse wheel. The kind is
  * decided at the run's first event and held for the run, so one gesture never changes gain halfway.
  */
 describe("the run's kind, decided once at its first event", () => {

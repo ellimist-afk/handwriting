@@ -1,3 +1,20 @@
+
+/** Extend the existing cursor fixture with its owned clipping parent. */
+function cursorChildren(createCursor: () => any): (options?: { cls?: string }) => any {
+	return (options) => {
+		const cursor = createCursor();
+		if (options?.cls !== "handwriting-pdf-cursor-viewport") return cursor;
+		const viewport = {
+			parentElement: cursor.parentElement,
+			classList: { contains: (cls: string) => cls === "handwriting-pdf-cursor-viewport" },
+			setCssStyles() {},
+			createDiv: () => cursor,
+			remove() { cursor.remove(); viewport.parentElement = null; },
+		};
+		cursor.parentElement = viewport;
+		return viewport;
+	};
+}
 /**
  * "Pen toolbar" on a PDF: the setting decides, the same way it does on a note.
  *
@@ -122,11 +139,11 @@ function makeController() {
 		querySelector: () => null,
 		setCssStyles: () => {},
 	};
-	scroller.createDiv = (): Record<string, unknown> => {
+	scroller.createDiv = cursorChildren((): Record<string, unknown> => {
 		const el = fakeEl();
 		el.parentElement = scroller;
 		return el;
-	};
+	});
 	probe.current = {
 		scroller,
 		scaleFactor: SCALE,

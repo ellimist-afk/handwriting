@@ -156,6 +156,7 @@ async function layerVisual(action:string,zoom=.4){
  if(action==='restore')overlay.restorePinchLayers();
  if(action==='tail')overlay.tail.drawSelectionBox(overlay.camera.snapshot,{x:overlay.camera.x+120,y:overlay.camera.y+120,width:80,height:60},'#ff0000');
  if(action==='tail-clear')overlay.tail.clearAll(overlay.cssWidth,overlay.cssHeight);
+ if(action==='tail-full')overlay.tail.restoreFullSurface();
  if(action==='wet'){const first={x:overlay.camera.x+100,y:overlay.camera.y+100,pressure:.8,t:0};overlay.wet.beginStroke(first);overlay.wet.appendPoint(overlay.camera.snapshot,DEFAULT_PEN,{...first,x:first.x+80,y:first.y+30,t:20});overlay.wet.appendPoint(overlay.camera.snapshot,DEFAULT_PEN,{...first,x:first.x+160,y:first.y+50,t:40});overlay.wet.finishStroke(overlay.camera.snapshot,DEFAULT_PEN);}
  if(action==='wet-clear')overlay.wet.clear(overlay.cssWidth,overlay.cssHeight);
  if(action==='repaint'){overlay.damage.addAll();overlay.repaint();}
@@ -177,7 +178,7 @@ async function layerVisual(action:string,zoom=.4){
  if(action==='background-restore'){canvases.forEach((c,i)=>c.style.visibility=overlay.visualSavedVisibility[i]);delete overlay.visualSavedVisibility;}
  const rect=overlay.committedCanvas.getBoundingClientRect(),sx=rect.width/overlay.cssWidth,sy=rect.height/overlay.cssHeight,cam=overlay.lastPaintCam;
  const thinArms=[{width:.5,y:420},{width:2,y:450}].map(arm=>({width:arm.width,x0:rect.left+(380-cam.x)*cam.zoom*sx,x1:rect.left+(540-cam.x)*cam.zoom*sx,y:rect.top+(arm.y-cam.y)*cam.zoom*sy}));
- return {thinArms,composite:overlay.pinchComposite,visible:canvases.map(c=>getComputedStyle(c).visibility),pixels:canvases.map(occupiedPixels),originalHashes:action==='setup'||action==='restore'?[rasterHash(overlay.highlightCanvas),rasterHash(overlay.committedCanvas)]:null,blank:[overlay.highlightBlank,overlay.highlightWet.provenBlank,overlay.committedBlank,overlay.wet.provenBlank,overlay.tail.provenBlank],strokes:JSON.stringify(inlineInk.strokes(path))};
+ return {thinArms,composite:overlay.pinchComposite,visible:canvases.map(c=>getComputedStyle(c).visibility),tailBacking:{w:overlay.tailCanvas.width,h:overlay.tailCanvas.height,bandW:overlay.wetCanvas.width,bandH:overlay.wetCanvas.height},pixels:canvases.map(occupiedPixels),originalHashes:action==='setup'||action==='restore'?[rasterHash(overlay.highlightCanvas),rasterHash(overlay.committedCanvas)]:null,blank:[overlay.highlightBlank,overlay.highlightWet.provenBlank,overlay.committedBlank,overlay.wet.provenBlank,overlay.tail.provenBlank],strokes:JSON.stringify(inlineInk.strokes(path))};
 }
 async function continuousPinch(target: number, cancel: boolean, measure = false, costPlant = false, diagnostic?: { startScale: number; hover: boolean; moving: boolean }) {
  const overlay=overlayForPath(path)! as any;
@@ -188,7 +189,9 @@ async function continuousPinch(target: number, cancel: boolean, measure = false,
  const cx=diagnostic?400:target<.5?60:400,cy=diagnostic?220:target<.5?40:220,startHalf=diagnostic?45:target<.5?40:100;
  view.scrollDOM.scrollLeft=160;view.scrollDOM.scrollTop=160;await settle();
  const before=snapshot(),column=view.contentDOM.offsetWidth;
- let live=true,backingWrites=0,liveClears=0,liveTransactions=0,finalTransactions=0;
+ // Whether the scroll above released the wet canvas (the pinch's composite then sizes it once at its start).
+ const wetReleasedBefore=(overlay as any).wetDeferred===true;
+ let live=true,backingWrites=0,wetBackingWrites=0,liveClears=0,liveTransactions=0,finalTransactions=0;
  const dimensions=()=>({scale:overlay.pinchScaleNow,grant:{...surfaceExtents.get(path)},band:{...overlay.band},canvases:[...view.dom.querySelectorAll('canvas')].map(c=>({width:c.width,height:c.height,cssWidth:c.style.width,cssHeight:c.style.height,transform:c.style.transform,visibility:c.style.visibility,rect:c.getBoundingClientRect().toJSON()})),native:{width:view.scrollDOM.clientWidth,height:view.scrollDOM.clientHeight,scrollWidth:view.scrollDOM.scrollWidth,scrollHeight:view.scrollDOM.scrollHeight}});
  const initialDimensions=measure?dimensions():null;
  const timing={firstMotionAt:0,firstPreviewAt:0,lastMoveAt:0,frameGaps:[] as number[],pointerMs:[] as number[],oracleMs:[] as number[],previews:[] as {scale:number;queueMs:number;workMs:number}[],methods:{} as Record<string,{calls:number;ms:number;maxMs:number;rectReads:number;rectMs:number}>,reserveCalls:0,cursorPaints:0,exitRestoreMs:[] as number[]};
@@ -239,7 +242,7 @@ async function continuousPinch(target: number, cancel: boolean, measure = false,
  };
  const canvasProto=HTMLCanvasElement.prototype;
  const descriptors=["width","height"].map(key=>[key,Object.getOwnPropertyDescriptor(canvasProto,key)!] as const);
- for(const [key,d] of descriptors)Object.defineProperty(canvasProto,key,{...d,set:function(value:number){if(live)backingWrites++;d.set!.call(this,value);}});
+ for(const [key,d] of descriptors)Object.defineProperty(canvasProto,key,{...d,set:function(value:number){if(live){backingWrites++;if(this===overlay.wetCanvas)wetBackingWrites++;}d.set!.call(this,value);}});
  const clear=CanvasRenderingContext2D.prototype.clearRect;
  CanvasRenderingContext2D.prototype.clearRect=function(...args:Parameters<typeof clear>){if(live&&(this===overlay.committedCtx||this===overlay.highlightCtx))liveClears++;return clear.apply(this,args);};
  try {
@@ -266,7 +269,7 @@ async function continuousPinch(target: number, cancel: boolean, measure = false,
   await settle();
   const rect=view.contentDOM.getBoundingClientRect(),a=anchor!;
   const viewport=view.scrollDOM.getBoundingClientRect();
-  return {timing:measure?timing:null,initialDimensions,liveDimensions,finalDimensions:measure?dimensions():null,backingWrites,liveClears,liveTransactions,finalTransactions,liveScale,liveAnchors,
+  return {timing:measure?timing:null,initialDimensions,liveDimensions,finalDimensions:measure?dimensions():null,backingWrites,wetBackingWrites,wetReleasedBefore,liveClears,liveTransactions,finalTransactions,liveScale,liveAnchors,
    pane:{width:pane.width,height:pane.height},viewport:{width:viewport.width,height:viewport.height},
    finalScale:overlay.pinchScaleNow,columnBefore:column,columnAfter:view.contentDOM.offsetWidth,
    anchorError:{x:rect.left+a.worldX*target-a.x,y:rect.top+a.worldY*target-a.y,boundaryX:boundaryX(target),boundaryY:boundaryY(target),naturalBoundaryX:naturalBoundaryX(target)},
@@ -287,6 +290,8 @@ async function pendingPinchPen(measured:boolean,cancel:boolean){
   const c=overlay.committedCanvas.getBoundingClientRect(),v=view.scrollDOM.getBoundingClientRect();
   let bluePixels=0;
   for(const canvas of view.dom.querySelectorAll("canvas")){
+   // A layer with no backing yet (the highlight pair before any highlighter use) holds no pixels, and getImageData refuses a 0 width.
+   if(canvas.width===0||canvas.height===0)continue;
    const data=canvas.getContext("2d")!.getImageData(0,0,canvas.width,canvas.height).data;
    for(let i=0;i<data.length;i+=4)if(data[i+3]!>10&&data[i+2]!>data[i]!+40&&data[i+2]!>data[i+1]!+10)bluePixels++;
   }

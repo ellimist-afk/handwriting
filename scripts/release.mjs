@@ -37,7 +37,7 @@ const REQUIRED_CSS = [
 	[".cm-scroller.handwriting-hscroll-axis", "v0.13.8 horizontal axis patch (moved off inline styles)"],
 	[".embedded-backlinks", "v0.13.0 backlinks border removal on Handwriting pages"],
 	['.metadata-property[data-property-key="handwriting-page-id"]', "page-id property hidden from Properties UI"],
-	["body.handwriting-active-page .status-bar", "status bar kept off the writing surface"],
+	["body.handwriting-active-page .status-bar", "status bar hidden on inked notes when that setting is on"],
 	[".handwriting-corner-bottom-left", "toolbar corner placement (settings)"],
 ];
 

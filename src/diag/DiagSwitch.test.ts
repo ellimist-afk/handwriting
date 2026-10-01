@@ -4,6 +4,7 @@ import {
 	diagnosticsEnabled,
 	diagnosticsEpoch,
 	endRecordingForReport,
+	endRecordingIfCurrent,
 	setDiagnosticsChangedListener,
 	setDiagnosticsEnabled,
 } from "./DiagSwitch";
@@ -111,5 +112,32 @@ describe("every way the switch flips reports itself", () => {
 		setDiagnosticsEnabled(true);
 		expect(first).toBe(before + 1);
 		expect(diagnosticsEpoch()).toBe(first + 1);
+	});
+});
+
+describe("a delivered report ends only the recording it came from (audit 141)", () => {
+	afterEach(() => setDiagnosticsEnabled(false));
+
+	it("ends the recording of the same epoch", () => {
+		setDiagnosticsEnabled(true);
+		const epoch = diagnosticsEpoch();
+		expect(endRecordingIfCurrent(epoch)).toBe(true);
+		expect(diagnosticsEnabled()).toBe(false);
+	});
+
+	it("leaves a newer recording running when a late upload lands after it began", () => {
+		setDiagnosticsEnabled(true);
+		const epoch = diagnosticsEpoch();
+		setDiagnosticsEnabled(false);
+		setDiagnosticsEnabled(true); // a new recording starts while the old window is still open
+		expect(endRecordingIfCurrent(epoch)).toBe(false);
+		expect(diagnosticsEnabled()).toBe(true);
+	});
+
+	it("reports true when nothing is recording and the epoch is unchanged, so the trace is still cleared", () => {
+		setDiagnosticsEnabled(true);
+		const epoch = diagnosticsEpoch();
+		endRecordingForReport();
+		expect(endRecordingIfCurrent(epoch)).toBe(true);
 	});
 });

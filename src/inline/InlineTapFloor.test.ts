@@ -134,6 +134,10 @@ function makeRig(realFloor = false): Rig {
 	// grab. The real class, not a stand-in: Object.create skips initialisers.
 	view.selection = new SelectionModel();
 	view.tail = {
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
 		clear: () => {
 			clears++;
 		},

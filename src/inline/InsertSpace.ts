@@ -220,26 +220,57 @@ function localRowsOf(strokes: readonly InkStroke[]): InkRow[] {
 		if(row){row.ids.push(s.id);row.top=Math.min(row.top,s.top);row.bottom=Math.max(row.bottom,s.bottom);row.left=Math.min(row.left,s.left);row.right=Math.max(row.right,s.right);}
 		else grouped.set(key,{top:s.top,bottom:s.bottom,left:s.left,right:s.right,ids:[s.id]});
 	});
-	const rows=[...grouped.values()].sort((a,b)=>a.top-b.top||a.left-b.left);
+	const rows=[...grouped.values()].sort((a,b)=>a.top-b.top||a.left-b.left)
+		.map((row,ord)=>({...row,ord}));
 	// A floating mark chooses the nearest eligible LOCAL host below it,
 	// regardless of interleaved groups in another column. The height-relative
 	// width/overhang allowance also handles a dot above a lone vertical stem.
+	//
+	// A host starts at or below the mark (gap >= 0) and no further below it
+	// than its own height, so only rows whose top lies within the tallest
+	// row's height under the mark can qualify. `byTop` keeps the live rows
+	// ordered by top, so each mark checks that window instead of every row:
+	// the all-rows filter per mark was quadratic, 30-80 ms on a note of one
+	// to two thousand written lines, after every ink change. The choice is
+	// the one the filter-and-sort made: nearest gap, then centre offset, then
+	// left, then the earlier row (`ord`, the stable sort's tie).
+	const byTop=[...rows];
+	const firstFrom=(y:number)=>{
+		let lo=0,hi=byTop.length;
+		while(lo<hi){const mid=(lo+hi)>>1;if(byTop[mid]!.top<y)lo=mid+1;else hi=mid;}
+		return lo;
+	};
+	let tallest=0;
+	for(const row of rows)tallest=Math.max(tallest,row.bottom-row.top);
 	for(const mark of [...rows].reverse()){
-		const hosts=rows.filter(host=>{
-			if(host===mark)return false;
-			const height=host.bottom-host.top,gap=host.top-mark.bottom;
-			return height>0 && gap>=0 && gap<=height && mark.bottom-mark.top<=height*.34 &&
-				mark.right-mark.left<=Math.max(host.right-host.left,height*.25)*.34 &&
-				mark.left>=host.left-height*.1 && mark.right<=host.right+height*.1;
-		}).sort((a,b)=>(a.top-mark.bottom)-(b.top-mark.bottom)||
-			Math.abs(a.left+a.right-mark.left-mark.right)-Math.abs(b.left+b.right-mark.left-mark.right)||a.left-b.left);
-		const host=hosts[0];
+		let host:(typeof rows)[number]|null=null,hostAt=-1;
+		for(let i=firstFrom(mark.bottom);i<byTop.length;i++){
+			const cand=byTop[i]!;
+			if(cand.top-mark.bottom>tallest)break;
+			if(cand===mark)continue;
+			const height=cand.bottom-cand.top,gap=cand.top-mark.bottom;
+			if(!(height>0 && gap>=0 && gap<=height && mark.bottom-mark.top<=height*.34 &&
+				mark.right-mark.left<=Math.max(cand.right-cand.left,height*.25)*.34 &&
+				mark.left>=cand.left-height*.1 && mark.right<=cand.right+height*.1))continue;
+			if(host){
+				const order=(cand.top-mark.bottom)-(host.top-mark.bottom)||
+					Math.abs(cand.left+cand.right-mark.left-mark.right)-Math.abs(host.left+host.right-mark.left-mark.right)||
+					cand.left-host.left||cand.ord-host.ord;
+				if(!(order<0))continue;
+			}
+			host=cand;hostAt=i;
+		}
 		if(!host)continue;
 		host.ids.push(...mark.ids);host.top=mark.top;
 		host.left=Math.min(host.left,mark.left);host.right=Math.max(host.right,mark.right);
-		rows.splice(rows.indexOf(mark),1);
+		tallest=Math.max(tallest,host.bottom-host.top);
+		// The host's top moved up to the mark's: take it out and put it back
+		// in order, then drop the mark, which has no other place to be.
+		byTop.splice(hostAt,1);
+		byTop.splice(firstFrom(host.top),0,host);
+		byTop.splice(byTop.indexOf(mark),1);
 	}
-	return rows.sort((a,b)=>a.top-b.top||a.left-b.left).map(({top,bottom,ids})=>({top,bottom,ids}));
+	return byTop.sort((a,b)=>a.top-b.top||a.left-b.left||a.ord-b.ord).map(({top,bottom,ids})=>({top,bottom,ids}));
 }
 
 /**

@@ -2,6 +2,11 @@
 export * from "../obsidian-stub";
 import { StateField } from "@codemirror/state";
 
+export const issue22Notices: string[] = [];
+export class Notice {
+	constructor(message: string) { issue22Notices.push(message); }
+}
+
 export interface Issue22EditorOwner {
 	app: { commands: { executeCommandById(id: string): unknown } };
 	file: { path: string };

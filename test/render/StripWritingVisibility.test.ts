@@ -13,9 +13,14 @@ describe.each(["chromium", "webkit"] satisfies BrowserEngine[])("toolbar writing
 			await note.page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 			for (const mode of ["auto", "show", "auto"] as const) {
 				await note.page.evaluate(({ mode, collapsed }) => window.__hw.setWritingVisibility(mode, true, collapsed), { mode, collapsed });
-				await expect.poll(async () => note.page.evaluate((collapsed) => getComputedStyle(
-					document.querySelector<HTMLElement>(collapsed ? ".handwriting-pen-pill" : ".handwriting-mobile-tools")!
-				).visibility, collapsed)).toBe(mode === "auto" ? "hidden" : "visible");
+				// Auto steps aside by fading and refusing the pen, not by visibility:
+				// the element stays visible so the fade never repaints the window.
+				await expect.poll(async () => note.page.evaluate((collapsed) => {
+					const style = getComputedStyle(document.querySelector<HTMLElement>(collapsed ? ".handwriting-pen-pill" : ".handwriting-mobile-tools")!);
+					return { visibility: style.visibility, faded: Number(style.opacity) === 0, hittable: style.pointerEvents !== "none" };
+				}, collapsed)).toEqual(mode === "auto"
+					? { visibility: "visible", faded: true, hittable: false }
+					: { visibility: "visible", faded: false, hittable: true });
 				const state = await note.page.evaluate((collapsed) => {
 					const strip = document.querySelector<HTMLElement>(".handwriting-mobile-tools")!;
 					const pill = document.querySelector<HTMLElement>(".handwriting-pen-pill")!;

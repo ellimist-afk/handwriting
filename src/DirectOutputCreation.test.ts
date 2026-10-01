@@ -52,6 +52,7 @@ import { Notice, normalizePath } from "obsidian";
 import mainSource from "./main.ts?raw";
 import { createFreshFile } from "./export/CreateFreshFile";
 import { DiagnosticTextModal } from "./diag/DiagnosticTextModal";
+import { stripMarkdownExtension } from "./util/MarkdownPath";
 
 const source = mainSource.replace(/\r\n/g, "\n");
 
@@ -72,6 +73,10 @@ const SNIP_NOTE_BLOCK = slice(
 	"\tprivate async snipNote(file: TFile, overlay: InkOverlayPlugin): Promise<void> {",
 	"\n\t}"
 );
+const SNIP_BACKLINK_BLOCK = slice(
+	"\tprivate snipBacklink(file: TFile, subpath?: string, alias?: string): string {",
+	"\n\t}"
+);
 const SNIP_PDF_BLOCK = slice(
 	"\tprivate async snipPdf(file: TFile, controller: PdfInkController): Promise<void> {",
 	"\n\t}"
@@ -84,6 +89,7 @@ expect(SNIP_NOTE_BLOCK).toContain(".snip-${n}.png");
 expect(SNIP_PDF_BLOCK).toContain(".snip-${n}.png");
 expect(SNIP_NOTE_BLOCK).toContain("clipboard.writeText");
 expect(SNIP_PDF_BLOCK).toContain("clipboard.writeText");
+expect(SNIP_BACKLINK_BLOCK).toContain("generateMarkdownLink");
 
 const js = (code: string): string => transformSync(code, { loader: "ts", target: "es2022" }).code;
 
@@ -101,7 +107,7 @@ type SnipHost = {
 
 /** The three real method bodies on one prototype, so `this.firstFreePath` is the real loop. */
 const holderFor = (deps: Deps): { prototype: SnipHost } =>
-	build(`return class { ${FIRST_FREE_PATH_BLOCK}\n${SNIP_NOTE_BLOCK}\n${SNIP_PDF_BLOCK} }`, deps) as {
+	build(`return class { ${FIRST_FREE_PATH_BLOCK}\n${SNIP_BACKLINK_BLOCK}\n${SNIP_NOTE_BLOCK}\n${SNIP_PDF_BLOCK} }`, { stripMarkdownExtension, ...deps }) as {
 		prototype: SnipHost;
 	};
 
@@ -238,6 +244,12 @@ type SnipOpts = {
 	bytes: Uint8Array;
 	refuseClipboard?: boolean;
 	ambiguous?: boolean;
+	/** Paths of OTHER files in the vault, so the model link generator can qualify a duplicate name. */
+	siblings?: string[];
+	/** Every generateMarkdownLink call: the file it was asked for, and the rest of the arguments. */
+	linkCalls?: { file: unknown; args: unknown[] }[];
+	/** When set, the model generator returns this instead of its own link, to see it written verbatim. */
+	linkReturns?: string;
 	existsThrows?: boolean;
 	clips?: string[];
 };
@@ -274,6 +286,21 @@ function snipInstance(o: SnipOpts): SnipHost {
 		vault: o.host.view(o.tag, o.log, { existsThrows: o.existsThrows }),
 		metadataCache: {
 			getFirstLinkpathDest: (name: string) => (o.ambiguous ? { path: `elsewhere/${name}` } : null),
+		},
+		fileManager: {
+			// Models Obsidian's own generator for the one behaviour these cells
+			// need: the shortest name that is unambiguous, the path when it is
+			// not, no .md on a note, the subpath and alias appended.
+			generateMarkdownLink: (file: { path: string; name: string }, ...args: unknown[]): string => {
+				o.linkCalls?.push({ file, args });
+				if (o.linkReturns !== undefined) return o.linkReturns;
+				const [, subpath = "", alias] = args as [string, string | undefined, string | undefined];
+				const isNote = file.path.endsWith(".md");
+				const bare = isNote ? file.name.replace(/\.md$/, "") : file.name;
+				const full = isNote ? file.path.replace(/\.md$/, "") : file.path;
+				const dup = (o.siblings ?? []).some((s) => s.split("/").pop() === file.name && s !== file.path);
+				return `[[${dup ? full : bare}${subpath}${alias ? `|${alias}` : ""}]]`;
+			},
 		},
 	};
 	return inst;
@@ -473,6 +500,48 @@ describe("serial controls: what already worked keeps working", () => {
 		const ambiguous: string[] = [];
 		await fireSnipNote({ tag: "B", log: [], host, bytes: PNG_B, clips: ambiguous, ambiguous: true });
 		expect(ambiguous[0]).toBe("![[folderA/source.snip-2.png]]\n[[source]]");
+	});
+
+	it("the backlink names the inked file, not the other file of the same name (#181)", async () => {
+		const clips: string[] = [];
+		await fireSnipNote({
+			tag: "A",
+			log: [],
+			host: makeHost({ "folderA/source.md": "# a" }),
+			bytes: PNG_A,
+			clips,
+			siblings: ["folderB/source.md"],
+		});
+		expect(clips[0]).toBe("![[source.snip-1.png]]\n[[folderA/source]]");
+
+		const pdfClips: string[] = [];
+		await fireSnipPdf(
+			{
+				tag: "B",
+				log: [],
+				host: makeHost({ "folderA/paper.pdf": "%PDF" }),
+				bytes: PNG_A,
+				clips: pdfClips,
+				siblings: ["folderB/paper.pdf"],
+			},
+			3
+		);
+		expect(pdfClips[0]).toBe("![[paper.snip-1.png]]\n[[folderA/paper.pdf#page=3|paper p.3]]");
+	});
+
+	it("both backlinks are what Obsidian's generator returns, asked for the inked file, subpath and alias", async () => {
+		const linkCalls: { file: unknown; args: unknown[] }[] = [];
+		const clips: string[] = [];
+		const host = makeHost({ "folderA/source.md": "# x", "folderA/paper.pdf": "%PDF" });
+		const inst = (tag: string) =>
+			snipInstance({ tag, log: [], host, bytes: PNG_A, clips, linkCalls, linkReturns: "<<GENERATED>>" });
+		await inst("A").snipNote(NOTE_FILE, { snipSelection: async () => ({ ok: true, bytes: PNG_A }) });
+		await inst("B").snipPdf(PDF_FILE, { snipSelection: async () => ({ ok: true, bytes: PNG_B, pageNumber: 5 }) });
+		expect(linkCalls).toEqual([
+			{ file: NOTE_FILE, args: ["", undefined, undefined] },
+			{ file: PDF_FILE, args: ["", "#page=5", "paper p.5"] },
+		]);
+		expect(clips.map((c) => c.split("\n")[1])).toEqual(["<<GENERATED>>", "<<GENERATED>>"]);
 	});
 
 	it("the pdf embed keeps its page number and its own destination", async () => {

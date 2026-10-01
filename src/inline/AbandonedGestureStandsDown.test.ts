@@ -34,6 +34,7 @@ import { InkOverlayPlugin, releaseTipModes } from "./InkOverlay";
 import { SelectionModel } from "../objects/SelectionModel";
 import { Camera } from "../camera/Camera";
 import { StrokeFrame } from "./StrokeFrame";
+import { reticleShown } from "../testUtils/ReticleShown";
 
 interface Proto {
 	strokeAbandoned(this: unknown): void;
@@ -62,7 +63,13 @@ function makeRig() {
 	};
 	const wet = layer();
 	const highlightWet = layer();
-	const tail = { cleared: 0, clearAll: () => void tail.cleared++ };
+	const tail = {
+		cleared: 0, clearAll: () => void tail.cleared++,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 	const inking: boolean[] = [];
 
 	const inst = Object.create(InkOverlayPlugin.prototype) as Record<string, unknown>;
@@ -211,7 +218,7 @@ describe("the note surface stands its own gesture down when a stroke is abandone
 
 		rig.proto.strokeAbandoned.call(rig.inst);
 
-		expect(rig.cursorStyle.display).toBe("none");
+		expect(reticleShown(rig.cursorStyle)).toBe(false);
 	});
 
 	it("uses the same full provisional cleanup when a second finger starts pinch", () => {

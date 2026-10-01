@@ -322,7 +322,13 @@ function makeRig(initial: Partial<PaneState> = {}): Rig {
 	const renderer = { applyDpr: () => undefined, clear: () => undefined };
 	o.wet = renderer;
 	o.highlightWet = renderer;
-	o.tail = { applyDpr: () => undefined, clearAll: () => undefined };
+	o.tail = {
+		applyDpr: () => undefined, clearAll: () => undefined,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 
 	o.contentStyle = null;
 	o.refFontPx = 0;

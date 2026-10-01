@@ -107,7 +107,7 @@ describe("note zoom controls change notifications", () => {
 });
 
 /**
- * s137 item 9. The canvas gate is a SECOND condition over the user's mode,
+ * The canvas gate is a SECOND condition over the user's mode,
  * not a fourth mode: with the canvas off the note cannot zoom at all, so the
  * bar has no job, and turning the canvas back on must return the user to the
  * mode they chose rather than to a default.

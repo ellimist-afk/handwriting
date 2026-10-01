@@ -1543,6 +1543,104 @@ describe("NOTIFICATION TIMING", () => {
 		// 9s since the FIRST failure, but only 2s since the run restarted.
 		expect(a.notices).toEqual([]);
 	});
+
+	it("a run that ends WITHOUT adopting still resets the patience, same as a success (audit 128)", async () => {
+		// Fail once (arms the quiet-period clock), then a run that neither
+		// fails NOR adopts - a local edit supersedes the prepared adoption
+		// mid-flight, same mechanism as "A LOCAL MUTATION DURING
+		// PRESERVATION". That round still proves the disk pipe is healthy:
+		// `prepare` did real I/O and came back with an answer. The clock
+		// must restart there too, not only on a completed adoption, or one
+		// unrelated blip long afterwards shows the notice at once instead
+		// of waiting through the quiet period again.
+		const failing = { on: true };
+		let committed = false;
+		let a!: Device;
+		const adapter = hooked(fake, {
+			failWrite: (p) => failing.on && p.endsWith("-outgoing.json"),
+			beforeWrite: (p) => {
+				if (!committed && !failing.on && p.endsWith("-outgoing.json")) {
+					committed = true;
+					a.ink.commit(PATH, stroke("mid"));
+				}
+			},
+		});
+		a = await settledDeviceA(adapter);
+		externalReplacement(["a", "remote"]);
+		await a.ink.adoptExternal(PATH, () => true);
+		expect(a.notices).toEqual([]); // still inside the window
+
+		vi.setSystemTime(Date.now() + 7_000);
+		failing.on = false;
+		externalReplacement(["a", "remote2"]);
+		const held = await a.ink.adoptExternal(PATH, () => true);
+		expect(held.outcome).toBe("held"); // superseded locally, not adopted
+		expect(committed).toBe(true);
+		expect(a.notices).toEqual([]);
+
+		failing.on = true;
+		externalReplacement(["a", "remote3"]);
+		await a.ink.adoptExternal(PATH, () => true);
+		vi.setSystemTime(Date.now() + 2_000);
+		await a.ink.adoptExternal(PATH, () => true);
+		// 9s since the FIRST failure, but only 2s since the held run.
+		expect(a.notices).toEqual([]);
+	});
+
+	it("a failure run that ends in silence (unchanged polls) restarts the patience (audit 128)", async () => {
+		const adapter = hooked(fake, { failWrite: (p) => p.endsWith("-outgoing.json") });
+		const a = await settledDeviceA(adapter);
+		externalReplacement(["a", "remote"]);
+		await a.ink.adoptExternal(PATH, () => true);
+		expect(a.notices).toEqual([]);
+
+		// The poll saw the sidecar unchanged for a minute and never called
+		// adoptExternal. One later blip is a new run, not the old one.
+		vi.setSystemTime(Date.now() + 60_000);
+		externalReplacement(["a", "remote2"]);
+		await a.ink.adoptExternal(PATH, () => true);
+		expect(a.notices).toEqual([]);
+
+		// A run that keeps failing at poll speed still speaks, once.
+		vi.setSystemTime(Date.now() + 8_001);
+		await a.ink.adoptExternal(PATH, () => true);
+		expect(a.notices).toHaveLength(1);
+	});
+
+	it("a stale preparation resets the patience too", async () => {
+		const failing = { on: true };
+		let bump = false;
+		const adapter = hooked(fake, {
+			failWrite: (p) => failing.on && p.endsWith("-outgoing.json"),
+			afterWrite: (p) => {
+				// A newer external revision lands while the copies are written.
+				if (bump && p.endsWith("-outgoing.json")) {
+					bump = false;
+					externalReplacement(["a", "newer"]);
+				}
+			},
+		});
+		const a = await settledDeviceA(adapter);
+		externalReplacement(["a", "remote"]);
+		await a.ink.adoptExternal(PATH, () => true);
+		expect(a.notices).toEqual([]);
+
+		vi.setSystemTime(Date.now() + 7_000);
+		failing.on = false;
+		bump = true;
+		externalReplacement(["a", "remote2"]);
+		const held = await a.ink.adoptExternal(PATH, () => true);
+		expect(held.outcome).toBe("held");
+		expect(bump).toBe(false); // the stale path really ran
+
+		failing.on = true;
+		externalReplacement(["a", "remote3"]);
+		await a.ink.adoptExternal(PATH, () => true);
+		vi.setSystemTime(Date.now() + 2_000);
+		await a.ink.adoptExternal(PATH, () => true);
+		// 9s since the FIRST failure, but only 2s since the stale round.
+		expect(a.notices).toEqual([]);
+	});
 });
 
 describe("MISSING CAPABILITY: external replacement never falls back to unpreserved reload", () => {

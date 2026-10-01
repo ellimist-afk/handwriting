@@ -23,7 +23,7 @@ export const MAX_PINCH_SCALE = 6;
 export const MIN_PINCH_SCALE = 0.1;
 
 /**
- * s110: HOW FAR PAST THE CAP A LIVE PINCH MAY PAINT, and only a live pinch.
+ * HOW FAR PAST THE CAP A LIVE PINCH MAY PAINT, and only a live pinch.
  *
  * At the cap today the preview stops painting: the fingers keep spreading and
  * nothing on screen answers, which reads as the gesture having died rather than
@@ -41,14 +41,14 @@ export const PINCH_GIVE = 1.1;
  * `floor` is the lowest scale this request may reach. A floor can only lower
  * the constant, never raise it.
  *
- * `preview` opens the give at both ends (s110). A preview frame is repainted by
+ * `preview` opens the give at both ends. A preview frame is repainted by
  * the next one and is never committed, so the widened range lives and dies
  * inside the gesture; the commit path calls this without the flag and keeps the
  * constants exactly as they were.
  */
 export function clampPinchScale(scale: number, floor = MIN_PINCH_SCALE, preview = false): number {
  const ceiling = preview ? MAX_PINCH_SCALE * PINCH_GIVE : MAX_PINCH_SCALE;
- // The cap side only (s112): the floor is Alan's 10 percent rule and Fit's own territory; a preview
+ // The cap side only: the floor is Alan's 10 percent rule and Fit's own territory; a preview
  // never paints under it. `preview` widens the ceiling alone.
  const bottom = MIN_PINCH_SCALE;
  const min = validCameraScale(floor) ? Math.min(bottom, floor) : bottom;

@@ -72,7 +72,9 @@ export class PinchBridge {
 		/** The pen always wins: no bridging while a gesture holds the pane. */
 		private allowed: () => boolean,
 		/** The viewer's current scale, read cheap; null when unknowable. */
-		private getScale: () => number | null = () => null
+		private getScale: () => number | null = () => null,
+		/** Read the shield's existing decision, including radius shrink. */
+		private swallowed: (identifier: number) => boolean = () => false
 	) {}
 
 	/**
@@ -107,7 +109,9 @@ export class PinchBridge {
 			const pageNo = page.getAttribute("data-page-number");
 			if (pageNo === null) continue;
 			const r = page.getBoundingClientRect();
-			const dist = cy < r.top ? r.top - cy : cy > r.bottom ? cy - r.bottom : 0;
+			const dx = Math.max(0, r.left - cx, cx - r.right);
+			const dy = Math.max(0, r.top - cy, cy - r.bottom);
+			const dist = Math.hypot(dx, dy);
 			if (dist < bestDist) {
 				bestDist = dist;
 				best = { pageNo, ax: cx - r.left, ay: cy - r.top };
@@ -140,7 +144,7 @@ export class PinchBridge {
 	}
 
 	private points(e: TouchEvent): PinchPoint[] {
-		return Array.from(e.touches).map((t) => ({
+		return Array.from(e.touches).filter((t) => !this.swallowed(t.identifier)).map((t) => ({
 			identifier: t.identifier,
 			clientX: t.clientX,
 			clientY: t.clientY,
@@ -179,30 +183,39 @@ export class PinchBridge {
 			this.contentEl =
 				el.querySelector<HTMLElement>(".pdfViewer") ??
 				(el.firstElementChild as HTMLElement | null);
-			if (this.contentEl) {
-				const rect = el.getBoundingClientRect();
-				const ox = this.startCentroid.x - rect.left + el.scrollLeft;
-				const oy = this.startCentroid.y - rect.top + el.scrollTop;
-				this.contentEl.setCssStyles({
-					transformOrigin: `${ox}px ${oy}px`,
-					willChange: "transform",
-				});
-			}
+			this.refreshPreviewOrigin();
 		}
 		this.bridged++;
 		this.claim(e);
 	};
 
+	/** Re-measure the locked centre after the viewer changes its layout. */
+	private refreshPreviewOrigin(): void {
+		const el = this.el;
+		if (!el || !this.ids || !this.contentEl) return;
+		const rect = el.getBoundingClientRect();
+		const ox = this.startCentroid.x - rect.left + el.scrollLeft;
+		const oy = this.startCentroid.y - rect.top + el.scrollTop;
+		this.contentEl.setCssStyles({
+			transformOrigin: `${ox}px ${oy}px`,
+			willChange: "transform",
+		});
+	}
 	private onMove = (e: TouchEvent): void => {
 		if (!this.ids) return;
 		const pts = this.points(e);
-		if (pts.length !== 2) return;
+		if (pts.length !== 2 || pts.some((p) => !this.ids!.includes(p.identifier))) {
+			this.ids = null;
+			this.clearPreview();
+			return;
+		}
 		this.claim(e);
 		const spread = spreadOf(pts[0]!, pts[1]!);
 		if (this.startSpread <= 0 || spread <= 0 || !this.contentEl) return;
 		// Soft bounds: the viewer clamps real zoom anyway; the preview
 		// should not sail past anything the commit can honour.
 		this.liveRatio = Math.min(6, Math.max(0.25, spread / this.startSpread));
+		this.refreshPreviewOrigin();
 		this.contentEl.setCssStyles({ transform: `scale(${this.liveRatio})` });
 		// The gain is measured INSIDE the first pinch, once the gesture has
 		// crossed the dead-zone and declared its direction. An idle-time
@@ -233,6 +246,12 @@ export class PinchBridge {
 
 	private onEnd = (e: TouchEvent): void => {
 		if (!this.ids) return;
+		const present = new Set([...Array.from(e.touches), ...Array.from(e.changedTouches)].map((t) => t.identifier));
+		if (this.ids.some((id) => this.swallowed(id) || !present.has(id))) {
+			this.ids = null;
+			this.clearPreview();
+			return;
+		}
 		for (const t of Array.from(e.changedTouches)) {
 			if (this.ids.includes(t.identifier)) {
 				this.ids = null;
@@ -290,7 +309,8 @@ export class PinchBridge {
 			if (this.el !== el) return;
 			this.settle();
 			const actual = this.getScale();
-			if (actual === null) return;
+			if (actual === null || actual <= 0.1 || actual >= 10) return;
+			// The viewer caps scale at 10%/1000%; a partial landing is not gain.
 			const observed = Math.log(actual / preScale);
 			if (Math.abs(observed) > 1e-4 && Math.abs(delta) > 1) {
 				const learned = Math.abs(observed / delta);
@@ -334,13 +354,20 @@ export class PinchBridge {
 			})
 		);
 		const win = el.ownerDocument.defaultView ?? window;
+		const ids = this.ids;
+		const refresh = () => {
+			if (this.el === el && this.ids === ids) this.refreshPreviewOrigin();
+		};
+		refresh();
+		win.requestAnimationFrame(refresh);
 		win.setTimeout(() => {
 			// Not across a rebind, and not once a commit is in flight - a
 			// released pinch's own wheel would be read into the measurement.
 			// The landing teaches instead then, as it always has.
-			if (this.el !== el || this.pending !== null) return;
+			if (this.el !== el || this.ids !== ids || this.pending !== null) return;
+			refresh();
 			const after = this.getScale();
-			if (after === null) return;
+			if (after === null || after <= 0.1 || after >= 10) return;
 			const moved = Math.log(after / pre);
 			// Nothing (a zoom bound), or far more than our 3% (a commit or a
 			// real wheel landed inside the window): nothing usable measured.
@@ -367,6 +394,7 @@ export class PinchBridge {
 
 	dispose(): void {
 		if (!this.el) return;
+		this.clearPreview();
 		// An owed correction is owed to THIS binding; the next one starts
 		// with nothing pending.
 		this.pending = null;

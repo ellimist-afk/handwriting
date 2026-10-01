@@ -162,7 +162,7 @@ export function fillRibbon(
 		// assumed: RibbonClosePathParity.test.ts replays this painter's own call
 		// stream closed and open and compares the rasters byte for byte.
 		//
-		// It was not free. The s93 device trace bills `closePath` 3332.0 ms of a
+		// It was not free. A device trace bills `closePath` 3332.0 ms of a
 		// 3536.8 ms pinch-end task, beside `lineTo`'s 5.6 ms at three times the
 		// call count, and the cost of one close grows with the length of the path
 		// it closes (1.17 us at 419 subpaths, 2.57 us at 799). One close per

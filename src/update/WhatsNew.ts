@@ -180,6 +180,15 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"thank you to seekermarcel for help",
 	],
 	"1.4.21": ["Ink hotfix"],
+	"1.4.22": [
+		"lots of ink + zoom bug fixes",
+		"keyboard popup bug fix",
+		"mobile bug fixes",
+		"sync fixes",
+		"pdf fixes",
+		"esc works",
+		"inf. canvas and paper backgrounds buttons",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */
@@ -230,6 +239,9 @@ export function decideWhatsNew(
 	// this version's notes late.
 	if (fresh) return { show: false, record: current };
 	if (seen === current) return { show: false, record: current };
+	// A build older than the one that last showed its notes: keep the newer
+	// record, or the newer build's notes show again when it comes back.
+	if (seen !== null && compareVersions(seen, current) > 0) return { show: false, record: seen };
 	const rawGroups = notesSince(current, seen, notes);
 	if (rawGroups.every((g) => g.notes.length === 0)) return { show: false, record: current };
 	// The two most recent groups render in full; anything older collapses to
@@ -337,10 +349,12 @@ function collapseOlderGroups(groups: NotesGroup[]): NotesGroup[] {
  * gets its own version label ahead of its list, so a vault that skipped
  * several releases reads five short honestly-labelled lists instead of one
  * flat list that reads as if it all shipped in the version just installed
- * (1.4.6, §5c). The first group carries no label of its own - the heading
- * above already names the current version. With zero or one group (or no
- * `groups` argument at all, for older callers) the output is exactly what
- * this function always produced: one title, one list.
+ * (1.4.6, §5c). The first group carries no label of its own when it is the
+ * heading's own version - the heading above already names it. A group of any
+ * other version is labelled, first or only, so older notes never read as the
+ * current release's. With zero groups, or one group of the heading's version
+ * (or no `groups` argument at all, for older callers), the output is exactly
+ * what this function always produced: one title, one list.
  *
  * A group with `collapsedCount` set (see `collapseOlderGroups`) stands for
  * every release older than the two most recent: it renders as its one
@@ -353,7 +367,7 @@ export function whatsNewFragment(
 ): DocumentFragment {
 	const frag = createFragment();
 	frag.createDiv({ cls: "handwriting-whats-new-title", text: `Handwriting ${version}` });
-	if (groups && groups.length > 1) {
+	if (groups && (groups.length > 1 || groups.some((g) => g.version !== "" && g.version !== version))) {
 		groups.forEach((group, i) => {
 			if (group.collapsedCount !== undefined) {
 				frag.createDiv({
@@ -362,7 +376,9 @@ export function whatsNewFragment(
 				});
 				return;
 			}
-			if (i > 0) {
+			// Notes of a release other than the heading's carry their own
+			// version, so they are not read as this release's.
+			if (i > 0 || group.version !== version) {
 				frag.createDiv({
 					cls: "handwriting-whats-new-version",
 					text: group.version,

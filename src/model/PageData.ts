@@ -135,6 +135,16 @@ export interface PageData {
 	 * its index (see SlidesInkSurface.remapSlides).
 	 */
 	slides?: { index: number; hash: string }[];
+	/**
+	 * The editor font size in px that every stored coordinate on this note was
+	 * drawn against (audit 46). Ink is stored in the frame of the size the note
+	 * was first inked at; without this a reopen at another size latches the new
+	 * size and reads all existing ink in the wrong frame. Written once and never
+	 * changed. Absent on every note that predates it, and on any note that has
+	 * not been saved since its reference was known. Additive: an older build
+	 * keeps it as an unknown top-level field, so the schema version stays.
+	 */
+	fontRefPx?: number;
 	textBoxes: TextBoxData[];
 	images: ImageData[];
 	strokes: InkStroke[];
@@ -191,6 +201,11 @@ export interface ParseResult {
 	 */
 	damaged?: boolean;
 	problem?: string;
+	/**
+	 * Set with `damaged`: the vault path the store actually read and could not use, the live sidecar in the
+	 * configured folder or a leftover <id>.json.tmp. The damaged-ink notice names this file.
+	 */
+	damagedPath?: string;
 	/**
 	 * Set when the main file was corrupt, its own complete .tmp was promoted
 	 * in its place, and the corrupt bytes were kept at this path.
@@ -275,6 +290,7 @@ const KNOWN_TOP = new Set([
 	"pdfPaths",
 	"deck",
 	"slides",
+	"fontRefPx",
 	"textBoxes",
 	"images",
 	"strokes",
@@ -476,6 +492,9 @@ export function serializePage(page: PageData, version: number = SCHEMA_VERSION):
 					: {}),
 				...(page.slides
 					? { slides: page.slides.map((s) => ({ index: s.index, hash: s.hash })) }
+					: {}),
+				...(typeof page.fontRefPx === "number" && Number.isFinite(page.fontRefPx) && page.fontRefPx > 0
+					? { fontRefPx: page.fontRefPx }
 					: {}),
 				textBoxes: page.textBoxes.map((b) =>
 					withUnknown(
@@ -703,6 +722,11 @@ export function migratePageData(
 			list.push({ index, hash });
 		}
 		if (list.length > 0) page.slides = list;
+	}
+	// Finite and above zero, else absent: a bad value says nothing about the
+	// size, and absent is what "unknown" already means.
+	if (typeof o.fontRefPx === "number" && Number.isFinite(o.fontRefPx) && o.fontRefPx > 0) {
+		page.fontRefPx = o.fontRefPx;
 	}
 	if (Array.isArray(o.pdfPaths)) {
 		const paths = o.pdfPaths.filter((p): p is string => typeof p === "string" && p !== "");

@@ -1,55 +1,42 @@
-# Contributing
+# contributing
 
-Contributions are welcome. Pull requests are read, and not all of them are
-merged. If you are about to spend real time on something, open an issue first
-and say what you intend to do.
+i don't merge pull requests, but i will review them. if you've found a fix, post it in an issue instead and i'll put it in myself if it's good. this keeps the code clean.
 
-## before you open a pull request
+## how to help
 
-Run all four, from a clean checkout. Node 18 or newer.
+- bugs: use the bug report form. include device, pen and a pen trace
+- ideas and questions: Discussions
+- untested tablet or pen? tell me what works and what doesn't
+- security: see `SECURITY.md`, not a public issue
+
+## code in issues
+
+file and line, a snippet, a console error, or a small fix for one bug (say what you tested it on).
+
+by posting code you agree i can use it in Handwriting under the project's license. i usually credit people but don't have to.
+
+## AI / LLM policy
+
+AI is fine, slop isn't.
+
+1. only report bugs you've seen on your own device
+2. device, pen, versions and steps come from you, not AI
+3. test AI fixes on your device and understand them before posting
+4. label AI theories as guesses
+5. say if AI helped
+6. no bots
+7. security reports need a real repro
+
+## building
+
+Node 20 or newer, clean checkout:
 
 ```
-npm ci            # the locked dependency set, not npm install
-npx tsc -noEmit   # typecheck
-npm test          # the full suite
-npm run build     # production build
+npm ci
+npx tsc -noEmit
+npm test
+npm run test:render
+npm run build
 ```
 
-`npm ci` rather than `npm install`: it installs exactly what
-`package-lock.json` pins, and it fails instead of quietly changing the lock.
-
-## the rules that matter
-
-**Test pen and touch changes on real hardware.** Input arbitration cannot be
-judged from unit tests. Palm rejection, the touch assist, the scroll-follow
-layer and anything touching `pointerrawupdate` need a pen and a tablet, and
-the pull request should say what you tested on.
-
-**Keep storage backward-compatible.** A sidecar written by an older
-Handwriting must still load, and unknown fields must survive a round trip.
-`docs/storage.md` says which parts of the format are stable and which are
-internal. If you need a format change, raise it in an issue first.
-
-**Add a failing-first test for a defect.** Write the test, watch it fail
-against the current code, then fix it. A test that passes before your change
-proves nothing about the bug. The suite has several examples that name the
-exact damage they reproduce.
-
-**No telemetry, no required network access, no dynamic dependency
-installation.** Handwriting does not phone home, does not need a network, and
-does not fetch code at runtime. A change that adds any of those will not be
-merged.
-
-**Comments should explain causes.** The comment that earns its place says
-why the code is shaped that way and what broke without it. Several
-files carry hardware findings that are the only record of why an invariant
-exists; do not delete those.
-
-## licensing
-
-Contributions are submitted under `CC-BY-NC-ND-4.0`, the same license
-as the rest of the project. By opening a pull request you are offering your
-change under those terms.
-
-There is no contributor license agreement and no copyright assignment. You
-keep the copyright in what you wrote.
+the license (CC BY-NC-ND 4.0) doesn't allow sharing modified versions.

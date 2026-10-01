@@ -16,7 +16,7 @@
  * Run: npm run test:render.
  *
  * SOURCE OF THE MINIMAL RULES. Verbatim, from
- * `C:\Users\alanl\Obsidian\ObsidianVaults\vault test 2\.obsidian\themes\Minimal\theme.css`
+ * the Minimal theme file in the test vault (`.obsidian/themes/Minimal/theme.css`)
  * (Minimal 9.0.2, 8709 lines on disk in this vault). Line numbers below were
  * re-verified against that file for this test, not inherited.
  *

@@ -161,6 +161,27 @@ describe("session history record identity", () => {
 		expect(store.pathForHistoryIdentity(identity)).toBeNull();
 	});
 
+	it("renames of notes no editor shows leave the pending-rename map bounded", () => {
+		const store = new InlineInkStore();
+		// A hundred renames of one unopened note: each chains on the last, so only the latest is kept.
+		for (let i = 0; i < 100; i++) store.handleRename(`n${i}.md`, `n${i + 1}.md`);
+		expect(store.pendingRenameCount).toBe(1);
+		expect(store.consumeRename("n0.md", "n100.md")).toBe(false);
+		expect(store.consumeRename("n99.md", "n100.md")).toBe(true);
+		expect(store.pendingRenameCount).toBe(0);
+		// Three hundred distinct unopened notes: the cap keeps the newest 256.
+		for (let i = 0; i < 300; i++) store.handleRename(`a${i}.md`, `b${i}.md`);
+		expect(store.pendingRenameCount).toBe(256);
+		expect(store.consumeRename("a0.md", "b0.md")).toBe(false);
+		expect(store.consumeRename("a299.md", "b299.md")).toBe(true);
+		// A delete of either end drops the entry.
+		store.handleDelete("a298.md");
+		store.handleDelete("b297.md");
+		expect(store.pendingRenameCount).toBe(253);
+		expect(store.consumeRename("a298.md", "b298.md")).toBe(false);
+		expect(store.consumeRename("a297.md", "b297.md")).toBe(false);
+	});
+
 	const variants: InkOp[] = [
 		{ type: "add", path: "a.md", strokes: [stroke("s")], indices: [0] },
 		{ type: "remove", path: "a.md", strokes: [stroke("s")], indices: [0] },

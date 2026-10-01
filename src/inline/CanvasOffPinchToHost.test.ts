@@ -74,7 +74,7 @@ function oneFinger(canvasOn: boolean | undefined): { touchAction: string; touche
 }
 
 describe("canvas off: the second finger is the host's", () => {
-	it("RED until s185: the plugin claims nothing - the second contact is never recorded, never guarded, and no pinch is watched", () => {
+	it("before the fix: the plugin claims nothing - the second contact is never recorded, never guarded, and no pinch is watched", () => {
 		const s = twoFingers(false);
 		expect(s.touches, "the second contact was recorded in touchPos").toBe(1);
 		expect(s.guarded, "the second contact was added to the guard's touch set").toBe(1);
@@ -95,7 +95,7 @@ describe("canvas off: the second finger is the host's", () => {
 		expect(s.watched, "an unanswered pinchZoom stopped the pinch being watched").toBeGreaterThan(0);
 	});
 
-	it("RED until s185 add. 1: the guard arms at pinch-zoom with the canvas off, so the browser still owns the two-finger zoom it decided about at the FIRST contact", () => {
+	it("before the guard fix: the guard arms at pinch-zoom with the canvas off, so the browser still owns the two-finger zoom it decided about at the FIRST contact", () => {
 		const s = oneFinger(false);
 		expect(s.touches, "premise: the first finger is still ours, the assist pan needs it").toBe(1);
 		expect(s.touchAction, "the scroller was armed at none, which takes the host's pinch away before the second finger lands").toBe("pinch-zoom");

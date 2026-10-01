@@ -149,7 +149,7 @@ class FakePane {
 	}
 
 	fingersOff(): void {
-		this.fire("touchend", [], [1]);
+		this.fire("touchend", [], [1, 2]);
 	}
 }
 let pane: FakePane;

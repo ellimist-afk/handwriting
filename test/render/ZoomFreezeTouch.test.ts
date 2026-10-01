@@ -1,5 +1,5 @@
 /**
- * s93, step 5: the same gesture through Chromium's REAL input pipeline.
+ * Step 5: the same gesture through Chromium's REAL input pipeline.
  *
  * Everything the rig has driven so far calls `router.updatePinch(...)` directly.
  * That skips what a real finger goes through: the pointer listeners the plugin
@@ -53,7 +53,7 @@ const GESTURE_MS = 30_000;
 /** Moves per gesture. A real pinch is a few hundred events over a second or so. */
 const MOVES = 60;
 
-// s179: the pinch zoom exists only under the Infinite Canvas, so the cost sweep runs with the
+// The pinch zoom exists only under the Infinite Canvas, so the cost sweep runs with the
 // canvas on. The canvas-off half of this sweep is retired and replaced by the refusal pin at the
 // foot of this file, which is this rig's one canvas-off zoom cell.
 for (const infiniteCanvas of [true]) it(`CDP touch pinch through the real listeners, IC ${infiniteCanvas ? "on" : "off"}`, async () => {
@@ -138,7 +138,7 @@ for (const infiniteCanvas of [true]) it(`CDP touch pinch through the real listen
 }, 180_000);
 
 /**
- * s179, THE REFUSAL PIN for this rig: with the Infinite Canvas off a two-finger pinch is not a
+ * THE REFUSAL PIN for this rig: with the Infinite Canvas off a two-finger pinch is not a
  * zoom at all. Alan's decision of 2026-09-20 takes the note zoom out of the canvas-off mode, so
  * the product ignores every phase of the gesture, the zoom bar and its buttons stand down, and
  * the page is left exactly where it was.
@@ -158,14 +158,14 @@ it("canvas off: a two-finger pinch does nothing - scale stays 1, the text stays 
 	page.on("pageerror", e => errors.push(e.message));
 
 	const scaleRead = () => page.evaluate(() => (window as any).scrollColumnAnchor.runTearScaleRead()) as Promise<{ pinchScaleNow: number; cssScale: number; busy: boolean }>;
-	// s187 (2), class C [s185 (3)]: THE NaN WAS THIS LINE. runTearRead().rects.text is {l, t, r, b, w, h};
+	// 2: , class C: THE NaN WAS THIS LINE. runTearRead().rects.text is {l, t, r, b, w, h};
 	// reading .left and .top off it gave undefined, and Math.abs(undefined - undefined) is the NaN the lone
 	// run reported - a rig read, not a claim about the page. With the keys the rig uses, the text does not
 	// move: l 781 t 425 before the pinch and l 781 t 425 after it.
 	const textRect = async () => (await page.evaluate(() => (window as any).scrollColumnAnchor.runTearRead())).rects.text as { l: number; t: number };
 	const pinch = () => page.evaluate(([cx, cy]) => (window as any).scrollColumnAnchor.runTearPinch(1, 0.4, 20, cx, cy), [PANE.w / 2, PANE.h / 2] as const);
 	/**
-	 * s187 add. 1: THE OVERLAY'S pinchZoom ANSWER, WHERE IT REACHES THE SCREEN. Nothing pinned it: the router
+	 * THE OVERLAY'S pinchZoom ANSWER, WHERE IT REACHES THE SCREEN. Nothing pinned it: the router
 	 * unit rig supplies its own callback and never imports the overlay, and every render rig calls
 	 * router.beginPinch directly, past the pointerdown gate. The route left is InlinePenRouter's
 	 * armedTouchAction(), which writes the standing guard onto the scroller the router holds: the guard's
@@ -201,7 +201,7 @@ it("canvas off: a two-finger pinch does nothing - scale stays 1, the text stays 
 		await pinch();
 		const offAfter = await scaleRead();
 		const textAfter = await textRect();
-		// s187 add. 1: THE OVERLAY'S OWN ANSWER, read off the live scroller the router guards
+		// THE OVERLAY'S OWN ANSWER, read off the live scroller the router guards
 		// (InlinePenRouter.ts armedTouchAction / :2069 writes it there), with no pointer synthesised.
 		const touchActionOff = await readTouchAction();
 
@@ -221,7 +221,7 @@ it("canvas off: a two-finger pinch does nothing - scale stays 1, the text stays 
 		expect(offAfter.busy, "canvas off: the zoom bar, its buttons, Fit and the zoom commands read busy").toBe(true);
 		expect(Math.abs(textAfter.l - textBefore.l), "canvas off: the text's screen left after the pinch").toBeLessThanOrEqual(0.5);
 		expect(Math.abs(textAfter.t - textBefore.t), "canvas off: the text's screen top after the pinch").toBeLessThanOrEqual(0.5);
-		// s187 add. 1: the overlay's own answer, one line per mode. Measured: "pinch-zoom" with the canvas off,
+		// The overlay's own answer, one line per mode. Measured: "pinch-zoom" with the canvas off,
 		// so the browser keeps the two-finger zoom and the plugin claims nothing; the guard's own value with it
 		// on. RED-FIRST is the plant at InkOverlay.ts pinchZoom: () => this.canvasMode rewritten to () => true,
 		// which makes the canvas-off line read the guard value instead.

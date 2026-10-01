@@ -40,30 +40,38 @@ export class ForkResolutionModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 
+		// Newest first, so the first pair kept for a page is its newest.
 		const records = listForks();
-		const accounts: ForkAccount[] = [];
+		const open: Array<{ rec: ForkRecord; account: ForkAccount }> = [];
+		const shown = new Set<string>();
 		for (const r of records) {
+			if (shown.has(r.pageId)) continue;
+			let account: ForkAccount;
 			try {
-				accounts.push(await describeFork(this.host, r));
+				account = await describeFork(this.host, r);
 			} catch (err) {
 				// One unreadable pair must not hide the rest of the list.
 				console.error("[handwriting] could not describe a preserved fork", r.pageId, err);
+				continue;
 			}
+			// Only the ones with something to decide. Older pairs with nothing
+			// to decide are not listed and not deleted. A page can hold several
+			// pairs; the newest one that needs a decision is the one put to the
+			// user, and a later routine pair no longer hides it.
+			if (!account.needsDecision) continue;
+			shown.add(r.pageId);
+			open.push({ rec: r, account });
 		}
-		// Only the ones with something to decide. Adoption preserves a pair on
-		// every sync and most are a plain superset; listing those would make
-		// this surface the noise the success-silence rule removed.
-		const open = accounts.filter((a) => a.needsDecision);
 
 		if (open.length === 0) {
 			contentEl.createEl("p", { text: COPY.empty });
 			return;
 		}
 
-		for (const a of open) this.renderOne(contentEl, a);
+		for (const { rec, account } of open) this.renderOne(contentEl, account, rec);
 	}
 
-	private renderOne(parent: HTMLElement, a: ForkAccount): void {
+	private renderOne(parent: HTMLElement, a: ForkAccount, rec: ForkRecord): void {
 		const box = parent.createDiv({ cls: "handwriting-fork" });
 		box.createEl("h3", { text: a.path });
 		box.createEl("p", { text: COPY.headline });
@@ -77,8 +85,6 @@ export class ForkResolutionModal extends Modal {
 		side(COPY.mine, a.mine, a.mineOnly);
 		side(COPY.theirs, a.theirs, a.theirsOnly);
 
-		const rec = listForks().find((r) => r.pageId === a.pageId);
-		if (!rec) return;
 		const buttons = box.createDiv({ cls: "handwriting-fork-actions" });
 		this.button(buttons, COPY.keepMine, rec, "keep-mine");
 		this.button(buttons, COPY.takeTheirs, rec, "take-theirs");

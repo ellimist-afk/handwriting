@@ -269,7 +269,7 @@ class FakeElImpl {
 	/**
 	 * Comma-separated tag/.class tokens, matched the same way as `querySelector`
 	 * (reached at SlidesTools.ts:104: "root.querySelectorAll(\".a, .b\")" while
-	 * building the mobile tools strip; F2's "dead at this head" did not hold
+	 * building the mobile tools strip; a review's "dead at this head" did not hold
 	 * once the migration ran real production code through it).
 	 */
 	querySelectorAll(sel: string): FakeEl[] {
@@ -343,14 +343,14 @@ class FakeElImpl {
  * failure diffs and thenable checks, never by production code. Must pass
  * through (undefined when unimplemented) rather than throw, or a real
  * assertion failure on a FakeEl reports "unsupported member" instead of the
- * mismatch that actually failed (Reviewer, fake-unify-1420 T1).
+ * mismatch that actually failed (fake-unify-1420 T1).
  */
 const FRAMEWORK_PROBES = new Set(["then", "toJSON", "asymmetricMatch", "$$typeof", "nodeType", "constructor"]);
 
 /**
  * `new FakeEl(...)` returns a Proxy over the real instance: any member not
  * implemented above throws by name on first access, rather than silently
- * reading undefined (add. 12 note 2 - the durable fix for FakeEl surface gaps
+ * reading undefined (the durable fix for FakeEl surface gaps
  * found one red at a time). Symbols and FRAMEWORK_PROBES are exempt: every
  * real DOM/Obsidian member is a plain string outside that list.
  */

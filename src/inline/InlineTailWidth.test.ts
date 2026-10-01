@@ -135,6 +135,10 @@ describe("the note predicted tail takes the pressure the ribbon consumed", () =>
 			},
 		};
 		view.tail = {
+			configureInlineBacking: () => undefined,
+			placeInline: () => undefined,
+			restoreFullSurface: () => undefined,
+			prepareLive: () => undefined,
 			clear: () => undefined,
 			drawHead: () => undefined,
 			draw: (

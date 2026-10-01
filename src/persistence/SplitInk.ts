@@ -92,7 +92,7 @@ export interface SplitInkReport {
  * copy is not a fork. They are excluded from the page set entirely, in both
  * directions: neither as a page of its own nor as a second copy of one.
  */
-const RECOVERY_COPY = /\.(damaged|conflict)-\d+(-\d+)?\.json$/;
+const RECOVERY_COPY = /\.(damaged|conflict|superseded|flush-conflict)-\d+(-\d+)?\.json$/;
 
 /** The last path segment, matching `InkFolder.baseName`. */
 function baseName(path: string): string {

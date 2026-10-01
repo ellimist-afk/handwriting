@@ -44,8 +44,7 @@ const VISIBLE_PX = 0.5;
 /**
  * Obsidian's Readable line length, VERBATIM.
  *
- * From `~/slate-artifacts/1.4.18/candidate-48170426/full-app.css` - the CSS
- * extracted from the running app for that candidate: `--file-line-width` at
+ * From the CSS extracted from the running app for the 1.4.18 candidate 48170426: `--file-line-width` at
  * :2240 and the four `is-readable-line-width` rules at :3546-3559.
  *
  * The shape that matters: the auto margins are on `.cm-sizer`. `.cm-content`

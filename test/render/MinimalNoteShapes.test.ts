@@ -21,7 +21,7 @@
  * means anything.
  *
  * SOURCE OF THE MINIMAL RULES. Hand-copied, verbatim, from
- * `C:\Users\alanl\Obsidian\ObsidianVaults\vault test 2\.obsidian\themes\Minimal\theme.css`
+ * the Minimal theme file in the test vault (`.obsidian/themes/Minimal/theme.css`)
  * (Minimal 9.0.2, 8709 lines on disk), citing line ranges the way
  * `ContentOriginColumn.test.ts` does, and from `@codemirror/view`'s own base
  * theme in `node_modules` for the two CodeMirror-owned elements the sweep

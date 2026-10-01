@@ -10,7 +10,7 @@
  * `harness.ts` for why the render suite is a separate script.
  *
  * SOURCE OF THE MINIMAL RULES. Verbatim, from
- * `C:\Users\alanl\Obsidian\ObsidianVaults\vault test 2\.obsidian\themes\Minimal\theme.css`
+ * the Minimal theme file in the test vault (`.obsidian/themes/Minimal/theme.css`)
  * (Minimal, 8709 lines on disk in this vault). Every declaration below is
  * copied from a specific line range, not paraphrased - the whole point of a
  * render suite is that a real engine resolves the real cascade, and a

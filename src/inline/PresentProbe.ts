@@ -168,7 +168,9 @@ export function parseHexColor(hex: string): [number, number, number] | null {
 
 export async function capturePresented(
 	box: ProbeBox,
-	inkRGB?: [number, number, number] | null
+	inkRGB?: [number, number, number] | null,
+	/** The note's own window: a popout's, or the main one (audit 175). */
+	win: Window = window
 ): Promise<{
 	ok: boolean;
 	detail: string;
@@ -179,11 +181,18 @@ export async function capturePresented(
 	try {
 		// Obsidian ships @electron/remote wired through its preload. Resolved
 		// dynamically so the module stays type-clean without node typings.
-		const req = (window as { require?: (m: string) => unknown }).require;
+		// A popout's own require only: the main window's would capture the
+		// main window's pixels and report them as the note's.
+		const req = (win as { require?: (m: string) => unknown }).require;
+		if (!req && win !== window) {
+			return { ok: false, detail: "popout capture unavailable", presentedPx: 0, inkMatchedPx: 0, sampledPx: 0 };
+		}
 		if (!req) {
 			return { ok: false, detail: "require unavailable (not an Electron renderer)", presentedPx: 0, inkMatchedPx: 0, sampledPx: 0 };
 		}
-		const electron = req("electron") as { remote?: RemoteLike } | undefined;
+		const electron = req("electron") as
+			| { remote?: RemoteLike; webFrame?: { getZoomFactor?: () => number } }
+			| undefined;
 		const remote =
 			electron?.remote ??
 			(() => {
@@ -197,11 +206,15 @@ export async function capturePresented(
 		if (!wc?.capturePage) {
 			return { ok: false, detail: "capturePage unavailable (no remote webContents)", presentedPx: 0, inkMatchedPx: 0, sampledPx: 0 };
 		}
+		// capturePage takes window DIPs; the box is css px, which differ by
+		// the page zoom (Obsidian's zoom setting).
+		const zf = electron?.webFrame?.getZoomFactor?.();
+		const zoom = typeof zf === "number" && Number.isFinite(zf) && zf > 0 ? zf : 1;
 		const rect = {
-			x: Math.max(0, Math.round(box.x)),
-			y: Math.max(0, Math.round(box.y)),
-			width: Math.max(1, Math.round(box.w)),
-			height: Math.max(1, Math.round(box.h)),
+			x: Math.max(0, Math.round(box.x * zoom)),
+			y: Math.max(0, Math.round(box.y * zoom)),
+			width: Math.max(1, Math.round(box.w * zoom)),
+			height: Math.max(1, Math.round(box.h * zoom)),
 		};
 		const image = await wc.capturePage(rect);
 		const size = image.getSize();
@@ -217,7 +230,12 @@ export async function capturePresented(
 			return [buf[i]!, buf[i + 1]!, buf[i + 2]!] as const;
 		};
 		const corners = [corner(0, 0), corner(w - 1, 0), corner(0, h - 1), corner(w - 1, h - 1)];
-		const bg = corners[0]!;
+		// The colour most corners agree on: ink touching one corner must not
+		// become the background.
+		const near = (a: readonly number[], b: readonly number[]) =>
+			Math.abs(a[0]! - b[0]!) <= 40 && Math.abs(a[1]! - b[1]!) <= 40 && Math.abs(a[2]! - b[2]!) <= 40;
+		const agree = corners.map((c) => corners.filter((d) => near(c, d)).length);
+		const bg = corners[agree.indexOf(Math.max(...agree))]!;
 		let presented = 0;
 		let inkMatched = 0;
 		const total = w * h;

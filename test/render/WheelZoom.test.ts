@@ -1,5 +1,5 @@
 /**
- * s136: A TOUCHPAD PINCH, AND CTRL+WHEEL, ZOOM THE NOTE.
+ * A TOUCHPAD PINCH, AND CTRL+WHEEL, ZOOM THE NOTE.
  *
  * Alan, device, 2026-09-20: "I can't pinch to zoom any further in than 100%, and zooming out
  * doesn't make the zoom counter correspond." Windows delivers a precision-touchpad pinch as a
@@ -19,7 +19,7 @@
  *   3. wheeling the other way zooms out and the counter follows down;
  *   4. past the cap the preview gives, and the quiet end eases back to exactly 400%;
  *   5. with Infinite Canvas OFF nothing is prevented and the note's zoom does not move - Obsidian
- *      gets its event back (s137: the mode is the gate, there is no setting of its own);
+ *      gets its event back;
  *   6. deltaMode 1 (lines) zooms by the same arithmetic as pixels.
  *
  * The zoom counter is not mounted in this rig (MobileTools is not in the bundle). `counter` is the
@@ -65,7 +65,7 @@ async function mounted(): Promise<Page> {
 	await page.addStyleTag({ content: css + REAL_OBSIDIAN_CSS });
 	await page.addScriptTag({ content: bundle });
 	await page.evaluate(([pane]) => (window as any).scrollColumnAnchor.runTearMount(1, 0, pane, true, { fx: 0.5, fy: 0.5 }), [{ w: PANE.w, h: PANE.h }] as const);
-	// s137: the ctrl+wheel zoom only exists in this mode.
+	// The ctrl+wheel zoom only exists in this mode.
 	await page.evaluate(() => (window as any).wheelZoom.setCanvas(true));
 	return page;
 }
@@ -77,7 +77,7 @@ it("1 + 2: a ctrl+wheel run zooms the note about the cursor, the counter follows
 	const page = await mounted();
 	try {
 		// -400 px of wheel travel: exp(400 * 0.002) = about 2.23x, well inside the cap.
-		// s199: four events of 100 px, the size a mouse notch reports. The total travel, and so every
+		// Four events of 100 px, the size a mouse notch reports. The total travel, and so every
 		// number below, is what it always was; only the event size changed, and it is what makes this
 		// run a MOUSE run rather than a touchpad one.
 		const r = await run(page, -400, 4);
@@ -116,7 +116,7 @@ it("1 + 2: a ctrl+wheel run zooms the note about the cursor, the counter follows
 it("3: wheeling the other way zooms the note out and the counter follows down", async () => {
 	const page = await mounted();
 	try {
-		const r = await run(page, 300, 3); // s199: three events of 100 px, a mouse run
+		const r = await run(page, 300, 3); // Three events of 100 px, a mouse run
 		report.push({ cell: "zoom out", ...r });
 		const expected = wheelRatio(300);
 		expect(expected).toBeLessThan(1);
@@ -132,7 +132,7 @@ it("4: past the cap the preview gives, and the quiet end eases back to exactly 4
 	const page = await mounted();
 	try {
 		// exp(1200 * 0.002) = about 11x: far past the 4x cap.
-		const r = await run(page, -1200, 12); // s199: twelve events of 100 px, a mouse run
+		const r = await run(page, -1200, 12); // Twelve events of 100 px, a mouse run
 		report.push({ cell: "past the cap", ...r });
 		const peak = Math.max(...r.live.map((l: any) => l.k as number));
 		expect(peak, "the preview stopped dead at the cap instead of giving").toBeGreaterThan(MAX_PINCH_SCALE + 0.05);
@@ -171,19 +171,19 @@ it("6: deltaMode 1 is lines, so the same gesture in line units lands on the same
 	}
 }, 120_000);
 
-it("8 (s199): the same travel on a touchpad zooms 1.5 times as far as on a mouse wheel", async () => {
+it("8: the same travel on a touchpad zooms 1.5 times as far as on a mouse wheel", async () => {
 	const page = await mounted();
 	try {
 		// 25 events of 4 px: the stream a precision touchpad sends. Same -100 px of travel as the
 		// mouse arm below, which sends it as one 100 px notch.
 		const pad = await run(page, -100, 25);
-		report.push({ cell: "s199 touchpad", ...pad });
+		report.push({ cell: "touchpad", ...pad });
 		expect(pad.final.k, "the touchpad run did not land at the touchpad gain").toBeCloseTo(Math.exp(100 * TOUCHPAD_ZOOM_K), 2);
 
 		const mouse = await mounted();
 		try {
 			const wheel = await run(mouse, -100, 1);
-			report.push({ cell: "s199 mouse", ...wheel });
+			report.push({ cell: "mouse", ...wheel });
 			expect(wheel.final.k, "the mouse run moved off 0.002").toBeCloseTo(Math.exp(100 * WHEEL_ZOOM_K), 2);
 			// The claim itself, in log ratio, which is where "1.5 times as far" is a straight line.
 			const gain = Math.log(pad.final.k) / Math.log(wheel.final.k);

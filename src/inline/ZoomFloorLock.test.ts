@@ -60,7 +60,7 @@ function makeRig(start = 1) {
 	overlay.view = { dom: host, scrollDOM: scroller, contentDOM: { getBoundingClientRect: () => ({ left: 0, top: 0 }), children: [] as unknown[] }, requestMeasure: vi.fn(), measure: vi.fn() };
 	overlay.container = { setCssStyles: vi.fn() };
 	overlay.frame = { locked: false };
-	// s179: THIS RIG'S SUBJECT IS ZOOM MECHANICS, so its note is a CANVAS note. With the canvas off a
+	// THIS RIG'S SUBJECT IS ZOOM MECHANICS, so its note is a CANVAS note. With the canvas off a
 	// two-finger gesture is not a zoom at all (`pinch` returns on its first line), and a fixture left in
 	// that mode would run none of the code these arms are about while still reporting a result - measured,
 	// the mode gate alone turned several of them green by doing nothing. `canvasMode` is a class field and
@@ -266,7 +266,7 @@ describe("zoom-out is locked below the 10% floor", () => {
  * the constant symbolically, so it stays green whether the constant is 4 or
  * 6. Nothing there drives an actual preview frame, a real commit, or a
  * button click past the old ceiling - which is exactly what let two bare `4`
- * literals sit unnoticed the first time this same ceiling moved (Reviewer F1
+ * literals sit unnoticed the first time this same ceiling moved (a review finding
  * on 772960c7).
  */
 describe("the pinch-in ceiling reaches MAX_PINCH_SCALE, not the old 400%", () => {

@@ -23,9 +23,9 @@ vi.mock("obsidian", () => ({
 	normalizePath: (p: string) => p.replace(/\\/g, "/").replace(/\/+/g, "/"),
 }));
 
-import { PageStore } from "./PageStore";
+import { PageStore, contentStamp } from "./PageStore";
 import { changeFolder, migrateInkFolder } from "./InkFolder";
-import { PageData, emptyPage, parsePage } from "../model/PageData";
+import { PageData, emptyPage, parsePage, serializePage } from "../model/PageData";
 
 // ---- fake filesystem --------------------------------------------------------
 
@@ -123,6 +123,13 @@ class FakeAdapter {
 	}
 }
 
+/** A page of several strokes, each built as `pageWith` builds one. */
+function pageOf(id: string, ...labels: string[]): PageData {
+	const p = pageWith(id, labels[0]!);
+	p.strokes = labels.map((l) => pageWith(id, l).strokes[0]!);
+	return p;
+}
+
 function pageWith(id: string, label: string): PageData {
 	const p = emptyPage(id);
 	p.surface = "inline";
@@ -217,6 +224,64 @@ async function settle(): Promise<void> {
 	}
 }
 
+describe("audit recovery B1-001", () => {
+	it.each([false, true])("failed recycle retains B (seeded tmp: %s)", async (seedTmp) => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await store.saveNow("p1", pageWith("p1", "A"));
+			const a = fake.files.get(".handwriting/p1.json")!;
+			fake.failWriteTimes = 4; // initial attempt plus all three retries
+			store.schedule("p1", pageWith("p1", "B"));
+			await settle();
+			expect(fake.failWriteTimes).toBe(0);
+			expect(vi.getTimerCount()).toBe(0);
+			expect((store as any).pending.get("p1").strokes[0].id).toBe("B");
+			expect(fake.files.get(".handwriting/p1.json")).toBe(a);
+			const tmp = ".handwriting/p1.json.tmp";
+			if (seedTmp) {
+				// Explicit cleanup arm, not a claim the prior failed write made it.
+				const b = JSON.parse(a);
+				b.strokes[0].id = "B";
+				fake.externalWrite(tmp, JSON.stringify(b));
+				expect(parsePage(fake.files.get(tmp)!, "p1").data.strokes[0]!.id).toBe("B");
+			}
+			const write = fake.write.bind(fake);
+			const failed: string[] = [];
+			fake.write = async (path, bytes) => {
+				if (path.startsWith(".handwriting/trash/p1-")) {
+					failed.push(path);
+					throw new Error("audit B1-001 exact trash destination");
+				}
+				return write(path, bytes);
+			};
+			await store.remove("p1");
+			expect(failed).toHaveLength(1);
+			expect(failed[0]).toMatch(/^\.handwriting\/trash\/p1-\d+(?:-\d+)?\.json$/);
+			const retained = (store as any).pending.get("p1")?.strokes.map((s: any) => s.id) ?? [];
+			const tmpAfter = fake.files.get(tmp);
+			fake.write = write;
+			await store.flush(); // no replay of B's original schedule
+			const cold = new PageStore({ vault: { adapter: fake } });
+			const reopened = await cold.load("p1");
+			const diskIds = [...fake.files.values()].flatMap((v) => parsePage(v, "p1").data.strokes.map((s) => s.id));
+			console.log("AUDIT-B1-001", JSON.stringify({ seedTmp, failed, retained, tmpRetained: tmpAfter !== undefined, diskIds, coldIds: reopened?.data.strokes.map((s) => s.id) }));
+			// Independent soft oracles: one failure must not hide the tmp arm.
+			expect.soft([...retained, ...diskIds], "B remains recoverable without replaying its schedule").toContain("B");
+			if (seedTmp) expect.soft(tmpAfter, "failed preservation must retain B's existing tmp").toBeDefined();
+		} finally { error.mockRestore(); }
+	});
+
+	it("successful recycle preserves queued B for a genuinely fresh store", async () => {
+		await store.saveNow("p1", pageWith("p1", "A"));
+		store.schedule("p1", pageWith("p1", "B"));
+		await store.remove("p1");
+		const cold = new PageStore({ vault: { adapter: fake } });
+		const loaded = await cold.load("p1");
+		expect(loaded?.data.strokes.map((s) => s.id)).toEqual(["B"]);
+		expect(loaded?.fromInkTrash).toBe(true);
+	});
+});
+
 describe("save ordering — disk state only moves forward", () => {
 	it("rapid sequential strokes collapse to one write of the NEWEST state", async () => {
 		store.schedule("p1", pageWith("p1", "s1"));
@@ -269,6 +334,16 @@ describe("failed writes are not durable", () => {
 		// The state is still queued: a later flush with a healed disk saves it.
 		fake.failWriteTimes = 0;
 		await store.flush();
+		expect(fake.files.get(".handwriting/p1.json")).toContain('"S"');
+	});
+
+	it("flushPage answers false while the page's write has failed, so a caller keeps what it holds", async () => {
+		fake.failWriteTimes = 99;
+		store.schedule("p1", pageWith("p1", "S"));
+		expect(await store.flushPage("p1")).toBe(false);
+		expect(fake.files.has(".handwriting/p1.json")).toBe(false);
+		fake.failWriteTimes = 0;
+		expect(await store.flushPage("p1")).toBe(true);
 		expect(fake.files.get(".handwriting/p1.json")).toContain('"S"');
 	});
 
@@ -594,8 +669,8 @@ describe("trash generations — a recovery copy is never overwritten", () => {
 		await settle();
 		const g2 = await store.preserve("p1"); // same trashClock
 
-		expect(g1).toBe(".handwriting/trash/p1-5000000.json");
-		expect(g2).toBe(".handwriting/trash/p1-5000000-2.json");
+		expect(g1).toBe(".handwriting/trash/p1-5000000-wipe.json");
+		expect(g2).toBe(".handwriting/trash/p1-5000000-2-wipe.json");
 		expect(fake.files.get(g1!)).toContain("alpha");
 		expect(fake.files.get(g2!)).toContain("beta");
 	});
@@ -603,15 +678,15 @@ describe("trash generations — a recovery copy is never overwritten", () => {
 	it("a pre-existing file on the candidate name is never overwritten", async () => {
 		// Something already occupies the natural name — a restored backup, a
 		// sync copy, a leftover from an older build's single-slot scheme.
-		fake.files.set(".handwriting/trash/p1-5000000.json", "PRE-EXISTING, DO NOT TOUCH");
-		fake.files.set(".handwriting/trash/p1-5000000-2.json", "ALSO PRE-EXISTING");
+		fake.files.set(".handwriting/trash/p1-5000000-wipe.json", "PRE-EXISTING, DO NOT TOUCH");
+		fake.files.set(".handwriting/trash/p1-5000000-2-wipe.json", "ALSO PRE-EXISTING");
 		store.schedule("p1", pageWith("p1", "new-ink"));
 		await settle();
 		const kept = await store.preserve("p1");
 
-		expect(kept).toBe(".handwriting/trash/p1-5000000-3.json");
-		expect(fake.files.get(".handwriting/trash/p1-5000000.json")).toBe("PRE-EXISTING, DO NOT TOUCH");
-		expect(fake.files.get(".handwriting/trash/p1-5000000-2.json")).toBe("ALSO PRE-EXISTING");
+		expect(kept).toBe(".handwriting/trash/p1-5000000-3-wipe.json");
+		expect(fake.files.get(".handwriting/trash/p1-5000000-wipe.json")).toBe("PRE-EXISTING, DO NOT TOUCH");
+		expect(fake.files.get(".handwriting/trash/p1-5000000-2-wipe.json")).toBe("ALSO PRE-EXISTING");
 		expect(fake.files.get(kept!)).toContain("new-ink");
 	});
 
@@ -1000,6 +1075,49 @@ describe("round trips and deletion", () => {
 		expect(fake.files.has(".handwriting/p1.json")).toBe(false);
 		expect(trashContents("p1")).toEqual([expect.stringContaining("precious")]);
 	});
+
+	it("a delete-all backup is not auto-revived when the note is deleted and restored", async () => {
+		// Same chain as above, then the note comes back (Obsidian's own
+		// trash, or a sync client's undelete). Nothing recycled a NEW
+		// generation for the empty page the note was deleted with, so the
+		// only generation on disk is delete-all's own safety copy. Reopening
+		// the restored note must find it EMPTY, the way the user left it —
+		// not silently bring back ink they deliberately wiped.
+		store.schedule("p1", pageWith("p1", "wiped-on-purpose"));
+		await settle();
+		await store.preserve("p1"); // the delete-all safety copy
+		const empty = emptyPage("p1");
+		empty.surface = "inline";
+		store.schedule("p1", empty); // the wipe
+		await settle();
+		await store.remove("p1"); // the note deletion
+		expect(trashContents("p1")).toEqual([expect.stringContaining("wiped-on-purpose")]);
+
+		// Nothing left to find: no live file, no .tmp, and the only trash
+		// generation is tagged as delete-all's own copy. The restored note
+		// opens exactly like a brand-new blank page, not a "recovered" one.
+		const restored = await new PageStore({ vault: { adapter: fake } }, ".handwriting", () => trashClock).load(
+			"p1"
+		);
+		expect(restored).toBeNull();
+	});
+
+	it("load with restore:false never brings a page back from the trash, and leaves the trash alone", async () => {
+		store.schedule("p1", pageWith("p1", "recycled-ink"));
+		await settle();
+		await store.remove("p1");
+		const before = trashGenerations("p1");
+		expect(before).toHaveLength(1);
+
+		const other = new PageStore({ vault: { adapter: fake } }, ".handwriting", () => trashClock);
+		expect(await other.load("p1", { restore: false })).toBeNull();
+		expect(trashGenerations("p1")).toEqual(before);
+
+		// Control: the same trash, default options, does restore. Without this
+		// the null above could be an empty fixture rather than the flag.
+		const restored = await new PageStore({ vault: { adapter: fake } }, ".handwriting", () => trashClock).load("p1");
+		expect(restored).not.toBeNull();
+	});
 });
 
 // ---- background flush (mobile freeze) --------------------------------------
@@ -1026,7 +1144,8 @@ describe("flushDispatch: the background/freeze path", () => {
 		// dirty page has already been handed to the platform by the time
 		// flushDispatch returns, because after it returns there may be no
 		// more JS at all.
-		expect(fake.writeStarts).toEqual([".handwriting/p1.json.tmp", ".handwriting/p2.json.tmp"]);
+		// Its own carrier per page, not the shared .tmp.
+		expect(fake.writeStarts).toEqual([".handwriting/p1.json.flush", ".handwriting/p2.json.flush"]);
 		expect(fake.log).toEqual([]); // nothing completed; the platform owns them now
 
 		// And still both, after a drained tick - nothing re-dispatches or
@@ -1045,8 +1164,8 @@ describe("flushDispatch: the background/freeze path", () => {
 		store.flushDispatch();
 		// The freeze: not one await between the sweep and here.
 		expect([...fake.files.keys()].sort()).toEqual([
-			".handwriting/p1.json.tmp",
-			".handwriting/p2.json.tmp",
+			".handwriting/p1.json.flush",
+			".handwriting/p2.json.flush",
 		]);
 
 		// Next launch, over the disk as the freeze left it: a fresh adapter
@@ -1067,7 +1186,51 @@ describe("flushDispatch: the background/freeze path", () => {
 			expect(r?.data.strokes[0]?.id).toBe(label);
 			// Promoted, not left in the scratch file (2026-09-01).
 			expect(disk.files.has(`.handwriting/${id}.json`)).toBe(true);
-			expect(disk.files.has(`.handwriting/${id}.json.tmp`)).toBe(false);
+			expect(disk.files.has(`.handwriting/${id}.json.flush`)).toBe(false);
+		}
+	});
+
+	it("a carrier built on the live bytes is promoted, and the old live file is kept beside it", async () => {
+		store.schedule("p1", pageWith("p1", "old"));
+		await settle();
+		const loaded = new PageStore({ vault: { adapter: fake } }, ".handwriting", () => trashClock);
+		await loaded.load("p1");
+		loaded.schedule("p1", pageWith("p1", "new"));
+		fake.writeDelay = new Promise<void>(() => {});
+		loaded.flushDispatch();
+		const disk = new FakeAdapter();
+		for (const [path, text] of fake.files) disk.files.set(path, text);
+		for (const [path, mtime] of fake.mtimes) disk.mtimes.set(path, mtime);
+		for (const dir of fake.dirs) disk.dirs.add(dir);
+		fake.writeDelay = null;
+		// The frozen write never landed in `fake`; put the carrier it started on disk.
+		expect(disk.files.has(".handwriting/p1.json.flush")).toBe(false);
+		disk.files.set(".handwriting/p1.json.flush", `{"flushBase":${JSON.stringify(contentStamp(disk.files.get(".handwriting/p1.json")!))},"page":${serializePage(pageWith("p1", "new"))}}`);
+		const r = await new PageStore({ vault: { adapter: disk } }, ".handwriting", () => trashClock).load("p1");
+		expect(r?.recovered).toBe(true);
+		expect(r?.data.strokes[0]?.id).toBe("new");
+		expect(disk.files.has(".handwriting/p1.json.flush")).toBe(false);
+		const kept = [...disk.files.keys()].filter((k) => k.includes(".superseded-"));
+		expect(kept).toHaveLength(1);
+		expect(parsePage(disk.files.get(kept[0]!)!, "p1").data.strokes[0]?.id).toBe("old");
+	});
+
+	it("a carrier built on other bytes is kept aside and the live file stands", async () => {
+		store.schedule("p1", pageWith("p1", "live"));
+		await settle();
+		fake.externalWrite(".handwriting/p1.json.flush", `{"flushBase":"some-other-stamp","page":${serializePage(pageWith("p1", "carried"))}}`);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const r = await new PageStore({ vault: { adapter: fake } }, ".handwriting", () => trashClock).load("p1");
+			expect(r?.recovered).toBeFalsy();
+			expect(r?.data.strokes[0]?.id).toBe("live");
+			expect(fake.files.has(".handwriting/p1.json.flush")).toBe(false);
+			const aside = [...fake.files.keys()].filter((k) => k.includes(".flush-conflict-"));
+			expect(aside).toHaveLength(1);
+			expect(parsePage(fake.files.get(aside[0]!)!, "p1").data.strokes[0]?.id).toBe("carried");
+			expect(warn).toHaveBeenCalledTimes(1);
+		} finally {
+			warn.mockRestore();
 		}
 	});
 
@@ -1083,6 +1246,8 @@ describe("flushDispatch: the background/freeze path", () => {
 		expect(fake.files.get(".handwriting/p1.json")).toContain('"new"');
 		expect(fake.files.get(".handwriting/p1.json")).not.toContain('"old"');
 		expect(fake.files.has(".handwriting/p1.json.tmp")).toBe(false);
+		// The landed save removes this session's carrier.
+		expect(fake.files.has(".handwriting/p1.json.flush")).toBe(false);
 	});
 
 	it("without a freeze it ends exactly where a normal save would", async () => {
@@ -1159,12 +1324,50 @@ describe("the ink folder fallback runs both ways", () => {
 		expect((await store.load("p1"))?.data.strokes.map((s) => s.id)).toEqual(["s1"]);
 	});
 
-	it("prefers the configured folder when the page is in both", async () => {
-		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "mine")));
+	it("prefers the configured folder when the page is in both with identical bytes", async () => {
+		const same = JSON.stringify(pageWith("p1", "same"));
+		fake.files.set(".handwriting/p1.json", same);
 		fake.mtimes.set(".handwriting/p1.json", 42);
-		fake.files.set("handwriting/p1.json", JSON.stringify(pageWith("p1", "theirs")));
+		fake.files.set("handwriting/p1.json", same);
 		fake.mtimes.set("handwriting/p1.json", 43);
-		expect((await store.load("p1"))?.data.strokes.map((s) => s.id)).toEqual(["mine"]);
+		await store.load("p1");
+		await store.saveNow("p1", pageOf("p1", "same", "next"));
+		expect(fake.files.get(".handwriting/p1.json")).toContain("next");
+		expect(fake.files.get("handwriting/p1.json")).toBe(same);
+	});
+
+	// A page in both folders whose copies differ: the copy holding every stroke
+	// of the other is the page, whichever folder it is in; the other is moved
+	// aside as a conflict copy by the next write, never deleted.
+	for (const [label, full, part] of [
+		["the synced folder holds more", "handwriting/p1.json", ".handwriting/p1.json"],
+		["the configured folder holds more", ".handwriting/p1.json", "handwriting/p1.json"],
+	] as const) {
+		it(`serves the copy that holds the other when the page is in both folders: ${label}`, async () => {
+			fake.files.set(full, JSON.stringify(pageOf("p1", "a", "b")));
+			fake.mtimes.set(full, 42);
+			fake.files.set(part, JSON.stringify(pageWith("p1", "a")));
+			fake.mtimes.set(part, 43);
+			expect((await store.load("p1"))?.data.strokes.map((s) => s.id)).toEqual(["a", "b"]);
+			await store.saveNow("p1", pageOf("p1", "a", "b", "c"));
+			expect(fake.files.get(full)).toContain('"c"');
+			expect(fake.files.has(part), "the smaller copy is no longer a live sidecar").toBe(false);
+			const aside = [...fake.files.keys()].filter((k) => k.includes("p1.conflict-") && !k.includes("-external-"));
+			expect(aside, "the smaller copy was moved aside, not deleted").toHaveLength(1);
+		});
+	}
+
+	it("a page in both folders where neither copy holds the other is a fork: the synced copy is served and the other is kept as a fork pair", async () => {
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageOf("p1", "a", "mine")));
+		fake.mtimes.set(".handwriting/p1.json", 42);
+		fake.files.set("handwriting/p1.json", JSON.stringify(pageOf("p1", "a", "theirs")));
+		fake.mtimes.set("handwriting/p1.json", 43);
+		expect((await store.load("p1"))?.data.strokes.map((s) => s.id)).toEqual(["a", "theirs"]);
+		const pair = [...fake.files.keys()].filter((k) => k.includes("p1.conflict-external-")).sort();
+		expect(pair, "a fork pair beside the served copy").toHaveLength(2);
+		expect(pair.every((k) => k.startsWith("handwriting/"))).toBe(true);
+		const outgoing = pair.find((k) => k.endsWith("-outgoing.json"))!;
+		expect(fake.files.get(outgoing)).toContain('"mine"');
 	});
 
 	// THE FORK ITSELF. Read from handwriting/, write to .handwriting/, and
@@ -1453,6 +1656,56 @@ describe("a folder change holds writes until the files have moved", () => {
 		store.schedule("p1", pageWith("p1", "after"));
 		await settle();
 		expect(fake.files.get(".handwriting/p1.json")).toContain("after");
+	});
+});
+
+describe("a second folder move while the first runs (audit 183)", () => {
+	it("busy is true from the hold to the release, with nothing queued", () => {
+		expect(store.busy).toBe(false);
+		store.holdWrites();
+		expect(store.busy).toBe(true);
+		expect(store.movingFolder).toBe(true);
+		store.releaseWrites();
+		expect(store.busy).toBe(false);
+		expect(store.movingFolder).toBe(false);
+	});
+
+	it("a second move started mid-move is refused as busy and migrates nothing", async () => {
+		fake.dirs.add(".handwriting");
+		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "old")));
+		fake.mtimes.set(".handwriting/p1.json", 42);
+		await store.load("p1");
+		let migrations = 0;
+		let unblock: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			unblock = resolve;
+		});
+		// The steps `changeInkFolder` builds: settle drains, then asks `busy`.
+		const steps = (block: boolean) => ({
+			settle: async () => {
+				await store.flush();
+				return !store.busy;
+			},
+			holdWrites: () => store.holdWrites(),
+			releaseWrites: () => store.releaseWrites(),
+			migrate: async (from: string, to: string) => {
+				migrations++;
+				if (block) await gate;
+				return migrateInkFolder(fake, from, to);
+			},
+			repoint: (to: string) => store.useInkFolder(to),
+			persist: async () => {},
+		});
+		const first = changeFolder(steps(true), ".handwriting", "assets/ink");
+		await vi.advanceTimersByTimeAsync(10);
+		// The row re-rendered and its fresh button was tapped: same from and to.
+		const second = await changeFolder(steps(false), ".handwriting", "assets/ink");
+		expect(second.kind).toBe("busy");
+		expect(migrations).toBe(1);
+		unblock();
+		expect((await first).kind).toBe("moved");
+		expect(migrations).toBe(1);
+		expect(store.busy).toBe(false);
 	});
 });
 
@@ -1824,17 +2077,29 @@ describe("listIds enumerates every folder a page can be served from", () => {
 		expect((await store.listIds("pdf-aa")).sort()).toEqual(["pdf-aa", "pdf-aa-2", "pdf-aa-3"]);
 	});
 
-	it("returns an id present in BOTH folders once, and the configured folder is the copy that loads", async () => {
-		fake.files.set(".handwriting/pdf-aa.json", JSON.stringify(pageWith("pdf-aa", "mine")));
+	it("returns an id present in BOTH folders once, and with identical bytes the configured folder is the copy that loads", async () => {
+		const same = JSON.stringify(pageWith("pdf-aa", "same"));
+		fake.files.set(".handwriting/pdf-aa.json", same);
 		fake.mtimes.set(".handwriting/pdf-aa.json", 42);
-		fake.files.set("handwriting/pdf-aa.json", JSON.stringify(pageWith("pdf-aa", "theirs")));
+		fake.files.set("handwriting/pdf-aa.json", same);
 		fake.mtimes.set("handwriting/pdf-aa.json", 43);
 		// One page id, one page - listing it twice would hand chooseInstance
 		// two candidates for one sidecar.
 		expect(await store.listIds("pdf-aa")).toEqual(["pdf-aa"]);
 		// Which file that id is served from is resolvePath's answer, not
-		// listIds': unchanged, the configured folder wins.
-		expect((await store.load("pdf-aa"))?.data.strokes.map((s) => s.id)).toEqual(["mine"]);
+		// listIds': with identical copies, the configured folder.
+		await store.load("pdf-aa");
+		await store.saveNow("pdf-aa", pageOf("pdf-aa", "same", "next"));
+		expect(fake.files.get(".handwriting/pdf-aa.json")).toContain("next");
+	});
+
+	it("a PDF id in both folders loads the copy that holds the other, as a note does", async () => {
+		fake.files.set(".handwriting/pdf-aa.json", JSON.stringify(pageWith("pdf-aa", "a")));
+		fake.mtimes.set(".handwriting/pdf-aa.json", 42);
+		fake.files.set("handwriting/pdf-aa.json", JSON.stringify(pageOf("pdf-aa", "a", "b")));
+		fake.mtimes.set("handwriting/pdf-aa.json", 43);
+		expect(await store.listIds("pdf-aa")).toEqual(["pdf-aa"]);
+		expect((await store.load("pdf-aa"))?.data.strokes.map((s) => s.id)).toEqual(["a", "b"]);
 	});
 
 	it("a folder that will not enumerate is skipped, not fatal", async () => {

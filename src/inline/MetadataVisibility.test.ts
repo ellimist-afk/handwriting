@@ -1,30 +1,4 @@
-/**
- * THE STYLESHEET ASSERTION READS CODE, NOT THE STYLESHEET'S TEXT, and this
- * file is where both failure directions sat on ADJACENT LINES.
- *
- *   - `toContain(".metadata-container.<class>")` is satisfied by a comment
- *     that names the class - the false ALL-CLEAR, silent.
- *   - `not.toContain(":has(")` is TRIPPED by a comment that names `:has(` -
- *     the false ALARM, loud. And the obvious comment to write above this rule
- *     is one saying why `:has()` was avoided, which is precisely the sentence
- *     that breaks it.
- *
- * Both were demonstrated on this branch in one edit: the real rule's class was
- * renamed to a typo - the rename that missed the stylesheet - and a comment
- * was added naming the correct class and explaining the `:has()` decision.
- * The presence assertion PASSED over a stylesheet that no longer carried the
- * rule; the relational-selector assertion then failed on the prose, which is
- * the sharper detail: the loud half fires first and masks the silent half, so
- * a maintainer chasing the visible failure deletes the sentence, goes green,
- * and never learns the rule is gone.
- *
- * `codeOnly` (src/CodeOnly.ts) is the shared stripper, imported not copied.
- * `styles.css` has no `//` sequence (verified), so its line-comment half
- * cannot over-blank this input. Neither direction is weakened: matching code
- * can only find FEWER matches, so no real rule stops satisfying the first
- * assertion and no real `:has(` stops tripping the second - what stops
- * counting is a rule, or a selector, that was only ever a sentence.
- */
+/** Read CSS rules after stripping comments, so prose cannot satisfy a selector check. */
 
 import { describe, expect, it } from "vitest";
 import { chromium } from "playwright";
@@ -72,7 +46,14 @@ function root(...containers: HTMLElement[]): ParentNode {
 }
 
 describe("metadata visibility", () => {
-	it.each([["handwriting-paper"], ["handwriting-page-id", "handwriting-paper"]])("hides internal-only rows %j", (...keys) => {
+	it.each([
+		["handwriting-paper"],
+		["handwriting-page-id", "handwriting-paper"],
+		// Turning per-note Infinite Canvas on/off writes this key (audit 196):
+		// it is as internal as page-id and paper, and must not by itself
+		// un-hide an id-only block.
+		["handwriting-page-id", "handwriting-canvas"],
+	])("hides internal-only rows %j", (...keys) => {
 		const container = metadataContainer(keys);
 		updateMetadataVisibility(root(container.element));
 		expect(container.hasClass()).toBe(true);
@@ -96,12 +77,24 @@ describe("metadata visibility", () => {
 		} finally { await browser.close(); }
 	}, 30_000);
 
-	it("uses a maintained class instead of relational selectors", () => {
-		// Both halves against the cascade, for opposite reasons - see the note
-		// at the top of this file.
+	it("the shipped CSS also hides the exact handwriting-canvas row (audit 196)", async () => {
+		const browser = await chromium.launch({ headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent('<div class="metadata-container"><div class="metadata-property" data-property-key="handwriting-canvas">canvas</div><div class="metadata-property" data-property-key="tags">tags</div></div>');
+			await page.addStyleTag({ content: css + "\n" + hostCss });
+			const display = await page.locator(".metadata-property").evaluateAll(rows => rows.map(row => getComputedStyle(row).display));
+			expect(display).toEqual(["none", "flex"]);
+		} finally { await browser.close(); }
+	}, 30_000);
+
+	it("keeps the relational focus exception scoped to the maintained class", () => {
 		const cssCode = codeOnly(css);
 		expect(cssCode).toContain(`.metadata-container.${ID_ONLY_METADATA_CLASS}`);
-		expect(cssCode).not.toContain(":has(");
+		const relationalRules = cssCode.split("}").filter(rule => rule.includes(":has("));
+		expect(relationalRules).toHaveLength(1);
+		expect(relationalRules[0]).toContain(`.metadata-container.${ID_ONLY_METADATA_CLASS}`);
+		expect(relationalRules[0]).toContain(".metadata-property");
 	});
 
 	it("reads rules, not sentences, in both directions", () => {

@@ -81,7 +81,7 @@ export function boxContains(box: PageBox, contentX: number, contentY: number): b
  * Which page a content point belongs to.
  *
  * Exact hit first. Failing that - the point is in the gap between pages, or
- * past the last one - the NEAREST page by vertical distance, because a pen
+ * past the last one - the NEAREST page by rectangle distance, because a pen
  * that starts a hair above a page still means that page. Null only for an
  * empty list.
  */
@@ -92,7 +92,8 @@ export function pageAt(boxes: readonly PageBox[], contentX: number, contentY: nu
 		if (boxContains(box, contentX, contentY)) return box;
 		const above = box.topPx - contentY;
 		const below = contentY - (box.topPx + box.heightPx);
-		const dist = Math.max(0, above, below);
+		const dx = Math.max(0, box.leftPx - contentX, contentX - (box.leftPx + box.widthPx));
+		const dist = Math.hypot(dx, Math.max(0, above, below));
 		if (dist < bestDist) {
 			bestDist = dist;
 			best = box;
@@ -158,6 +159,15 @@ export function snipViewport(
 	if (!(x1 > x0) || !(y1 > y0)) return null;
 	let scale = pxPerPt;
 	const area = (x1 - x0) * scale * ((y1 - y0) * scale);
-	if (area > capPx) scale *= Math.sqrt(capPx / area);
+	if (area > capPx) {
+		scale *= Math.sqrt(capPx / area);
+		// Callers allocate Math.round of each side, which can round both up past the cap. Settle on the scale that
+		// gives each side its floor: one side lands on its floor exactly, the other at or under its own, so the
+		// rounded product is at most floor x floor, which the continuous area already kept under the cap.
+		scale = Math.min(
+			Math.max(1, Math.floor((x1 - x0) * scale)) / (x1 - x0),
+			Math.max(1, Math.floor((y1 - y0) * scale)) / (y1 - y0)
+		);
+	}
 	return { x0, y0, x1, y1, scale };
 }

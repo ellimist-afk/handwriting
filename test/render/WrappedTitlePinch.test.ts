@@ -115,9 +115,9 @@ function sample(phase) {
 
 window.wrappedTitle = {
 	async mount(readable, twoLine) {
-		// s179 (Alan, 2026-09-20): the pinch zoom exists only under the Infinite Canvas now, so a
+		// Alan, 2026-09-20: the pinch zoom exists only under the Infinite Canvas now, so a
 		// rig that pinches mounts with the canvas ON. The canvas-on settle laws apply here: the
-		// page stays where the fingers left it, no centring and no fit window (s78, s97).
+		// page stays where the fingers left it, no centring and no fit window.
 		setPenInk(true); setScrollExpansionEnabled(true);
 		setInlineTool("pen"); setInkColorHex("pen", "#ff00ff"); setInkSizeMult("pen", 4);
 		const path = "wrapped-title-" + readable + "-" + twoLine + ".md";

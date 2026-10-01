@@ -176,7 +176,7 @@ describe("strokeIdsBelow (insert-space membership)", () => {
 	it("classifies each local group at the original guide, never another group's edge",()=>{
 		const page=localColumns();
 		// Isolate the second trap from group formation: a global cut would
-		// snap130 to the left group's150 and incorrectly exclude right140.
+		// snap 130 to the left group's 150 and incorrectly exclude right 140.
 		const groups=page.map(s=>({top:s.points[0]!.y,bottom:s.points[1]!.y,ids:[s.id]}));
 		expect(strokeIdsBelow(page,130,groups)).toEqual(["right-lower"]);
 	});

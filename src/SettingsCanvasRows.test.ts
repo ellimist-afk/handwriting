@@ -1,5 +1,5 @@
 /**
- * THE THREE SETTINGS-SIDE CHANGES OF s138 (items 13, 14, 15).
+ * THE THREE SETTINGS-SIDE CHANGES OF THE INFINITE CANVAS SETTINGS WORK.
  *
  *   Infinite Canvas   the row's description says what turning it on turns on.
  *   Zoom bar          the row is greyed out while Infinite Canvas is off - the
@@ -113,7 +113,7 @@ const isOff = (r: Row): boolean => {
 };
 
 describe("the Infinite Canvas row says what it turns on", () => {
-	it("carries the s138 description, word for word", async () => {
+	it("carries the Infinite Canvas description, word for word", async () => {
 		const tab = await tabFor({});
 		expect(row(tab, "Infinite canvas").desc).toBe("Turns on Infinite canvas. Also turns on zoom bar. Default off.");
 	});

@@ -1,12 +1,12 @@
 /**
- * s105 (Architect). Off-centre pinch-out 100% -> 10%, RLL off, IC off. 100ms into the post-lift glide, dispatch a
+ * Off-centre pinch-out 100% -> 10%, RLL off, IC off. 100ms into the post-lift glide, dispatch a
  * REAL pointerdown+pointerup (a tap, new pointerId, not routed through the pinch's own touchPos bookkeeping) on
  * the router's listened element (view.scrollDOM): InlinePenRouter.pointerDown (:2502-2504) calls onViewportInput()
- * unconditionally on every new contact ("any new contact ends the glide"), cancelling the playing ease; add.66's
+ * unconditionally on every new contact ("any new contact ends the glide"), cancelling the playing ease; the ruling's
  * fold leaves the offset sitting in viewportPan, stranding the page mid-glide with nothing to bring it back.
  * resumeStrandedPan (InkOverlay.ts) is the fix: called once every contact has lifted, it re-eases the standing
  * pan to its bound instead of leaving it. The second cell repeats this on a page wider than its room, where the
- * bound is a nonzero floor (add. 52), not 0 - the clamp has to read that floor, not assume flat 0.
+ * bound is a nonzero floor, not 0 - the clamp has to read that floor, not assume flat 0.
  *
  * Logs the cancelOverscrollBounce entry (build-time patch on its own guard line, source on disk untouched) so the
  * premise - the tap genuinely cancelled a playing ease - is checked, not assumed.
@@ -62,8 +62,8 @@ function sample(phase) {
 
 window.tapProbe = {
 	async mount(tag) {
-		// s187 (1) [Architect]: MOUNT WITH THE CANVAS ON. This rig made its hang and its glide with a
-		// two-finger pinch through the router while the canvas was OFF - a gesture s179 removed and s185
+		// 1: MOUNT WITH THE CANVAS ON. This rig made its hang and its glide with a
+		// two-finger pinch through the router while the canvas was OFF - a gesture a later ruling removed and the ruling
 		// handed to the host, so every premise below read 0 and the cells failed without a product fault.
 		setScrollExpansionEnabled(true);
 		const path = "tap-probe-" + (tag || "x") + ".md";
@@ -154,15 +154,15 @@ beforeAll(async () => {
 	let planted = 0;
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "tapProbePage.ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
-		plugins: [{ name: "s105-cancel-log", setup(builder) {
+		plugins: [{ name: "cancel-log", setup(builder) {
 			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
 				const text = readFileSync(args.path, "utf8");
-				if (text.split(from).length !== 2) throw new Error("s105 tap probe: cancelOverscrollBounce anchor not found once");
+				if (text.split(from).length !== 2) throw new Error("tap probe: cancelOverscrollBounce anchor not found once");
 				planted++;
 				return { loader: "ts", contents: text.replace(from, to) };
 			});
 		} }] });
-	if (!planted) throw new Error("s105 tap probe: patch never applied");
+	if (!planted) throw new Error("tap probe: patch never applied");
 	script = b.outputFiles[0]!.text;
 	browser = await chromium.launch({ headless: true });
 }, 180_000);
@@ -196,9 +196,9 @@ it("a tap during the post-lift glide does not strand the page: rest reaches the 
 		cancelLogs = logs;
 		record.push({ rows, cancelLogs: logs, rest });
 	});
-	// s189: THE EASE IS BACK UNDER THE CANVAS, so this premise is the original one again. s188 had it pinned
+	// THE EASE IS BACK UNDER THE CANVAS, so this premise is the original one again. A later ruling had it pinned
 	// the other way - nothing played, so nothing could be cancelled - because the true-travel capture ran
-	// canvas-off only. With s189's capture the lift eases under the canvas too and a contact cancels it,
+	// canvas-off only. With the ruling's capture the lift eases under the canvas too and a contact cancels it,
 	// which is what this cell has always been about.
 	expect(cancelLogs.length, "premise: the tap really did cancel a playing ease").toBeGreaterThan(0);
 	expect(rest.bounce.active, "the page is not left mid-ease forever").toBe(false);
@@ -207,28 +207,28 @@ it("a tap during the post-lift glide does not strand the page: rest reaches the 
 }, 60_000);
 
 /**
- * RETIRED [s179 (2), applied by s189, 2026-09-21]: "a tap during the glide on a floor-bound page (wider than
+ * RETIRED: "a tap during the glide on a floor-bound page (wider than
  * its room) rests at the floor, not 0".
  *
  * The floor is a canvas-OFF bound: resumeStrandedPan takes max(boundReadout.floorX/floorY, min(pan, 0)) with the
  * canvas off and plain min(pan, 0) with it on, so under the canvas there is no floor to rest at - measured here,
  * floorX reads -1698 and the page comes to rest with its pan at 0. Canvas off, meanwhile, has no gesture left
- * that can strand a page past its room, since s179 took the note zoom out of it. So the arm's state is not
+ * that can strand a page past its room, since then took the note zoom out of it. So the arm's state is not
  * reachable on either setting, and its premise (a tap cancelling a playing ease) fails for want of an ease
  * rather than for any product fault.
  *
  * MEASURED, both ends, rather than argued:
  *   at the shipped base aa437ff1, clean tree, this file reads 2 passed - the arm was GREEN as it shipped
- *     (slate-artifacts/1.4.20/s189-canvas-ease/tap-floor-aa437ff1.log);
- *   at this head, with the canvas mount and the s189 ease, it failed its first premise - "premise: the tap
+ *     (the tap-floor run at aa437ff1);
+ *   at this head, with the canvas mount and the ease, it failed its first premise - "premise: the tap
  *     really did cancel a playing ease: expected 0 to be greater than 0" - because nothing overshoots: the
  *     canvas floor reads -1698 and the page comes to rest with its pan at 0
- *     (slate-artifacts/1.4.20/s189-canvas-ease/ease-on-restored.log).
- * Green at base and red only from s179 onward is the case for retiring it: the state it drove for was taken
+ *     (the ease-on-restored run).
+ * Green at base and red only from the ruling onward is the case for retiring it: the state it drove for was taken
  * out by a named change, not broken.
  *
  * WHAT STILL CARRIES THE CLAIM: the sibling arm above - a tap during the post-lift glide does not strand the
- * page, it rests at its bound - which passes under the canvas with the s189 ease playing (2 passed at this
+ * page, it rests at its bound - which passes under the canvas with the ease playing (2 passed at this
  * head, glide-after-retire.log).
  */
 

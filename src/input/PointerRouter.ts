@@ -137,7 +137,6 @@ export interface NavigationCamera {
 }
 
 export class PointerRouter {
-	get hasActiveInput(): boolean { return this.activePenId !== null || this.panPointerId !== null || this.touches.size > 0; }
 	private root: HTMLElement;
 	private camera: NavigationCamera;
 	private gate = new PalmGate();

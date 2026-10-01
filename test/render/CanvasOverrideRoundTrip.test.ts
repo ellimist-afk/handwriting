@@ -1,12 +1,12 @@
 /**
- * s138, the plumbing half: A NOTE'S OWN INFINITE CANVAS CHOICE SURVIVES THE ROUND TRIP.
+ * The plumbing half: A NOTE'S OWN INFINITE CANVAS CHOICE SURVIVES THE ROUND TRIP.
  *
  * Write the choice into the note's frontmatter, let the vault's metadata catch up, read it back
  * through the getter the overlay will call, and do the same for an edit the user makes by hand.
  * Two notes with opposite values are read under one global in the same reader, which is the
  * side-by-side case reduced to the only thing this half owns: the answer, not the behaviour.
  *
- * WHAT THIS CELL CANNOT PROVE, stated so nobody reads more into it (ruled s143): the vault here is
+ * WHAT THIS CELL CANNOT PROVE, stated so nobody reads more into it: the vault here is
  * a fake, as in `notePaperPage`. It stores a frontmatter object, re-parses it and feeds the change
  * event back the way Obsidian does, so the read / listen / write loop is real - but Obsidian's own
  * YAML serialisation is not exercised, and neither is a note on disk. A real-file round trip needs

@@ -124,6 +124,9 @@ export interface PenOpts {
 	coalesced?: number[];
 	/** Full coalesced samples, when a replay carries real geometry. */
 	coalescedSamples?: Array<{ t: number; x: number; y: number; pressure: number }>;
+	/** Target-relative point, as the browser would compute it. Default 0. */
+	offsetX?: number;
+	offsetY?: number;
 }
 
 export function penEvent(type: string, ts: number, opts: PenOpts = {}): PointerEvent {
@@ -139,6 +142,8 @@ export function penEvent(type: string, ts: number, opts: PenOpts = {}): PointerE
 		coalescedSamples,
 		pointerId = 7,
 		isPrimary = true,
+		offsetX = 0,
+		offsetY = 0,
 	} = opts;
 	const base = {
 		type,
@@ -147,6 +152,8 @@ export function penEvent(type: string, ts: number, opts: PenOpts = {}): PointerE
 		isPrimary,
 		clientX: x,
 		clientY: y,
+		offsetX,
+		offsetY,
 		pressure,
 		buttons,
 		button: 0,

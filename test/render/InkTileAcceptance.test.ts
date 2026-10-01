@@ -128,7 +128,7 @@ const read = (page: Page, points: { label: string; x: number; y: number }[] = []
 /** A fresh page, the layer tree subscribed before the mount, the scene mounted at `zoom` on `pane` (default pane when null), far when asked.
  * `forceTransform` stubs `CSS.supports("zoom", ...)` to false before the bundle loads (same technique as `ZoomHostPreexistingZoom.test.ts`), so
  * the overlay's own `hostZoomSupported()` genuinely takes the fallback path - for proving the engineZoom/hostZoom pin, not for asserting the
- * fallback's shape (no coverage here, ruling F1). */
+ * fallback's shape (no coverage here). */
 async function open(zoom: number, pane: { w: number; h: number } | null, far: number, dpr: number, forceTransform = false): Promise<Rig> {
 	const w = pane?.w ?? 1397.5, h = pane?.h ?? 800;
 	const page = await browser.newPage({ viewport: { width: Math.ceil(HOST_LEFT + w + 20), height: Math.ceil(h + 100) }, deviceScaleFactor: dpr });
@@ -420,7 +420,7 @@ for (const zoom of [0.2, 1]) it(`IDENTITY at ${zoom * 100}% on the default pane:
 		// The pin, checked before any host-form-specific shape assert below: the
 		// harness engine actually supports css zoom, and the overlay's own gate
 		// agrees. A run where either is false is a different host form (no
-		// coverage here, ruling F1) and the asserts past this point are not
+		// coverage here) and the asserts past this point are not
 		// claimed for it - see the file header and the stubbed-engine cell below.
 		expect(r.engineZoom, "the harness engine supports css zoom").toBe(true);
 		expect(r.hostZoom, "the overlay's host-form gate agrees with the engine").toBe(r.engineZoom);
@@ -435,13 +435,34 @@ for (const zoom of [0.2, 1]) it(`IDENTITY at ${zoom * 100}% on the default pane:
 		expect(r.containerOffsetWidth, "the read carries the container's offset width").toBeGreaterThan(0);
 		expect(Math.abs(r.cssScale - zoom), `at ${zoom} within the measurement's own bound, 2 x ${zoom} / ${r.containerOffsetWidth}`).toBeLessThanOrEqual(2 * zoom / r.containerOffsetWidth);
 		expect(r.strokes, "the shape stored").toBeGreaterThan(0);
-		expect(r.canvases.length, "one canvas per layer, five layers").toBe(5);
-		expect(r.tiles.length, "one tile").toBe(1);
-		for (const c of r.canvases) {
+		expect(r.canvases.length, "five layers and the wet tile").toBe(6);
+		// The four band layers share one box; the live tail and the wet tile
+		// have their own compact backings and are read apart.
+		const bandLayers = r.canvases.filter((c: any) => c.field !== "tailCanvas" && c.field !== "wetTileCanvas");
+		const wetTile = r.canvases.find((c: any) => c.field === "wetTileCanvas");
+		expect(wetTile, "the wet tile canvas is read").toBeTruthy();
+		expect(wetTile.backing.w * wetTile.backing.h, "the wet tile is smaller than the band").toBeLessThan(committed.backing.w * committed.backing.h);
+		expect(bandLayers.length, "four band layers").toBe(4);
+		expect(new Set(bandLayers.map((c: any) => c.rectKey)).size, "one tile").toBe(1);
+		const tail = r.canvases.find((c: any) => c.field === "tailCanvas"), t = r.tailBacking;
+		expect(tail, "the tail canvas is read").toBeTruthy();
+		expect(t, "the tail's own backing is read").toBeTruthy();
+		if (t.grid) {
+			const side = Math.ceil(256 * t.backing / t.grid) * t.grid;
+			const tile = { w: Math.min(side, Math.floor(t.fullW / t.grid) * t.grid), h: Math.min(side, Math.floor(t.fullH / t.grid) * t.grid) };
+			expect({ w: tail.backing.w, h: tail.backing.h }, "the tail is the tile, 256 css px on the joint grid").toEqual(tile);
+			expect(tile.w * tile.h, "the tile is smaller than the band").toBeLessThan(committed.backing.w * committed.backing.h);
+			for (const v of [t.originX, t.originY]) expect(v % t.grid, "the tile origin is on the grid").toBe(0);
+		} else {
+			expect({ w: tail.backing.w, h: tail.backing.h }, "no joint grid: the tail keeps the full band").toEqual({ w: committed.backing.w, h: committed.backing.h });
+		}
+		for (const [lo, hi, tlo, thi] of [[committed.rect.l, committed.rect.r, tail.rect.l, tail.rect.r], [committed.rect.t, committed.rect.b, tail.rect.t, tail.rect.b]] as [number, number, number, number][])
+			expect(tlo >= lo - 0.01 && thi <= hi + 0.01, `the tail ${tlo}..${thi} is inside the band ${lo}..${hi}`).toBe(true);
+		for (const c of bandLayers) {
 			// Under the zoom host, canvasLayerBox(..., hostZoom=true) returns no
 			// transform and the unscaled band box (ZoomScale.ts, d2c03af1): the
 			// counter-scale shape below was the transform-host's, and that
-			// fallback branch has no coverage in this harness (ruling F1) - it
+			// fallback branch has no coverage in this harness - it
 			// is unreachable here, not asserted for.
 			expect.soft(c.transform, `${c.field} transform`).toBe("");
 			expect.soft(["", "0px"], `${c.field} left is the single-canvas box's`).toContain(c.left);
@@ -477,7 +498,7 @@ for (const zoom of [0.2, 1]) it(`IDENTITY at ${zoom * 100}% on the default pane:
  * host form, before the shape asserts above ever run into it as 10 confusing
  * soft reds (5 canvases x transform + css.w). Stubs the engine to disagree
  * with itself the way `ZoomHostPreexistingZoom.test.ts` does; does not assert
- * the fallback's own shape (no harness coverage, ruling F1) - only that the
+ * the fallback's own shape (no harness coverage) - only that the
  * disagreement the pin exists to catch is real and measured, not assumed.
  */
 it("IDENTITY at 20%: under a stubbed non-zoom engine, the pin catches it before the shape asserts would", async () => {
@@ -490,10 +511,12 @@ it("IDENTITY at 20%: under a stubbed non-zoom engine, the pin catches it before 
 		// Downstream of the pin, measured rather than assumed: this is exactly
 		// what would have reddened, one soft assert per canvas per check, had
 		// the pin not stopped the arm first (5 canvases: committedCanvas,
-		// wetCanvas, tailCanvas, highlightCanvas, highlightWetCanvas).
-		const transformMismatches = r.canvases.filter((c: any) => c.transform !== "").length;
+		// wetCanvas, tailCanvas, highlightCanvas, highlightWetCanvas; the wet
+		// tile has its own box and is not one of them).
+		const five = r.canvases.filter((c: any) => c.field !== "wetTileCanvas");
+		const transformMismatches = five.filter((c: any) => c.transform !== "").length;
 		expect(transformMismatches, "every canvas actually carries the fallback's own scale transform here").toBe(5);
-		const cssMismatches = r.canvases.filter((c: any) => Math.abs(c.css.w - r.containerCss.w) > 0.5).length;
+		const cssMismatches = five.filter((c: any) => Math.abs(c.css.w - r.containerCss.w) > 0.5).length;
 		expect(cssMismatches, "every canvas's css width is the fallback's counter-sized one here, not the unscaled band box").toBe(5);
 	} finally { await close(rig); }
 }, 240_000);

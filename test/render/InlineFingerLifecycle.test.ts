@@ -124,18 +124,20 @@ describe("real mounted ordinary-note iPhone finger lifecycle", () => {
 		});
 	});
 
+	// Infinite canvas is off here (its default), so the host leaves two-finger zoom to the browser
+	// and the armed guard reads pinch-zoom; a disarmed guard gives the scroller back its own value.
 	it("prepares held-scroll, command, Highlighter, lit-reselect and native-cancel entry before the next contact", () => {
 		expect(trace.reentry).toEqual({
 			mounted: true,
-			touchActionAfterPenWhileHeld: "none",
-			touchActionAfterHeldLift: "none",
+			touchActionAfterPenWhileHeld: "pinch-zoom",
+			touchActionAfterHeldLift: "pinch-zoom",
 			touchActionAfterCompletedScroll: "",
-			touchActionAfterCommand: "none",
+			touchActionAfterCommand: "pinch-zoom",
 			litReselectPrepareCalls: 1,
 			touchActionAfterPointerCancel: "",
-			touchActionAfterNativeCancel: "none",
+			touchActionAfterNativeCancel: "pinch-zoom",
 			touchActionAfterHighlighterScroll: "",
-			touchActionAfterHighlighter: "none",
+			touchActionAfterHighlighter: "pinch-zoom",
 			penCommandCount: 3,
 			highlighterCommandCount: 1,
 			penInkAfterPen: true,

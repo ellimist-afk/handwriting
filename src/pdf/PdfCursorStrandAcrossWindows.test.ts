@@ -1,3 +1,20 @@
+
+/** Extend the existing cursor fixture with its owned clipping parent. */
+function cursorChildren(createCursor: () => any): (options?: { cls?: string }) => any {
+	return (options) => {
+		const cursor = createCursor();
+		if (options?.cls !== "handwriting-pdf-cursor-viewport") return cursor;
+		const viewport = {
+			parentElement: cursor.parentElement,
+			classList: { contains: (cls: string) => cls === "handwriting-pdf-cursor-viewport" },
+			setCssStyles() {},
+			createDiv: () => cursor,
+			remove() { cursor.remove(); viewport.parentElement = null; },
+		};
+		cursor.parentElement = viewport;
+		return viewport;
+	};
+}
 /**
  * `handwriting-pdf-hover` MUST NOT OUTLIVE ITS REASON.
  *
@@ -121,13 +138,13 @@ function fakePane(rect: Rect = RECT) {
 		setPointerCapture() {},
 		releasePointerCapture() {},
 		querySelector: () => null,
-		createDiv: () => ({
+		createDiv: cursorChildren(() => ({
 			setAttribute: () => {},
 			remove: () => {},
 			classList: { add: () => {}, remove: () => {}, toggle: () => {} },
 			setCssStyles: (styles: Record<string, unknown>) => void Object.assign(cursorStyle, styles),
 			parentElement: el,
-		}),
+		})),
 	};
 	el.contains = (n: unknown) => n === el;
 	return {

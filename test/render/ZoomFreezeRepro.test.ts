@@ -1,5 +1,5 @@
 /**
- * s93: pinch zoom-OUT then zoom-IN on a plain Markdown note wedges the app.
+ * Pinch zoom-OUT then zoom-IN on a plain Markdown note wedges the app.
  *
  * Alan, measured on his devices, not inferred here:
  *  - gesture: touchscreen pinch, zoom OUT first, then a zoom-IN attempt. The
@@ -71,7 +71,7 @@ const GESTURE_MS = 20_000;
 type Probe = { phase: string; alive: "alive" | "wedged" | "closed"; longestTaskMs: number; tasks: number };
 
 /** IC OFF first: Alan reproduces in both, and off is the simpler failing config. */
-// s179: the pinch zoom exists only under the Infinite Canvas. The IC-off arms of this sweep
+// The pinch zoom exists only under the Infinite Canvas. The IC-off arms of this sweep
 // measured a gesture the product now ignores, so they are retired; the refusal itself is
 // pinned once for this rig in ZoomFreezeTouch.test.ts, through the real touch listeners.
 const ICS = [
@@ -80,7 +80,7 @@ const ICS = [
 
 /**
  * THE STEP COUNT IS THE VARIABLE, and it is the rig's largest known gap from the
- * device (s93 note 8). `runTearPinch` delivers this many `updatePinch` calls per
+ * device. `runTearPinch` delivers this many `updatePinch` calls per
  * gesture; a touchscreen delivers hundreds, coalesced. If the cost per event is
  * what grows at low zoom, wall time and the longest task grow with this number
  * and the rig can show on 400 what the device shows on a real stream. If they

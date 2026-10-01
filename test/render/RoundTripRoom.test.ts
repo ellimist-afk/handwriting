@@ -88,8 +88,8 @@ function sample(phase) {
 
 window.standingPan = {
 	async mount(readable, tag, lines, noInk) {
-		// s179 (Alan, 2026-09-20): the note zoom exists only under the Infinite Canvas, so this rig
-		// mounts with the canvas ON and its claim is the canvas one (s78/s97): a pinch out and back
+		// Alan, 2026-09-20: the note zoom exists only under the Infinite Canvas, so this rig
+		// mounts with the canvas ON and its claim is the canvas one: a pinch out and back
 		// about one focal point returns the page where it stood.
 		setPenInk(true); setScrollExpansionEnabled(true);
 		setInlineTool("pen"); setInkColorHex("pen", "#ff00ff"); setInkSizeMult("pen", 4);
@@ -289,7 +289,7 @@ async function open(readable: boolean, tag: string, noInk = true) {
  * earned (the sideways growth part 16's rule grants), so the re-sync never eats granted room.
  */
 for (const readable of [true, false]) {
-	it(`s183: a round trip about one focal point does NOT come back, and that is the design: it lands 2096.25 px left, parked in the room the canvas granted, RLL ${readable ? "on" : "off"}`, async () => {
+	it(`a round trip about one focal point does NOT come back, and that is the design: it lands 2096.25 px left, parked in the room the canvas granted, RLL ${readable ? "on" : "off"}`, async () => {
 		const { page, errors, mounted, n } = await open(readable, "roundtrip-" + readable);
 		try {
 			const c = mounted.pane.left + mounted.pane.width / 2, cy = n.textCy as number;
@@ -303,12 +303,12 @@ for (const readable of [true, false]) {
 				outRangeX: out.at(-1).rangeX, settledRangeX: settled.rangeX, settledScrollLeft: settled.scrollLeft,
 				laterRangeX: later.rangeX, laterScrollLeft: later.scrollLeft, laterPanX: later.panX, laterTextLeft: later.textLeft, naturalTextLeft: n.textLeft }));
 			expect(errors).toEqual([]);
-			// s179 add. 4 (Architect): under the canvas the room is the canvas's business, so the two
-			// room rows are no longer the claim. What survives the mode change is s78: a pinch out and
+			// Under the canvas the room is the canvas's business, so the two
+			// room rows are no longer the claim. What survives the mode change is the ruling: a pinch out and
 			// back about ONE focal point returns the page where it stood. The room and the scroll are
 			// still read and printed above, so a change in them is on the record either way.
 			expect(settled.k, "the round trip came back to 100%").toBeCloseTo(1, 3);
-			// s183 (Alan, 2026-09-20): the slide back to the margin at the lift IS the design, so the page
+			// Alan, 2026-09-20: the slide back to the margin at the lift IS the design, so the page
 			// returning to where it stood is NOT the claim any more. What it does instead is DERIVED here
 			// rather than pinned: the whole of the displacement is the native scroll the settle parked plus
 			// the pan standing at rest. Measured at f3dc4420: 647.25 -> -1449.00 with Readable line length on
@@ -339,7 +339,7 @@ it("a round trip on a note whose ink reaches the pane's edge keeps the room that
 		console.log("ROUNDTRIP-INK " + JSON.stringify({ grantedRangeX: grant.rangeX, laterRangeX: later.rangeX, laterScrollLeft: later.scrollLeft, textLeft: later.textLeft, naturalTextLeft: n.textLeft }));
 		expect(errors).toEqual([]);
 		expect(later.k, "back at 100%").toBeCloseTo(1, 3);
-		// s179 add. 4: under the canvas the round trip may GRANT more room than the ink earned, so the
+		// Under the canvas the round trip may GRANT more room than the ink earned, so the
 		// claim is that none of the ink's room is lost, not that the number is unchanged.
 		expect(later.rangeX, "the room the ink earned is still there").toBeGreaterThanOrEqual(grant.rangeX);
 		// NOT ASSERTED, MEASURED AND DISCLOSED: on a note that HAS granted room, the round trip also leaves the view parked

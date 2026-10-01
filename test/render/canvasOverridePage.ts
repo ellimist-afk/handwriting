@@ -1,5 +1,5 @@
 /**
- * s138: the page side of CanvasOverrideRoundTrip.test.ts. Runs the per-note
+ * The page side of CanvasOverrideRoundTrip.test.ts. Runs the per-note
  * Infinite Canvas override in a real browser against a fake vault whose
  * frontmatter is written, re-parsed and read back, so the read / listen / write
  * loop is exercised end to end rather than mocked at each seam.

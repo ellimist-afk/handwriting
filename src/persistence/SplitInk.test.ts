@@ -186,6 +186,8 @@ describe("findSplitInk", () => {
 			".handwriting/abc.conflict-1756000000.json": page("abc", 5),
 			".handwriting/abc.conflict-1756000000-2.json": page("abc", 6),
 			".handwriting/abc.damaged-1756000001.json": "{ not json",
+			".handwriting/abc.superseded-1756000002.json": page("abc", 3),
+			".handwriting/abc.flush-conflict-1756000003.json": page("abc", 7),
 			"handwriting/def.json": page("def", 1),
 		});
 		const report = await findSplitInk(adapter, DEFAULT_INK_FOLDER);

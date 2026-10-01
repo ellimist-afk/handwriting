@@ -23,9 +23,8 @@
  *
  * THE RIG. The real router on the shared element fake (test/routerHarness.ts),
  * driving BOTH streams the way the device does: pointer events on the element
- * and native touch events on the window. Ported from the diagnosis probe,
- * slate-artifacts/1.4.20/ipad-selection-diagnosis-20260918/probe-entry.ts,
- * whose eight stale variants each reported ratio 1.5 on the next single
+ * and native touch events on the window. Ported from the iPad selection diagnosis probe
+ * (2026-09-18), whose eight stale variants each reported ratio 1.5 on the next single
  * finger.
  *
  * WHAT MUST MOVE AND WHAT MUST NOT. Moving: the eight stale variants (four

@@ -647,7 +647,7 @@ async function stagedRelease(p: Page) {
 		const st = (window as any).__staged, half = st.half0 * st.ratio;
 		st.send("pointerup", 701, st.cx - half, st.cy);
 		st.send("pointerup", 702, st.cx + half, st.cy);
-		await (window as any).viewportFixture.rest(); // s189: the reading after a release is the page at rest; the patch reader pairs a screenshot with a later rect, which a playing ease skews
+		await (window as any).viewportFixture.rest(); // The reading after a release is the page at rest; the patch reader pairs a screenshot with a later rect, which a playing ease skews
 	});
 }
 
@@ -887,7 +887,7 @@ it("REGISTERED: a pan written on the scroller moves the painted rules by its val
  * own top-left corner cannot be reached with two fingers inside this editor; a pinch that returns to its scale about
  * one point is the same no-pan case.)
  *
- * KNOWN, DISCLOSED, NOT FIXED - `it.fails` under s88 add. 12, which PARKED the router fix
+ * KNOWN, DISCLOSED, NOT FIXED - `it.fails` under the ruling, which PARKED the router fix
  * post-1.4.20. The defect: InlinePenRouter emits the pinch "start" from inside the pointermove
  * that crosses the slop, and Chromium delivers one pointermove PER CONTACT for a single
  * two-finger sample, so that centroid is made of one contact's new position and the other's

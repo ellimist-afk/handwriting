@@ -3,7 +3,7 @@
  *
  * THE SYMPTOM, on the device: flick the note toward an end and it stops about an inch
  * past the end and stays there, with the paper still riding its preview element, until a
- * finger touches the glass again. No spring back at all. Measured by the Reviewer on the
+ * finger touches the glass again. No spring back at all. Measured in review on the
  * tip that first carried the give: 57.80 painted px still held when the glide stopped,
  * and zero releases.
  *

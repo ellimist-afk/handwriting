@@ -74,7 +74,13 @@ function makeRig(): Rig {
 	view.highlightWet = wet;
 	view.predReal = [];
 	view.predLastTail = [];
-	view.tail = { clear: () => undefined, drawHead: headDown };
+	view.tail = {
+		clear: () => undefined, drawHead: headDown,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 	// focusClaimedPenEditor's whole contract: already focused, nothing to do.
 	view.view = { hasFocus: true, focus: () => undefined };
 	view.frame = { locked: false, begin: () => undefined, end: () => undefined, cancel: () => undefined };

@@ -14,7 +14,7 @@
  * file sweeps the settings space between those two facts.
  *
  * SOURCE OF THE MINIMAL RULES. Verbatim, from
- * `C:\Users\alanl\Obsidian\ObsidianVaults\vault test 2\.obsidian\themes\Minimal\theme.css`
+ * the Minimal theme file in the test vault (`.obsidian/themes/Minimal/theme.css`)
  * (Minimal 9.0.2 per its own `manifest.json`, 8709 lines on disk). Every
  * declaration below is copied from a named line range, not paraphrased. What
  * is OMITTED, and why:

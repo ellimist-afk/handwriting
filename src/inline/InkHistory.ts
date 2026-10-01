@@ -215,6 +215,33 @@ export function invertInkOp(op: InkOp): InkOp {
 	}
 }
 
+/**
+ * Is this an ink step, including one a previous load of the plugin wrote?
+ *
+ * An update, or switching the plugin off and on with a note open, runs
+ * main.js again and defines a new `inkEffect` type, but the editor's history
+ * keeps the entries the old one wrote. Those can no longer be applied or
+ * inverted, and their undo changes nothing on the page; what it must not do is
+ * move the caret and scroll to where the caret was when that ink was drawn
+ * (audit 161). So the viewport guard below also knows an ink op by its shape.
+ */
+function isInkStep(effect: StateEffect<unknown>): boolean {
+	if (effect.is(inkEffect)) return true;
+	const op = effect.value as Record<string, unknown> | null;
+	if (!op || typeof op !== "object" || typeof op.path !== "string") return false;
+	switch (op.type) {
+		case "add":
+		case "remove":
+			return Array.isArray(op.strokes);
+		case "move":
+			return Array.isArray(op.strokeIds) && typeof op.dx === "number" && typeof op.dy === "number";
+		case "replace":
+			return Array.isArray(op.removed) && Array.isArray(op.inserted);
+		default:
+			return false;
+	}
+}
+
 /** The facet registration that makes the editor history invert ink ops. */
 export function inkHistorySupport(): Extension {
 	return [invertedEffects.of((tr) => {
@@ -259,7 +286,7 @@ export function inkHistorySupport(): Extension {
 			else if (tr.docChanged) reason = "document-change";
 			else if (!(tr.isUserEvent("undo") || tr.isUserEvent("redo"))) reason = "non-history-transaction";
 			else if (tr.effects.length === 0) reason = "no-effects";
-			else if (!tr.effects.every((effect) => effect.is(inkEffect))) reason = "foreign-effects";
+			else if (!tr.effects.every(isInkStep)) reason = "foreign-effects";
 			if (reason) {
 				recordUndoObservation(undoTraceIdentityForView(update.view.dom), { phase: "transaction", guard: { decision: "skip", stage: "observed", reason } });
 				return;
@@ -267,7 +294,7 @@ export function inkHistorySupport(): Extension {
 		}
 		if (!diagnostic && (update.view.state !== update.state || update.transactions.length !== 1 || !tr ||
 			tr.docChanged || !(tr.isUserEvent("undo") || tr.isUserEvent("redo")) ||
-			tr.effects.length === 0 || !tr.effects.every((effect) => effect.is(inkEffect)))) return;
+			tr.effects.length === 0 || !tr.effects.every(isInkStep))) return;
 		// History bypasses transaction filters. Its effect-only undo still
 		// asks the view to reveal the old text caret, which may be pages away
 		// from the ink. Replace that pending scroll with the current viewport

@@ -1,5 +1,5 @@
 /**
- * s93, step 7: the pinch on a note that actually HAS ink.
+ * Step 7: the pinch on a note that actually HAS ink.
  *
  * WHY THIS ARM EXISTS. Steps 2 to 5 all read flat - the step sweep (8/100/400
  * `updatePinch` calls), the coalesced-burst sweep (1/5/10/40 moves per frame),
@@ -139,7 +139,7 @@ for (const arm of ARMS) it(`pinch out then in, ${arm.name}: the page keeps answe
 		});
 		await page.evaluate(([pane]) => (window as any).scrollColumnAnchor.runTearMount(1, 0, pane, true, { fx: 0.5, fy: 0.5 }),
 			[{ w: PANE.w, h: PANE.h }] as const);
-		// s179: the canvas-off mode no longer zooms, so this cost cell runs under the Infinite
+		// The canvas-off mode no longer zooms, so this cost cell runs under the Infinite
 		// Canvas. The variable is unchanged.
 		await page.evaluate(() => (window as any).scrollColumnAnchor.setScrollExpansionEnabled(true));
 

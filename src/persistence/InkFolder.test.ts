@@ -104,6 +104,10 @@ describe("isLiveSidecarName - a page, not the residue of an accident", () => {
 		expect(isLiveSidecarName("abc.conflict-1700000000-2.json")).toBe(false);
 		expect(isLiveSidecarName("abc.damaged-1700000000.json")).toBe(false);
 		expect(isLiveSidecarName("abc.json.tmp")).toBe(false);
+		// The background flush's carrier and the two copies its recovery keeps.
+		expect(isLiveSidecarName("abc.json.flush")).toBe(false);
+		expect(isLiveSidecarName("abc.superseded-1700000000.json")).toBe(false);
+		expect(isLiveSidecarName("abc.flush-conflict-1700000000-2.json")).toBe(false);
 	});
 
 	it("and every one of those still travels when the folder changes", () => {
@@ -111,13 +115,20 @@ describe("isLiveSidecarName - a page, not the residue of an accident", () => {
 			"abc.conflict-1700000000.json",
 			"abc.damaged-1700000000.json",
 			"abc.json.tmp",
+			"abc.json.flush",
+			"abc.superseded-1700000000.json",
+			"abc.flush-conflict-1700000000.json",
 		]) {
 			expect(isSidecarFile(n)).toBe(true);
 		}
 	});
 });
 
-function fakeAdapter(files: string[], existing: string[] = []): {
+function fakeAdapter(
+	files: string[],
+	existing: string[] = [],
+	contents: Record<string, string> = {}
+): {
 	adapter: MigrationAdapter;
 	renames: Array<[string, string]>;
 	made: string[];
@@ -142,6 +153,9 @@ function fakeAdapter(files: string[], existing: string[] = []): {
 				return Promise.resolve();
 			},
 			list: () => Promise.resolve({ files, folders: [".handwriting/trash"] }),
+			...(Object.keys(contents).length > 0
+				? { read: (p: string) => Promise.resolve(contents[p] ?? "") }
+				: {}),
 		},
 	};
 }
@@ -158,6 +172,22 @@ describe("migrateInkFolder", () => {
 		expect(made).toContain("handwriting");
 		expect(renames).toContainEqual([".handwriting/a.json", "handwriting/a.json"]);
 		expect(renames).toContainEqual([".handwriting/c.json.tmp", "handwriting/c.json.tmp"]);
+	});
+
+	it("carries a background flush's carrier and the copies its recovery keeps", async () => {
+		const { adapter, renames } = fakeAdapter([
+			".handwriting/a.json",
+			".handwriting/a.json.flush",
+			".handwriting/a.superseded-1700000000.json",
+			".handwriting/a.flush-conflict-1700000001.json",
+		]);
+		const r = await migrateInkFolder(adapter, ".handwriting", "handwriting");
+		expect(r).toEqual({ moved: 4, skipped: 0, unsupported: false });
+		expect(renames).toContainEqual([".handwriting/a.json.flush", "handwriting/a.json.flush"]);
+		expect(renames).toContainEqual([
+			".handwriting/a.superseded-1700000000.json",
+			"handwriting/a.superseded-1700000000.json",
+		]);
 	});
 
 	it("never overwrites a name already at the destination", async () => {
@@ -189,6 +219,46 @@ describe("migrateInkFolder", () => {
 			"handwriting/old.damaged-99.json",
 		]);
 		expect(renames.flat()).not.toContain(".handwriting/README.md");
+	});
+
+	it("leaves a bare .json that is not one of our pages alone, when it can read to check", async () => {
+		// A fresh install adopting an existing "handwriting" folder full of
+		// someone's own .json files (audit 127): a name-only test cannot
+		// tell those from a real page, so this is the one place that reads.
+		const { adapter, renames } = fakeAdapter([".handwriting/a.json", ".handwriting/notes.json"], [], {
+			".handwriting/a.json": JSON.stringify({ schemaVersion: 3, pageId: "a", strokes: [] }),
+			".handwriting/notes.json": JSON.stringify({ title: "shopping list", items: ["eggs"] }),
+		});
+		const r = await migrateInkFolder(adapter, ".handwriting", "handwriting");
+		expect(r.moved).toBe(1);
+		expect(renames).toContainEqual([".handwriting/a.json", "handwriting/a.json"]);
+		expect(renames.flat()).not.toContain(".handwriting/notes.json");
+	});
+
+	it("moves a truncated page that kept its bare name, and still leaves parseable non-pages alone", async () => {
+		// PageStore renames a damaged file to `.damaged-<mtime>` only when an
+		// interrupted save sits beside it; otherwise load locks the note and
+		// the truncated file keeps its bare name. It must travel with the rest.
+		const full = JSON.stringify({ schemaVersion: 3, pageId: "t", strokes: [{ id: "s" }] });
+		const { adapter, renames } = fakeAdapter(
+			[".handwriting/t.json", ".handwriting/notes.json"],
+			[],
+			{
+				".handwriting/t.json": full.slice(0, full.length - 9),
+				".handwriting/notes.json": JSON.stringify({ title: "shopping list" }),
+			}
+		);
+		const r = await migrateInkFolder(adapter, ".handwriting", "handwriting");
+		expect(r.moved).toBe(1);
+		expect(renames).toContainEqual([".handwriting/t.json", "handwriting/t.json"]);
+		expect(renames.flat()).not.toContain(".handwriting/notes.json");
+	});
+
+	it("still moves a bare .json when the adapter cannot read (old behaviour, degraded not broken)", async () => {
+		const { adapter, renames } = fakeAdapter([".handwriting/a.json", ".handwriting/notes.json"]);
+		const r = await migrateInkFolder(adapter, ".handwriting", "handwriting");
+		expect(r.moved).toBe(2);
+		expect(renames).toContainEqual([".handwriting/notes.json", "handwriting/notes.json"]);
 	});
 
 	it("creates a nested destination one segment at a time", async () => {
@@ -471,6 +541,21 @@ describe("adoptInkFolder (no data.json to ask)", () => {
 			await adoptInkFolder(
 				withFiles({
 					[DEFAULT_INK_FOLDER]: ["page-1.damaged-1700000000.json", "page-3.json.tmp"],
+					[SYNCED_INK_FOLDER]: ["page-1.json"],
+				})
+			)
+		).toBe(SYNCED_INK_FOLDER);
+	});
+
+	it("ignores a folder holding only a flush carrier and the copies its recovery keeps", async () => {
+		expect(
+			await adoptInkFolder(
+				withFiles({
+					[DEFAULT_INK_FOLDER]: [
+						"page-1.json.flush",
+						"page-1.superseded-1700000000.json",
+						"page-1.flush-conflict-1700000001.json",
+					],
 					[SYNCED_INK_FOLDER]: ["page-1.json"],
 				})
 			)

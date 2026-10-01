@@ -219,6 +219,26 @@ export function inkFrontier(strokes: readonly InkStroke[]): Extent {
 }
 
 /**
+ * How far any stroke's bbox reaches LEFT of the origin, note px; 0 when none
+ * does. The surface's x grant grows to the right only; this is the other side.
+ */
+export function inkLeftReach(strokes: readonly InkStroke[]): number {
+	let reach = 0;
+	for (const s of strokes) if (-s.bbox.x > reach) reach = -s.bbox.x;
+	return Number.isFinite(reach) ? reach : 0;
+}
+
+/**
+ * The scroll room a scroller holds left of its column for ink left of the
+ * origin, layout px: none. The page is bounded by its top and left edges, so
+ * ink left of the origin is drawn where it lies and never buys scroll past the
+ * page's left edge, however far it reaches past the column's margin.
+ */
+export function leftReserve(_g: { reachNote: number; naturalMargin: number; fontZoom: number }): number {
+	return 0;
+}
+
+/**
  * Where the note-surface origin sits in the scroller's CONTENT coordinate
  * space (the space `left`/`top` of an absolutely positioned child uses when
  * the scroller is the containing block). All rect inputs are visual px; the
@@ -485,9 +505,10 @@ export class SurfaceExtents {
 		if (!moved) return;
 		this.byPath.delete(oldPath);
 		const owed = this.owedX.get(oldPath);
-		if (owed !== undefined) { this.owedX.delete(oldPath); this.owedX.set(newPath, owed); }
+		// Merged like the grant: keep the larger count and the newer due generation.
+		if (owed !== undefined) { this.owedX.delete(oldPath); this.owedX.set(newPath, Math.max(owed, this.owedX.get(newPath) ?? owed)); }
 		const shrinks = this.shrinks.get(oldPath);
-		if (shrinks !== undefined) { this.shrinks.delete(oldPath); this.shrinks.set(newPath, shrinks); }
+		if (shrinks !== undefined) { this.shrinks.delete(oldPath); this.shrinks.set(newPath, Math.max(shrinks, this.shrinkCount(newPath))); }
 		const existing = this.byPath.get(newPath);
 		this.byPath.set(
 			newPath,

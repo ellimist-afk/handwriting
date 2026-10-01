@@ -125,8 +125,13 @@ type Fixture = { overlay: InkOverlayPlugin; exec: (id: string) => void; state: (
 function mountOverlay(path: string, executeCommandById: (id: string) => void): Fixture {
 	let mounted = false;
 	const noop = (): void => undefined;
+	const zoomChrome = () => ({
+		createEl: () => ({ addEventListener: noop, textContent: "", disabled: false }),
+		toggleClass: noop,
+		remove: noop,
+	});
 	const dom = {
-		parentElement: { setCssStyles: noop },
+		parentElement: { setCssStyles: noop, createDiv: zoomChrome },
 		ownerDocument: {
 			defaultView: { getComputedStyle: () => ({ position: "relative" }), cancelAnimationFrame: noop },
 		},

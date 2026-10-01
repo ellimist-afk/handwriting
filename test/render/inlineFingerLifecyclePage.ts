@@ -334,6 +334,11 @@ function mouse(
 /** The parallel WebKit touch ledger, whose ids are not pointer ids. */
 function nativeTouch(target: HTMLElement, type: "touchstart" | "touchcancel", identifier: number): Event {
 	const event = new Event(type, { bubbles: true, cancelable: true });
+	// A real TouchEvent always carries the fingers still down; the router reads
+	// touches.length on touchend and touchcancel.
+	Object.defineProperty(event, "touches", {
+		value: type === "touchstart" ? [{ identifier, radiusX: 5, radiusY: 5 }] : [],
+	});
 	Object.defineProperty(event, "changedTouches", {
 		value: [{ identifier, radiusX: 5, radiusY: 5 }],
 	});

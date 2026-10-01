@@ -1,9 +1,9 @@
 /**
- * s93 fix A, red-first: does a `closePath` per quad reach the raster at all?
+ * the fix A, red-first: does a `closePath` per quad reach the raster at all?
  *
  * WHAT IS ABOUT TO CHANGE AND WHY. `fillRibbon` emits `moveTo` + 3x `lineTo` +
  * `closePath` per quad, one quad per sample, and the whole stroke goes into one
- * path that is filled once. The s93 device trace bills `closePath` 3332.0 ms of
+ * path that is filled once. The ruling device trace bills `closePath` 3332.0 ms of
  * a 3536.8 ms task - beside `lineTo`'s 5.6 ms at three times the call count,
  * which is roughly 1800x the cost per call. In the rig, replacing `closePath`
  * with an empty function took the worst pinch commit from 619.8 ms to 73.2 ms at

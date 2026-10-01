@@ -275,8 +275,12 @@ type Fixture = {
  */
 function mountOverlay(file: TFile, editor: Editor): Fixture {
 	const noop = (): void => undefined;
-	const dom = {
-		parentElement: { setCssStyles: noop },
+	// The note's own editor root, for the gate `pasteInkHere` now asks
+	// (`ownsMarkdownEditorRoot`, issue 22): the editor is its own source view,
+	// inside no other editor, table or embed.
+	const dom: Record<string, unknown> = {
+		closest: (sel: string) => (sel === ".markdown-source-view" ? dom : null),
+		parentElement: { setCssStyles: noop, closest: () => null },
 		ownerDocument: {
 			defaultView: { getComputedStyle: () => ({ position: "relative" }), cancelAnimationFrame: noop },
 		},

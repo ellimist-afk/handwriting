@@ -6,9 +6,59 @@
 
 import { describe, expect, it } from "vitest";
 import { PALM_RADIUS_SWALLOW_PX, isPalmTouch, palmRadiusTrustworthy, palmVerdict } from "./PalmShield";
+import { PalmShield } from "./PalmShield";
 
 const finger = (id: number, r = 5) => ({ identifier: id, radiusX: r, radiusY: r });
 const palm = (id: number, r = 24) => ({ identifier: id, radiusX: r, radiusY: r });
+
+describe("read-only swallowed contact query", () => {
+	function fixture() {
+		const handlers = new Map<string, (e: TouchEvent) => void>();
+		const el = {
+			addEventListener: (name: string, fn: (e: TouchEvent) => void) => handlers.set(name, fn),
+			removeEventListener: (name: string) => handlers.delete(name),
+		};
+		const shield = new PalmShield();
+		shield.attach(el as unknown as HTMLElement);
+		return { shield, el, fire: (name: string, changed: ReturnType<typeof finger>[]) => {
+			const event = { changedTouches: changed, preventDefault() {}, stopImmediatePropagation() {} };
+			handlers.get(name)!(event as unknown as TouchEvent);
+		} };
+	}
+
+	for (const end of ["touchend", "touchcancel"]) {
+		it(`keeps membership through shrink until ${end}, without changing diagnostics`, () => {
+			const { shield, fire } = fixture();
+			expect(shield.hasSwallowedContact(1)).toBe(false);
+			fire("touchstart", [palm(1), finger(2)]);
+			expect(shield.hasSwallowedContact(1)).toBe(true);
+			expect(shield.hasSwallowedContact(2)).toBe(false);
+			fire("touchmove", [finger(1)]);
+			const recent = [...shield.recent];
+			for (let i = 0; i < 3; i++) expect(shield.hasSwallowedContact(1)).toBe(true);
+			expect(shield.rejected).toBe(1);
+			expect(shield.recent).toEqual(recent);
+			fire(end, [finger(1)]);
+			expect(shield.hasSwallowedContact(1)).toBe(false);
+			shield.dispose();
+		});
+	}
+
+	it("tracks flattening and clears membership on disposal and rebind", () => {
+		const { shield, el, fire } = fixture();
+		fire("touchstart", [finger(3)]);
+		expect(shield.hasSwallowedContact(3)).toBe(false);
+		fire("touchmove", [palm(3)]);
+		expect(shield.hasSwallowedContact(3)).toBe(true);
+		shield.dispose();
+		expect(shield.hasSwallowedContact(3)).toBe(false);
+		shield.attach(el as unknown as HTMLElement);
+		fire("touchstart", [palm(3)]);
+		shield.attach(el as unknown as HTMLElement);
+		expect(shield.hasSwallowedContact(3)).toBe(false);
+		shield.dispose();
+	});
+});
 
 describe("what counts as a palm", () => {
 	it("a slab of contact is a palm, a fingertip is not", () => {

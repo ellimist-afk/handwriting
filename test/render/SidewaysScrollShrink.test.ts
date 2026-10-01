@@ -175,15 +175,15 @@ function expectRoomReachesTheInk(placed: Placed, back: Placed, end: Placed) {
 }
 
 /**
- * RETIRED [s179 (2), applied by s187 add. 2, 2026-09-21]: "ZOOMED OUT: a stroke at the pane's right edge at
+ * RETIRED: "ZOOMED OUT: a stroke at the pane's right edge at
  * 50% gives the note sideways room back at 100%, reaching just past the ink".
  *
  * The cell reached its ink past the pane's right edge by zooming the note out to 50% with the Infinite Canvas
- * OFF, drawing at the visible edge, and zooming back. s179 took the note zoom out of canvas-off altogether, so
+ * OFF, drawing at the visible edge, and zooming back. The ruling took the note zoom out of canvas-off altogether, so
  * the rig's `overlay.pinch(...)` is refused and the readout comes back "zoom":1 where 0.5 was asked - the
  * premise fails because the route the cell describes is not in the product any more, not because anything
- * regressed. GREEN at the shipped base aa437ff1 and red from s179 onward (Reviewer, two independent reads:
- * the baseline gate log, and the file run in review-aa437ff1 - 18 passed there against 17 here with the cell
+ * regressed. GREEN at the shipped base aa437ff1 and red from the ruling onward (review, two independent reads:
+ * the baseline gate log, and the file run in the review at aa437ff1 - 18 passed there against 17 here with the cell
  * gone), which is the stronger case for retiring it: the route was taken out by a named change rather than
  * never having worked.
  *
@@ -191,7 +191,7 @@ function expectRoomReachesTheInk(placed: Placed, back: Placed, end: Placed) {
  * state by the other canvas-off route named in the comment above (a wide pane narrowed), and INFINITE CANVAS ON
  * below that covers the zoomed case where the zoom still exists. The canvas-off refusal itself is pinned in
  * ZoomFreezeTouch (scale stays 1, the text stays put, the bar reads busy, and the surface hands the pinch to
- * the host), which is the one pin s179 (2) asks each rig for.
+ * the host), which is the one pin the ruling asks each rig for.
  */
 it("PANE NARROWED: a stroke near the right edge of a wide pane gives the note sideways room once the pane is narrowed", async () => {
 	const snaps = (await scenario("narrowed-pane-edge-ink")) as Placed[];

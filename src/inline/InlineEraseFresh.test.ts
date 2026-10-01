@@ -123,7 +123,13 @@ function makeRig(): Rig {
 	view.activeWet = wet;
 	view.highlightWet = { ...wet };
 	view.highlightWetCanvas = { setCssStyles: () => undefined };
-	view.tail = { clear: () => undefined, clearAll: () => undefined };
+	view.tail = {
+		clear: () => undefined, clearAll: () => undefined,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 	view.committedCtx = fakeCtx();
 	view.highlightCtx = fakeCtx();
 	view.damage = { addRect: () => undefined, addAll: () => undefined };

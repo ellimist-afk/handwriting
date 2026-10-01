@@ -105,7 +105,7 @@ export interface PdfPanEntry {
 	 * Time inside the handler.
 	 *
 	 * `pan`: this used to read "the scroll writes plus the reticle"; the
-	 * reticle is no longer painted per move (F4, 1.4.12 §11), so it is the
+	 * reticle is no longer painted per move (1.4.12 §11), so it is the
 	 * arithmetic and the two scroll writes and nothing else.
 	 *
 	 * `scroll`: everything the controller does on a native scroll - the live

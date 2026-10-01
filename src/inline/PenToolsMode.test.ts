@@ -624,14 +624,17 @@ describe("main.ts restores the latch before any strip can be built", () => {
 		expect(body.length, "the brace walk collapsed to something far smaller than this method").toBeGreaterThan(4000);
 		expect(body.length, "the brace walk swallowed more than loadSettings").toBeLessThan(src.length / 8);
 
+		// The mode is applied by applyRuntimeSettings, which loadSettings calls;
+		// the latch must be restored before that call.
 		const restore = body.indexOf(RESTORE);
-		const mode = body.indexOf(MODE);
+		const apply = body.indexOf("this.applyRuntimeSettings();");
 		expect(
 			restore,
 			"the restore has left loadSettings: a latch restored after the first strip is built leaves a pen device with no Keyboard button"
 		).toBeGreaterThan(-1);
-		expect(mode, "the pen tools mode is no longer applied inside loadSettings").toBeGreaterThan(-1);
-		expect(restore, "the latch must be set before the mode that decides who gets a strip").toBeLessThan(mode);
+		expect(apply, "loadSettings no longer applies the runtime settings").toBeGreaterThan(-1);
+		expect(bodyOfMethod("private applyRuntimeSettings(): void {"), "the pen tools mode is no longer applied").toContain(MODE);
+		expect(restore, "the latch must be set before the mode that decides who gets a strip").toBeLessThan(apply);
 	});
 
 	// The other half of the move, and the half a synced vault depends on: an

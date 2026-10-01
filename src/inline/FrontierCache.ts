@@ -1,5 +1,5 @@
 import { InkStroke } from "../ink/Stroke";
-import { Extent, inkFrontier } from "./SurfaceExtent";
+import { Extent, inkFrontier, inkLeftReach } from "./SurfaceExtent";
 
 /**
  * The ink frontier, remembered per note.
@@ -24,15 +24,24 @@ import { Extent, inkFrontier } from "./SurfaceExtent";
  * fields.
  */
 export class FrontierCache {
-	private byPath = new Map<string, { count: number; frontier: Extent }>();
+	private byPath = new Map<string, { count: number; frontier: Extent; left: number }>();
 
 	/** The frontier of `strokes`, computed at most once per invalidation. */
 	get(path: string, strokes: readonly InkStroke[]): Extent {
+		return this.entry(path, strokes).frontier;
+	}
+
+	/** How far the ink reaches left of the origin (`inkLeftReach`), on the same entry as the frontier. */
+	leftReach(path: string, strokes: readonly InkStroke[]): number {
+		return this.entry(path, strokes).left;
+	}
+
+	private entry(path: string, strokes: readonly InkStroke[]): { count: number; frontier: Extent; left: number } {
 		const hit = this.byPath.get(path);
-		if (hit && hit.count === strokes.length) return hit.frontier;
-		const frontier = inkFrontier(strokes);
-		this.byPath.set(path, { count: strokes.length, frontier });
-		return frontier;
+		if (hit && hit.count === strokes.length) return hit;
+		const next = { count: strokes.length, frontier: inkFrontier(strokes), left: inkLeftReach(strokes) };
+		this.byPath.set(path, next);
+		return next;
 	}
 
 	/** Forget one note's frontier; the next `get` recomputes it. */

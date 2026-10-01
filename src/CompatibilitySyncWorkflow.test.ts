@@ -384,7 +384,11 @@ describe("compatibility across two synthetic devices", () => {
     expect(d.store.externalChangeObservation(noteId)).toBe("unchanged");
     expect(notices).toEqual([]);
   });
-  it.each(["damaged", "future", "preservation"])("late %s input stays retryable without consuming either surface", async failure => {
+  // No "preservation" case here: these surfaces start empty, so the late
+  // revision only adds and no recovery pair is written - there is no write to
+  // fail. Preservation failures on revisions that diverge are held and retried
+  // in PdfAdoptionRouteEndToEnd.test.ts and InlineExternalAdoptionPreservation.test.ts.
+  it.each(["damaged", "future"])("late %s input stays retryable without consuming either surface", async failure => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const files = new SyncAdapter(); documents(files);
     const d = await device(files, { inkFolder: "handwriting" }); await d.open(); const p = poll(d);

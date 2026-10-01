@@ -54,7 +54,7 @@ import { EINK_CAPS, adaptiveCaps, buildTail, correctionError } from "../ink/Pred
 import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
 import { predictionEinkOn, predictionEnabled } from "../inline/StrokePrediction";
 import { rowsOf, snapLine, strokeIdsBelow } from "../inline/InsertSpace";
-import { copyInk, pasteInk } from "../inline/InkClipboard";
+import { copyInk, inkClipboardMarker, pasteInk } from "../inline/InkClipboard";
 import { drawStroke, ribbonCacheStats } from "../ink/StrokeRenderer";
 import { withInkDestination } from "../ink/InkTheme";
 import { PdfPageAssumption, pdfPageDestination } from "../ink/InkPdf";
@@ -67,6 +67,7 @@ import {
 	pickStripColor,
 	armMouseInkQuietlyEverywhere,
 	releaseMouseInkQuietlyEverywhere,
+	peelInkEscapeFloor,
 } from "../inline/InkOverlay";
 import { InlinePenRouter, anyHandOnGlass, traceSurface } from "../inline/InlinePenRouter";
 import { describeEl } from "../inline/PenHitProbe";
@@ -88,6 +89,7 @@ import {
 	setEraserRadiusPx,
 	setEraserWholeStrokes,
 	setInkSizeMult,
+	applyInkSize,
 } from "../inline/InkOverlay";
 import { mouseInkEnabled } from "../inline/MouseInk";
 import { penInkEnabled } from "../inline/PenInk";
@@ -107,7 +109,7 @@ import {
 	starInkPreset,
 } from "../ink/InkPresets";
 import { penReticleShown } from "../inline/PenCursor";
-import { PenContactIntent, penContactIntent, releaseTipMode, tipMode, tipModeHeld } from "../inline/TipMode";
+import { PenContactIntent, penContactIntent, tipMode } from "../inline/TipMode";
 import { PdfInkHistory } from "./PdfInkHistory";
 import { PAN_EDGE_CLEAR, panBatchDelta, panEdgeContact, panScrollLimit, panScrollNext, type PanEdgeLatch } from "./PanScroll";
 import { coalescedCount, recordPdfPanMove, recordPdfScrollEvent } from "./PdfPanTrace";
@@ -124,7 +126,7 @@ import {
 	viewportAt,
 	wholePage,
 } from "./PageBand";
-import { findScaleFactor, ProbedViewer, probeViewer, viewerCanvasOf } from "./PdfViewerProbe";
+import { findScaleFactor, ProbedViewer, probeViewer, wholePageCanvasOf } from "./PdfViewerProbe";
 
 const OVERLAY_CLASS = "handwriting-pdf-ink";
 /** Put on the COMMITTED canvas while a highlighter is wet. See `dressWet`. */
@@ -135,7 +137,8 @@ const INK_OVER_CLASS = "handwriting-pdf-ink-over";
  * including the writes this controller makes to its own reticle and hover
  * class, so a hovering pen defeated its own probe cache every time it moved.
  */
-const OWN_CLASSES = [OVERLAY_CLASS, INK_OVER_CLASS, "handwriting-pdf-cursor"];
+const OWN_CLASSES = [OVERLAY_CLASS, INK_OVER_CLASS, "handwriting-pdf-cursor", "handwriting-pdf-cursor-viewport"];
+const OWN_TOOLBAR_SELECTOR = ".handwriting-mobile-tools, .handwriting-pen-pill";
 
 // ---- pdf trace --------------------------------------------------------------
 //
@@ -431,8 +434,13 @@ export type StrokeSource = (pageNumber: number) => readonly InkStroke[];
  * sample is a serialize of the whole document behind a debounce, at input
  * rate, during a gesture already doing hit-testing and repainting. The single
  * write is the `persist` callback at pen-up.
+ *
+ * "live-page" = "live", for a single-page `replace` whose indices are positions
+ * in that page's stroke list rather than the document's: the eraser's
+ * per-sample op, so its cost follows the page it is on and not the ink on
+ * every other page (PdfInkStore.applyLivePage).
  */
-export type OpMode = "live" | "commit";
+export type OpMode = "live" | "live-page" | "commit";
 
 export type OpSink = (op: InkOp, mode?: OpMode) => void;
 
@@ -682,7 +690,8 @@ export class PdfInkController {
 			const page = this.boundScroller?.querySelector("div.page[data-page-number]");
 			if (!(page instanceof HTMLElement)) return null;
 			return findScaleFactor(page, this.win).value;
-		}
+		},
+		(identifier) => this.palmShield.hasSwallowedContact(identifier)
 	);
 	/**
 	 * This surface's own latency instruments, stamped at the same points the
@@ -735,6 +744,7 @@ export class PdfInkController {
 	 * Kept so the swap can be noticed. See bindTo.
 	 */
 	private boundScroller: HTMLElement | null = null;
+	private focusBinding: { scroller: HTMLElement; addedTabindex: boolean; priorFocus: HTMLElement | null } | null = null;
 	/**
 	 * The scroller the cursor classes were last put ON.
 	 *
@@ -775,12 +785,14 @@ export class PdfInkController {
 	 * feature on a rare page; guessing costs the ink.
 	 */
 	private rotated = new Set<number>();
+	private warnedRotated = new Set<number>();
 
 	/**
 	 * Whether the user has already been told this document is still being
 	 * identified. One notice per wait, not one per pen contact.
 	 */
 	private warnedNoId = false;
+	private warnedInkNotReady = false;
 	/** Said once per pane: this viewer is not one we know how to ink. */
 	private warnedNoViewer = false;
 
@@ -828,6 +840,11 @@ export class PdfInkController {
 	/** Set while dragging a selection; the point the drag started from. */
 	private dragFrom: Point2 | null = null;
 	private dragTotal = { dx: 0, dy: 0 };
+	private editFrame: number | null = null;
+	private editPaint: { box: PageBox; kind: "lasso" | "space" } | null = null;
+	private editTarget: { path: string; page: number; strokeIds: string[] } | null = null;
+	private editDelta = { dx: 0, dy: 0 };
+
 	/** The hover reticle, and the timer that hides it when the pen is gone. */
 	private cursorEl: HTMLElement | null = null;
 	/** Whether the reticle's single teardown is already registered. */
@@ -967,7 +984,9 @@ export class PdfInkController {
 		 * no pixels. The flatten asks the same setting the same question
 		 * (`pdfPageDestination`). The default is that setting's shipped default.
 		 */
-		private pageAssumption: () => PdfPageAssumption = () => "darken"
+		private pageAssumption: () => PdfPageAssumption = () => "darken",
+		/** The sidecar has finished a trustworthy read; destructive tools may start. */
+		private inkReady: () => boolean = () => true
 	) {}
 
 	/**
@@ -1013,7 +1032,7 @@ export class PdfInkController {
 	 */
 	private sayIfPageEmpty(pageNumber: number, kind: "erase" | "select"): void {
 		const key = this.emptyPageNoticeKey(pageNumber);
-		const presence = this.strokes(pageNumber).length > 0 ? "ink" : "none";
+		const presence = !this.inkReady() ? "unknown" : this.strokes(pageNumber).length > 0 ? "ink" : "none";
 		if (key !== null && inkChangeRearmsNotice(presence)) { this.emptyPageNotice.forget(key); this.claimedPages.delete(pageNumber); }
 		const text = emptyPageNoticeText(presence, kind);
 		if (text && this.emptyPageNotice.claim(key, kind)) { this.notify(text); this.claimedPages.add(pageNumber); }
@@ -1151,9 +1170,10 @@ export class PdfInkController {
 			starPreset: (tool) => starInkPreset(tool as InkTool),
 			forgetPreset: (tool, index) => forgetInkPreset(tool as InkTool, index),
 			inkSizeMult: (tool) => getInkSizeMult(tool as InkTool),
+			// A drag moves the size; the release also saves it, the same road the note strip takes.
 			setInkSizeMult: (tool, mult, commit) => {
-				setInkSizeMult(tool as InkTool, mult);
-				void commit;
+				if (commit) applyInkSize(tool as InkTool, mult);
+				else setInkSizeMult(tool as InkTool, mult);
 			},
 			// A NO-OP, and still the honest one now that this surface honours
 			// pen off. There is no editor here to hand the keys to:
@@ -1249,11 +1269,7 @@ export class PdfInkController {
 
 	mount(): void {
 		this.mounted = true;
-		// The keydown listener below is bound to this root, so the root has to
-		// be able to hold focus at all before a claimed pen can hand it any
-		// (StripPenChrome.ts). Once, here, rather than at pen contact: it is an
-		// attribute on the pane, not part of a gesture.
-		armStripPenFocus(this.root);
+		// Focus belongs to the bound scroll container; key events bubble to this root.
 		// The strip follows the setting for the life of this pane, not only at
 		// pen contact. Notes hear about a change through `refreshPenToolsAll`
 		// (InkOverlay.ts), which walks InkOverlay's own set of open editors and
@@ -1352,6 +1368,15 @@ export class PdfInkController {
 		this.schedule();
 	}
 
+	/** Release a selection before a tool layer, including the window's focus fallback. */
+	peelEscapeSelection(ev: KeyboardEvent): boolean {
+		if (ev.key !== "Escape" || ev.defaultPrevented || this.selected.length === 0) return false;
+		this.clearSelection();
+		this.refreshStrip();
+		ev.preventDefault();
+		return true;
+	}
+
 	/**
 	 * The keydown listener bound to this pane's root, above. A class field
 	 * rather than a local closure so it is one fixed function reference for
@@ -1370,28 +1395,9 @@ export class PdfInkController {
 		if (isTypingTarget(ev.target)) return;
 		// Escape puts a selection away; Delete takes it. Both ahead of the
 		// modifier check, because neither uses one.
-		if (ev.key === "Escape" && this.selected.length > 0) {
-			this.clearSelection();
-			this.refreshStrip();
-			ev.preventDefault();
-			return;
-		}
-		// ...and with nothing selected, Escape leaves whatever mode has the
-		// tip - InkOverlay.ts:1627-1637's rule ("Landing in pan or insert
-		// space used to strand you until you found the Pen button; Escape is
-		// what a hand reaches for, and the nib it returns to is the one that
-		// was already chosen"), never ported to this surface until now. A
-		// PDF pane stranded the same way is worse off: the strip is the
-		// ONLY way back to the pen here, there being no toolbar row above an
-		// editor to fall back on. `tipMode` is process-global (TipMode.ts),
-		// so this is the same held state the note surface just released.
-		if (ev.key === "Escape" && tipModeHeld()) {
-			releaseTipMode();
-			this.refreshStrip();
-			this.hideCursor();
-			ev.preventDefault();
-			return;
-		}
+		if (this.peelEscapeSelection(ev)) return;
+		// Notes and PDFs share the same tip-then-mouse floor, preserving the last nib.
+		if (peelInkEscapeFloor(ev)) return;
 		// Audit doc §5r/§5s: this used to call `deleteSelection()` directly -
 		// a fourth dispatcher beside the strip button, the palette and the
 		// hotkey (Slice AD unified only those three onto the controller's
@@ -1510,7 +1516,29 @@ export class PdfInkController {
 	 * 1: the viewer resizes its pages rather than applying a transform, so
 	 * there is no visual/layout gap of the kind the note surface divides out.
 	 */
+	private releaseFocusBinding(): void {
+		const binding = this.focusBinding;
+		this.focusBinding = null;
+		if (!binding) return;
+		const { scroller, priorFocus } = binding;
+		const ownsFocus = scroller.ownerDocument?.activeElement === scroller;
+		if (binding.addedTabindex && scroller.getAttribute?.("tabindex") === "-1") scroller.removeAttribute?.("tabindex");
+		if (ownsFocus && priorFocus?.isConnected && priorFocus.ownerDocument === scroller.ownerDocument) {
+			stripPenFocus(priorFocus);
+		}
+	}
+
 	private bindTo(scroller: HTMLElement): void {
+		if (this.focusBinding?.scroller !== scroller) {
+			this.releaseFocusBinding();
+			const hadTabindex = scroller.hasAttribute?.("tabindex") ?? true;
+			armStripPenFocus(scroller);
+			this.focusBinding = {
+				scroller,
+				addedTabindex: !hadTabindex && scroller.getAttribute?.("tabindex") === "-1",
+				priorFocus: null,
+			};
+		}
 		this.router?.dispose();
 		this.ro?.disconnect();
 		this.boundScroller?.removeEventListener("scroll", this.onScroll);
@@ -1633,7 +1661,7 @@ export class PdfInkController {
 				// expensive defect shape rebuilt at small scale.
 				onPenMove: (_ev, count) => this.metrics.recordEvent("move", count, 0, false),
 				onPenUp: (ev) => this.penUp(ev),
-				// A HAND IS LANDING WITH NOTHING ELSE ON THE GLASS (ruling, alan,
+				// A HAND IS LANDING WITH NOTHING ELSE ON THE GLASS (alan,
 				// 1.4.12: "hide the mouse reticle when a finger or pen is
 				// active"). `InlinePenRouter.onHandOnGlass` fires only on that
 				// edge - a stale mouse ring left over from before the finger or
@@ -1675,6 +1703,7 @@ export class PdfInkController {
 	}
 
 	unmount(): void {
+		this.flushEditFrame(false);
 		// A gesture interrupted by the pane closing has applied live ops that
 		// nothing has written yet. Before this batching existed every sample
 		// wrote, so an interrupted erase was already durable; it has to stay
@@ -1691,6 +1720,7 @@ export class PdfInkController {
 		// router on a controller that is gone - the leak unmount exists to
 		// prevent, rebuilt one frame later.
 		this.mounted = false;
+		this.releaseFocusBinding();
 		// With the gate above and before the strip goes below: a mode change
 		// arriving after this line must not find a listener holding a dead
 		// controller. The viewer under a PDF pane is rebuilt routinely and
@@ -1792,12 +1822,14 @@ export class PdfInkController {
 		this.history.clear();
 		this.pageSize.clear();
 		this.rotated.clear();
+		this.warnedRotated.clear();
 		// The selection names strokes in the OLD document - a Delete pressed
 		// after switching files would ask this one to remove ids it has never
 		// heard of - and a gesture caught mid-air is inherited whole.
 		this.resetGestureState();
 		// A new document is a new wait, so it may say so once more.
 		this.warnedNoId = false;
+		this.warnedInkNotReady = false;
 	}
 
 	/**
@@ -1839,7 +1871,7 @@ export class PdfInkController {
 	 * The strip first, and byte-for-byte the note's line. `stripPenDown` ran
 	 * at contact, and abandoning ends the stroke without a PointerEvent, so
 	 * nothing reaches `penUp()` to put it back - the strip and pill would
-	 * stand `is-inking` (styles.css: opacity 0 AND visibility hidden, so
+	 * stand `is-inking` (styles.css: opacity 0 AND pointer-events none, so
 	 * unhit-testable, not merely invisible) until some later stroke completed.
 	 * Deliberately NOT `penUp()` itself, which commits ink, ends metrics and
 	 * closes an erase batch for a stroke that is being dropped.
@@ -1939,6 +1971,11 @@ export class PdfInkController {
 	 * silently, and for as long as the view lives.
 	 */
 	private resetGestureState(): void {
+		if (this.editFrame !== null) this.win.cancelAnimationFrame(this.editFrame);
+		this.editFrame = null;
+		this.editPaint = null;
+		this.editTarget = null;
+		this.editDelta = { dx: 0, dy: 0 };
 		this.builder = null;
 		this.frame = null;
 		this.wetFrom = null;
@@ -2310,13 +2347,16 @@ export class PdfInkController {
 		if (!probed) return "no-probe";
 		if (probed.scaleFactor === null) return "no-scale";
 		this.ensureTools();
-		// Re-created whenever it is not in the CURRENT scroller. It lives in
+		// Re-created whenever its owned viewport is not in the CURRENT scroller. It lives in
 		// that scroller's subtree, so a viewer rebuild took it away and left
 		// this field holding a detached div - and because the old test was
 		// "is the field null", the reticle then never came back in that pane
 		// for the rest of the session. pdf.js rebuilds its viewer often
 		// enough that this is an ordinary Tuesday, not an edge case.
-		if (this.cursorEl?.parentElement !== probed.scroller) {
+		if (
+			this.cursorEl?.parentElement?.parentElement !== probed.scroller ||
+			!this.cursorEl.parentElement.classList.contains("handwriting-pdf-cursor-viewport")
+		) {
 			// Trace-only, and only on this rebuild transition, not per move -
 			// this is the "ordinary Tuesday" path the comment above names,
 			// and a palm/pinch investigation needs to see it happen without
@@ -2328,11 +2368,15 @@ export class PdfInkController {
 					`reticle rebuilt: old parent ${describeEl(this.cursorEl?.parentElement ?? null)} -> new scroller ${describeEl(probed.scroller)}`
 				);
 			}
-			this.cursorEl?.remove();
+			const oldViewport = this.cursorEl?.parentElement;
+			if (oldViewport?.classList.contains("handwriting-pdf-cursor-viewport")) oldViewport.remove();
+			else this.cursorEl?.remove();
 			if (this.win.getComputedStyle(probed.scroller).position === "static") {
 				probed.scroller.setCssStyles({ position: "relative" });
 			}
-			this.cursorEl = probed.scroller.createDiv({ cls: "handwriting-pdf-cursor" });
+			const viewport = probed.scroller.createDiv({ cls: "handwriting-pdf-cursor-viewport" });
+			viewport.setCssStyles({ position: "absolute", overflow: "hidden", pointerEvents: "none", zIndex: "100" });
+			this.cursorEl = viewport.createDiv({ cls: "handwriting-pdf-cursor" });
 			this.cursorEl.setAttribute("aria-hidden", "true");
 			// One disposer for the life of the controller, not one per
 			// rebuild: it cleans up whatever the current element and scroller
@@ -2340,7 +2384,9 @@ export class PdfInkController {
 			if (!this.cursorDisposed) {
 				this.cursorDisposed = true;
 				this.disposers.push(() => {
-					this.cursorEl?.remove();
+					const viewport = this.cursorEl?.parentElement;
+					if (viewport?.classList.contains("handwriting-pdf-cursor-viewport")) viewport.remove();
+					else this.cursorEl?.remove();
 					this.cursorEl = null;
 					this.boundScroller?.classList.remove("handwriting-pdf-hover");
 					this.boundScroller?.classList.remove("handwriting-pdf-pan-drag");
@@ -2362,10 +2408,18 @@ export class PdfInkController {
 			traceSurface("pdf-hover", null, "reticle resumed: first hover after hide/pen-up");
 		}
 		this.cursorTraceHidden = false;
-		const content = this.toContent(sample, probed.scroller);
-		const cx = content.x;
-		const cy = content.y;
-		const mode = tipMode();
+		// Clip paint at the scrollport without moving the actual pointer center.
+		// The wrapper contributes no overflow beyond the existing visible area.
+		this.cursorEl.parentElement!.setCssStyles({
+			display: "block",
+			left: `${probed.scroller.scrollLeft}px`,
+			top: `${probed.scroller.scrollTop}px`,
+			width: `${probed.scroller.clientWidth}px`,
+			height: `${probed.scroller.clientHeight}px`,
+		});
+		const cx = sample.x;
+		const cy = sample.y;
+		const mode = this.erasing ? "eraser" : tipMode();
 		// The nib dot is the SIZE OF THE INK it will lay down, not a fixed
 		// blob: page units are css px at scale 1, so the nib's on-screen width
 		// is its width times the scale. A dot that is the same size whatever
@@ -2501,6 +2555,10 @@ export class PdfInkController {
 			this.cursorTimer = null;
 		}
 		this.cursorEl?.setCssStyles({ display: "none" });
+		const viewport = this.cursorEl?.parentElement;
+		if (viewport?.classList.contains("handwriting-pdf-cursor-viewport")) {
+			viewport.setCssStyles({ display: "none" });
+		}
 		// NO `probe()` HERE, and that is the point of this method's shape.
 		// The ResizeObserver callback calls `invalidateProbe()` and then this,
 		// so a `probe()` on this path could never be served from cache: every
@@ -2625,7 +2683,7 @@ export class PdfInkController {
 	 * holding a page should look like is a hand.
 	 *
 	 * WHAT IT COST, stated exactly, because the finding that opened this
-	 * reads "per sample" and the code said something slightly different. F4
+	 * reads "per sample" and the code said something slightly different.
 	 * (1.4.12-design §11): "the pdf pan still paints the ring per sample via
 	 * `showPanCursor`". `penRaw`'s pan branch called it once per BATCH, on
 	 * the batch's last sample - so per sample for a mouse, which delivers
@@ -2830,7 +2888,23 @@ export class PdfInkController {
 		}));
 		const content = this.toContent(sample, scroller);
 		const box = pageAt(boxes, content.x, content.y);
-		if (!box || this.rotated.has(box.pageNumber)) return;
+		if (!box) return;
+		if (this.rotated.has(box.pageNumber)) {
+			if (!this.warnedRotated.has(box.pageNumber)) {
+				this.warnedRotated.add(box.pageNumber);
+				this.notify("Handwriting: ink on a rotated PDF page is not supported");
+			}
+			return;
+		}
+		const intent = penContactIntent(ev?.buttons ?? 0, ev?.button ?? -1, tipMode());
+		if (intent !== "ink" && intent !== "pan" && !this.inkReady()) {
+			if (!this.warnedInkNotReady) {
+				this.warnedInkNotReady = true;
+				this.notify("Handwriting: this PDF's ink is not ready - try again in a moment");
+			}
+			return;
+		}
+		this.warnedInkNotReady = false;
 		// A gesture is starting, whichever one: the strip steps aside and its
 		// drop-down chrome closes, the same as a note (StripPenChrome.ts,
 		// §5o) - this surface never called either half of that before.
@@ -2843,7 +2917,14 @@ export class PdfInkController {
 		// gesture: a pen on a pane with no viewer, no id or no page under the
 		// sample has not acted on anything, and taking the keyboard away from
 		// wherever it was would be a theft that bought nothing.
-		stripPenFocus(this.root);
+		const priorFocus = scroller.ownerDocument?.activeElement;
+		// The find bar may live outside the scroll container but inside this pane.
+		if (!(isTypingTarget(priorFocus ?? null) && this.root.contains?.(priorFocus ?? null))) {
+			stripPenFocus(scroller);
+			if (this.focusBinding?.scroller === scroller && priorFocus !== scroller && scroller.ownerDocument?.activeElement === scroller) {
+				this.focusBinding.priorFocus = priorFocus as HTMLElement | null;
+			}
+		}
 		// Frozen for the stroke, as it always was - but frozen from the box
 		// rather than from the viewer variable that lags behind it.
 		const scale = this.scaleFor(box, probed.scaleFactor);
@@ -2876,7 +2957,6 @@ export class PdfInkController {
 		// : false` ternaries this replaced computed - no eraser end and no
 		// side button, leaving the strip mode to decide alone. -1 is the DOM's
 		// own "no button changed" value, and 0 would be the primary button.
-		const intent = penContactIntent(ev?.buttons ?? 0, ev?.button ?? -1, tipMode());
 		this.erasing = intent === "erase";
 		// One line per contact that gets this far - past the no-viewer,
 		// no-id, no-box and rotated-page refusals above, which have their
@@ -2920,6 +3000,7 @@ export class PdfInkController {
 		// missing (alan, 2026-08-30). Pan drags the viewer's own scroller;
 		// space is refused with the reason, because a pdf page cannot grow.
 		if (intent === "pan") {
+			this.clearSelection();
 			// THE ONE SCROLL READ OF THE WHOLE DRAG, taken here where it is off
 			// the move path and where `probe()` above has already forced layout
 			// clean. Everything after this is arithmetic on the carried value;
@@ -2943,6 +3024,7 @@ export class PdfInkController {
 			return;
 		}
 		if (intent === "space") {
+			this.clearSelection();
 			// The page cannot grow, but the ink can make room: everything in
 			// the rows below the divider follows the pen, the same gesture -
 			// and the same pure membership rule - the note surface uses.
@@ -3244,15 +3326,8 @@ export class PdfInkController {
 				// Vertical only: the divider is a seam, not a joystick. Applied
 				// live and unrecorded, one op into history at release - the
 				// lasso drag's shape exactly.
-				if (id) {
-					this.apply(
-						{ type: "move", path: id, strokeIds: this.spaceIds, dx: 0, dy },
-						this.strokePageNumber,
-						"live"
-					);
-				}
+				if (id) this.queueEditFrame(box, "space", id, this.strokePageNumber, this.spaceIds, 0, dy);
 			}
-			this.drawSpaceLine(box);
 			// Last sample only, same reasoning as pan and erase.
 			const lastSpace = samples[samples.length - 1];
 			if (lastSpace) this.showSpaceCursor(lastSpace);
@@ -3326,6 +3401,16 @@ export class PdfInkController {
 			}
 			// The dot rides the newest sample, so a mouse always has a nib.
 			if (this.mouseStroke) lastDrawOutcome = this.showCursor(s, "mouse");
+		}
+		// Rejected jitter still changes prediction. Clear the old tail while
+		// retaining the accepted head, even when no wet point was appended.
+		if (accepted === 0 && builder.lastPoint) {
+			const pair = this.wetOn(box.pageNumber);
+			const cam = this.cameraFor(box);
+			if (pair && cam) {
+				if (builder.pointCount === 1) this.drawContact(pair, cam, builder.lastPoint);
+				else this.drawHead(pair, cam);
+			}
 		}
 		// The predicted tail rides on top of the head, from the newest real
 		// sample outward. Fed in PAGE units like everything else here: the
@@ -3620,10 +3705,11 @@ export class PdfInkController {
 		const content = this.toContent(sample, scroller);
 		const p = toPagePoint(box, scale, content.x, content.y);
 		if (!p) return;
-		// Hit-tested against the PAGE (the nib can only reach what is on it),
-		// but indexed against the document. Two different lists on purpose.
+		// Hit-tested and indexed against the PAGE: the nib can only reach what is
+		// on it, and the op is a page-local live op ("live-page"), so nothing
+		// here reads the document list. The gesture's single history entry is
+		// built against the document at pen-up (recordErase).
 		const onPage = [...this.strokes(box.pageNumber)];
-		const all = this.opList();
 		// The radius is screen px; page units are screen px divided by scale,
 		// so the nib covers the same physical area at any zoom.
 		const r = getEraserRadiusPx() / scale;
@@ -3634,8 +3720,9 @@ export class PdfInkController {
 		const inserted: InkStroke[] = [];
 		const insertedAt: number[] = [];
 		const whole = getEraserWholeStrokes();
-		for (const stroke of onPage.filter((s) => hitIds.has(s.id))) {
-			const at = all.indexOf(stroke);
+		for (let at = 0; at < onPage.length; at++) {
+			const stroke = onPage[at]!;
+			if (!hitIds.has(stroke.id)) continue;
 			removed.push(stroke);
 			removedAt.push(at);
 			if (whole) continue; // nothing survives; there are no pieces to put back
@@ -3649,7 +3736,7 @@ export class PdfInkController {
 		this.apply(
 			{ type: "replace", path: id, removed, removedAt, inserted, insertedAt },
 			box.pageNumber,
-			"live"
+			"live-page"
 		);
 	}
 
@@ -3661,11 +3748,11 @@ export class PdfInkController {
 		const after = this.opList();
 		const afterIds = new Set(after.map((s) => s.id));
 		const beforeIds = new Set(before.map((s) => s.id));
-		const removed = before.filter((s) => !afterIds.has(s.id));
+		const removedAt: number[] = [];
+		const removed = before.filter((s, i) => !afterIds.has(s.id) && removedAt.push(i) > 0);
 		if (removed.length === 0) return;
-		const removedAt = removed.map((s) => before.indexOf(s));
-		const inserted = after.filter((s) => !beforeIds.has(s.id));
-		const insertedAt = inserted.map((s) => after.indexOf(s));
+		const insertedAt: number[] = [];
+		const inserted = after.filter((s, i) => !beforeIds.has(s.id) && insertedAt.push(i) > 0);
 		this.recordOp({ type: "replace", path: id, removed, removedAt, inserted, insertedAt });
 	}
 
@@ -3728,33 +3815,57 @@ export class PdfInkController {
 		this.sayIfPageEmpty(box.pageNumber, "select");
 	}
 
+	/** Keep all geometry, but apply and paint live edits once per display frame. */
+	private queueEditFrame(box: PageBox, kind: "lasso" | "space", path?: string, page?: number, strokeIds?: string[], dx = 0, dy = 0): void {
+		if (path && page !== undefined && strokeIds) {
+			this.editTarget ??= { path, page, strokeIds: [...strokeIds] };
+			this.editDelta.dx += dx;
+			this.editDelta.dy += dy;
+		}
+		this.editPaint = { box, kind };
+		if (this.editFrame !== null) return;
+		const frame = this.frame;
+		this.editFrame = this.win.requestAnimationFrame(() => {
+			if (this.frame !== frame) return;
+			this.flushEditFrame();
+		});
+	}
+
+	/** Drain before completion; the immutable target survives selection cleanup. */
+	private flushEditFrame(paint = true): void {
+		if (this.editFrame !== null) this.win.cancelAnimationFrame(this.editFrame);
+		this.editFrame = null;
+		const target = this.editTarget;
+		const { dx, dy } = this.editDelta;
+		this.editDelta = { dx: 0, dy: 0 };
+		const pendingPaint = this.editPaint;
+		this.editPaint = null;
+		if (target && target.path === this.documentId() && (dx !== 0 || dy !== 0)) {
+			this.apply({ type: "move", path: target.path, strokeIds: target.strokeIds, dx, dy }, target.page, "live");
+		}
+		if (!paint || !pendingPaint) return;
+		if (pendingPaint.kind === "space") this.drawSpaceLine(pendingPaint.box);
+		else if (this.lassoPts.length > 0 || this.dragFrom) this.drawLasso(pendingPaint.box);
+	}
+
 	private lassoMove(box: PageBox, scale: number, sample: PenSample, scroller: HTMLElement): void {
 		const p = this.pagePoint(box, scale, sample, scroller);
 		if (!p) return;
 		if (this.dragFrom) {
+			if (this.selected.length === 0) return;
 			const dx = p.x - this.dragFrom.x;
 			const dy = p.y - this.dragFrom.y;
 			this.dragFrom = { x: p.x, y: p.y };
 			this.dragTotal.dx += dx;
 			this.dragTotal.dy += dy;
 			const id = this.documentId();
-			// Applied without recording: the whole drag becomes ONE move op at
-			// pen-up, or a single drag would be dozens of undo steps.
-			if (id) {
-				this.apply(
-					{ type: "move", path: id, strokeIds: this.selected, dx, dy },
-					this.selectionPage,
-					"live"
-				);
+			if (id && (dx !== 0 || dy !== 0)) {
+				this.queueEditFrame(box, "lasso", id, this.selectionPage, this.selected, dx, dy);
 			}
-			// The outline travels with the ink. Left until pen-up, it would sit
-			// where the selection started while the strokes moved out from under
-			// it.
-			this.drawLasso(box);
 			return;
 		}
 		this.lassoPts.push({ x: p.x, y: p.y });
-		this.drawLasso(box);
+		this.queueEditFrame(box, "lasso");
 	}
 
 	/**
@@ -3815,11 +3926,13 @@ export class PdfInkController {
 		if (this.rotated.has(page)) {
 			return { ok: false, reason: `page ${page} is rotated, and ink on a rotated page is not supported` };
 		}
-		// The viewer's canvas sets the snip's resolution: `k` is its backing
-		// pixels per point, and both the crop out of it and the output scale
-		// come from the one number. Without a canvas the CSS size at device
-		// pixels is the honest fallback.
-		const pageCanvas = viewerCanvasOf(pageEl);
+		// The viewer's whole-page canvas sets the snip's resolution: `k` is its
+		// backing pixels per point, and both the crop out of it and the output
+		// scale come from the one number. Not the last visible canvas: on a
+		// zoomed page that is pdf.js's detail canvas, which covers only the
+		// visible part of the page. Without a whole-page canvas the CSS size at
+		// device pixels is the honest fallback, on white.
+		const pageCanvas = wholePageCanvasOf(pageEl);
 		const k = pageCanvas && pageCanvas.width > 0 ? pageCanvas.width / wPt : null;
 		const pxPerPt = k ?? (wPx / wPt) * (this.win.devicePixelRatio || 1);
 		const vp = snipViewport(b, 8, wPt, size.hPt, pxPerPt, MAX_SNIP_PX);
@@ -3965,6 +4078,8 @@ export class PdfInkController {
 	deleteSelection(): boolean {
 		const id = this.documentId();
 		if (!id || this.selected.length === 0) return false;
+		// Finish and record the drag before removal snapshots its moved strokes.
+		if (this.dragFrom) this.penUp();
 		const all = this.opList();
 		const picked = new Set(this.selected);
 		const strokes = all.filter((s) => picked.has(s.id));
@@ -3986,7 +4101,11 @@ export class PdfInkController {
 	private lassoUp(page: number): void {
 		const pts = this.lassoPts;
 		this.lassoPts = [];
-		if (pts.length < 3) return;
+		if (pts.length < 3) {
+			const box = this.frameBox(page);
+			if (box) this.drawLasso(box);
+			return;
+		}
 		const bounds = polygonBounds(pts);
 		this.selected = this.strokes(page)
 			.filter((s) => strokeInLasso(s, pts, bounds))
@@ -4045,6 +4164,9 @@ export class PdfInkController {
 	}
 
 	private penUp(ev?: PointerEvent): void {
+		this.flushEditFrame(false);
+		const editTarget = this.editTarget;
+		this.editTarget = null;
 		this.endMetrics();
 		// Whatever the gesture was, it is over: the strip returns, the same
 		// as a note (StripPenChrome.ts, §5o). The router funnels pointerup
@@ -4111,7 +4233,7 @@ export class PdfInkController {
 		// SAMPLED point and the tail between there and where the pen actually
 		// left the glass is missing - visible as ends being cut off
 		// (hardware, 2026-08-29). The note surface closes the same gap.
-		if (ev && frame && this.builder && !this.erasing) this.addFinalPoint(ev, frame);
+		if (ev?.type === "pointerup" && frame && this.builder && !this.erasing) this.addFinalPoint(ev, frame);
 		const builder = this.builder;
 		const page = this.strokePageNumber;
 		const id = this.documentId();
@@ -4136,8 +4258,8 @@ export class PdfInkController {
 			const { dx, dy } = this.dragTotal;
 			// One op for the whole drag, recorded but NOT re-applied: the
 			// moves already landed live, sample by sample.
-			if (id && (dx !== 0 || dy !== 0) && this.selected.length > 0) {
-				this.recordOp({ type: "move", path: id, strokeIds: this.selected, dx, dy });
+			if (id && editTarget?.path === id && (dx !== 0 || dy !== 0) && editTarget.strokeIds.length > 0) {
+				this.recordOp({ type: "move", path: id, strokeIds: editTarget.strokeIds, dx, dy });
 			}
 			this.persistLive();
 			const box = this.frameBox(page);
@@ -4342,7 +4464,7 @@ export class PdfInkController {
 		// of the page number, so it regenerates the same marks whatever the
 		// gesture believed it had done to them.
 		if (!this.emitOp(op, mode)) return false;
-		if (mode === "live") this.liveDirty = true;
+		if (mode === "live" || mode === "live-page") this.liveDirty = true;
 		if (onlyPage === undefined) this.refresh();
 		else this.refreshPage(onlyPage);
 		return true;
@@ -4384,7 +4506,7 @@ export class PdfInkController {
 		// Ahead of the pop, not after it: a refusal further down would consume
 		// the entry and report a step that never happened. The ring can still
 		// hold ops recorded before the sources went synthetic.
-		if (this.syntheticSources()) return false;
+		if (!this.idle || this.syntheticSources()) return false;
 		this.clearSelection();
 		const op = redo ? this.history.redo() : this.history.undo();
 		if (!op) return false;
@@ -4410,8 +4532,21 @@ export class PdfInkController {
 		const id = this.documentId();
 		if (!id || this.selected.length === 0) return 0;
 		const chosen = new Set(this.selected);
+		// Drain pending movement before copying without ending the live drag.
+		this.flushEditFrame(false);
 		const strokes = this.strokes(this.selectionPage).filter((st) => chosen.has(st.id));
-		return copyInk(strokes, id);
+		const count = copyInk(strokes, id);
+		const marker = count > 0 ? inkClipboardMarker() : null;
+		if (marker !== null) {
+			try {
+				void this.win.navigator.clipboard?.writeText(marker).catch(() => {
+					/* The command can still paste session ink when the clipboard is denied. */
+				});
+			} catch {
+				/* The owning window may not expose a clipboard API. */
+			}
+		}
+		return count;
 	}
 
 	/**
@@ -4588,6 +4723,7 @@ export class PdfInkController {
 	private isOwnMutation(record: MutationRecord): boolean {
 		if (record.target === this.cursorEl) return true;
 		if (record.target.instanceOf(Element)) {
+			if (record.target.closest(OWN_TOOLBAR_SELECTOR)) return true;
 			for (const cls of OWN_CLASSES) {
 				if (record.target.classList.contains(cls)) return true;
 			}
@@ -4761,13 +4897,18 @@ export class PdfInkController {
 	private pageWidthPt(pageNumber: number, wPx: number, hPx: number, scale: number): number {
 		const known = this.pageSize.get(pageNumber);
 		if (known) {
-			// A page whose proportions changed since we measured it has been
-			// rotated. Aspect rather than a rotation attribute, because this
-			// integration reads the DOM only and the viewer's own markup for
-			// rotation is not something we have verified.
-			const wasPortrait = known.hPt >= known.wPt;
-			const isPortrait = hPx >= wPx;
-			if (wasPortrait !== isPortrait) this.rotated.add(pageNumber);
+			if (!Number.isFinite(wPx) || !Number.isFinite(hPx) || wPx <= 0 || hPx <= 0) return known.wPt;
+			// The page div reports integer pixels. A near-square page can tie at
+			// one zoom, so a sign flip alone does not prove rotation. The two
+			// differences must each clear rounding noise before we refuse ink.
+			const expected = (known.wPt - known.hPt) * (wPx + hPx) / (known.wPt + known.hPt);
+			const observed = wPx - hPx;
+			const turned = expected * observed < 0 && Math.abs(expected) > 1.5 && Math.abs(observed) > 1.5;
+			if (turned) this.rotated.add(pageNumber);
+			else {
+				this.rotated.delete(pageNumber);
+				this.warnedRotated.delete(pageNumber);
+			}
 			return known.wPt;
 		}
 		if (!Number.isFinite(scale) || scale <= 0 || wPx <= 0 || hPx <= 0) return 0;

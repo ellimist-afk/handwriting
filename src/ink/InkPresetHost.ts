@@ -55,6 +55,8 @@ import { InkTool } from "./Stroke";
 import {
 	InkPreset,
 	addPreset,
+	addPresetAt,
+	presetSlotFor,
 	colorNameFor,
 	inkPresetsFor,
 	presetLabel,
@@ -187,10 +189,17 @@ export function installInkPresetActions(store: InkPresetStore): void {
 			refreshAllStrips();
 			sayPreset(`Handwriting: ${presetLabel(preset)}`, true);
 		},
-		star: (tool) => {
+		star: (tool, index) => {
 			const preset = livePreset(tool);
-			write(addPreset(store.list(), preset));
-			sayPreset(`Handwriting: starred ${presetLabel(preset)}`, true);
+			const list = store.list();
+			write(index === undefined ? addPreset(list, preset) : addPresetAt(list, preset, index));
+			// A save command names its slot in the sentence: an append short of
+			// the slot asked for says where the pen actually landed.
+			const slot =
+				index === undefined
+					? ""
+					: `${tool === "pen" ? "Pen" : "Highlighter"} preset ${presetSlotFor(list, tool, index) + 1}: `;
+			sayPreset(`Handwriting: starred ${slot}${presetLabel(preset)}`, true);
 		},
 		remove: (tool, index) => {
 			const gone = inkPresetsFor(tool)[index];

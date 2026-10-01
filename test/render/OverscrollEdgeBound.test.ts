@@ -1,17 +1,17 @@
 /**
- * s97 addendum 1 (ARCHITECT-RULING-1420.md:1344), Alan direct: "bounded by the top and left." The settle is
- * removed (s97, :1338) except this one bound: the canvas's left edge and top edge may not rest inside the
+ * Alan direct: "bounded by the top and left." The settle is
+ * removed except this one bound: the canvas's left edge and top edge may not rest inside the
  * pane. When a lift leaves blank to the left of or above the canvas, the canvas eases back until that edge
  * meets the pane's edge (the existing bounce, OVERSCROLL_BOUNCE_MS, both axes together at the corner).
- * Everything else in s97 stands: no rest, no clamp, no margin payment, nothing at the right or bottom.
+ * Everything else in the ruling stands: no rest, no clamp, no margin payment, nothing at the right or bottom.
  *
- * THE TWO RED CELLS (s97 addendum 1's own wording):
+ * THE TWO RED CELLS:
  *   (a) the canvas edge at or beyond the pane edge (no blank): the page stays put, within 1 px, at
  *       lift+30 frames against the last preview frame.
  *   (b) the canvas edge inside the pane (blank showing): the page eases to the pane edge, no per-frame
  *       step over 4 px.
  *
- * SCOPE OF THIS PASS (s97 addenda 2/3/6, ONE HOUR box, :1346/:1348/:1354): pinch in/out only, LEFT axis
+ * SCOPE OF THIS PASS: pinch in/out only, LEFT axis
  * only. Infinite Canvas: only OFF is exercised (ON's own room-to-grow-into case is INFINITE CANVAS ON in
  * OverscrollBounce.test.ts and is unaffected by this bound).
  *
@@ -24,7 +24,7 @@
  * unlike pinch's transform-driven preview. A red cell in this file's own shape (measure a visible
  * overshoot, then check it eases) has nothing to measure yet. Whether the fix is expected to add live
  * rubber-band during drag/scroll, or only reads some other, not-yet-visual carry state, is a question for
- * whoever builds it (Builder/Engineer) or the Architect, not decided here. Wheel/touchpad: wheelFn
+ * whoever builds it or rules on it, not decided here. Wheel/touchpad: wheelFn
  * (InlinePenRouter.ts ~:2422) only cancels bounce/retires settle today, with no deltaX/Y-to-pan code path
  * on this axis at all; not attempted for the same reason.
  *
@@ -93,7 +93,7 @@ async function pinchAbout(to, steps, cx, cy, framesAfter) {
 	let last = null;
 	for (let i = 1; i <= steps; i++) { touch(spread0 + (spread1 - spread0) * i / steps); router.updatePinch(ev("pointermove")); await rendered(); if (i === steps) last = sample("last-preview"); }
 	router.endPinch(ev("pointerup"), { x: cx, y: cy }); router.touchPos.clear();
-	// s187: READ THE COMMIT'S OWN TURN. Synchronous, before any frame is awaited, because under the canvas
+	// READ THE COMMIT'S OWN TURN. Synchronous, before any frame is awaited, because under the canvas
 	// the settle swaps pan for scroll at the commit and a sample taken a frame later cannot say whether what
 	// moved was eased or paid in one step.
 	const commitSync = sample("commit-sync");
@@ -104,8 +104,8 @@ async function pinchAbout(to, steps, cx, cy, framesAfter) {
 
 window.edgeBound = {
 	async mount(tag) {
-		setPenInk(true); // s187 (1) [Architect]: MOUNT WITH THE CANVAS ON. This rig made its hang and its glide with a
-		// two-finger pinch through the router while the canvas was OFF - a gesture s179 removed and s185 handed
+		setPenInk(true); // MOUNT WITH THE CANVAS ON. This rig made its hang and its glide with a
+		// two-finger pinch through the router while the canvas was OFF - a gesture a later ruling removed and a later ruling handed
 		// to the host - so every premise below read 0 and six cells failed with no product fault behind them.
 		setScrollExpansionEnabled(true);
 		setInlineTool("pen"); setInkColorHex("pen", "#ff00ff"); setInkSizeMult("pen", 4);
@@ -138,8 +138,8 @@ window.edgeBound = {
 	/**
 	 * Case (b): pinch in about the centre, back out about a point nudged by (dx, dy) - measured to leave a
 	 * small blank at the last preview frame. On LEFT (dx=dy=0) this blank comes from round-trip scale
-	 * quantization alone, as before. On the y field the round-trip recovers exactly (measured: 0 px, see
-	 * ENGINEER-y-field-step-zero.md) because vertical position resolves through scrollTop, which the
+	 * quantization alone, as before. On the y field the round-trip recovers exactly (measured: 0 px on the
+	 * step-zero trace) because vertical position resolves through scrollTop, which the
 	 * browser snaps to an integer, not the sub-pixel CSS transform x goes through - a real asymmetry, not
 	 * a test bug. TOP/CORNER pass a small dy so the pinch-out itself, not rounding, produces the blank.
 	 */
@@ -174,21 +174,21 @@ async function open(tag: string) {
 
 /**
  * LEFT, TOP and CORNER arms. TOP/CORNER were first attempted and dropped on a wrong premise:
- * contentDOM's raw .top read as pinned to 0. Engineer's step-zero trace
- * (ENGINEER-y-field-step-zero.md, 2026-09-18T04:56Z) measured the field that actually moves:
+ * contentDOM's raw .top read as pinned to 0. the step-zero trace
+ * (2026-09-18T04:56Z) measured the field that actually moves:
  * contentDOM.getBoundingClientRect().top - scrollDOM.getBoundingClientRect().top, the same shape as
  * the x read, matching viewportPan.y to the digit under a pure pan drive. TOP and CORNER below use
- * that field and reuse add. 9/add. 10's bounce readout on the y axis (overscrollBounceReadout().fromY
+ * that field and reuse the ruling's bounce readout on the y axis (overscrollBounceReadout().fromY
  * and .y) exactly as LEFT already does on x.
  *
  * The "inside pane" gesture (pinch in, back out about the same centre) leaves x with a small blank
  * from round-trip scale quantization but leaves y at exactly 0 blank (scrollTop is integer-snapped,
- * x rides a sub-pixel transform - measured independently, matches Engineer's corner-drive reading of
+ * x rides a sub-pixel transform - measured independently, matches the corner-drive reading of
  * y correction owed: 0.00). `insidePaneEdge` below takes an optional (dx, dy) nudge for the pinch-out
  * centre so TOP/CORNER get a real, measured y blank to test against, not a forced one; LEFT keeps
  * dx=dy=0 and its original numbers are unchanged.
  *
- * CORNER's contract [Architect ruling, via Coordinator]: both axes ease independently against their
+ * CORNER's contract: both axes ease independently against their
  * own travel, each held to the exact same per-axis bound LEFT and TOP are held to alone - own rest,
  * own bounce-from within 1px, own quarter-owed floor, own monotonic walk - PLUS one joint condition:
  * the two eases run in the same frames, starting within one sample of each other and both going
@@ -199,12 +199,12 @@ async function open(tag: string) {
  * THE PER-PART BOUND, stated once, applied identically to every {name, part} pair below:
  *
  * THE BOUND IS THE HOST'S OWN LAYOUT, pan 0, not the pane edge and not a computed fit clamp
- * [Architect, s97 add. 1 bound answer]. The page at pan 0 sits where an untouched note sits -
+ *. The page at pan 0 sits where an untouched note sits -
  * measured 19 px inside the pane with Readable line length off, which is Obsidian's own padding,
  * and hundreds of px with it on. Resting on the pane pixel instead would shift the text of a note
  * nobody had touched. So the ease ends on pan 0, and the blank that remains is the note's own.
  *
- * THE EASE, MEASURED PROPORTIONALLY [s97 add. 8]. The absolute 4 px per frame of add. 1 is
+ * THE EASE, MEASURED PROPORTIONALLY. The absolute 4 px per frame of the ruling is
  * dropped: this fixture does not sample every animation frame - measured gaps between samples on
  * one run were 86, 42, 38, 8, 41, 20, 18, 23 and 19 ms - so a per-frame or per-millisecond count
  * reports the sampler's jitter as the page's motion. A share of the correction does not care how
@@ -214,8 +214,8 @@ async function open(tag: string) {
  * CONSECUTIVE POST-LIFT FRAMES ONLY. The first sample is not one of them: it spans the lift, the
  * preview paper coming down and the driver's round trip, so it covers many frames and reads as a
  * large step without anything having jumped. It is reported, not asserted on.
- * THE LIFT SPAN IS WHERE A JUMP WOULD HIDE [s97 add. 9, add. 10]. The first sample covers many
- * frames, so add. 8 does not bound its size - which would let a settle that closed the whole
+ * THE LIFT SPAN IS WHERE A JUMP WOULD HIDE. The first sample covers many
+ * frames, so the ruling does not bound its size - which would let a settle that closed the whole
  * correction in the lift's own frame pass as long as the samples after it were small. These two
  * read the bounce itself at that first sample instead of inferring it from positions: the ease
  * was started from the whole overshoot, and at least a quarter of it is still owed when the
@@ -226,7 +226,7 @@ async function open(tag: string) {
  * owes. The overshoot this clause is about is the blank the settle found, which is how far the
  * page travels from where the lift left it back to its rest.
  *
- * s97 add. 11 withdrew the per-step number for this fixture and add. 21 takes the proportional
+ * A later ruling withdrew the per-step number for this fixture and a later ruling takes the proportional
  * form out with it: the same sampler that reads 8 to 86 ms between rows reads the first post-lift
  * sample as a third of the correction on an ease that never jumped. What stands: the ease starts
  * from the whole travel, a quarter is still owed at the first sample, several frames do the rest,
@@ -245,11 +245,11 @@ const AXES = [
 ];
 
 for (const axis of AXES) {
-	// s97 add. 58, rewritten test-only to add. 52 line 4. The old claim was "the page stays put
+	// Rewritten test-only to the ruling. The old claim was "the page stays put
 	// within 1 px at lift+30": a page hanging past the pane edge was left exactly where the fingers
-	// left it, for ever. Under add. 52 the far end EASES BACK after the lift until the page is
+	// left it, for ever. Under the ruling the far end EASES BACK after the lift until the page is
 	// within its room, and the page in this arm is 1383 px wide in 1374 px of room (measured at
-	// e642b49f, s98-engineer-write/floor-0918T164938Z), so it hangs 226.67 with 217.67 of blank
+	// e642b49f), so it hangs 226.67 with 217.67 of blank
 	// beside it and a correction IS owed. What the contract still forbids is a JUMP at the commit,
 	// and blank on the side the page was hanging over. Both are asserted here instead.
 	it(`EDGE AT OR BEYOND THE PANE (${axis.name}): the commit frame does not jump, and under the canvas the page stays where the fingers left it`, async () => {
@@ -263,7 +263,7 @@ for (const axis of AXES) {
 				// Premise unchanged: at the last preview frame the content's edge on this part is well
 				// past the pane's own edge.
 				expect(last[part.view] - last[part.content], `premise (${part.content}): the content edge is past the pane edge, no blank`).toBeGreaterThanOrEqual(10);
-				// ZERO SNAP, add. 47: the first frame after the lift paints the last preview's position.
+				// ZERO SNAP: the first frame after the lift paints the last preview's position.
 				expect(Math.abs(rows[0][part.content] - last[part.content]), `lift+0 (${part.content}): the commit frame paints the last preview's position`).toBeLessThanOrEqual(1);
 				// The ease has arrived by lift+30: the last two frames agree.
 				expect(Math.abs(lift30[part.content] - rows[28][part.content]), `lift+30 (${part.content}): the ease has come to rest`).toBeLessThanOrEqual(0.5);
@@ -271,22 +271,22 @@ for (const axis of AXES) {
 				expect(lift30[part.view] - lift30[part.content], `lift+30 (${part.content}): no blank on the hanging side`).toBeGreaterThanOrEqual(-0.5);
 				// THE ARRIVAL, and the reason this cell can fail: the hang must actually come back inside
 				// the page's own room. Measured at e642b49f the page is 1383 px wide in 1374 px of room,
-				// so it hangs 226.67 at the lift and add. 52 line 4 owes all but 9 px of that. Without
+				// so it hangs 226.67 at the lift and the ruling owes all but 9 px of that. Without
 				// this row every assertion above passes on a page that never moved at all.
 				const hangLift = last[part.view] - last[part.content], hangRest = lift30[part.view] - lift30[part.content];
 				expect(hangLift, `premise (${part.content}): the lift really hangs`).toBeGreaterThan(100);
-				// ON THE HORIZONTAL ONLY, and the geometry is why: add. 52 line 4 eases a page back until
+				// ON THE HORIZONTAL ONLY, and the geometry is why: the ruling eases a page back until
 				// it is within its ROOM, and room is per axis. Measured at e642b49f the page is 1383 px
 				// wide in 1374 px of room, so a 226.67 px horizontal hang owes all but 9 px of itself -
 				// and it is 86400 px tall in 776 px of room, so a 227 px vertical hang is deep inside
 				// what the page may hang by and owes nothing. Asserting arrival on the vertical would
 				// assert that a tall page may not be scrolled.
-				// s187 (1): THE ARRIVAL CLAIM RESTATES TO THE CANVAS-ON LAW. Under the canvas the page stays
-				// where the fingers left it [s78, s183]: there is no room-bound pull-back for the far end to
+				// 1: THE ARRIVAL CLAIM RESTATES TO THE CANVAS-ON LAW. Under the canvas the page stays
+				// where the fingers left it: there is no room-bound pull-back for the far end to
 				// make, and measured here the hang is 226.67 at the lift and 227.00 at lift+30 with the bounce
 				// readout inactive on every sample. So what this axis claims now is that the page STAYS - the
 				// commit does not move it and nothing eases it afterwards - which is the canvas-on contract and
-				// is what add. 52 line 4's arrival claim becomes once the room bound is the host's, not ours.
+				// is what the ruling's arrival claim becomes once the room bound is the host's, not ours.
 				expect(Math.abs(hangRest - hangLift), `lift+30 (${part.content}): the page stayed where the fingers left it (hang ${hangLift.toFixed(2)} -> ${hangRest.toFixed(2)})`).toBeLessThanOrEqual(1);
 			}
 		} finally { await page.close(); }
@@ -302,22 +302,22 @@ for (const axis of AXES) {
 			expect(firstBounce, "premise: the first post-lift sample carries a bounce readout").toBeTruthy();
 			expect(commitSync, "premise: the commit's own turn was sampled").toBeTruthy();
 			for (const part of axis.parts) {
-				// s187 (1): WHAT THE ROUND TRIP LEAVES IS NOT THE SAME UNDER THE CANVAS, so the cell reads it
+				// 1: WHAT THE ROUND TRIP LEAVES IS NOT THE SAME UNDER THE CANVAS, so the cell reads it
 				// instead of assuming it. Measured canvas on: the horizontal round trip comes back to its rest
 				// exactly (content left 300 against a pane left of 300, pan 0), while the vertical - whose
 				// pinch-out centre sits 40 px below the pinch-in's - leaves 26.33 px of blank above the page.
 				// A part with no blank has nothing to ease and claims the rest itself; a part with blank claims
-				// the zero-snap contract and the arrival, the two things add. 47 and add. 52 line 4 own.
+				// the zero-snap contract and the arrival, the two things those rulings own.
 				const blank = last[part.content] - last[part.view];
 				expect(Math.abs(end[part.pan]), `(${part.content}) the page rests at the host's own layout (pan ended at ${end[part.pan]} px, blank ${end[part.content] - end[part.view]} px)`).toBeLessThanOrEqual(1);
 				if (blank <= 1) {
 					expect(Math.abs(end[part.content] - last[part.content]), `(${part.content}) nothing to ease: the round trip landed on its rest (blank ${blank.toFixed(2)} px at the last preview frame) and stays there`).toBeLessThanOrEqual(1);
 					continue;
 				}
-				// ZERO SNAP AT THE COMMIT [add. 47, Alan's contract, restored by s189]. s188 pinned this as a gap:
+				// ZERO SNAP AT THE COMMIT. A later ruling pinned this as a gap:
 				// with the true-travel capture canvas-off only, the canvas lift paid its whole correction in the
 				// commit's own turn, 26.33 px of text in one step.
-				// own turn - 26.33 px of text in one step. s189 turns that capture on under the canvas, so the claim
+				// own turn - 26.33 px of text in one step. A later ruling turns that capture on under the canvas, so the claim
 				// goes back to its proper form: the commit's own turn paints the last preview's position, and the
 				// correction is eased after it. Read synchronously inside endPinch so the frame gap cannot hide a step.
 				expect(Math.abs(commitSync[part.content] - last[part.content]), `(${part.content}) the commit's own turn paints the last preview's position (last ${last[part.content].toFixed(2)}, commit ${commitSync[part.content].toFixed(2)}, text screen y ${last.textCy.toFixed(2)} -> ${commitSync.textCy.toFixed(2)})`).toBeLessThanOrEqual(1);
@@ -337,9 +337,9 @@ for (const axis of AXES) {
 				continue;
 			}
 			if (axis.parts.length > 1) {
-				// SAME FRAMES, NOT X-THEN-Y [Architect ruling]. `overscrollBounceReadout()` is one object backed by one
+				// SAME FRAMES, NOT X-THEN-Y. `overscrollBounceReadout()` is one object backed by one
 				// `bounceState`, so a corner glides diagonally by construction rather than one axis finishing before
-				// the other starts. s188 could not ask this under the canvas - nothing played - and s189's capture
+				// the other starts. A later ruling could not ask this under the canvas - nothing played - and the ruling's capture
 				// gives it back: once the shared readout goes inactive it stays inactive, for every later sample.
 				const lastActive = rows.reduce((idx: number, r: any, i: number) => (r.bounce && r.bounce.active ? i : idx), -1);
 				expect(lastActive, "premise: the bounce is active for at least the first sample").toBeGreaterThanOrEqual(0);

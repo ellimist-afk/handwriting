@@ -104,6 +104,11 @@ class FakeEl {
 	setCssStyles(styles: Record<string, string>): void {
 		Object.assign(this.style, styles);
 	}
+	// The overlay reads the band's and the scroller's boxes to find the
+	// visible area; unscaled and the pane's size, so the clamp is the pane's.
+	getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
+		return { left: 0, top: 0, width: PANE.width, height: PANE.height };
+	}
 	setAttribute(k: string, v: string): void {
 		this.attrs.set(k, v);
 	}
@@ -224,7 +229,13 @@ function makeRig(): Rig {
 	view.activeWet = wet;
 	view.highlightWet = { ...wet };
 	view.highlightWetCanvas = { setCssStyles: () => undefined };
-	view.tail = { clear: () => undefined, clearAll: () => undefined };
+	view.tail = {
+		clear: () => undefined, clearAll: () => undefined,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 	view.committedCtx = fakeCtx();
 	view.highlightCtx = fakeCtx();
 	view.damage = { addRect: () => undefined, addAll: () => undefined };

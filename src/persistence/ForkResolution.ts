@@ -1,5 +1,5 @@
-import { PageData, parsePage } from "../model/PageData";
-import { recoverExactPage } from "./PageStore";
+import { PageData, parsePage, serializePage } from "../model/PageData";
+import { ADOPTED_BY_KEY, outgoingDiverges, recoverExactPage } from "./PageStore";
 
 /**
  * WHAT THE USER DOES ABOUT A FORK, once the store has preserved both sides.
@@ -17,11 +17,10 @@ import { recoverExactPage } from "./PageStore";
  * compares geometry, or decides anything on the user's behalf. It reports what
  * each side holds and applies the choice the user makes.
  *
- * NO NEW WRITE PATH, which is the constraint that shapes everything below.
- * Only one of the three decisions writes at all, and it writes through
- * `saveNow` - the same entry point every other save uses. The other two are
- * already true on disk the moment the fork exists, so honouring them means
- * writing nothing. That is stated rather than hidden: see `applyForkDecision`.
+ * A decision that changes the live page writes it through the host's
+ * `restore` (copy the current page aside, then write through the open note)
+ * and reads it back before claiming it happened; a decided pair is renamed so
+ * it is not listed again. See `applyForkDecision`.
  */
 
 /** One preserved fork, as `adoptExternal` reported it. */
@@ -64,12 +63,12 @@ export interface ForkAccount {
 	/**
 	 * Whether there is anything to decide.
 	 *
-	 * ADOPTION PRESERVES A PAIR EVERY TIME, including the ordinary case where
-	 * the other device simply drew more and this one drew nothing - and there
-	 * the incoming is a superset, adopting is plainly right, and a question
-	 * would be noise on every sync. That is the case the success-silence rule
+	 * Adoption now writes a pair only when the incoming revision would lose
+	 * something, but pairs written by older builds on every sync are still on
+	 * disk: there the incoming is a superset, adopting was plainly right, and a
+	 * question would be noise. That is the case the success-silence rule
 	 * (`d50534a`) exists for and this must not undo it. Only a revision holding
-	 * something the other does not is a fork a person needs to answer.
+	 * a stroke the other lacks is a fork a person needs to answer.
 	 *
 	 * False when either side is unreadable: nothing can be claimed about a
 	 * count that could not be taken.
@@ -96,8 +95,89 @@ export interface ForkHost {
 	read(path: string): Promise<string | null>;
 	stat(path: string): Promise<{ mtime: number } | null>;
 	saveNow(pageId: string, data: PageData): Promise<void>;
+	/**
+	 * Make a revision the live page: keep a copy of the current live page
+	 * first, then write through whichever open note or PDF holds the page, so
+	 * screen, memory and disk agree. THROWS when the copy cannot be made, and
+	 * then nothing is written. A host without it writes through `saveNow`.
+	 */
+	restore?(pageId: string, data: PageData): Promise<void>;
+	/**
+	 * Rename a file. Used to mark a decided pair so no later scan lists it
+	 * again; a host without it cannot make a decision stick past the session.
+	 */
+	rename?(from: string, to: string): Promise<void>;
 	/** Filenames in the ink folder. Absent hosts simply cannot scan. */
 	list?(folder: string): Promise<string[]>;
+	/**
+	 * The note or PDF a page id belongs to, or null when nothing open or
+	 * known this session says. A scanned pair carries only the id, so this is
+	 * how the list names it.
+	 */
+	nameFor?(pageId: string): Promise<string | null>;
+	/**
+	 * This install's id. A scanned pair written by a different install has its
+	 * legs the other way round for this device (see `scanForForks`).
+	 */
+	readonly deviceId?: string;
+}
+
+/** What `forkHostFor` builds the plugin's fork host from. */
+export interface ForkHostSources {
+	adapter: {
+		read(path: string): Promise<string>;
+		stat(path: string): Promise<{ mtime: number } | null>;
+		rename?(from: string, to: string): Promise<void>;
+		list?(folder: string): Promise<{ files: string[] }>;
+	};
+	store: {
+		saveNow(pageId: string, data: PageData): Promise<void>;
+		/** Copy the current live page aside; throws when it cannot. */
+		preserve(pageId: string): Promise<string | null>;
+	};
+	/** The note a page id belongs to, or null. */
+	pathForNote?(pageId: string): string | null;
+	/** The PDF a page id belongs to, or null. It may read the sidecar, so it is async. */
+	pathForPdf?(pageId: string): Promise<string | null>;
+	/** Hand a restored page to the open surface holding it; true when it wrote it. */
+	restoreOpen?(pageId: string, data: PageData): Promise<boolean>;
+	/** This install's id; see `ForkHost.deviceId`. */
+	deviceId?: string;
+}
+
+/**
+ * The fork host the plugin uses, in one place so the command and the cells
+ * that exercise it build the same thing.
+ */
+export function forkHostFor(src: ForkHostSources): ForkHost {
+	const list = src.adapter.list?.bind(src.adapter);
+	const rename = src.adapter.rename?.bind(src.adapter);
+	const pathForNote = src.pathForNote?.bind(src);
+	const pathForPdf = src.pathForPdf?.bind(src);
+	return {
+		...(pathForNote || pathForPdf
+			? {
+					nameFor: async (pageId: string) =>
+						pathForNote?.(pageId) ?? (await pathForPdf?.(pageId).catch(() => null)) ?? null,
+				}
+			: {}),
+		...(src.deviceId ? { deviceId: src.deviceId } : {}),
+		...(rename ? { rename: (from: string, to: string) => rename(from, to) } : {}),
+		read: (p) => src.adapter.read(p),
+		stat: async (p) => {
+			const s = await src.adapter.stat(p);
+			return s ? { mtime: s.mtime } : null;
+		},
+		saveNow: (pageId, data) => src.store.saveNow(pageId, data),
+		restore: async (pageId, data) => {
+			// The current live page can hold ink drawn after the fork, in no
+			// other file. Copied first, and a failed copy stops the restore.
+			await src.store.preserve(pageId);
+			if (await src.restoreOpen?.(pageId, data)) return;
+			await src.store.saveNow(pageId, data);
+		},
+		...(list ? { list: async (folder: string) => (await list(folder)).files } : {}),
+	};
 }
 
 /**
@@ -146,13 +226,21 @@ export async function scanForForks(host: ForkHost, folder: string): Promise<Fork
 	for (const e of pairs.values()) {
 		if (!e.outgoing || !e.incoming) continue;
 		const st = await host.stat(e.outgoing).catch(() => null);
+		// A pair another install wrote: its "outgoing" leg is THAT device's
+		// revision and its "incoming" leg is this one's, so this device reads
+		// them the other way round. A pair with no writer recorded (written
+		// before this existed) reads as it always has.
+		if (host.deviceId) {
+			const writer = await writerOf(host, e.outgoing);
+			if (writer !== null && writer !== host.deviceId) [e.outgoing, e.incoming] = [e.incoming, e.outgoing];
+		}
 		out.push({
 			pageId: e.pageId,
 			// THE NOTE PATH IS NOT RECOVERABLE FROM THE FILENAME - the artifact
 			// is named for the page id and nothing else. A fork registered live
 			// this session carries the real path; a scanned one falls back to
-			// the id, which is at least stable and searchable. Turning an id
-			// back into a note is the store's job and is not this slice's.
+			// the id, which is at least stable and searchable. `describeFork`
+			// names it through `ForkHost.nameFor` when the host can.
 			path: e.pageId,
 			outgoingPath: e.outgoing,
 			incomingPath: e.incoming,
@@ -160,6 +248,19 @@ export async function scanForForks(host: ForkHost, folder: string): Promise<Fork
 		});
 	}
 	return out;
+}
+
+/** The install that wrote a pair, from its outgoing leg, or null when none is recorded or it cannot be read. */
+async function writerOf(host: ForkHost, outgoingPath: string): Promise<string | null> {
+	try {
+		const text = await host.read(outgoingPath);
+		if (text === null) return null;
+		const top = JSON.parse(text) as Record<string, unknown>;
+		const writer = top[ADOPTED_BY_KEY];
+		return typeof writer === "string" && writer.length > 0 ? writer : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -170,14 +271,21 @@ export async function scanForForks(host: ForkHost, folder: string): Promise<Fork
  */
 export async function refreshForks(host: ForkHost, folder: string): Promise<void> {
 	for (const found of await scanForForks(host, folder)) {
-		if (!forks.has(found.pageId)) forks.set(found.pageId, found);
+		const key = pairKey(found);
+		if (!forks.has(key)) forks.set(key, found);
 	}
 }
 
 // ---- the register -----------------------------------------------------------
 
 /**
- * Forks this session has seen, newest wins per page.
+ * Forks this session has seen, ONE ENTRY PER PAIR.
+ *
+ * It was one per page, newest wins, so a later adoption on the same page
+ * replaced a real fork's entry, and after a restart the scan kept whichever
+ * pair it met first. A routine pair then hid a real one and the command said
+ * there was nothing to fix. Every pair is kept; which of a page's pairs is put
+ * to the user is the surface's choice (the newest one needing a decision).
  *
  * In memory on purpose. A fork is only actionable while the artifacts it names
  * are still on disk, and persisting the list would mean a second thing to keep
@@ -186,9 +294,19 @@ export async function refreshForks(host: ForkHost, folder: string): Promise<void
  */
 const forks = new Map<string, ForkRecord>();
 
-/** Record a fork the store just preserved. Newest per page replaces older. */
+/**
+ * One pair, whichever leg a record calls this device's: the two legs share
+ * their name up to `-outgoing` / `-incoming`.
+ */
+function pairKey(rec: ForkRecord): string {
+	const base = (p: string) => p.replace(/-(outgoing|incoming)\.json$/, "");
+	const [a, b] = [base(rec.outgoingPath), base(rec.incomingPath)].sort();
+	return `${rec.pageId}|${a}|${b}`;
+}
+
+/** Record a fork the store just preserved. The same pair again replaces its entry. */
 export function recordFork(rec: ForkRecord): void {
-	forks.set(rec.pageId, rec);
+	forks.set(pairKey(rec), rec);
 }
 
 /** Every unresolved fork, newest first. */
@@ -196,9 +314,14 @@ export function listForks(): ForkRecord[] {
 	return [...forks.values()].sort((a, b) => b.at - a.at);
 }
 
-/** Drop one, once the user has decided about it. */
+/** Drop one pair, once the user has decided about it. */
+export function forgetPair(rec: ForkRecord): void {
+	forks.delete(pairKey(rec));
+}
+
+/** Drop every pair of one page. */
 export function forgetFork(pageId: string): void {
-	forks.delete(pageId);
+	for (const [key, rec] of forks) if (rec.pageId === pageId) forks.delete(key);
 }
 
 /** Test seam, and the teardown path. */
@@ -227,7 +350,7 @@ export function forkFromAdoption(
 	return { pageId, path, outgoingPath: result.outgoingPath, incomingPath: result.incomingPath, at };
 }
 
-async function idsOf(host: ForkHost, pageId: string, path: string): Promise<Set<string> | null> {
+async function pageAt(host: ForkHost, pageId: string, path: string): Promise<PageData | null> {
 	let text: string | null = null;
 	try {
 		text = await host.read(path);
@@ -237,7 +360,7 @@ async function idsOf(host: ForkHost, pageId: string, path: string): Promise<Set<
 	if (text === null) return null;
 	const parsed = parsePage(text, pageId);
 	if (parsed.damaged) return null;
-	return new Set(parsed.data.strokes.map((s) => s.id));
+	return parsed.data;
 }
 
 async function sideOf(host: ForkHost, pageId: string, path: string): Promise<ForkSide> {
@@ -261,24 +384,36 @@ async function sideOf(host: ForkHost, pageId: string, path: string): Promise<For
  * What each side of a fork holds. Reads both artifacts; changes nothing.
  */
 export async function describeFork(host: ForkHost, rec: ForkRecord): Promise<ForkAccount> {
-	const [mine, theirs, mineIds, theirsIds] = await Promise.all([
+	// A scanned record carries the page id where a path belongs. Name it from
+	// the host when the host can; a record that already carries a real path,
+	// and an id nothing knows, are left as they are.
+	const path = rec.path === rec.pageId ? ((await host.nameFor?.(rec.pageId).catch(() => null)) ?? rec.path) : rec.path;
+	const [mine, theirs, minePage, theirsPage] = await Promise.all([
 		sideOf(host, rec.pageId, rec.outgoingPath),
 		sideOf(host, rec.pageId, rec.incomingPath),
-		idsOf(host, rec.pageId, rec.outgoingPath),
-		idsOf(host, rec.pageId, rec.incomingPath),
+		pageAt(host, rec.pageId, rec.outgoingPath),
+		pageAt(host, rec.pageId, rec.incomingPath),
 	]);
-	const both = mineIds !== null && theirsIds !== null;
+	const both = minePage !== null && theirsPage !== null;
+	const mineIds = new Set(minePage?.strokes.map((s) => s.id));
+	const theirsIds = new Set(theirsPage?.strokes.map((s) => s.id));
 	const mineOnly = both ? [...mineIds].filter((id) => !theirsIds.has(id)).length : 0;
 	const theirsOnly = both ? [...theirsIds].filter((id) => !mineIds.has(id)).length : 0;
 	return {
 		pageId: rec.pageId,
-		path: rec.path,
+		path,
 		at: rec.at,
 		mine,
 		theirs,
 		mineOnly,
 		theirsOnly,
-		needsDecision: both && mineOnly > 0,
+		// The question preservation asked when it kept the pair: does this
+		// device's revision hold anything the other lacks, by id or under the
+		// same id in another form? A stroke the other device moved keeps its
+		// id, so counting missing ids alone hid that pair from the list. The
+		// legs are compared as parsed; the nested exact capture on the
+		// outgoing leg is not a stroke and is not compared.
+		needsDecision: both && outgoingDiverges(minePage, theirsPage),
 	};
 }
 
@@ -287,22 +422,23 @@ export async function describeFork(host: ForkHost, rec: ForkRecord): Promise<For
 /**
  * Apply the user's decision.
  *
- * ONLY `keep-mine` WRITES, and it writes through `saveNow` like every other
- * save in the plugin. The other two are already the state of the disk:
- * `take-theirs` is what adoption did, and `keep-both` is what adoption left
- * behind. Honouring them by writing nothing is not a shortcut - a write there
- * would be a change the user did not ask for.
+ * `keep-mine` makes this device's preserved revision the live page.
+ * `take-theirs` makes the other device's revision the live page when the live
+ * page is no longer that revision (after an earlier keep-mine, or ink drawn
+ * since); when it already is, it writes nothing. `keep-both` writes nothing
+ * and keeps the fork listed so the person can come back to it.
  *
- * NOTHING IS EVER DELETED. Both artifacts stay where they are under every
- * decision, so "take the other" cannot destroy this device's revision and a
- * decision made in error is recoverable by making the other one.
+ * A write goes through `restore` when the host has it: the current live page
+ * is copied aside first, and the page goes through the open note, so the
+ * screen, the session and the disk hold the same revision.
  *
- * The difference between `take-theirs` and `keep-both` is therefore not on
- * disk - it is whether the fork stays reachable afterwards. `keep-both` keeps
- * it listed so the person can come back to it; `take-theirs` is them saying
- * they are finished with it. That is a real difference in the surface and NOT
- * a difference in the files, and the handback says so rather than implying the
- * three decisions are three outcomes.
+ * A DECISION STICKS. `keep-mine` and `take-theirs` rename both legs of the
+ * pair to a resolved name that no scan lists, on this device and on any other
+ * that syncs the folder. The pair was only forgotten in memory before, so the
+ * next run of the command listed the same fork again.
+ *
+ * NOTHING IS EVER DELETED. Both legs stay on disk under every decision, so a
+ * decision made in error is still recoverable from the files.
  */
 export async function applyForkDecision(
 	host: ForkHost,
@@ -312,15 +448,10 @@ export async function applyForkDecision(
 	if (decision === "keep-both") {
 		return { kind: "applied", wrote: false, stillListed: true };
 	}
-	if (decision === "take-theirs") {
-		forgetFork(rec.pageId);
-		return { kind: "applied", wrote: false, stillListed: false };
-	}
-
-	// keep-mine: put this device's preserved revision back as the live page.
+	const leg = decision === "keep-mine" ? rec.outgoingPath : rec.incomingPath;
 	let text: string | null = null;
 	try {
-		text = await host.read(rec.outgoingPath);
+		text = await host.read(leg);
 	} catch {
 		text = null;
 	}
@@ -348,9 +479,86 @@ export async function applyForkDecision(
 	// store wrote for exactly this: it returns the nested capture when there is
 	// one and the ordinary page otherwise, and the capture does not carry the
 	// key itself.
-	await host.saveNow(rec.pageId, recoverExactPage(parsed.data));
-	forgetFork(rec.pageId);
-	return { kind: "applied", wrote: true, stillListed: false };
+	const restored = recoverExactPage(parsed.data);
+	// Take the other with the other revision already live: nothing to write.
+	const write = decision === "keep-mine" || !(await livePageHolds(host, rec, restored));
+	if (write) {
+		try {
+			if (host.restore) await host.restore(rec.pageId, restored);
+			else await host.saveNow(rec.pageId, restored);
+		} catch (err) {
+			// The copy of the current page could not be made, or the write
+			// threw: nothing is claimed, and the fork stays listed.
+			console.error("[handwriting] could not restore a revision", rec.pageId, err);
+			return { kind: "refused", wrote: false, stillListed: true, why: "not saved" };
+		}
+		// A save that fails is caught by the store and queued for a retry, so
+		// returning from the write does not mean the page is on disk. Reading
+		// it back does: until the chosen revision is the live page, the
+		// decision has not happened, and the fork stays listed.
+		if (!(await livePageHolds(host, rec, restored))) {
+			return { kind: "refused", wrote: false, stillListed: true, why: "not saved" };
+		}
+	}
+	forgetPair(rec);
+	await markResolved(host, rec);
+	return { kind: "applied", wrote: write, stillListed: false };
+}
+
+/**
+ * `<id>.conflict-external-<token>-<leg>.json` becomes
+ * `<id>.conflict-resolved-<token>-<leg>.json`: the same file, under a name the
+ * scan does not match. A failed rename keeps the decision for this session
+ * only; the next run lists the fork again, which is safe.
+ */
+async function markResolved(host: ForkHost, rec: ForkRecord): Promise<void> {
+	if (!host.rename) return;
+	for (const leg of [rec.outgoingPath, rec.incomingPath]) {
+		const to = leg.replace(".conflict-external-", ".conflict-resolved-");
+		if (to === leg) continue;
+		try {
+			await host.rename(leg, to);
+		} catch (err) {
+			console.error("[handwriting] could not mark a decided fork", leg, err);
+		}
+	}
+}
+
+/** The live sidecar beside a pair: the store writes both legs next to it. */
+function livePathBeside(rec: ForkRecord): string {
+	const slash = rec.outgoingPath.lastIndexOf("/");
+	const folder = slash < 0 ? "" : rec.outgoingPath.slice(0, slash + 1);
+	return `${folder}${rec.pageId}.json`;
+}
+
+/**
+ * Does the live sidecar now hold exactly this page's strokes, text boxes and
+ * images, in this order and in this form?
+ *
+ * Ids alone are not enough: a lasso move keeps a stroke's id, so a moved
+ * stroke read as the chosen revision and "Take the other" wrote nothing, and a
+ * failed write read back as done. Both sides go through the codec, so the
+ * unrounded capture this device restores matches its own rounded write.
+ */
+async function livePageHolds(host: ForkHost, rec: ForkRecord, page: PageData): Promise<boolean> {
+	let text: string | null = null;
+	try {
+		text = await host.read(livePathBeside(rec));
+	} catch {
+		return false;
+	}
+	if (text === null) return false;
+	const parsed = parsePage(text, rec.pageId);
+	if (parsed.damaged) return false;
+	const onDisk = parsePage(serializePage(parsed.data), rec.pageId).data;
+	const wanted = parsePage(serializePage(page), rec.pageId).data;
+	const same = (a: readonly unknown[], b: readonly unknown[]): boolean =>
+		a.length === b.length && a.every((x, i) => JSON.stringify(x) === JSON.stringify(b[i]));
+	return (
+		same(onDisk.strokes, wanted.strokes) &&
+		same(onDisk.textBoxes, wanted.textBoxes) &&
+		same(onDisk.images, wanted.images)
+	);
 }
 
 // ---- copy -------------------------------------------------------------------
@@ -400,8 +608,9 @@ export async function applyForkDecision(
  * have read "Handwriting: Handwriting: ..." - and no other command in this
  * plugin carries one. He also removed the word "note" himself on learning the
  * screen covers PDFs too: preservation runs on the pdf surface, `scanForForks`
- * matches on filename and never opens the file, so a PDF fork lists beside a
- * note fork. Slides has no preservation route and produces none.
+ * pairs files by name (it opens a pair only to read which install wrote it),
+ * so a PDF fork lists beside a note fork. Slides has no preservation route
+ * and produces none.
  *
  * `mine` AND `theirs` ARE CORRECT AND WERE NEVER CHANGED. It was observed that
  * the revision labelled "The other device" is the one currently on screen, and

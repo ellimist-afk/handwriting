@@ -115,7 +115,7 @@ function sample(phase, withInk) {
 	return { phase, t: performance.now(), k, preview: !!overlay.pinchPreview, restX: pan.x, restY: pan.y,
 		bounce: typeof overlay.overscrollBounceReadout === "function" ? overlay.overscrollBounceReadout() : null,
 		contentLeft: cr.left, viewLeft: sr.left, viewRight: sr.right, contentRight: cr.right, textLeft: t.left, textCy: t.cy,
-		// s189: the vertical pair, so a cell can read the axis the canvas corrects (the origin edge) the same way
+		// The vertical pair, so a cell can read the axis the canvas corrects (the origin edge) the same way
 		// it has always read the horizontal one. Read-only, and the horizontal fields are untouched.
 		contentTop: cr.top, viewTop: sr.top,
 		sizerX: translateX(sizer.style.transform), sizerTransform: sizer.style.transform || "",
@@ -132,7 +132,7 @@ function sample(phase, withInk) {
 async function pinchAbout(to, steps, cx, cy, framesAfter, withInk, travel) {
 	const { overlay } = rig, router = overlay.router, from = overlay.pinchScaleNow;
 	const spread0 = 300, spread1 = 300 * to / from, drift = travel || 0;
-	// s97 add. 21: the centroid may TRAVEL across the gesture, which is how a real two-finger drag makes
+	// The centroid may TRAVEL across the gesture, which is how a real two-finger drag makes
 	// blank beside the page. Rounding alone leaves 19 px here, too small for the pen plant to
 	// discriminate; a 60 px drag makes the correction by construction.
 	const touch = (s, f) => { const c = cx + drift * (f === undefined ? 0 : f); router.touchPos.set(911, { x: c - s / 2, y: cy }); router.touchPos.set(912, { x: c + s / 2, y: cy }); };
@@ -174,17 +174,17 @@ window.bounce = {
 		return { strokes: inlineInk.strokes(path).length, natural: sample("natural", true), inkMiddleX: t.left + 170 };
 	},
 	/**
-	 * s97 add. 21: the round trip that leaves the canvas's edge INSIDE the pane - in to 300% about the
+	 * The round trip that leaves the canvas's edge INSIDE the pane - in to 300% about the
 	 * ink and back out to 100% about the same point, the blank coming from the scale's own rounding.
 	 * It used to zoom out 340 px to the left, which clipped the page instead and leaned on the fitting
-	 * clamp s97 deleted; there was then no ease at all for these cells to read.
+	 * clamp a later ruling deleted; there was then no ease at all for these cells to read.
 	 */
 	/**
-	 * s189 [Architect]: THE DRIVE THAT OWES A CORRECTION UNDER THE CANVAS. The same-centre round trip above
+	 * THE DRIVE THAT OWES A CORRECTION UNDER THE CANVAS. The same-centre round trip above
 	 * trip owes 1 px there - the canvas keeps the page where the fingers left it sideways, so rounding blank on x
 	 * is all there is, and 1 px is no bounce to read. What the canvas DOES correct is the origin edge: zoom in
 	 * about the ink, then out about a point 40 px below it, and the page ends with blank above its own top, which
-	 * the settle owes back. This is the s188 TOP drive, measured 26.33 px on that rig.
+	 * the settle owes back. This is the TOP drive, measured 26.33 px on that rig.
 	 */
 	async originEdgeOvershoot(inkMiddleX, cy) {
 		await pinchAbout(3, 30, inkMiddleX, cy, 16, false);
@@ -244,7 +244,7 @@ window.bounce = {
 		// right after the lift, before settle() runs a single frame, so a resumed ease reads mid-decay here
 		// and a mere park (no ease at all) would read x:0 already - the two are not the same claim.
 		const justAfterPenUp = sample("just-after-penup", false);
-		// s105 add. 11: settle(12) is ~200ms of frames and the ease is 500ms wall-clock, so a fixed frame
+		// Settle(12) is ~200ms of frames and the ease is 500ms wall-clock, so a fixed frame
 		// budget reads "after" while the resume is still playing - red by construction, not by defect. Wait
 		// for the readout to go quiet instead, the same shape lateCatch above uses, then read the endpoint.
 		for (let j = 0; j < 90; j++) {
@@ -259,7 +259,7 @@ window.bounce = {
 			expectedAtRest: px - atContact.contentLeft - rig.noteOffset, expectedThroughBounce: px - before.contentLeft - rig.noteOffset };
 	},
 	/**
-	 * THE GIVE AT AN END, THEN A SECOND GRAB WHILE IT SPRINGS BACK (Reviewer option 2, s106 add. 2).
+	 * THE GIVE AT AN END, THEN A SECOND GRAB WHILE IT SPRINGS BACK.
 	 *
 	 * One finger dragged DOWN at the top, far enough to reach the allowance; the lift
 	 * releases the give; a second contact lands while it is still springing and lifts again without
@@ -273,7 +273,7 @@ window.bounce = {
 	 * the one exception. A first attempt dispatched synthetic touch PointerEvents and the premise
 	 * read a give of 0, so the drive is no longer the variable under test.
 	 *
-	 * No plant of its own: the Reviewer plants this cell independently for the verdict, and an
+	 * No plant of its own: review plants this cell independently for the verdict, and an
 	 * author's plant on an author's cell was ruled to add nothing here.
 	 *
 	 * Endpoint sampling only, no per-frame rows: this file goes red under seven-file load on timing.
@@ -333,7 +333,7 @@ window.bounce = {
 		finger("pointerdown", yTop, 1);
 		atDown.push(probe());
 		// One small move first to clear the assist's slop, then the run, which is the shape the
-		// Reviewer's fling probe drives a real one-finger drag with.
+		// the fling probe drives a real one-finger drag with.
 		finger("pointermove", yTop + 10, 1);
 		for (let i = 1; i <= 12; i++) { finger("pointermove", yTop + 10 + 20 * i, 1); if (i === 6) atDown.push(probe()); }
 		await rendered();
@@ -368,7 +368,7 @@ window.bounce = {
 	 * THE RATCHET (Alan, device, 2026-09-20, vault test 2, Untitled 2: "repeatedly left scroll, lift, left
 	 * scroll" walks the page way out of bounds). One finger pulled to the allowance at the top, lifted,
 	 * grabbed again EARLY in the spring and pulled to the allowance again, five times over. The grab folds
-	 * what the spring still owed into the standing pan (add. 66, so nothing jumps), and the next pull is
+	 * what the spring still owed into the standing pan (so nothing jumps), and the next pull is
 	 * measured from zero again, so the page stands the allowance PLUS the fold past the top - and further
 	 * on every grab. Each cycle reports the page's total past the top while held (standing pan plus give).
 	 */
@@ -430,12 +430,12 @@ window.bounce = {
 	 * how far past the left edge the page stands.
 	 */
 	/**
-	 * s135 direction check: which way a finger has to drag, at scrollLeft 0, to push the page against its
+	 * direction check: which way a finger has to drag, at scrollLeft 0, to push the page against its
 	 * OWN left edge, and what sign the pull carries there. Read on both directions and in both modes, so the
 	 * sideways give's ceiling side can be named from a measurement rather than from the sign convention.
 	 */
 	/**
-	 * s138(12): a flick into the open room. Canvas mode disables the fling today, so this reads whether a
+	 * A flick into the open room. Canvas mode disables the fling today, so this reads whether a
 	 * glide runs at all after the lift, how far the page travels once the finger is gone, and whether the
 	 * room grows to meet it. Driven leftward from the middle, which the direction check measured as the
 	 * way into the room rather than against the origin edge.
@@ -489,7 +489,7 @@ window.bounce = {
 		await settle(8);
 		await new Promise(res => setTimeout(res, 1200));
 		await settle(4);
-		// s144(4): SEEK TO THE FAR END AFTER THE SETTLE, NOT BEFORE IT. The expansion grows the range
+		// SEEK TO THE FAR END AFTER THE SETTLE, NOT BEFORE IT. The expansion grows the range
 		// while the rig settles - measured 9697 before and 10977 after - so a seek taken from the earlier
 		// number leaves the finger 1280 px INSIDE the range, and the drag then scrolls because it has room
 		// rather than because an end refused it. Seek, let the growth that the seek itself triggers settle,
@@ -687,17 +687,17 @@ const FRAME_MS = 1000 / 60;
 const show = (v: unknown) => JSON.stringify(v);
 
 it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own top edge, eased, within the bound, onto the settle's own rest", async () => {
-	// s187 add. 2 (class A): MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
-	// router.beginPinch, the canvas-ON pinch since s179; mounted canvas off it pinched nothing at all and
+	// class A: MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
+	// router.beginPinch, the canvas-ON pinch since then; mounted canvas off it pinched nothing at all and
 	// the cell failed on its own premise, with no product fault behind it.
 	const { page, errors, mounted } = await open("shape", true);
 	try {
 		expect(mounted.strokes, "premise: the stroke committed").toBe(1);
-		// s189 [Architect]: THE DRIVE CHANGES, THE CLAIMS DO NOT. Under the canvas the same-centre round trip owes
+		// THE DRIVE CHANGES, THE CLAIMS DO NOT. Under the canvas the same-centre round trip owes
 		// 1 px sideways - the page stays where the fingers left it, so there is nothing to ease and the >= 15
 		// premise below cannot be met by any claim this cell makes. What the canvas does correct is the ORIGIN
 		// EDGE: zoom in about the ink, then out about a point 40 px below it, and the page ends with blank above
-		// its own top which the settle owes back - the s188 TOP drive, 26.33 px there. Every claim below is the
+		// its own top which the settle owes back - the TOP drive, 26.33 px there. Every claim below is the
 		// same claim, read on the axis the canvas actually corrects.
 		const { last, rows } = await call(page, "originEdgeOvershoot", mounted.inkMiddleX, mounted.natural.textCy) as { last: any; rows: any[] };
 		const later = await call(page, "later", 400) as any;
@@ -705,14 +705,14 @@ it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own
 		const end = rows.at(-1);
 		expect(errors).toEqual([]);
 		expect(end.k, "premise: back at 100%").toBeCloseTo(1, 6);
-		// s97 add. 21: the premise is that the settle owed a correction at all, not the old fitting clamp's
+		// The premise is that the settle owed a correction at all, not the old fitting clamp's
 		// 200..250 px. That clamp is gone with the settle, and the drive is the same-centre round trip that
 		// leaves the canvas's edge inside the pane - the one thing the bound still corrects. Measured on
-		// this drive: 19.00 px, the same correction the Engineer's trace reads at the settle.
+		// this drive: 19.00 px, the same correction the trace reads at the settle.
 
-		// s189 [Architect]: THE PREMISE READS THE CORRECTION THIS CELL ASSERTS ON, TWICE, FROM TWO SOURCES THAT
+		// THE PREMISE READS THE CORRECTION THIS CELL ASSERTS ON, TWICE, FROM TWO SOURCES THAT
 		// MUST AGREE. Under the canvas the origin-edge correction is the scroll commit's true-travel share
-		// (s189 (a)), not a pan-bound hit, so `boundMaxPx` stays at 1 by design and cannot stand for it -
+		// (by rule), not a pan-bound hit, so `boundMaxPx` stays at 1 by design and cannot stand for it -
 		// measured on this drive: boundMaxPx 1, boundHits 3, while the page travels 26.33 px over 23 eased frames.
 		// The bar is unchanged at 15. What changes is where it is read: the bounce's own fromY is the product
 		// grading itself, so the page's painted travel - the content box's top between the last preview frame and
@@ -723,19 +723,19 @@ it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own
 		expect(Math.abs(travelled - eased), `premise: the two readings agree - painted travel ${travelled.toFixed(2)} px against the ease's own ${eased.toFixed(2)} px`).toBeLessThanOrEqual(1);
 		const correction = end.contentTop - last.contentTop;
 		// CONDITION 1, THE REST: the page ends exactly where the settle's bound put it - the overlay's own
-		// correction. s97 add. 21: MAGNITUDE, because the direction reversed with the contract. The old
+		// correction. MAGNITUDE, because the direction reversed with the contract. The old
 		// fitting clamp pulled a clipped page RIGHT, back onto the pane; the bound that replaced it closes
 		// blank at the LEFT, so the page travels left and `correction` is negative where it used to be
 		// positive. Measured here: moved -19.00 px against a bound of 19.00. Comparing signed values
-		// reddens a page that moved exactly as far as it should, in the only direction s97 allows.
-		// s189: THE SAME CLAIM, AGAINST THE QUANTITY THAT CORRECTS HERE. The page rests where the settle said it
+		// reddens a page that moved exactly as far as it should, in the only direction a later ruling allows.
+		// THE SAME CLAIM, AGAINST THE QUANTITY THAT CORRECTS HERE. The page rests where the settle said it
 		// would; under the canvas what the settle hands the ease is the true-travel share, read as the bounce's
 		// own from-offset, and `boundMaxPx` (1 px) is the pan bound, which is not what moved the page. The two
 		// sources were required to agree within a pixel in the premise above, so this compares against the pair.
 		expect(Math.abs(Math.abs(correction) - eased), `the page rests where the settle put it: moved ${correction} px against the ${eased.toFixed(2)} px the ease was given (pan bound ${end.fitReadout.boundMaxPx} px, which is not what corrects under the canvas)`).toBeLessThanOrEqual(0.05);
 		// It animates: no single frame carries more than half of the correction (a jump carries all of it in one frame).
 		const steps = rows.map((r, i) => r.contentTop - (i === 0 ? last.contentTop : rows[i - 1].contentTop));
-		// s97 add. 21: HALF THE CORRECTION'S SIZE. `correction` is negative under the new bound (the page
+		// HALF THE CORRECTION'S SIZE. `correction` is negative under the new bound (the page
 		// travels left to close blank), so the old `correction / 2` was a negative ceiling on a positive
 		// maximum and could never hold.
 		expect(Math.max(...steps.map(Math.abs)), `no frame jumps: per-frame steps ${show(steps.map(s => Math.round(s * 10) / 10))}`).toBeLessThanOrEqual(Math.abs(correction) / 2);
@@ -745,7 +745,7 @@ it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own
 		expect(Math.abs(first.bounce.fromY + correction), `it starts from the overshoot: offset ${first.bounce.fromY} against a correction of ${correction}`).toBeLessThanOrEqual(2);
 		// Toward the rest, never past it, never back toward the overshoot.
 		for (let i = 1; i < rows.length; i++) {
-			// s97 add. 21: the page now travels LEFT to close blank, so contentLeft falls toward the rest.
+			// The page now travels LEFT to close blank, so contentLeft falls toward the rest.
 			// The pair is the same claim with its inequalities the other way round.
 			expect(rows[i].contentTop, `frame ${i + 1} does not pass the rest`).toBeGreaterThanOrEqual(end.contentTop - 0.5);
 			expect(rows[i].contentTop, `frame ${i + 1} does not move back toward the overshoot`).toBeLessThanOrEqual(rows[i - 1].contentTop + 0.5);
@@ -764,7 +764,7 @@ it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own
 		expect(end.bounce.x, "the offset ends at exactly zero").toBe(0);
 		expect(end.sizerX, "the text's translate at the end is the rest's own").toBeCloseTo(end.restX / end.cssScale, 9);
 		expect(Math.abs(later.contentTop - end.contentTop), "nothing moves afterwards").toBeLessThanOrEqual(0.01);
-		// s97 add. 7 and add. 21: THE REST IS THE HOST'S OWN LAYOUT, not inside the pane. The old fitting
+		// THE REST IS THE HOST'S OWN LAYOUT, not inside the pane. The old fitting
 		// clamp landed a clipped page back within the viewport; the bound that replaced it only forbids
 		// blank at the left and top, and a page hanging past the pane's edge is where Alan asked for it to
 		// be left. Measured on this drive: the canvas rests 19 px past the pane's left edge, at pan 0.
@@ -797,9 +797,9 @@ it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own
 	} finally { await page.close(); }
 }, 240_000);
 
-it("PEN DOWN MID-BOUNCE: the bounce is cancelled before the contact is read, the stroke lands where the page rests, and a page standing past its bound resumes to it after the lift (s107)", async () => {
-	// s187 add. 2 (class A): MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
-	// router.beginPinch, the canvas-ON pinch since s179; mounted canvas off it pinched nothing at all and
+it("PEN DOWN MID-BOUNCE: the bounce is cancelled before the contact is read, the stroke lands where the page rests, and a page standing past its bound resumes to it after the lift", async () => {
+	// class A: MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
+	// router.beginPinch, the canvas-ON pinch since then; mounted canvas off it pinched nothing at all and
 	// the cell failed on its own premise, with no product fault behind it.
 	const { page, errors, mounted } = await open("pen", true);
 	try {
@@ -808,9 +808,9 @@ it("PEN DOWN MID-BOUNCE: the bounce is cancelled before the contact is read, the
 		expect(errors).toEqual([]);
 
 		expect(r.before, "premise: a pen landed while the bounce was a quarter to three quarters of the way").not.toBeNull();
-		// s97 add. 70, test-only. The old premise asked the two mappings to differ by 20 px, which held
+		// Test-only. The old premise asked the two mappings to differ by 20 px, which held
 		// while a cancelled ease dropped its offset and the page jumped to its rest under the pen. Under
-		// add. 66 the cancel FOLDS that offset into the pan, so the page is already where the pen sees it
+		// The cancel FOLDS that offset into the pan, so the page is already where the pen sees it
 		// and the two mappings agree - measured 0 against a demanded 20. What the cell is really about
 		// survives and is asserted instead: the page does not move when the contact cancels the ease.
 		// That fails the moment the fold is removed, by the whole remaining offset.
@@ -818,7 +818,7 @@ it("PEN DOWN MID-BOUNCE: the bounce is cancelled before the contact is read, the
 			`premise: the contact does not move the page (mid-bounce ${r.before.contentLeft}, at contact ${r.atContact.contentLeft})`).toBeLessThanOrEqual(1);
 		expect(r.atContact.bounce.active, "the contact cancelled the bounce").toBe(false);
 		expect(r.atContact.bounce.x, "the page is at its rest when the contact is read").toBe(0);
-		// s97 add. 70, test-only, same reason as the premise above: the cancel no longer throws the
+		// Test-only, same reason as the premise above: the cancel no longer throws the
 		// remaining offset away, it folds it into the pan, so the page's REST carries it - measured
 		// 36.39 against a rest of 0 with 36.39 still standing on the ease. The page on screen has not
 		// moved, which is the row above. What is asserted here now is that the fold is exact: the new
@@ -830,15 +830,15 @@ it("PEN DOWN MID-BOUNCE: the bounce is cancelled before the contact is read, the
 		expect(r.strokeX, "the stroke committed").not.toBeNull();
 		expect(Math.abs(r.strokeX - r.expectedAtRest), `the stroke lands where the resting page puts it (through the bounce would be ${r.expectedThroughBounce})`).toBeLessThanOrEqual(3);
 		// DURING the stroke nothing moves - the row above (`atContact` vs `before`) already covers that,
-		// unchanged. s107 (Alan): nothing moves unless the page is past its bound, then it eases back - no
+		// unchanged. Alan: nothing moves unless the page is past its bound, then it eases back - no
 		// infinite blank standing forever. This pen catch folded a real standing offset into the pan
-		// (`atContact.restX` above, nonzero), so AFTER the pen lifts that offset is exactly what add.52's
-		// resume has to spend: the old row here asked for zero further motion, which was the pre-add.52 law
+		// (`atContact.restX` above, nonzero), so AFTER the pen lifts that offset is exactly what the ruling's
+		// resume has to spend: the old row here asked for zero further motion, which was the earlier law
 		// for a page whose only rest is 0. What survives is that the page reaches its bound and stops there,
 		// not that it never moves - the paired "already at rest" row below is the case with nothing to spend.
 		//
-		// THE EASE ITSELF, not just where it ends up (Reviewer): a mere park - the page silently placed at
-		// its bound with no ease at all - would satisfy a rest-only check but is not what add.52 does. Two
+		// THE EASE ITSELF, not just where it ends up: a mere park - the page silently placed at
+		// its bound with no ease at all - would satisfy a rest-only check but is not what the ruling does. Two
 		// endpoints, no per-frame sampling (this file reddens under seven-file load on timing): right after
 		// the lift the resumed bounce has just started (offset non-zero, decay not yet run a frame), and at
 		// rest it has finished (offset back to 0).
@@ -849,9 +849,9 @@ it("PEN DOWN MID-BOUNCE: the bounce is cancelled before the contact is read, the
 	} finally { await page.close(); }
 }, 240_000);
 
-it("PEN DOWN AFTER THE BOUNCE HAS SETTLED: a page already at its bound has nothing to resume, so a caught-and-drawn stroke does not move it (s107, the paired control)", async () => {
-	// s187 add. 2 (class A): MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
-	// router.beginPinch, the canvas-ON pinch since s179; mounted canvas off it pinched nothing at all and
+it("PEN DOWN AFTER THE BOUNCE HAS SETTLED: a page already at its bound has nothing to resume, so a caught-and-drawn stroke does not move it (the paired control)", async () => {
+	// class A: MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
+	// router.beginPinch, the canvas-ON pinch since then; mounted canvas off it pinched nothing at all and
 	// the cell failed on its own premise, with no product fault behind it.
 	const { page, errors, mounted } = await open("pen", true);
 	try {
@@ -901,7 +901,7 @@ it("PEN DOWN AFTER THE BOUNCE HAS SETTLED: a page already at its bound has nothi
  * rather than the page being parked silently, the offset reaches 0, and the page rests at the top
  * within a pixel.
  */
-it("PINNED GAP: a one-finger drag never reaches the assist pan in this rig, so no give is made and the page does not leave its end (s135: driven with the canvas ON, which is where the give now lives)", async () => {
+it("PINNED GAP: a one-finger drag never reaches the assist pan in this rig, so no give is made and the page does not leave its end (driven with the canvas ON, which is where the give now lives)", async () => {
 	const { page, errors } = await open("give-regrab", true);
 	try {
 		const r = await call(page, "giveRegrab") as any;
@@ -931,7 +931,7 @@ it("PINNED GAP: a one-finger drag never reaches the assist pan in this rig, so n
 	} finally { await page.close(); }
 }, 240_000);
 
-it("INFINITE CANVAS ON: the give measures from the rest - grabbed mid-spring and pulled again, the page stands no further past its own top than the one allowance, and comes home (Alan, device, 2026-09-20; s135 moves this into canvas mode)", async () => {
+it("INFINITE CANVAS ON: the give measures from the rest - grabbed mid-spring and pulled again, the page stands no further past its own top than the one allowance, and comes home (Alan, device, 2026-09-20; the ruling moves this into canvas mode)", async () => {
 	const { page, errors } = await open("give-ratchet", true);
 	try {
 		const r = await call(page, "giveRatchet") as any;
@@ -957,7 +957,7 @@ it("INFINITE CANVAS ON: the give measures from the rest - grabbed mid-spring and
 	} finally { await page.close(); }
 }, 240_000);
 
-it("INFINITE CANVAS ON: a flick into the page's own left edge - the glide ends at the end it hits and the spring starts at once, whatever residual the flick carried across it (Alan, device, 2026-09-20; s135 moves this into canvas mode)", async () => {
+it("INFINITE CANVAS ON: a flick into the page's own left edge - the glide ends at the end it hits and the spring starts at once, whatever residual the flick carried across it (Alan, device, 2026-09-20; the ruling moves this into canvas mode)", async () => {
 	const { page, errors } = await open("flick-into-end", true);
 	try {
 		const r = await call(page, "flickIntoEnd", 1) as any;
@@ -966,7 +966,7 @@ it("INFINITE CANVAS ON: a flick into the page's own left edge - the glide ends a
 		const drive = JSON.stringify({ held: r.held, flingEnd: r.flingEnd, springStart: r.springStart, home: r.home, first: r.frames.slice(0, 6) });
 		// THE INPUTS ARE RIGHT: the assist carried the flick, the page had no sideways range, the give was held.
 		expect(r.held.engaged, `the assist carries the flick (${drive})`).toBe(true);
-		// s144: canvas mode GRANTS sideways range (measured 1690 px), so "no range" is not what makes this
+		// Canvas mode GRANTS sideways range (measured 1690 px), so "no range" is not what makes this
 		// an end. The scroller sitting at 0 is: a rightward flick there is refused by the origin edge.
 		expect(r.held.scrollLeft, `premise: the page is on its own left edge (${drive})`).toBe(0);
 		expect(r.held.pullX, `the flick pulled at the left edge, on the ceiling side (${drive})`).toBeGreaterThan(10);
@@ -983,7 +983,7 @@ it("INFINITE CANVAS ON: a flick into the page's own left edge - the glide ends a
 	} finally { await page.close(); }
 }, 240_000);
 
-it("CANVAS OFF: the page does not give at its top edge - no pull, no spring, the scroller stays inside its range (s135)", async () => {
+it("CANVAS OFF: the page does not give at its top edge - no pull, no spring, the scroller stays inside its range", async () => {
 	const { page, errors } = await open("give-ratchet-off");
 	try {
 		const r = await call(page, "giveRatchet") as any;
@@ -1002,7 +1002,7 @@ it("CANVAS OFF: the page does not give at its top edge - no pull, no spring, the
 	} finally { await page.close(); }
 }, 240_000);
 
-it("CANVAS OFF: a flick into an end neither gives nor springs (s135)", async () => {
+it("CANVAS OFF: a flick into an end neither gives nor springs", async () => {
 	const { page, errors } = await open("flick-into-end-off");
 	try {
 		const r = await call(page, "flickIntoEnd") as any;
@@ -1018,7 +1018,7 @@ it("CANVAS OFF: a flick into an end neither gives nor springs (s135)", async () 
 	} finally { await page.close(); }
 }, 240_000);
 
-it("INFINITE CANVAS ON: a flick into the open room glides on after the lift, with room still ahead of it (s138 item 12)", async () => {
+it("INFINITE CANVAS ON: a flick into the open room glides on after the lift, with room still ahead of it", async () => {
 	const { page, errors } = await open("flick-into-room", true);
 	try {
 		const r = await call(page, "flickIntoRoom") as any;
@@ -1042,8 +1042,8 @@ it("INFINITE CANVAS ON: a flick into the open room glides on after the lift, wit
 }, 240_000);
 
 it("A BOUNCE AFTER A ZOOM CHANGE: the preview element rides it with the settled zoom's rules, not the gesture's", async () => {
-	// s187 add. 2 (class A): MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
-	// router.beginPinch, the canvas-ON pinch since s179; mounted canvas off it pinched nothing at all and
+	// class A: MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
+	// router.beginPinch, the canvas-ON pinch since then; mounted canvas off it pinched nothing at all and
 	// the cell failed on its own premise, with no product fault behind it.
 	const { page, errors, mounted } = await open("zoom-change", true);
 	try {
@@ -1063,14 +1063,14 @@ it("A BOUNCE AFTER A ZOOM CHANGE: the preview element rides it with the settled 
 	} finally { await page.close(); }
 }, 240_000);
 
-it("MEASUREMENT s135: which way a drag pushes the page against its own origin edge, and what the far end does in canvas mode", async () => {
+it("MEASUREMENT: which way a drag pushes the page against its own origin edge, and what the far end does in canvas mode", async () => {
 	const ROWS = [
 		{ tag: "off-right", infinite: false, axis: "x", dir: 1, farEnd: false },
 		{ tag: "off-left", infinite: false, axis: "x", dir: -1, farEnd: false },
 		{ tag: "on-right", infinite: true, axis: "x", dir: 1, farEnd: false },
 		{ tag: "on-left", infinite: true, axis: "x", dir: -1, farEnd: false },
 		{ tag: "on-far-end-y", infinite: true, axis: "y", dir: -1, farEnd: true },
-		// s144(4) again: y's far end RECEDES (the grow rule keeps headroom ahead of the frontier), so the
+		// Again: y's far end RECEDES (the grow rule keeps headroom ahead of the frontier), so the
 		// x axis is the one whose far end can actually be reached - measured range 1690 there, unchanged
 		// across a drag. This row is where the far-end pull risk can fire at all.
 		{ tag: "on-far-end-x", infinite: true, axis: "x", dir: -1, farEnd: true },
@@ -1101,8 +1101,8 @@ it("INFINITE CANVAS ON: a page pushed toward the room it grows into does not bou
 }, 240_000);
 
 it("TIMED: the glide lasts half a second on the frame clock, within one frame, and its offset only ever shrinks", async () => {
-	// s187 add. 2 (class A): MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
-	// router.beginPinch, the canvas-ON pinch since s179; mounted canvas off it pinched nothing at all and
+	// class A: MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
+	// router.beginPinch, the canvas-ON pinch since then; mounted canvas off it pinched nothing at all and
 	// the cell failed on its own premise, with no product fault behind it.
 	const { page, errors, mounted } = await open("timed", true);
 	try {

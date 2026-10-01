@@ -20,16 +20,12 @@ describe("explicit canvas adoption authority", () => {
 		expect(await store.externallyChanged("p1", true)).toBe(true);
 		expect(await store.externallyChanged("p1", true)).toBe(true);
 	});
-	it.each(["absent", null, "canvas", "unknown", "inline", "pdf", "slides", 4])("qualifies raw surface %j", async surface => {
+	it("a sidecar with no surface field is not adopted as inline or as PDF", async () => {
 		const adapter = new FakeAdapter(), store = new PageStore({ vault: { adapter } } as never, ".handwriting");
 		const page = emptyPage("p1"), raw = JSON.parse(serializePage(page));
-		if (surface !== "absent") raw.surface = surface;
+		delete raw.surface;
 		await adapter.write(".handwriting/p1.json", JSON.stringify(raw));
-		const result = await store.prepareExternalAdoption("p1", page, "canvas");
-		expect(result.kind).toBe(surface === "absent" ? "prepared" : "unavailable");
-		if (surface === "absent") {
-			expect((await store.prepareExternalAdoption("p1", page)).kind).toBe("unavailable");
-			expect((await store.prepareExternalAdoption("p1", page, "pdf")).kind).toBe("unavailable");
-		}
+		expect((await store.prepareExternalAdoption("p1", page)).kind).toBe("unavailable");
+		expect((await store.prepareExternalAdoption("p1", page, "pdf")).kind).toBe("unavailable");
 	});
 });

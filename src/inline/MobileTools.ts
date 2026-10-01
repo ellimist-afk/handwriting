@@ -71,7 +71,7 @@ export interface MobileToolsHost {
 
 	/**
 	 * The path of the note this strip is painted over, for the per-note
-	 * Infinite Canvas override (s138). OPTIONAL, and absent means "ask the
+	 * Infinite Canvas override. OPTIONAL, and absent means "ask the
 	 * global": a host that does not know its path - the fold-order preview
 	 * strip, the PDF surface - has no per-note override to honour, and
 	 * `canvasForNote(null, global)` already answers the global for it.
@@ -1031,6 +1031,7 @@ export interface MobileToolsOptions {
  */
 let foldOrder: readonly string[] = DEFAULT_FOLD_ORDER;
 const liveStrips = new Set<MobileTools>();
+const liveNoteZoomControls = new Set<NoteZoomControls>();
 
 export function setStripFoldOrder(order: readonly string[]): void {
 	foldOrder = normalizeFoldOrder(order);
@@ -1045,11 +1046,143 @@ export function setStripFoldOrder(order: readonly string[]): void {
  * bar's own mode has a listener while the canvas has none, so without this a
  * user turning the canvas off would keep a zoom bar until the pane was rebuilt
  * - the "only applies on restart" defect the override's listener was written
- * to avoid. The per-note case comes in through each strip's own subscription;
+ * to avoid. The per-note case comes in through each control's own subscription;
  * this is the global half.
  */
 export function refreshNoteZoomControlsAll(): void {
-	for (const strip of liveStrips) strip.refreshNoteZoomControls();
+	for (const controls of liveNoteZoomControls) controls.refresh();
+}
+
+/** Note zoom chrome has its own lifetime; a note need not have a pen strip. */
+/**
+ * How long the chrome stays invisible after a lift before it fades back
+ * (styles.css: the base rules' `opacity 60ms linear 160ms`).
+ */
+const STEP_BACK_MS = 160;
+
+/**
+ * One step-aside edge for a set of chrome elements that hide together.
+ *
+ * `is-inking` fades them out by opacity and makes them unhittable. When it
+ * comes off, they are still invisible for STEP_BACK_MS, and `visibility`
+ * used to keep them unhittable through that delay; a visibility transition
+ * cannot run on the compositor, so it is gone, and `is-stepping-back` carries
+ * the delay instead: on at the lift, off when the fade starts, or at once if
+ * the pen comes down again first. Class toggles and one timer, no reads.
+ */
+class StepAside {
+	private hidden = false;
+	private timer: number | null = null;
+	private win: Window | null = null;
+	constructor(private readonly els: () => readonly HTMLElement[]) {}
+	set(hide: boolean): void {
+		// refresh() re-applies the current state; that must not cut a
+		// running return delay short.
+		if (hide === this.hidden) return;
+		this.hidden = hide;
+		this.cancel();
+		const els = this.els();
+		// The window the chrome lives in (a popout has its own); none for a
+		// detached element, which has no delay to keep.
+		const view = els[0]?.ownerDocument?.defaultView;
+		const win = typeof view?.setTimeout === "function" ? view : null;
+		const lifted = !hide && win !== null;
+		for (const el of els) {
+			el.toggleClass("is-inking", hide);
+			el.toggleClass("is-stepping-back", lifted);
+		}
+		if (!lifted) return;
+		this.win = win;
+		this.timer = win.setTimeout(() => {
+			this.timer = null;
+			for (const el of this.els()) el.toggleClass("is-stepping-back", false);
+		}, STEP_BACK_MS);
+	}
+	cancel(): void {
+		if (this.timer === null) return;
+		this.win?.clearTimeout(this.timer);
+		this.timer = null;
+	}
+}
+
+export class NoteZoomControls {
+	readonly element: HTMLElement;
+	private readonly buttons: HTMLButtonElement[] = [];
+	private inking = false;
+	private readonly stepAside = new StepAside(() => [this.element]);
+	private stopModeWatch: (() => void) | null = null;
+	private stopCanvasOverrideWatch: (() => void) | null = null;
+
+	constructor(parent: HTMLElement, private readonly host: Pick<MobileToolsHost, "noteViewport" | "notePath">) {
+		const viewport = host.noteViewport;
+		if (!viewport) throw new Error("note zoom controls need a note viewport");
+		this.element = parent.createDiv({cls:"handwriting-note-viewport-controls",attr:{role:"group","aria-label":"Note zoom"}});
+		for (const [label, value, action] of [
+			["Zoom out", "−", () => viewport.zoomNoteBy(.5)],
+			["Reset note zoom to 100%", "100%", () => viewport.resetNoteZoom()],
+			["Zoom in", "+", () => viewport.zoomNoteBy(2)],
+			["Fit handwriting", "Fit", () => viewport.fitHandwriting()],
+		] as const) {
+			const button = this.element.createEl("button", {text:value,attr:{type:"button","aria-label":label,title:label}});
+			button.addEventListener("pointerdown", e => e.preventDefault());
+			button.addEventListener("click", () => { action(); this.refresh(); });
+			this.buttons.push(button);
+		}
+		this.refresh();
+		liveNoteZoomControls.add(this);
+		this.stopModeWatch = onNoteZoomControlsChanged(() => this.refresh());
+		this.stopCanvasOverrideWatch = onCanvasOverrideChanged(path => {
+			if (this.host.notePath?.() === path) this.refresh();
+		});
+	}
+
+	refresh(): void {
+		const state = this.host.noteViewport?.getNoteViewportState();
+		if (state) this.buttons.forEach((button, i) => {
+			button.disabled = state.busy || (i === 3 && !state.fitAvailable) || (i === 2 && state.zoom >= MAX_PINCH_SCALE);
+			if (i === 1) button.textContent = `${Number((state.zoom * 100).toPrecision(3))}%`;
+		});
+		const path = this.host.notePath?.() ?? null;
+		this.element.toggleClass("is-hidden", !noteZoomControlsVisibleWithCanvas(
+			getNoteZoomControlsMode(), canvasForNote(path, getZoomBarCanvasEnabled())
+		));
+		this.setInking(this.inking);
+	}
+
+	setInking(on: boolean): void {
+		this.inking = on;
+		this.stepAside.set(on && getNoteZoomControlsMode() === "auto");
+	}
+
+	penUp(): void {
+		this.setInking(false);
+		// The gesture clears mode and builder after this call. Read the ready state then.
+		queueMicrotask(() => { if (liveNoteZoomControls.has(this)) this.refresh(); });
+	}
+
+	destroy(): void {
+		this.stopModeWatch?.();
+		this.stopCanvasOverrideWatch?.();
+		this.stopModeWatch = null;
+		this.stopCanvasOverrideWatch = null;
+		this.stepAside.cancel();
+		liveNoteZoomControls.delete(this);
+		this.element.remove();
+	}
+}
+
+export function ensureNoteZoomControls(
+	current: NoteZoomControls | null,
+	container: HTMLElement | null,
+	parent: () => HTMLElement,
+	host: Pick<MobileToolsHost, "noteViewport" | "notePath">
+): NoteZoomControls | null {
+	return current ?? (container ? new NoteZoomControls(parent(), host) : null);
+}
+
+export function destroyNoteZoomControls(current: NoteZoomControls | null): null {
+	current?.destroy();
+	return null;
 }
 
 /**
@@ -1159,9 +1292,8 @@ export class MobileTools {
 	private appliedGrid = "";
 	private resizeWatch: { disconnect(): void } | null = null;
 	private inking = false;
+	private readonly stepAside = new StepAside(() => [this.el, this.pill]);
 	private stopModeWatch: (() => void) | null = null;
-	private stopZoomModeWatch: (() => void) | null = null;
-	private stopCanvasOverrideWatch: (() => void) | null = null;
 	/**
 	 * The corner this strip is parked in, kept because item 5's clearance
 	 * needs to know which way to dodge and `setCorner` otherwise wrote the
@@ -1231,7 +1363,20 @@ export class MobileTools {
 	 */
 	private recordingHoldTimer: number | null = null;
 	private presetHoldTimer: number | null = null;
+	/** Set true the instant a hold-timer forgets a preset, before the finger
+	 * has physically lifted. `paintPresets` empties and rebuilds the row right
+	 * there, so the button under the finger is destroyed and whatever now
+	 * sits at that screen position (often the former neighbour) is a BRAND
+	 * NEW button with its own fresh `held = false` closure. On Windows the
+	 * release still fires a contextmenu after the hold, and it lands on that
+	 * new button - which has no memory of the hold that just ran, and would
+	 * forget a second preset (item 73 audit, "press-and-hold delete on a
+	 * preset chip also deletes its neighbour"). This flag lives on the strip,
+	 * not on a chip closure, so it survives the rebuild the closure does not. */
+	private suppressNextPresetContextMenu = false;
 	private recordingDot!: HTMLElement;
+	/** Whether the dot was last drawn lit, so a flip can re-plan the fold. */
+	private recordingShown = false;
 	private collapseBtn!: HTMLElement;
 	/** True when HOVER opened the slider - only those evaporate on leave.
 	 * A clicked-open slider is a decision and stays until a click, a tap
@@ -1459,14 +1604,12 @@ export class MobileTools {
 		const verdict = stripEscapeVerdict({
 			key: ev.key,
 			defaultPrevented: ev.defaultPrevented,
-			anyOpen: this.hasOpenPop(),
+			anyOpen: this.hasOpenPop() || this.moreOpen,
 			ownsTarget: this.pane.contains(ev.target as Node | null),
 		});
 		if (verdict === "ignore") return;
-		// closePops used to exist here because Escape alone took the eraser
-		// pop; now closeInkSliders takes every pop (pen contact and an
-		// outside tap included, alan, 2026-09-02), so Escape has nothing
-		// left to add and calls the same close everything else does.
+		// The More row is an Escape layer without changing pen-contact dismissal.
+		this.setMoreOpen(false);
 		this.closeInkSliders();
 		if (verdict === "close-consume") {
 			ev.preventDefault();
@@ -1474,8 +1617,7 @@ export class MobileTools {
 		}
 	};
 
-	private viewportControls: HTMLElement | null = null;
-	private viewportButtons: HTMLButtonElement[] = [];
+	private viewportControls: NoteZoomControls | null = null;
 
 	constructor(parent: HTMLElement, private host: MobileToolsHost, opts: MobileToolsOptions = {}) {
 		// Read once into a local: the flag is consulted from the resize
@@ -1483,30 +1625,16 @@ export class MobileTools {
 		// boolean is cheaper to reason about than a field nothing else reads.
 		const preview = opts.preview === true;
 		this.pane = parent;
-  if (host.noteViewport && !preview) {
-   const group=parent.createDiv({cls:"handwriting-note-viewport-controls",attr:{role:"group","aria-label":"Note zoom"}});
-   this.viewportControls=group;
-   for(const [label,text,action] of [
-    ["Zoom out","−",()=>host.noteViewport!.zoomNoteBy(.5)],
-    ["Reset note zoom to 100%","100%",()=>host.noteViewport!.resetNoteZoom()],
-    ["Zoom in","+",()=>host.noteViewport!.zoomNoteBy(2)],
-    ["Fit handwriting","Fit",()=>host.noteViewport!.fitHandwriting()],
-   ] as const) {
-    const button=group.createEl("button",{text,attr:{type:"button","aria-label":label,title:label}});
-    button.addEventListener("pointerdown",e=>e.preventDefault());
-    button.addEventListener("click",()=>{action();this.refresh();});
-    this.viewportButtons.push(button);
-   }
-   // A stored "hide" is honoured from the first paint, not only after the
-   // next mode change.
-   this.applyNoteZoomControlsVisibility();
-  }
+  if (host.noteViewport && !preview) this.viewportControls = new NoteZoomControls(parent, host);
 
 		// The collapsed form: one small pen button that brings the strip back.
 		this.pill = parent.createEl("button", {
 			cls: "handwriting-pen-pill",
 			attr: { "aria-label": "Pen tools", type: "button" },
 		});
+		// Obsidian's mobile swipe recogniser ignores touch-action and stands down only for a target under
+		// `data-ignore-swipe`, so a finger dragging the pill would also open a sidebar or the palette.
+		this.pill.dataset.ignoreSwipe = "true";
 		setIcon(this.pill, "pen");
 		if (!this.pill.querySelector("svg")) this.pill.setText("P");
 		// Buttons must not take focus from the editor: undo/redo route to the
@@ -1537,7 +1665,10 @@ export class MobileTools {
 			el.addEventListener("pointercancel", release);
 		};
 		noFocus(this.pill);
-		this.attachTip(this.pill);
+		// The pill has its OWN tip, on the strip's parent beside it. The shared tip lives inside the strip,
+		// which is display:none while the strip is folded, so a tip shown from the pill was never painted.
+		this.pillTip = parent.createDiv({ cls: "handwriting-pill-tip" });
+		this.attachTip(this.pill, () => this.pillTip);
 		this.pill.addEventListener("click", (ev) => {
 			ev.preventDefault();
 			// A DRAG IS NOT A TAP. Pointer capture keeps the whole gesture on
@@ -1562,6 +1693,8 @@ export class MobileTools {
 		parent.ownerDocument.addEventListener("pointercancel", this.endDrag, { capture: true });
 		parent.ownerDocument.addEventListener("click", this.traceClick, { capture: true });
 		this.el = parent.createDiv({ cls: "handwriting-mobile-tools" });
+		// The whole strip, its grip and its pops included: see the pill above.
+		this.el.dataset.ignoreSwipe = "true";
 		// THE GRIP, and it is first so it is the strip's leading end - the row
 		// is a plain flex row, so dom order is what the user sees left to
 		// right, and the handle of a draggable thing belongs at its edge
@@ -1585,6 +1718,7 @@ export class MobileTools {
 			cls: "handwriting-tools-grip",
 			attr: { "aria-hidden": "true" },
 		});
+		this.grip.dataset.ignoreSwipe = "true";
 		this.grip.createDiv({ cls: "handwriting-tools-grip-dots" });
 		this.armDrag(this.grip);
 		// The recording indicator lives HERE, not the status bar: status
@@ -1661,6 +1795,11 @@ export class MobileTools {
 			// If the icon set yields no svg, the button says its initial.
 			if (!b.querySelector("svg")) b.setText(spec.glyph);
 			noFocus(b);
+			// Older WebKit sends a plain MouseEvent for click. Keep the type of
+			// this button's contact so its click still takes the touch path.
+			let contactType: string | null = null;
+			b.addEventListener("pointerdown", (ev) => { contactType = ev.pointerType; });
+			b.addEventListener("pointercancel", () => { contactType = null; });
 			b.addEventListener("pointerenter", (ev) => {
 				if (ev.pointerType === "touch") return;
 				const hoverNib =
@@ -1783,7 +1922,11 @@ export class MobileTools {
 				// them the nib button IS the mode: clicking the active tool
 				// hands the mouse back to text. Pen and touch keep the tap
 				// (hover already opened the slider for anything that hovers).
-				const ptr = ev.pointerType;
+				// A synthetic click has no pointerdown. On a touch device, a
+				// legacy WebKit click with no pointerType is a finger tap unless a
+				// preceding pointerdown identified a mouse or pen.
+				const ptr = ev.pointerType || contactType || (this.host.hasTouch() ? "touch" : "mouse");
+				contactType = null;
 				const claimsTip =
 					nib !== null ||
 					spec.commandId === "handwriting:inline-tool-eraser" ||
@@ -1803,7 +1946,16 @@ export class MobileTools {
 					if (ptr === "mouse" && !this.host.mouseInkOn()) this.host.armMouseInkQuietly();
 					if (nib) this.host.prepareFingerInk?.();
 					this.host.setEditorFocus(false);
-					this.openInkSlider = nib;
+					// The iPhone first-tap rule (below: a tap that GRANTS a nib
+					// its first ink, rather than adjusting one already drawing,
+					// picks the tool without opening its pop) applies here too.
+					// Leaving Keyboard mode reaches THIS branch, not that one -
+					// ink is off in Keyboard mode, so `!penInksHere()` is true
+					// and this branch runs first - so without this check the
+					// pop opened over the note on every Keyboard exit (item 200).
+					const iphoneFirstTap =
+						nib !== null && ptr === "touch" && (this.host.fingerInkAvailable?.() ?? false);
+					this.openInkSlider = iphoneFirstTap ? null : nib;
 					this.sliderFromHover = false;
 					if (spec.commandId === "handwriting:inline-tool-eraser") {
 						this.eraserPopClosed = false;
@@ -2178,6 +2330,8 @@ export class MobileTools {
 				cls: "handwriting-eraser-slider",
 				attr: { type: "range", min, max, step, "aria-label": aria },
 			});
+			// As Obsidian's own range slider does: a thumb dragged sideways is not a sidebar swipe.
+			input.dataset.ignoreSwipe = "true";
 			// Under the track and above the hairline, so the nib's pop reads
 			// slider, value, saved pens, palette, and the eraser's reads
 			// chips, slider, value: the number belongs to the control it
@@ -2258,7 +2412,12 @@ export class MobileTools {
 			"Pen size",
 			String(multToPx(0.3, DEFAULT_PEN.baseWidth)),
 			String(multToPx(3, DEFAULT_PEN.baseWidth)),
-			"0.1",
+			// A grid from this fractional min (0.66) never lands exactly on the
+			// default (1x = 2.2px) or the max (3x = 6.6px) at a 0.1 step either -
+			// both sat 0.04px off the nearest grid point (item 137). 0.01 divides
+			// evenly into both distances from this min, so dragging to either
+			// lands on it exactly.
+			"0.01",
 			(v, c) => this.host.setInkSizeMult("pen", pxToMult(v, DEFAULT_PEN.baseWidth), c),
 			"pen"
 		);
@@ -2276,7 +2435,7 @@ export class MobileTools {
 			(v, c) => this.host.setInkSizeMult("highlighter", pxToMult(v, HIGHLIGHTER_PEN.baseWidth), c),
 			"highlighter"
 		);
-		for (const pop of [this.penSlider.pop, this.hlSlider.pop]) {
+		for (const pop of [this.slider.pop, this.penSlider.pop, this.hlSlider.pop]) {
 			pop.addEventListener("pointerenter", (ev: PointerEvent) => {
 				if (ev.pointerType !== "touch") this.cancelSliderClose();
 			});
@@ -2291,7 +2450,10 @@ export class MobileTools {
 			// preview was over. The native pointerdown the range input needs
 			// for its own drag (see dropSlider's comment) bubbles here first.
 			pop.addEventListener("pointerdown", (ev: PointerEvent) => {
-				if (ev.pointerType !== "touch") this.sliderFromHover = false;
+				if (ev.pointerType !== "touch") {
+					this.sliderFromHover = false;
+					this.eraserPopFromHover = false;
+				}
 			});
 		}
 		// The tip mode is GLOBAL and this pair of bits is per-strip, so a
@@ -2333,22 +2495,6 @@ export class MobileTools {
 		// that are already open. Dropped again in `destroy()`.
 		liveStrips.add(this);
 		if (!preview) this.stopModeWatch = onPenToolsChanged(() => this.setInking(this.inking));
-		// A zoom-bar mode change re-applies the show/hide state and re-runs the
-		// step-aside, so a mode flip mid-stroke lands correctly too.
-		if (!preview) this.stopZoomModeWatch = onNoteZoomControlsChanged(() => {
-			this.applyNoteZoomControlsVisibility();
-			this.setInking(this.inking);
-		});
-		// A per-note override changing is the same event as the mode changing,
-		// for this strip, when it is THIS note that changed. Filtered on the
-		// path: a frontmatter edit in some other note must not repaint every
-		// open strip, and a strip that does not know its own path cannot be
-		// the one the event is about.
-		if (!preview) this.stopCanvasOverrideWatch = onCanvasOverrideChanged(path => {
-			if (this.host.notePath?.() !== path) return;
-			this.applyNoteZoomControlsVisibility();
-			this.setInking(this.inking);
-		});
 		this.layoutOverflow();
 		// Item 5 rides the same two triggers as item 4 - a first pass now, and
 		// the observer below - because they answer the same question about the
@@ -2590,6 +2736,9 @@ export class MobileTools {
 			const btn = this.buttons.find((b) => b.spec.commandId === id)?.el;
 			if (btn) this.moreRow.appendChild(btn);
 		}
+		// The dot is not in the row order, so the loop above left every tool after it. It belongs at the row's
+		// far end, before the chevron.
+		this.el.insertBefore(this.recordingDot, this.moreBtn);
 	}
 
 	/**
@@ -2631,13 +2780,16 @@ export class MobileTools {
 
 	/** The synchronous body; the constructor uses it before first paint. */
 	refreshNow(): void {
-  const viewport=this.host.noteViewport?.getNoteViewportState();
-  if(viewport) this.viewportButtons.forEach((button,i)=>{
-   button.disabled=viewport.busy || (i===3&&!viewport.fitAvailable) || (i===2&&viewport.zoom>=MAX_PINCH_SCALE);
-   if(i===1) button.textContent=`${Number((viewport.zoom*100).toPrecision(3))}%`;
-  });
+		this.viewportControls?.refresh();
 
-		this.recordingDot.toggleClass("is-recording", this.host.recordingOn());
+		const recording = this.host.recordingOn();
+		this.recordingDot.toggleClass("is-recording", recording);
+		// The dot takes a cell of the row's budget while it shows, and it shows only under this class, so the
+		// fold has to be planned again when the class flips: a strip that fit without it may not fit with it.
+		if (recording !== this.recordingShown) {
+			this.recordingShown = recording;
+			this.layoutOverflow();
+		}
 		for (const { el, spec } of this.buttons) {
 			// The lights follow the TOOL state and nothing else. They used to
 			// dim for a text-mode mouse, keyed off the last pointer type seen
@@ -2669,7 +2821,13 @@ export class MobileTools {
 			// for exactly one button.
 			if (spec.inkTool !== undefined) {
 				const hex = this.host.toolColor(spec.inkTool);
-				el.setCssStyles({ color: hex });
+				// Blended toward the theme's own readable text colour rather
+				// than painted with the raw hex: a pen this close to the
+				// background (black in dark mode, white in light mode) used to
+				// nearly disappear while unlit (item 140). The blend still
+				// reads as "that colour" - it is mostly the pen's own hue - it
+				// just never goes all the way to invisible against the page.
+				el.setCssStyles({ color: `color-mix(in srgb, ${hex} 70%, var(--text-normal))` });
 				// The tooltip names the colour beside the tool - the tinted
 				// icon says WHICH colour and cannot say its name, and "Pen"
 				// alone told a hover nothing about the ink it is holding
@@ -2931,11 +3089,16 @@ export class MobileTools {
 				// ink surface underneath as the start of a stroke.
 				ev.preventDefault();
 				held = false;
+				this.suppressNextPresetContextMenu = false;
 				cancelHold();
 				this.presetHoldTimer = window.setTimeout(() => {
 					this.presetHoldTimer = null;
 					held = true;
 					this.host.forgetPreset(tool, chip.index);
+					// The release's contextmenu, still to come, must not land
+					// on whatever fresh button the rebuild below puts under
+					// the finger (item 73).
+					this.suppressNextPresetContextMenu = true;
 					// In place: the pop stays open and the row redraws
 					// without it, so a second unwanted preset is one more
 					// hold away rather than a re-open.
@@ -2950,6 +3113,16 @@ export class MobileTools {
 				// app's own context menu does not open over the pop.
 				ev.preventDefault();
 				cancelHold();
+				// STRIP-LEVEL GUARD FIRST (item 73): a hold that already fired
+				// rebuilds the row before the release, so this contextmenu may
+				// be landing on a BRAND NEW button - the former neighbour's,
+				// shifted into this screen slot - whose own `held` closure
+				// knows nothing about the hold that just ran. The flag lives
+				// on the strip, not the chip, so it survives the rebuild.
+				if (this.suppressNextPresetContextMenu) {
+					this.suppressNextPresetContextMenu = false;
+					return;
+				}
 				// ONE GUARD PER CHIP, not two independent triggers: on Windows
 				// pen and touch a long press fires BOTH the 600ms hold timer
 				// above AND this contextmenu handler once the finger lifts, and
@@ -3099,12 +3272,10 @@ export class MobileTools {
 	 */
 	setInking(on: boolean): void {
 		this.inking = on;
-		const hide = on && getPenToolsMode() === "auto";
-		this.el.toggleClass("is-inking", hide);
-		this.pill.toggleClass("is-inking", hide);
+		this.stepAside.set(on && getPenToolsMode() === "auto");
 		// The zoom bar mirrors the same step-aside, on its own mode. Pure class
 		// toggle, no reads - same hot path as the two above.
-		this.viewportControls?.toggleClass("is-inking", on && getNoteZoomControlsMode() === "auto");
+		this.viewportControls?.setInking(on);
 	}
 
 	/**
@@ -3112,37 +3283,7 @@ export class MobileTools {
 	 * mode listener does. Public for `refreshNoteZoomControlsAll`.
 	 */
 	refreshNoteZoomControls(): void {
-		this.applyNoteZoomControlsVisibility();
-		this.setInking(this.inking);
-	}
-
-	/**
-	 * "hide" removes the zoom bar from paint AND from the
-	 * accessibility tree/tab order, the same way the pen strip itself is
-	 * removed from both when `penToolsVisible` is false for it (InkOverlay.ts
-	 * :2419's `ensurePenToolsInner`, which does not build/destroys the strip
-	 * outright). That mechanism operates on the WHOLE MobileTools instance,
-	 * which the zoom bar cannot borrow directly - the strip's own buttons
-	 * must keep working in every zoom-bar mode. The `display: none` idiom
-	 * this codebase already uses for an in-place "gone without being
-	 * destroyed" state (styles.css's `.handwriting-mobile-tools.is-collapsed`)
-	 * gives the same real-world outcome at the group's own scope: a
-	 * display:none subtree is out of the tab order and unannounced in every
-	 * browser without any extra aria/tabindex bookkeeping here.
-	 */
-	private applyNoteZoomControlsVisibility(): void {
-		this.viewportControls?.toggleClass("is-hidden", !this.zoomBarWanted());
-	}
-
-	/**
-	 * The user's mode AND this note's canvas. Resolved here, at paint time,
-	 * rather than held in a field: the note under a strip can change without
-	 * the strip being rebuilt, and a cached answer would be the stale-cache
-	 * defect the override's own listener exists to avoid.
-	 */
-	private zoomBarWanted(): boolean {
-		const path = this.host.notePath?.() ?? null;
-		return noteZoomControlsVisibleWithCanvas(getNoteZoomControlsMode(), canvasForNote(path, getZoomBarCanvasEnabled()));
+		this.viewportControls?.refresh();
 	}
 
 	/**
@@ -3273,9 +3414,10 @@ export class MobileTools {
 	 *
 	 * Pointer capture, so the gesture keeps arriving here once the finger has
 	 * left the 24px of grip it started on, which it does immediately. Pen,
-	 * finger and mouse alike: nothing below reads `pointerType`, because a
-	 * drag is a drag whatever is doing it and the three differ only in how
-	 * much they jitter - which is what the threshold is for.
+	 * finger and mouse alike: only the second-finger test below reads
+	 * `pointerType`, because a drag is a drag whatever is doing it and the
+	 * three differ only in how much they jitter - which is what the
+	 * threshold is for.
 	 */
 	private armDrag(handle: HTMLElement): void {
 		handle.addEventListener("pointerdown", (ev: PointerEvent) => {
@@ -3283,11 +3425,13 @@ export class MobileTools {
 			// not a second drag, and taking it would leave the first one's
 			// pointer captured with nothing left to end it.
 			if (this.drag !== null) return;
-			// LEFT BUTTON, PRIMARY POINTER. A right- or middle-button press on
-			// the grip is a menu gesture, not a drag, and a secondary contact of
-			// a multi-touch is not one either; either would otherwise travel six
-			// px and commit a placement the hand never asked for.
-			if ((ev.button ?? 0) !== 0 || ev.isPrimary === false) return;
+			// LEFT BUTTON, AND NOT A SECOND FINGER. A right- or middle-button
+			// press on the grip is a menu gesture, not a drag, and a secondary
+			// contact of a multi-touch is not one either; either would otherwise
+			// travel six px and commit a placement the hand never asked for.
+			// Touch only: Windows reports a pen as not primary whenever a second
+			// mouse is live beside it, and that pen is still the only hand on it.
+			if ((ev.button ?? 0) !== 0 || (ev.isPrimary === false && ev.pointerType === "touch")) return;
 			// A tap that is about to be a tap: nothing is painted, no pop is
 			// closed, and the pill's click still fires, until the pointer has
 			// travelled far enough to say otherwise.
@@ -3569,6 +3713,12 @@ export class MobileTools {
 		// comes BACK the way it was last chosen to be seen, rather than
 		// re-opening a menu somebody dismissed by collapsing the whole thing.
 		if (on) this.setMoreOpen(false);
+		// Folding hides any open ink pop along with the rest of the strip
+		// (display:none), but leaves `hasOpenPop()` true - so the first Escape
+		// pressed after folding is swallowed with nothing visible to show for
+		// it (item 101). Close pops here so folding and closing them happen
+		// together.
+		if (on) this.closeInkSliders();
 		this.el.toggleClass("is-collapsed", on);
 		this.pill.toggleClass("is-showing", on);
 		// Expanding is the moment the strip has widths again - it was
@@ -3608,6 +3758,8 @@ export class MobileTools {
 	}
 
 	private tip!: HTMLElement;
+	/** The folded pill's tooltip: on the strip's parent, because `tip` is inside the strip and hidden with it. */
+	private pillTip!: HTMLElement;
 	private tipTimer: number | null = null;
 
 	/**
@@ -3628,12 +3780,13 @@ export class MobileTools {
 	/** OS-style tooltip: a beat of hover shows it, anything else hides it.
 	 * Touch is skipped - a tap would flash the tip under the finger while
 	 * the button acts, explaining nothing and covering the pops. */
-	private attachTip(el: HTMLElement): void {
+	private attachTip(el: HTMLElement, tipOf: () => HTMLElement = () => this.tip): void {
 		this.ownName(el);
 		const hide = () => {
 			if (this.tipTimer !== null) window.clearTimeout(this.tipTimer);
 			this.tipTimer = null;
-			this.tip.removeClass("is-showing");
+			this.tip?.removeClass("is-showing");
+			this.pillTip?.removeClass("is-showing");
 		};
 		el.addEventListener("pointerenter", (ev: PointerEvent) => {
 			if (ev.pointerType === "touch") return;
@@ -3642,22 +3795,40 @@ export class MobileTools {
 				this.tipTimer = null;
 				const text = el.dataset.tipLabel ?? el.getAttribute("aria-label");
 				if (!text) return;
-				this.tip.setText(text);
+				const tip = tipOf();
+				tip.setText(text);
 				// Aligned to the hovered control and clamped by the tip's
 				// MEASURED width - the old guess of 180px let a long label
 				// (the recording dot's) run 80px past the strip's edge.
 				// Shown first, so the width is real when read.
-				this.tip.addClass("is-showing");
+				tip.addClass("is-showing");
+				if (tip === this.pillTip) {
+					this.placePillTip(el, tip);
+					return;
+				}
 				const left = Math.max(
 					0,
-					Math.min(el.offsetLeft, this.el.offsetWidth - this.tip.offsetWidth)
+					Math.min(el.offsetLeft, this.el.offsetWidth - tip.offsetWidth)
 				);
-				this.tip.setCssStyles({ left: `${left}px`, right: "auto" });
+				tip.setCssStyles({ left: `${left}px`, right: "auto" });
 			}, 350);
 		});
 		el.addEventListener("pointerleave", hide);
 		el.addEventListener("pointercancel", hide);
 		el.addEventListener("pointerdown", hide);
+	}
+
+	/**
+	 * Put the pill's tip beside the pill, in the parent's coordinates: below it, or above it when the pill hangs
+	 * at a bottom corner (the strip's own tip flips the same way), clamped inside the parent by its measured width.
+	 */
+	private placePillTip(pill: HTMLElement, tip: HTMLElement): void {
+		const parent = pill.parentElement;
+		const room = parent ? parent.clientWidth - tip.offsetWidth : 0;
+		const left = Math.max(0, Math.min(pill.offsetLeft, room));
+		const above = ["left", "center", "right"].some((x) => pill.classList.contains(`handwriting-corner-bottom-${x}`));
+		const top = above ? pill.offsetTop - tip.offsetHeight - 6 : pill.offsetTop + pill.offsetHeight + 6;
+		tip.setCssStyles({ left: `${left}px`, top: `${top}px`, right: "auto", bottom: "auto" });
 	}
 
 	private cancelSliderClose(): void {
@@ -3692,11 +3863,8 @@ export class MobileTools {
 	destroy(): void {
 		this.stopModeWatch?.();
 		this.stopModeWatch = null;
-		this.stopZoomModeWatch?.();
-		this.stopZoomModeWatch = null;
-		this.stopCanvasOverrideWatch?.();
-		this.stopCanvasOverrideWatch = null;
 		this.cancelSliderClose();
+		this.stepAside.cancel();
 		// Every timer this strip can have armed, cancelled before the elements
 		// they would touch are removed. A strip is destroyed and rebuilt on a
 		// pen edge, so each of these is a real window, not a theoretical one.
@@ -3728,7 +3896,9 @@ export class MobileTools {
 		this.heldSlider = null;
 		this.el.remove();
 		this.pill.remove();
-		this.viewportControls?.remove();
+		this.pillTip.remove();
+		this.viewportControls?.destroy();
+		this.viewportControls = null;
 		this.buttons = [];
 	}
 

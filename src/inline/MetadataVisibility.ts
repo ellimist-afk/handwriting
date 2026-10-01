@@ -1,8 +1,26 @@
-/** Class used instead of a broad `:has()` selector in the shipped stylesheet. */
+import { NOTE_CANVAS_KEY } from "./CanvasNoteOverride";
+
+/** Limits the stylesheet's visibility check to confirmed internal-only blocks. */
 export const ID_ONLY_METADATA_CLASS = "handwriting-metadata-id-only";
 
+/** The same Properties container moves between the editor and reading view. */
+function metadataRoot(root: ParentNode): ParentNode {
+	const element = root as Element;
+	return typeof element.closest === "function"
+		? element.closest(".view-content") ?? root
+		: root;
+}
+
+/**
+ * `handwriting-canvas` (the per-note Infinite Canvas override, audit 196) is
+ * internal the same way `handwriting-page-id` and `handwriting-paper` are:
+ * the note's own choice, not something the id-only class should count
+ * against it. Without this, toggling Infinite Canvas on an id-only note
+ * un-hides its empty Properties block by adding exactly one more internal
+ * key `isInternalProperty` did not recognise.
+ */
 function isInternalProperty(key: string | null): boolean {
-	return key === "handwriting-page-id" || key === "handwriting-paper";
+	return key === "handwriting-page-id" || key === "handwriting-paper" || key === NOTE_CANVAS_KEY;
 }
 
 /**
@@ -37,7 +55,7 @@ export function updateMetadataVisibility(
 	root: ParentNode,
 	frontmatterKeys?: () => readonly string[] | null
 ): void {
-	for (const container of root.querySelectorAll<HTMLElement>(".metadata-container")) {
+	for (const container of metadataRoot(root).querySelectorAll<HTMLElement>(".metadata-container")) {
 		const rows = Array.from(
 			container.querySelectorAll<HTMLElement>(".metadata-property")
 		);
@@ -84,11 +102,9 @@ function touchesContainer(nodes: ArrayLike<Node>): boolean {
 /**
  * Could this mutation have changed a Properties block?
  *
- * The overlay observes the WHOLE `.markdown-source-view` with subtree
- * childList, because the container does not exist at mount and there is
- * nothing narrower to watch. CodeMirror recycles line DOM, so that observer
- * fires on every keystroke and every scroll to answer a question that only
- * changes when the properties panel does (audit doc §5g/G2). This is the
+ * The overlay observes the view containing both the editor and reading view
+ * with subtree childList, because the container moves between them. CodeMirror
+ * recycles line DOM, and the reading view can redraw unrelated content. This is the
  * gate: a record survives when its target is inside or IS a container - the
  * rows and their `data-property-key` attributes - or when the container
  * itself is being added or removed, which is the case `closest` cannot see
@@ -101,7 +117,7 @@ export function isMetadataMutation(record: MutationRecord): boolean {
 
 /** Remove presentation state when the editor overlay is unmounted. */
 export function clearMetadataVisibility(root: ParentNode): void {
-	for (const container of root.querySelectorAll<HTMLElement>(".metadata-container")) {
+	for (const container of metadataRoot(root).querySelectorAll<HTMLElement>(".metadata-container")) {
 		container.classList.remove(ID_ONLY_METADATA_CLASS);
 	}
 }

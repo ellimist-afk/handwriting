@@ -84,7 +84,7 @@ export function noteZoomControlsVisible(m: NoteZoomControlsMode): boolean {
 }
 
 /**
- * s137 item 9: INFINITE CANVAS IS THE OTHER HALF OF THE ANSWER.
+ * INFINITE CANVAS IS THE OTHER HALF OF THE ANSWER.
  *
  * With the canvas off a note has no zoom at all - pinch, ctrl+wheel and
  * `zoomNoteBy` all refuse - so a bar whose every button is a zoom has nothing

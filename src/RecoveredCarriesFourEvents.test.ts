@@ -25,7 +25,7 @@ import type { InkStroke } from "./ink/Stroke";
  * "Handwriting recovered this note's ink from an interrupted save. Nothing was
  * lost." It excluded A (the earlier `damaged` branch took it) and D (by
  * `damagedKeptAs`). **It did not exclude C**, so a trash restore was announced
- * as an interrupted save. That reader was deleted with the view in s197, and
+ * as an interrupted save. That reader was deleted with the view, and
  * no surface reads `recovered` this way today - which removes the live defect
  * and leaves the field exactly as ambiguous as it was for the next one.
  * The identical failure as `PdfInkStore.ts:205` and `SlidesInkSurface.ts:2275`,

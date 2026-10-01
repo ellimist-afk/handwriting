@@ -121,7 +121,7 @@ describe("rungIndexFor", () => {
 describe("ladderShape", () => {
 	it("covers the extent and no more", () => {
 		expect(ladderShape(0)).toEqual({ count: 1, spacing: RUNG_SPACING });
-		// Alan's note: 57 rungs (ruling 2B RP-4).
+		// Alan's note: 57 rungs.
 		expect(ladderShape(114822)).toEqual({ count: 57, spacing: RUNG_SPACING });
 		// Four times it: 225.
 		expect(ladderShape(114822 * 4)).toEqual({ count: 225, spacing: RUNG_SPACING });

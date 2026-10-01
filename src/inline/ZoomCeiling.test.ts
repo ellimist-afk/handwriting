@@ -21,7 +21,7 @@
  * and requires it to be `MAX_PINCH_SCALE`, not a numeral. A literal that
  * happens to equal today's ceiling would still pass every behavioural test
  * and drift silently the next time the constant moves - which is exactly the
- * gap Reviewer F1 caught on 772960c7 (two bare `4`s survived a change to the
+ * gap review caught on 772960c7 (two bare `4`s survived a change to the
  * constant because nothing read the source to check). Node only: no render,
  * no browser.
  */
@@ -36,7 +36,7 @@ const strip = stripSource.replace(/\r\n/g, "\n");
 
 /** applyPinchScale's preview branch: the live-pinch guard, no commit. */
 function previewCeiling(): string {
-	// s110 widened the preview ceiling by the cap give (`MAX_PINCH_SCALE * PINCH_GIVE`); the pin reads the constant either way.
+	// A later change widened the preview ceiling by the cap give (`MAX_PINCH_SCALE * PINCH_GIVE`); the pin reads the constant either way.
 	const m = overlay.match(/this\.scaleGeometryValid === false \|\| next > (\w+)(?: \* PINCH_GIVE)? \|\|/);
 	expect(m, "applyPinchScale's preview guard was not found in InkOverlay.ts; update this pin with it").not.toBeNull();
 	return m![1]!;
@@ -58,7 +58,7 @@ function commitCameraScaleCeiling(): string {
 
 /** The zoom-bar "+" button's disable check. */
 function plusButtonCeiling(): string {
-	const m = strip.match(/i===2&&viewport\.zoom>=(\w+)/);
+	const m = strip.match(/i\s*===\s*2\s*&&\s*state\.zoom\s*>=\s*(\w+)/);
 	expect(m, "the plus button's disable check was not found in MobileTools.ts; update this pin with it").not.toBeNull();
 	return m![1]!;
 }

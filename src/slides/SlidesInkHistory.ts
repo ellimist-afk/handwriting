@@ -81,7 +81,10 @@ export class SlidesInkHistory {
 	 * authoritative replacement or remap requires clear(), not rebasing.
 	 * The caller separately rebases any unfinished gesture's snapshot.
 	 */
-	rebaseInitial(additions: ReadonlyMap<number, readonly InkStroke[]>): void {
+	rebaseInitial(
+		additions: ReadonlyMap<number, readonly InkStroke[]>,
+		resolveLocal: (stroke: InkStroke, index: number) => InkStroke = stroke => stroke,
+	): void {
 		const append = (snapshot: readonly InkStroke[], incoming: readonly InkStroke[]): InkStroke[] => {
 			const result = [...snapshot];
 			const ids = new Set(snapshot.map((stroke) => stroke.id));
@@ -94,6 +97,8 @@ export class SlidesInkHistory {
 		};
 		for (const entry of [...this.done, ...this.undone]) {
 			for (const change of entry.changes) {
+				change.before = change.before.map(stroke => resolveLocal(stroke, change.index));
+				change.after = change.after.map(stroke => resolveLocal(stroke, change.index));
 				const incoming = additions.get(change.index);
 				if (!incoming?.length) continue;
 				change.before = append(change.before, incoming);

@@ -44,6 +44,13 @@ import { DIAG_OFF_NOTE, diagnosticsEnabled } from "../diag/DiagSwitch";
  *            and whether that bbox intersects the camera viewport at commit
  *            ("visible=NO on a stroke drawn under the nib" = the render path
  *            lost it, not the input path).
+ *
+ * The same scroll and repaint events also write a performance.mark each, so a
+ * Chromium trace taken on the device shows which scroll event asked for which
+ * repaint: "hw:scroll x=<scrollLeft> y=<scrollTop>" and "hw:repaint
+ * work=<all | n rect> band=<moved | still> x=<scrollLeft> y=<scrollTop>". They are
+ * written only while diagnostics record, from the same gated functions as
+ * the ring, so with the switch off they cost the boolean read and nothing else.
  */
 
 interface WheelEntry {
@@ -102,6 +109,25 @@ interface RepaintEntry {
 	locked: boolean;
 	driftX: number;
 	driftY: number;
+	/** What the frame painted: "all", or "<n> rect". Absent when the caller did not say. */
+	work?: string;
+	/** The ink band moved this frame. */
+	bandMoved?: boolean;
+	/** The band move carried its pixels (a blit and the uncovered strips) rather than moving the box bare. */
+	carried?: boolean;
+	/** Time inside syncCamera this frame, ms. */
+	syncCameraMs?: number;
+	/** Time inside paintCommittedWork this frame, ms. */
+	paintMs?: number;
+	/** What made the frame redraw the whole layer, "+"-joined (first, zoom, camera, damage); empty when it did not. */
+	allFrom?: string;
+	/** The camera now minus the camera the raster was painted with, note units; absent before the first paint. */
+	camDeltaX?: number;
+	camDeltaY?: number;
+	/** The frame baked a settled pan into the raster (which asks for the whole layer). */
+	panBaked?: boolean;
+	/** The damage queued for the frame before any promotion to a full redraw: "all" or "<n> rect". */
+	damageIn?: string;
 }
 
 interface ExtentEntry {
@@ -202,6 +228,15 @@ let lastScrollLeft = 0;
 let lastScrollTop = 0;
 let pendingSchedAt: number | null = null;
 
+/** One user-timing mark, for the trace. Never throws: a page without the User Timing API just loses the marks. */
+function traceMark(name: string): void {
+	try {
+		performance.mark(name);
+	} catch {
+		// no User Timing: the ring still has the event
+	}
+}
+
 function push(e: ProbeEntry): void {
 	entries.push(e);
 	if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES);
@@ -247,6 +282,7 @@ export function scrollProbeScroll(
 	duringStroke = false
 ): void {
 	if (!diagnosticsEnabled()) return;
+	traceMark(`hw:scroll x=${scrollLeft} y=${scrollTop}`);
 	const t = performance.now();
 	push({
 		kind: "scroll",
@@ -285,8 +321,28 @@ export function scrollProbeRepaint(g: {
 	locked: boolean;
 	driftX: number;
 	driftY: number;
+	/** What the frame painted: "all", or "<n> rect" for damage rects. Absent when the caller does not know. */
+	work?: string;
+	/** The ink band moved this frame. */
+	bandMoved?: boolean;
+	/** The band move carried its pixels. */
+	carried?: boolean;
+	/** Time inside syncCamera this frame, ms. */
+	syncCameraMs?: number;
+	/** Time inside paintCommittedWork this frame, ms. */
+	paintMs?: number;
+	/** What made the frame redraw the whole layer, "+"-joined; empty when it did not. */
+	allFrom?: string;
+	/** The camera now minus the painted camera, note units. */
+	camDeltaX?: number;
+	camDeltaY?: number;
+	/** The frame baked a settled pan into the raster. */
+	panBaked?: boolean;
+	/** The damage queued before any promotion to a full redraw. */
+	damageIn?: string;
 }): void {
 	if (!diagnosticsEnabled()) return;
+	traceMark(`hw:repaint work=${g.work ?? "?"} band=${g.bandMoved ? "moved" : "still"} x=${g.scrollLeft} y=${g.scrollTop}`);
 	const t = performance.now();
 	push({
 		kind: "repaint",
@@ -353,6 +409,11 @@ export function classifyScroll(sinceWheelMs: number, sinceTouchMs: number): stri
 
 function fmtAge(ms: number): string {
 	return Number.isFinite(ms) ? `${ms.toFixed(0)}ms` : "never";
+}
+
+/** Exponent form: a camera move far under the two printed decimals still reads as a number. */
+function fmtCamDelta(dx: number | undefined, dy: number | undefined): string {
+	return dx === undefined || dy === undefined ? "-" : `(${dx.toExponential(2)},${dy.toExponential(2)})`;
 }
 
 export function formatScrollProbe(): string {
@@ -489,6 +550,11 @@ export function formatScrollProbe(): string {
 			case "repaint":
 				lines.push(
 					`${at}  repaint  +${e.waitedMs.toFixed(1)}ms  cam=(${e.camX.toFixed(2)},${e.camY.toFixed(2)}) docTop=${e.documentTop.toFixed(2)} contentLeft=${e.contentLeft.toFixed(2)} rect=(${e.rectLeft.toFixed(2)},${e.rectTop.toFixed(2)}) scale=${e.scale} scroll=(${e.scrollLeft},${e.scrollTop}) strokes=${e.strokesDrawn}` +
+						(e.work !== undefined
+							? ` work=${e.work} band=${e.bandMoved ? "moved" : "still"} carry=${e.carried ? "yes" : "no"} sync=${(e.syncCameraMs ?? 0).toFixed(2)}ms paint=${(e.paintMs ?? 0).toFixed(2)}ms` +
+								(e.allFrom !== undefined ? ` from=${e.allFrom || "-"} dcam=${fmtCamDelta(e.camDeltaX, e.camDeltaY)}` : "") +
+								(e.damageIn !== undefined ? ` bake=${e.panBaked ? "yes" : "no"} in=${e.damageIn}` : "")
+							: "") +
 						(e.locked
 							? `  LOCKED drift=(${e.driftX.toFixed(1)},${e.driftY.toFixed(1)})`
 							: "")

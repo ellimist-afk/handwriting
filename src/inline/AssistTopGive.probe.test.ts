@@ -1,11 +1,11 @@
 /**
- * PROBE, s104 line 7: why a downward drag at the top gives at 72% and not at 400%.
+ * PROBE: why a downward drag at the top gives at 72% and not at 400%.
  *
  * NOT A GATE CELL. This measures the router's own behaviour in two scroll regimes and
  * prints what it saw. It is deliberately assertion-light: the point is the numbers, and
  * the hypothesis under test is allowed to lose.
  *
- * THE HYPOTHESIS (Builder, s104 line 7): at 72% the note FITS the pane, so the inner
+ * THE HYPOTHESIS: at 72% the note FITS the pane, so the inner
  * scroller has no range, the assist pan is never what the writer feels, and the give
  * comes from the outer pane's native rubber band. At 400% the inner scroller HAS range,
  * the assist owns the gesture, and `carryScrollBy`'s clamp to [0, range] swallows the

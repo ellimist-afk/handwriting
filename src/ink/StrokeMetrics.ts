@@ -38,6 +38,186 @@ function rateText(events: number, durationMs: number): string {
 	return events === 0 ? "(not recorded)" : `${round2((events * 1000) / durationMs)}Hz`;
 }
 
+/** One script inside a long animation frame, as the browser attributes it. */
+export interface LoafScript {
+	invoker: string;
+	sourceURL: string;
+	sourceFunctionName: string;
+	sourceCharPosition: number;
+	duration: number;
+	/** Style and layout this script forced synchronously, ms; 0 where it forced none. */
+	forcedStyleAndLayoutMs: number;
+}
+
+/** A long animation frame: one that took 50 ms or more from start to paint. */
+export interface LoafFrame {
+	startTime: number;
+	duration: number;
+	blockingDuration: number;
+	/** The frame's own style and layout, frame end less `styleAndLayoutStart`, ms; null where the entry has none. */
+	styleAndLayoutMs: number | null;
+	scripts: LoafScript[];
+}
+
+export interface LoafSummary {
+	/** False where the browser has no long-animation-frame entries: nothing measured, not zero. */
+	supported: boolean;
+	frames: LoafFrame[];
+}
+
+/**
+ * Where a stroke's long frames come from. The browser's source below in the
+ * plugin; a fake in the tests, which run in Node with no such entry type.
+ */
+export interface LoafSource {
+	supported(): boolean;
+	/** Idempotent. Called once per stroke from `begin`, never per pointer event. */
+	start(): void;
+	/** Frames overlapping [from, to), in the performance.now() clock, after taking any entries still queued. */
+	framesBetween(from: number, to: number): LoafFrame[];
+	/**
+	 * Hands `add` each frame overlapping [from, to) that is delivered after this call, as it is delivered, until
+	 * a frame starting at or after `to` shows every overlapping frame has come. Called once per stroke from `end`.
+	 */
+	watch(from: number, to: number, add: (frame: LoafFrame) => void): void;
+}
+
+/**
+ * Long-animation-frame entries (Chromium 123+) through one shared observer.
+ *
+ * Cost: the observer's callback runs only when a frame is already long, so
+ * a smooth stroke pays nothing per event. `begin` pays one flag check;
+ * `end` pays a takeRecords and a filter over at most KEEP frames. Nothing
+ * here is created until the first stroke starts.
+ *
+ * A stroke's window stays open after `end` until a frame past it arrives, so
+ * the frame spanning the lift, which is queued only once it completes, lands
+ * in that stroke's summary however many frames follow it. At most WATCH
+ * windows stay open; the oldest is closed first.
+ */
+class BrowserLoafSource implements LoafSource {
+	private static readonly KEEP = 64;
+	private static readonly WATCH = 16;
+	private observer: PerformanceObserver | null = null;
+	private recent: LoafFrame[] = [];
+	private open: { from: number; to: number; add: (frame: LoafFrame) => void }[] = [];
+	private known: boolean | null = null;
+
+	supported(): boolean {
+		if (this.known === null) {
+			this.known =
+				typeof PerformanceObserver !== "undefined" &&
+				(PerformanceObserver.supportedEntryTypes ?? []).includes("long-animation-frame");
+		}
+		return this.known;
+	}
+
+	start(): void {
+		if (this.observer || !this.supported()) return;
+		this.observer = new PerformanceObserver((list) => this.take(list.getEntries()));
+		this.observer.observe({ type: "long-animation-frame", buffered: true });
+	}
+
+	framesBetween(from: number, to: number): LoafFrame[] {
+		// The entry for the frame that ended the stroke may still be queued.
+		if (this.observer) this.take(this.observer.takeRecords());
+		return this.framesSeen(from, to);
+	}
+
+	private framesSeen(from: number, to: number): LoafFrame[] {
+		return this.recent.filter((f) => f.startTime < to && f.startTime + f.duration > from);
+	}
+
+	watch(from: number, to: number, add: (frame: LoafFrame) => void): void {
+		if (!this.observer) return;
+		this.open.push({ from, to, add });
+		if (this.open.length > BrowserLoafSource.WATCH) this.open.shift();
+	}
+
+	private take(entries: PerformanceEntryList): void {
+		for (const e of entries) {
+			const f = loafFrameOf(e);
+			this.recent.push(f);
+			if (this.open.length > 0) this.hand(f);
+		}
+		if (this.recent.length > BrowserLoafSource.KEEP) this.recent.splice(0, this.recent.length - BrowserLoafSource.KEEP);
+	}
+
+	/** Frames arrive in the order they end, and frames do not overlap, so one starting at or past `to` closes the window. */
+	private hand(f: LoafFrame): void {
+		this.open = this.open.filter((w) => {
+			if (f.startTime < w.to && f.startTime + f.duration > w.from) w.add(f);
+			return f.startTime < w.to;
+		});
+	}
+}
+
+/** The fields this report prints, copied out of the live entry. */
+function loafFrameOf(e: PerformanceEntry): LoafFrame {
+	const f = e as PerformanceEntry & {
+		blockingDuration?: number;
+		styleAndLayoutStart?: number;
+		scripts?: (Partial<Omit<LoafScript, "forcedStyleAndLayoutMs">> & { forcedStyleAndLayoutDuration?: number })[];
+	};
+	// 0 is the entry's "no style and layout phase", not a time.
+	const sl = f.styleAndLayoutStart;
+	return {
+		startTime: e.startTime,
+		duration: e.duration,
+		blockingDuration: f.blockingDuration ?? 0,
+		styleAndLayoutMs: typeof sl === "number" && sl > 0 ? Math.max(0, e.startTime + e.duration - sl) : null,
+		scripts: (f.scripts ?? []).map((s) => ({
+			invoker: s.invoker ?? "",
+			sourceURL: s.sourceURL ?? "",
+			sourceFunctionName: s.sourceFunctionName ?? "",
+			sourceCharPosition: s.sourceCharPosition ?? -1,
+			duration: s.duration ?? 0,
+			forcedStyleAndLayoutMs: s.forcedStyleAndLayoutDuration ?? 0,
+		})),
+	};
+}
+
+const browserLoaf = new BrowserLoafSource();
+
+/**
+ * A stroke's long frames. The frame that spans the lift is queued only once it completes, which is after
+ * `end` has run, so a snapshot taken at `end` would miss it for good. The source hands the summary each
+ * later frame in its window as it is delivered, so the report holds it whenever it is read, even after the
+ * source's own buffer has moved past it. Nothing is done per pointer event.
+ */
+function loafSummaryFor(source: LoafSource, from: number, to: number): LoafSummary {
+	const frames = source.framesBetween(from, to);
+	source.watch(from, to, (f) => {
+		if (!frames.some((g) => g.startTime === f.startTime)) frames.push(f);
+	});
+	return { supported: true, frames };
+}
+
+/** `invoker  function file:char`, the file cut to its last path segment. */
+function loafScriptText(s: LoafScript): string {
+	const file = s.sourceURL.split(/[\\/]/).pop() || "(no source)";
+	const at = s.sourceCharPosition >= 0 ? `${file}:${s.sourceCharPosition}` : file;
+	const forced = s.forcedStyleAndLayoutMs > 0 ? `  forced style/layout ${Math.round(s.forcedStyleAndLayoutMs)}ms` : "";
+	return `  script ${Math.round(s.duration)}ms  ${s.invoker || "(unknown)"}  ${s.sourceFunctionName || "(anonymous)"} ${at}${forced}`;
+}
+
+/** Three longest frames, three longest scripts each: the text stays readable. */
+function loafText(l: LoafSummary): string[] {
+	if (!l.supported) return ["long frames (not recorded)"];
+	if (l.frames.length === 0) return ["long frames 0"];
+	const d = l.frames.map((f) => f.duration);
+	const blocking = l.frames.reduce((a, f) => a + f.blockingDuration, 0);
+	const lines = [
+		`long frames ${l.frames.length}  ${round2(d.reduce((a, v) => a + v, 0) / d.length)}/${round2(Math.max(...d))}ms  blocking ${round2(blocking)}ms`,
+	];
+	for (const f of [...l.frames].sort((a, b) => b.duration - a.duration).slice(0, 3)) {
+		const sl = f.styleAndLayoutMs === null ? "(not recorded)" : `${Math.round(f.styleAndLayoutMs)}ms`;
+		lines.push(`  frame ${Math.round(f.duration)}ms  blocking ${Math.round(f.blockingDuration)}ms  style/layout ${sl}`);
+		for (const s of [...f.scripts].sort((a, b) => b.duration - a.duration).slice(0, 3)) lines.push(loafScriptText(s));
+	}
+	return lines;
+}
+
 export interface StatSummary {
 	avg: number;
 	max: number;
@@ -88,6 +268,8 @@ export interface StrokeSummary {
 	ageAtPresentMs: StatSummary;
 	frameIntervalMs: StatSummary;
 	queueDepthMax: number;
+	/** Resize operations on the initiating inline tail during this stroke; null when unmeasured. */
+	tailBackingResizes: number | null;
 	// ---- prediction experiment (v0.1.3) ----
 	predMode: string;
 	predApi: string;
@@ -99,6 +281,8 @@ export interface StrokeSummary {
 	predHorizonMs: StatSummary;
 	predTipDistPx: StatSummary;
 	predCorrectionPx: StatSummary;
+	/** Long animation frames that overlapped this stroke. */
+	loaf: LoafSummary;
 }
 
 export class StrokeMetrics {
@@ -120,6 +304,7 @@ export class StrokeMetrics {
 	private frameInterval = new Stat();
 	private queueMax = 0;
 	private lastFrameTs = 0;
+	private tailResizeStart: number | null = null;
 
 	private predMode = "off";
 	private predApi = "unknown";
@@ -135,7 +320,9 @@ export class StrokeMetrics {
 	/** Never reset, never capped: the honest count of strokes that ended. */
 	totalEnded = 0;
 
-	begin(mode: string, now: number): void {
+	constructor(private readonly loafSource: LoafSource = browserLoaf) {}
+
+	begin(mode: string, now: number, tailResizeTotal?: number): void {
 		// Per stroke, like every other prediction field. Left standing, the
 		// FIRST stroke that ever predicted made every later report say
 		// "pred on" - including strokes drawn with the setting off, which
@@ -166,6 +353,8 @@ export class StrokeMetrics {
 		this.frameInterval.reset();
 		this.queueMax = 0;
 		this.lastFrameTs = 0;
+		this.tailResizeStart = tailResizeTotal ?? null;
+		this.loafSource.start();
 		this.active = true;
 	}
 
@@ -237,9 +426,11 @@ export class StrokeMetrics {
 		if (this.active) this.predCorrection.add(errPx);
 	}
 
-	end(now: number): StrokeSummary {
+	end(now: number, tailResizeTotal?: number): StrokeSummary {
 		this.active = false;
 		const durationMs = Math.max(1, now - this.startedAt);
+		const tailBackingResizes = this.tailResizeStart === null || tailResizeTotal === undefined
+			? null : tailResizeTotal - this.tailResizeStart;
 		const summary: StrokeSummary = {
 			mode: this.mode,
 			durationMs: Math.round(durationMs),
@@ -258,6 +449,7 @@ export class StrokeMetrics {
 			ageAtPresentMs: this.presentAge.summary(),
 			frameIntervalMs: this.frameInterval.summary(),
 			queueDepthMax: this.queueMax,
+			tailBackingResizes,
 			predMode: this.predMode,
 			predApi: this.predApi,
 			predCapMs: round2(this.predCapMs),
@@ -267,6 +459,9 @@ export class StrokeMetrics {
 			predHorizonMs: this.predHorizon.summary(),
 			predTipDistPx: this.predTip.summary(),
 			predCorrectionPx: this.predCorrection.summary(),
+			loaf: this.loafSource.supported()
+				? loafSummaryFor(this.loafSource, this.startedAt, now)
+				: { supported: false, frames: [] },
 		};
 		this.totalEnded++;
 		this.summaries.push(summary);
@@ -301,6 +496,7 @@ export class StrokeMetrics {
 			`delivery ${s.deliveryAgeMs.avg}/${s.deliveryAgeMs.max}ms  handler ${s.handlerMs.avg}/${s.handlerMs.max}ms  draw ${s.drawMs.avg}/${s.drawMs.max}ms`,
 			`age@draw ${s.ageAtDrawMs.avg}/${s.ageAtDrawMs.max}ms  age@present ${s.ageAtPresentMs.avg}/${s.ageAtPresentMs.max}ms`,
 			`frame ${statText(s.frameIntervalMs)}  queueMax ${s.queueDepthMax}`,
+			`tail backing resizes ${s.tailBackingResizes ?? "(not recorded)"}`,
 		];
 		if (s.predMode !== "off") {
 			lines.push(
@@ -309,6 +505,7 @@ export class StrokeMetrics {
 					`  tip ${s.predTipDistPx.avg}/${s.predTipDistPx.max}px  err ${s.predCorrectionPx.avg}/${s.predCorrectionPx.max}px`
 			);
 		}
+		lines.push(...loafText(s.loaf));
 		return lines.join("\n");
 	}
 }

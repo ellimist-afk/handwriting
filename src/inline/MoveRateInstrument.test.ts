@@ -151,12 +151,14 @@ describe("note: onPenMove really calls StrokeMetrics.recordEvent", () => {
 	function mountFake(): void {
 		const win = { getComputedStyle: () => ({ position: "relative" }) };
 		const doc = { defaultView: win, body: fakeEl() };
-		// s181 add. 8: the mount gate (`ownsMarkdownEditorRoot`) now runs before the
+		// The mount gate (`ownsMarkdownEditorRoot`) now runs before the
 		// router is built, and a bare `fakeEl` has no `closest`, so mount threw
 		// "dom.closest is not a function" before it could capture the router.
 		const dom = fakeNoteEditorDom(doc);
 		const view = {
-			state: { field: () => ({}) }, // truthy, no `.app` - ensurePenTools bails itself
+			// Truthy, with a file (1.4.22 lane R: an owner with no file does not
+			// mount), and no `.app` - ensurePenTools bails itself.
+			state: { field: () => ({ file: { path: "note.md" } }) },
 			dom,
 			scrollDOM: fakeEl(doc),
 		};

@@ -13,9 +13,9 @@
  * fixed here, and it is the store's rule, not any one surface's.
  *
  * WHERE THIS CAME FROM. The case was found on the canvas page view, which held
- * one document per pane. That view was deleted in s197. The store rule it
+ * one document per pane. That view was deleted. The store rule it
  * exposed is untouched and is what these cases drive; the one claim that could
- * only be made about the view is listed by name in the s197 RESULT.md.
+ * only be made about the view is listed by name in the removal evidence.
  *
  * THE GUARD IS THE MECHANISM, NOT A MITIGATION. `writeNow`'s external-revision
  * guard computes `external` from `st.mtime !== knownMtime`, then compares
@@ -454,12 +454,51 @@ describe("the reconcile is per WRITER, and only ever adds", () => {
 		expect(fake.files.get(FINAL)).toContain("s2");
 	});
 
+	it("audit 125: a retired writer no longer claims the file, so the next writer's erase is not merged back", async () => {
+		const a = newPageWriter("slides");
+		store.schedule(PAGE_ID, pageWith("s1", "s2"), a);
+		await settle();
+		store.retireWriter(a); // slides ink switched off
+		const b = newPageWriter("slides"); // ...and on again
+		store.schedule(PAGE_ID, pageWith("s1"), b); // erase s2, close quickly
+		await settle();
+		expect(fake.files.get(FINAL)).toContain("s1");
+		expect(fake.files.get(FINAL)).not.toContain("s2");
+	});
+
+	it("audit 125: a save of the retired writer that lands AFTER the retire does not claim the file either", async () => {
+		const a = newPageWriter("slides");
+		store.schedule(PAGE_ID, pageWith("s1", "s2"), a);
+		store.retireWriter(a); // still inside the debounce: the write has not landed
+		await settle();
+		expect(fake.files.get(FINAL)).toContain("s2"); // it did land
+		const b = newPageWriter("slides");
+		store.schedule(PAGE_ID, pageWith("s1"), b);
+		await settle();
+		expect(fake.files.get(FINAL)).not.toContain("s2");
+	});
+
+	it("audit 125: switching slides ink off retires the writer it made (main.ts wiring)", () => {
+		expect(mainCode).toMatch(/setSlidesInk\(false\);[\s\S]{0,200}this\.store\.retireWriter\(this\.slidesWriter\)/);
+		expect(mainCode).toContain("this.slidesWriter = writer;");
+	});
+
+	it("audit 125: a writer that is NOT retired is still reconciled (the known cost above stands)", async () => {
+		const a = newPageWriter("pane-a");
+		const b = newPageWriter("pane-b");
+		store.schedule(PAGE_ID, pageWith("s1", "s2"), a);
+		await settle();
+		store.schedule(PAGE_ID, pageWith("s1"), b);
+		await settle();
+		expect(fake.files.get(FINAL)).toContain("s2");
+	});
+
 	it("the shipped surface carries a writer identity at every schedule site", async () => {
 		// THE GAP THIS CLOSES. Every test above hands the store an identity of
 		// its own making, so they would all stay green over a plugin whose
 		// surfaces still called `schedule` with two arguments - the fix would
 		// be present in the store and absent from the surface that needs it.
-		// Slides is that surface after s197: one deck, its own composed page
+		// Slides is that surface after the removal: one deck, its own composed page
 		// per sidecar id, and a writer token made once in `startSlidesInk`.
 		// Read from production source instead, in the `?raw` idiom
 		// StripPenChrome.test.ts established - but from its CODE, not its

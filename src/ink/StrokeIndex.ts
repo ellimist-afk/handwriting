@@ -179,12 +179,28 @@ export class StrokeIndex {
 		const x1 = Math.floor((rect.x + rect.width) / BUCKET_WORLD);
 		const y1 = Math.floor((rect.y + rect.height) / BUCKET_WORLD);
 		const seen = new Set<InkStroke>();
-		for (let by = y0; by <= y1; by++) {
-			for (let bx = x0; bx <= x1; bx++) {
-				const list = this.buckets.get(`${bx},${by}`);
-				if (!list) continue;
+		// A rect spanning more cells than there are buckets walks the buckets
+		// instead. The cell walk is the AREA of the rect, so a damage rect
+		// around one far-flung stroke (a coordinate of 1e6 in a hand-edited
+		// sidecar) meant millions of empty map lookups per query and the note
+		// froze; an infinite rect never ended. The bucket walk visits only
+		// what exists and reaches the same strokes, since every bucketed
+		// stroke is in at least one bucket and `hits` decides membership.
+		// A NaN rect keeps the cell walk, whose loops do not run.
+		if ((x1 - x0 + 1) * (y1 - y0 + 1) > this.buckets.size) {
+			for (const list of this.buckets.values()) {
 				for (const s of list) {
 					if (hits(s.bbox, rect)) seen.add(s);
+				}
+			}
+		} else {
+			for (let by = y0; by <= y1; by++) {
+				for (let bx = x0; bx <= x1; bx++) {
+					const list = this.buckets.get(`${bx},${by}`);
+					if (!list) continue;
+					for (const s of list) {
+						if (hits(s.bbox, rect)) seen.add(s);
+					}
 				}
 			}
 		}

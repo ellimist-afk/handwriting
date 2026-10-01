@@ -503,8 +503,8 @@ describe("strip pen chrome — one shared place, not two", () => {
 
 	it("the pdf surface takes its focus claim from the shared file", () => {
 		const pdfInkControllerSrc = code("/src/pdf/PdfInkController.ts");
-		expect(pdfInkControllerSrc).toContain("stripPenFocus(this.root)");
-		expect(pdfInkControllerSrc).toContain("armStripPenFocus(this.root)");
+		expect(pdfInkControllerSrc).toContain("stripPenFocus(scroller)");
+		expect(pdfInkControllerSrc).toContain("armStripPenFocus(scroller)");
 	});
 });
 

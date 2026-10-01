@@ -3,7 +3,7 @@
  *
  * THE POINT. `fillRibbon` puts every quad and disc of a stroke into ONE path
  * and fills it once. A quad is `moveTo` + 3x `lineTo` + `closePath`, and the
- * close is what the s93 device trace bills: 3332.0 ms of a 3536.8 ms task, and
+ * close is what the device trace bills: 3332.0 ms of a 3536.8 ms task, and
  * ~1800x the per-call cost of the `lineTo` beside it. `fill()` closes every open
  * subpath implicitly, so the closes should not be reaching the raster at all -
  * but "should" is not a measurement, and removing a call from the paint path on

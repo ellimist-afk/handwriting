@@ -433,7 +433,7 @@ Save to vault up front, and a Show data button that expands the raw trace
 were active) if you want to look at it.
 
 Upload sends the trace to the developer's server; the id it returns appears
-in the modal, tap-to-select, so you can put it in your issue instead of the
+in the modal with a Copy ID button, so you can put it in your issue instead of the
 whole trace. It's the only thing Handwriting sends over the network, and
 only on that press - Copy and Save to vault stay offline. The trace is pen
 coordinates, timing and device info, never your note's text.
@@ -474,7 +474,9 @@ Node 20 or newer.
 ```
 npm ci            # install the locked dependency set
 npx tsc -noEmit   # typecheck
-npm test          # the full test suite
+npm test          # unit tests
+npm run test:render  # render tests
+npm run gate      # every check, both test suites, then the build
 npm run build     # typecheck, then a production main.js
 ```
 

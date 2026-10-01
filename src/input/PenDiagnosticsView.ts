@@ -41,7 +41,15 @@ interface MarkEntry {
 	t: number;
 }
 
-type LogRecord = LogEntry | MarkEntry;
+/** A probe note, such as a tracer row: in the JSON too, not only on screen. */
+interface NoteEntry {
+	seq: number;
+	type: "note";
+	text: string;
+	t: number;
+}
+
+type LogRecord = LogEntry | MarkEntry | NoteEntry;
 
 /**
  * A scripted remote session is roughly ten gestures of five to fifteen seconds
@@ -229,7 +237,9 @@ export class PenDiagnosticsView extends ItemView {
 		// received pen pointerdown/up on the test Surface even though the canvas view does;
 		// this logs where in the DOM pen contact events actually land. It never
 		// calls preventDefault/stopPropagation; observation only. Removed on
-		// close.
+		// close. On the view's own document: a probe opened in a popout sees
+		// that window's contacts, not the main window's (audit 160).
+		const doc = content.ownerDocument;
 		const trace = (ev: Event) => {
 			const e = ev as PointerEvent;
 			if (e.pointerType !== "pen") return;
@@ -245,9 +255,9 @@ export class PenDiagnosticsView extends ItemView {
 			);
 		};
 		for (const type of ["pointerdown", "pointerup", "pointercancel"]) {
-			document.addEventListener(type, trace, { capture: true });
+			doc.addEventListener(type, trace, { capture: true });
 			this.disposers.push(() =>
-				document.removeEventListener(type, trace, { capture: true })
+				doc.removeEventListener(type, trace, { capture: true })
 			);
 		}
 
@@ -283,6 +293,7 @@ export class PenDiagnosticsView extends ItemView {
 	}
 
 	private recordNote(text: string): void {
+		this.entries.push({ seq: this.seq++, type: "note", text, t: Math.round(performance.now()) });
 		const row = this.logEl.createDiv({ cls: "handwriting-diag-row handwriting-diag-note", text });
 		this.trimDom();
 		row.scrollIntoView({ block: "nearest" });

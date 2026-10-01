@@ -1,7 +1,7 @@
 /**
- * THE CANVAS PAGE IS OUT, EXECUTED (s197).
+ * THE CANVAS PAGE IS OUT, EXECUTED.
  *
- * "Canvas page" throughout means the old whiteboard pane, removed in s197 -
+ * "Canvas page" throughout means the old whiteboard pane, removed -
  * never Infinite Canvas, the per-note setting on ordinary notes, which is a
  * different thing and is untouched.
  *

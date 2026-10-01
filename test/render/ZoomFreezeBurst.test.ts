@@ -1,5 +1,5 @@
 /**
- * s93, step 4: does the cost stack when moves arrive WITHIN one frame?
+ * Step 4: does the cost stack when moves arrive WITHIN one frame?
  *
  * The step sweep (ZoomFreezeRepro.test.ts) found per-event cost frame-bound and
  * flat: 8, 100 and 400 `updatePinch` calls gave the same 57-77 ms longest task,
@@ -13,7 +13,7 @@
  * device shows. If it stays flat at 40 moves per frame, the router path is not
  * where the freeze lives and the remaining rig gap is the DOM listener path.
  *
- * Instruments are the ones s93 has used throughout: a longtask tape armed before
+ * Instruments are the ones the ruling has used throughout: a longtask tape armed before
  * the gesture, and `page.evaluate(() => 1)` raced against 3 s, which needs only
  * a free main thread and so reads a wedge regardless of machine speed.
  */
@@ -81,7 +81,7 @@ for (const burst of BURSTS) it(`IC on, ${burst} coalesced move(s) per frame acro
 		});
 		await page.evaluate(([pane]) => (window as any).scrollColumnAnchor.runTearMount(1, 0, pane, true, { fx: 0.5, fy: 0.5 }),
 			[{ w: PANE.w, h: PANE.h }] as const);
-		// s179: the pinch zoom exists only under the Infinite Canvas now, so a cost cell that
+		// The pinch zoom exists only under the Infinite Canvas now, so a cost cell that
 		// pinched with the canvas off would measure a gesture the product ignores. The mode is on
 		// here and the cost question is unchanged: does per-event work stack inside one frame.
 		await page.evaluate(() => (window as any).scrollColumnAnchor.setScrollExpansionEnabled(true));

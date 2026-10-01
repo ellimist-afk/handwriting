@@ -34,6 +34,8 @@ import {
 	grownExtent,
 	inkClaimX,
 	inkFrontier,
+	inkLeftReach,
+	leftReserve,
 	isScrollableOverflow,
 	onScreenFloorX,
 	shrunkAxis,
@@ -204,6 +206,33 @@ describe("inkFrontier", () => {
 	it("is the furthest right/bottom bbox corner across strokes", () => {
 		const f = inkFrontier([stroke(10, 400, 50, 20), stroke(300, 5, 40, 10)]);
 		expect(f).toEqual({ x: 340, y: 420 });
+	});
+});
+
+describe("inkLeftReach", () => {
+	it("is zero when no ink reaches left of the origin", () => {
+		expect(inkLeftReach([])).toBe(0);
+		expect(inkLeftReach([stroke(0, 10, 50, 20), stroke(300, 5, 40, 10)])).toBe(0);
+	});
+
+	it("is the furthest any bbox reaches left of the origin", () => {
+		expect(inkLeftReach([stroke(-40, 10, 50, 20), stroke(-218, 5, 116, 10), stroke(20, 0, 5, 5)])).toBe(218);
+	});
+});
+
+describe("leftReserve", () => {
+	it("holds no room left of the page, however far the ink reaches past the margin", () => {
+		expect(leftReserve({ reachNote: 218, naturalMargin: 100, fontZoom: 1 })).toBe(0);
+		expect(leftReserve({ reachNote: 100, naturalMargin: 40.4, fontZoom: 1.5 })).toBe(0);
+		expect(leftReserve({ reachNote: 620, naturalMargin: 0, fontZoom: 2 })).toBe(0);
+		expect(leftReserve({ reachNote: 30, naturalMargin: -12, fontZoom: 1 })).toBe(0);
+	});
+
+	it("holds nothing where the margin covers the reach, or there is no reach", () => {
+		expect(leftReserve({ reachNote: 218, naturalMargin: 341, fontZoom: 1 })).toBe(0);
+		expect(leftReserve({ reachNote: 0, naturalMargin: 0, fontZoom: 1 })).toBe(0);
+		expect(leftReserve({ reachNote: 50, naturalMargin: 0, fontZoom: 0 })).toBe(0);
+		expect(leftReserve({ reachNote: Number.NaN, naturalMargin: 0, fontZoom: 1 })).toBe(0);
 	});
 });
 
@@ -402,6 +431,22 @@ describe("SurfaceExtents.shrinkX", () => {
 		expect([extents.shrinkCount("a.md"), extents.shrinkCount("b.md")]).toEqual([0, 1]);
 		extents.handleDelete("b.md");
 		expect(extents.shrinkCount("b.md")).toBe(0);
+	});
+
+	it("merges the counters on a rename onto a note that has its own, like the grant", () => {
+		const extents = new SurfaceExtents();
+		extents.grow("old.md", { x: 1500, y: 0 });
+		extents.grow("new.md", { x: 1500, y: 0 });
+		extents.shrinkX("old.md", 900);
+		extents.shrinkX("new.md", 900);
+		extents.shrinkX("new.md", 600);
+		extents.oweShrinkX("old.md");
+		extents.oweShrinkX("new.md");
+		const newerDue = extents.shrinkDue("new.md");
+		extents.handleRename("old.md", "new.md");
+		expect(extents.shrinkCount("new.md"), "the target's larger shrink count survives").toBe(2);
+		expect(extents.shrinkDue("new.md"), "the target's newer due generation survives").toBe(newerDue);
+		expect([extents.shrinkCount("old.md"), extents.owesShrinkX("old.md")]).toEqual([0, false]);
 	});
 });
 

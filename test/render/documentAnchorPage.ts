@@ -1,5 +1,5 @@
 /**
- * QE4 for mechanism E's ladder (ruling 2B RP-1 to RP-5), in a real browser.
+ * The document anchor ladder's surface checks, in a real browser.
  *
  * WHY THIS IS ITS OWN PAGE. The question is not what the camera computes - the
  * unit tests own the algebra - but what the ANCHOR DOES TO THE SURFACE: whether
@@ -8,11 +8,11 @@
  * range. None of that is visible without a real CodeMirror, a real scroller and
  * a real MutationObserver, and all of it has already gone wrong once: a probe
  * that wrote `style.top` collapsed scrollTop from 114820 to 9630, twice,
- * independently (L1c first attempt, and a second, independent replication).
+ * independently (the first attempt, and a second, independent replication).
  *
  * `scrollColumnAnchorPage.ts` is the fixture for the camera's NUMBERS and is
- * owned by another lane right now. This page is deliberately small and asks
- * only QE4's questions.
+ * owned by other work right now. This page is deliberately small and asks
+ * only the anchor's surface questions.
  */
 
 import { EditorState, Compartment } from "@codemirror/state";
@@ -78,7 +78,7 @@ async function mount(tag: string, plant?: "height" | "heightBig", startScrollTop
 			extensions: [
 				history(), EditorView.lineWrapping,
 				editorInfoField.init(() => ({ app: { commands: { executeCommandById: () => false } }, file: { path }, editor: {} })),
-				// `bare` is the CONTROL for QE4b: no ink overlay and therefore no
+				// `bare` is the CONTROL for the install check: no ink overlay and therefore no
 				// anchor widget, so what CodeMirror does to a restored scroll on its
 				// own can be measured and subtracted.
 				bare ? [] : overlayCompartment.of(inkOverlayExtension() as never),
@@ -120,7 +120,7 @@ async function growSurface(rig: { overlay: any; path: string }, y: number): Prom
 }
 
 /** Every mutation observed anywhere inside `.cm-content`, which is the thing
- * ruling 2B forbids on the scroll path. Observes the whole subtree: attributes
+ * the design forbids on the scroll path. Observes the whole subtree: attributes
  * (a `style.top` write) and childList alike. */
 function watchContent(view: EditorView) {
 	const records: { type: string; target: string; attr: string | null }[] = [];
@@ -135,7 +135,7 @@ function watchContent(view: EditorView) {
 }
 
 /**
- * QE4a: scroll across several rung boundaries and watch three things - what was
+ * Scroll check: scroll across several rung boundaries and watch three things - what was
  * written inside `contentDOM` (must be nothing), whether the camera stayed
  * continuous, and whether a rung switch caused a full redraw.
  *
@@ -149,10 +149,10 @@ async function runScroll(opts: boolean | { plant?: boolean; surface?: number; no
 	const noAnchor = typeof opts === 'boolean' ? false : !!opts.noAnchor;
 	const rig = await mount(`scroll-${plantStyleWrites}-${surface}-${noAnchor}`);
 	// The anchor-absent arm uses the SHIPPED refusal path, not a test seam:
-	// `refuseDocumentAnchor` is what the F-2 gate calls, and it is the only
+	// `refuseDocumentAnchor` is what the parity gate calls, and it is the only
 	// thing that keeps the anchor down for the view's lifetime. Removing the
 	// wrapper by hand would not - the next `updateExtent` re-mounts it, which is
-	// exactly how an earlier control in this lane was silently invalidated.
+	// exactly how an earlier control here was silently invalidated.
 	if (noAnchor) refuseDocumentAnchor(rig.view, { implied: 0, shipped: 0, bar: 0, reason: "cost-control" });
 	const { view, overlay } = rig;
 	await growSurface(rig, surface);
@@ -163,7 +163,7 @@ async function runScroll(opts: boolean | { plant?: boolean; surface?: number; no
 	const proto = Object.getPrototypeOf(overlay);
 	const realRepaint = proto.repaint, realSyncBand = proto.syncBand, realSync = proto.syncCamera;
 	let repaints = 0, bandMoves = 0;
-	// TASK 2 (ruling 2F): what the ladder costs per frame. `syncCamera` is timed
+	// TASK 2: what the ladder costs per frame. `syncCamera` is timed
 	// end to end and every forced layout is counted, because 34 zero-size
 	// clipped absolutely positioned boxes SHOULD cost nothing - so a difference
 	// here is a latency finding that blocks landing, not a footnote.
@@ -261,7 +261,7 @@ async function runScroll(opts: boolean | { plant?: boolean; surface?: number; no
 }
 
 /**
- * QE4b: the reopen path. The scroll is restored far down before CodeMirror's
+ * Install check: the reopen path. The scroll is restored far down before CodeMirror's
  * first measure; the widget must not let anything move it.
  */
 async function runInstall(mode: "shipped" | "control" | "plant" | "plantBig" = "shipped") {
@@ -292,7 +292,7 @@ async function runInstall(mode: "shipped" | "control" | "plant" | "plantBig" = "
 }
 
 /**
- * QE4c: growing the extent appends rungs. The surface must not move, and the
+ * Growth check: growing the extent appends rungs. The surface must not move, and the
  * ladder must add no scroll range of its own - which is what `overflow: hidden`
  * on the wrapper is for. The plant drops that rule.
  */
@@ -338,12 +338,12 @@ async function runExtent(plant?: "noOverflowHidden") {
 }
 
 /**
- * QE2 (ruling 2A, as amended): the document top E IMPLIES against `anchorTop`,
+ * Parity check: the document top the ladder IMPLIES against `anchorTop`,
  * the formula it replaces.
  *
  * THE BAR IS NOT A FLAT 2.5e-5 AND CANNOT BE. `anchorTop` reads the
  * `.cm-content` rect, which is the noisy operand E exists to remove, so at any
- * distance the two must differ by that rect's own rounding. Ruling 2A sets the
+ * distance the two must differ by that rect's own rounding. The design sets the
  * bar at `2.5e-5 + 2 x ulp32(|contentDOM rect top|) + ulp32(T) x cssScale`, and
  * this computes it from the numbers the arm actually read rather than quoting
  * the ruling's worked example.
@@ -395,7 +395,7 @@ async function runParity(scrollTop: number) {
 }
 
 /**
- * P-6 / E0-2: reflow above `contentDOM`'s parent must move the anchor and the
+ * Reflow check: reflow above `contentDOM`'s parent must move the anchor and the
  * content TOGETHER, so the camera sees it and adopts it.
  *
  * This is the plant that caught the first construction of all: a probe anchored
@@ -485,17 +485,17 @@ async function runTeardown(plant?: "staleBeforeRemount" | "staleAfterRemount") {
 (window as unknown as Record<string, unknown>).documentAnchor = { runScroll, runInstall, runExtent, runParity, runReflow, runTeardown, inlineInk };
 
 /**
- * E2 (ruling 2F): the three arms that make the E1 fixes measured rather than
+ * The three arms that make the placement fixes measured rather than
  * argued.
  *
- * E2-1  something ABOVE `.cm-content` in the flow, so the static position and
+ * Block above: something ABOVE `.cm-content` in the flow, so the static position and
  *       the scroller's own origin no longer coincide. Parity must be exactly 0
  *       with auto offsets and NONZERO with `top: 0` - the half the reflow plant
  *       could not reach, because in a fixture with nothing above the content
  *       those two positions are the same point.
- * E2-2a a flex ROW with `align-items: center`. F-1's `align-self: flex-start`
+ * Centred container: a flex ROW with `align-items: center`. The wrapper's `align-self: flex-start`
  *       pins the cross axis, parity is 0, and the ladder is USED.
- * E2-2b something F-1 CANNOT pin - `align-self: center !important` on the
+ * Unpinnable: something the wrapper's align-self CANNOT pin - `align-self: center !important` on the
  *       wrapper itself. The gate must refuse: no ladder, the camera back on
  *       `anchorTop`, a refusal recorded, and the document top the camera used
  *       exactly equal to the shipped formula.
@@ -503,7 +503,7 @@ async function runTeardown(plant?: "staleBeforeRemount" | "staleAfterRemount") {
 async function runE2(mode: "above" | "aboveTop0" | "center" | "unpinnable") {
 	if (mode === "unpinnable") {
 		const style = document.createElement("style");
-		// !important so F-1's inline `align-self` cannot win: this is the case
+		// !important so the wrapper's inline `align-self` cannot win: this is the case
 		// the gate exists for, not one the style fix can absorb.
 		style.textContent = ".handwriting-document-anchor{align-self:center !important}";
 		document.head.appendChild(style);
@@ -530,9 +530,9 @@ async function runE2(mode: "above" | "aboveTop0" | "center" | "unpinnable") {
 	view.scrollDOM.scrollTop = 20000;
 	await settle(8);
 	const held0 = documentAnchorLadder(view);
-	// The `top: 0` half of E2-1, applied from the test rather than by a
-	// production switch: it is the same element, moved to the position ruling
-	// 2E A-2 rejected.
+	// The `top: 0` half of the block-above arm, applied from the test rather than by a
+	// production switch: it is the same element, moved to the position the design
+	// rejected.
 	if (mode === "aboveTop0" && held0) { held0.wrapper.style.top = "0px"; await settle(6); }
 	view.scrollDOM.scrollTop += 137;
 	view.scrollDOM.dispatchEvent(new Event("scroll", { bubbles: true }));

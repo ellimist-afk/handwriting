@@ -1,7 +1,10 @@
 /**
  * A computed-style check that `.handwriting-note-viewport-controls.is-inking`
- * resolves to `opacity: 0` and `visibility: hidden` under the real
- * stylesheet, and that "hide" resolves to `display: none` with no button
+ * resolves to `opacity: 0` and `pointer-events: none` under the real
+ * stylesheet (no visibility change: a visibility transition cannot run on the
+ * compositor and repainted the whole window at every pen edge, lane LAG), that
+ * the controls stay unhittable through the 160ms return delay after a lift,
+ * and that "hide" resolves to `display: none` with no button
  * able to take focus. The unit suite (`MobileTools.test.ts`) has no real CSS
  * engine (`FakeEl` is a class-list stand-in), so this is the only place
  * either resolves.
@@ -49,13 +52,42 @@ describe("note zoom controls, computed style", () => {
 	});
 
 	// The actual computed values, not just the class name.
-	it("auto + inking resolves to opacity 0, visibility hidden", async () => {
+	it("auto + inking resolves to opacity 0 and pointer-events none, visibility untouched", async () => {
 		const at_rest = await h.probe({ mode: "auto", inking: false });
 		expect(at_rest.opacity).toBe("1");
 		expect(at_rest.visibility).toBe("visible");
 		const inking = await h.probe({ mode: "auto", inking: true });
 		expect(inking.opacity).toBe("0");
-		expect(inking.visibility).toBe("hidden");
+		expect(inking.visibility).toBe("visible");
+		const pe = await h.page.evaluate(() =>
+			getComputedStyle(document.querySelector(".handwriting-note-viewport-controls")!).pointerEvents);
+		expect(pe).toBe("none");
+	});
+
+	// Shipped hit-test semantics: while the controls are invisible they are not
+	// there for the pen. Visibility used to carry that through the 160ms return
+	// delay; is-stepping-back carries it now. A pen landing there inside the
+	// delay reaches the page, and after the delay it reaches the button.
+	it("a lift leaves the controls unhittable for 160ms, then hittable", async () => {
+		await h.probe({ mode: "auto", inking: true });
+		const during = await h.page.evaluate(() => {
+			const pane = (window as unknown as { __pane: HTMLElement }).__pane;
+			window.__hw.noteZoomVisibilityProbe(pane, { mode: "auto", inking: false });
+			const bar = document.querySelector<HTMLElement>(".handwriting-note-viewport-controls")!;
+			const r = bar.getBoundingClientRect();
+			const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+			return { w: r.width, h: r.height, inBar: !!hit && bar.contains(hit), t: performance.now() };
+		});
+		expect(during.w, "controls laid out").toBeGreaterThan(0);
+		expect(during.inBar, "inside the return delay the pen misses the controls").toBe(false);
+		const after = await h.page.evaluate(async (t0) => {
+			await new Promise((res) => setTimeout(res, Math.max(0, t0 + 250 - performance.now())));
+			const bar = document.querySelector<HTMLElement>(".handwriting-note-viewport-controls")!;
+			const r = bar.getBoundingClientRect();
+			const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+			return !!hit && bar.contains(hit);
+		}, during.t);
+		expect(after, "after the delay the pen reaches the controls").toBe(true);
 	});
 
 	it("show never steps aside, even while inking", async () => {

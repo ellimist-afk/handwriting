@@ -79,8 +79,9 @@ export const SNAP_CHIP_W = 56;
 export const SNAP_CHIP_H = 26;
 
 /**
- * What a listener is handed. Only `target` and `stopPropagation` are ever
- * touched, and both are optional so the fake events the tests fire are as
+ * What a listener is handed. Only `target`, `stopPropagation` and (on the
+ * chip's own mousedown) `preventDefault` are ever touched, and all are
+ * optional so the fake events the tests fire are as
  * valid an input as a real `PointerEvent` - which satisfies this shape
  * exactly, which is what makes the real DOM assignable to the interfaces
  * below without a cast anywhere.
@@ -88,6 +89,7 @@ export const SNAP_CHIP_H = 26;
 export interface ChipEvent {
 	target?: unknown;
 	stopPropagation?(): void;
+	preventDefault?(): void;
 }
 
 /** The one element call the chip's parent has to answer. */
@@ -133,15 +135,14 @@ export interface SnapChipDeps {
 	/** The document. Any key withdraws it. */
 	keyRoot: ChipTarget;
 	/**
-	 * `parent`'s OWN box, in css px: `InkOverlay`'s `cssWidth`/`cssHeight`, off
-	 * `container.offsetWidth`/`offsetHeight`. That box is the ink band
-	 * (ScrollBand.ts) - which is deliberately TALLER than what the reader can
-	 * see, by its scroll margin - so this is not the visible area and clamping
-	 * to it does not keep the chip on screen. It is the frame the chip's own
-	 * coordinates are in, which is the only thing the clamp needs: the chip
-	 * lands inside the element it is planted in rather than outside it.
+	 * The area the chip may sit in, in `parent`'s own css px. For the note
+	 * overlay that is the part of its ink band (ScrollBand.ts) the scroller
+	 * shows: the band is deliberately larger than the visible pane, by its
+	 * scroll margin, and a chip clamped to the band could land below or right
+	 * of the pane, where scrolling to it withdraws it. Without `left`/`top`
+	 * the area starts at the parent's corner.
 	 */
-	pane: { width: number; height: number };
+	pane: { left?: number; top?: number; width: number; height: number };
 	clock: ChipClock;
 }
 
@@ -152,15 +153,22 @@ export interface SnapChipDeps {
  * never leaves the pane" are two claims a test should be able to make about
  * arithmetic rather than about a rendered box. A pane too small to hold the
  * chip clamps to its top-left rather than going negative.
+ *
+ * `pane.left` and `pane.top` place the visible area inside the parent when it
+ * does not start at the parent's corner: the note overlay's parent is its
+ * scroll band, which reaches up to a margin past the visible pane on every
+ * side, and a chip clamped only to the band could sit where the pane cannot
+ * show it.
  */
 export function snapChipOrigin(
 	x: number,
 	y: number,
-	pane: { width: number; height: number }
+	pane: { left?: number; top?: number; width: number; height: number }
 ): { left: number; top: number } {
+	const left0 = pane.left ?? 0, top0 = pane.top ?? 0;
 	return {
-		left: Math.max(0, Math.min(x + SNAP_CHIP_OFFSET, pane.width - SNAP_CHIP_W)),
-		top: Math.max(0, Math.min(y + SNAP_CHIP_OFFSET, pane.height - SNAP_CHIP_H)),
+		left: Math.max(left0, Math.min(x + SNAP_CHIP_OFFSET, left0 + pane.width - SNAP_CHIP_W)),
+		top: Math.max(top0, Math.min(y + SNAP_CHIP_OFFSET, top0 + pane.height - SNAP_CHIP_H)),
 	};
 }
 
@@ -213,6 +221,12 @@ export class SnapChip {
 		this.el = el;
 		this.clock = deps.clock;
 
+		// A mouse press on a focusable element focuses it by default, and the
+		// chip is focusable (tabindex -1). Taking the chip down then drops focus
+		// on the body, and Ctrl/Cmd+Z no longer reaches the note (audit 171).
+		// Cancelling the mousedown keeps focus where it was; the click that
+		// takes the snap still fires, since it is not mousedown's default.
+		el.addEventListener("mousedown", (ev) => ev.preventDefault?.());
 		el.addEventListener("click", () => {
 			// `this.el === el` is the once-only latch: a click arriving on a
 			// chip this object has already taken down is a click on a stale

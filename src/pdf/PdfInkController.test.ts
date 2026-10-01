@@ -1,3 +1,20 @@
+
+/** Extend the existing cursor fixture with its owned clipping parent. */
+function cursorChildren(createCursor: () => any): (options?: { cls?: string }) => any {
+	return (options) => {
+		const cursor = createCursor();
+		if (options?.cls !== "handwriting-pdf-cursor-viewport") return cursor;
+		const viewport = {
+			parentElement: cursor.parentElement,
+			classList: { contains: (cls: string) => cls === "handwriting-pdf-cursor-viewport" },
+			setCssStyles() {},
+			createDiv: () => cursor,
+			remove() { cursor.remove(); viewport.parentElement = null; },
+		};
+		cursor.parentElement = viewport;
+		return viewport;
+	};
+}
 /**
  * The PDF lasso, driven through the controller's own pen callbacks.
  *
@@ -39,7 +56,7 @@ import { calibrationStrokes } from "./PdfCalibration";
 import { clearInkClipboard, clipboardSize } from "../inline/InkClipboard";
 import { setDiagnosticsEnabled } from "../diag/DiagSwitch";
 import { captureInlinePenTrace, clearInlinePenTrace } from "../inline/InlinePenRouter";
-import { setMouseInk } from "../inline/MouseInk";
+import { clearToolPicked, setMouseInk } from "../inline/MouseInk";
 import { predictionEinkOn } from "../inline/StrokePrediction";
 // The one element fake the router's own suites drive it with; see
 // `test/routerHarness.ts`. Used by the pointerleave suite at the bottom of
@@ -67,6 +84,7 @@ vi.mock("./PdfViewerProbe", () => ({
 	// documented fallback - a page the viewer has not rendered snips as paper
 	// white with the ink on it - and it is what this file's fakes are.
 	viewerCanvasOf: () => null,
+	wholePageCanvasOf: () => null,
 }));
 
 import {
@@ -76,6 +94,8 @@ import {
 	pointerScale,
 } from "./PdfInkController";
 import { applyOp } from "./PdfInkHistory";
+import { PdfInkStore } from "./PdfInkStore";
+import { emptyPage, ParseResult } from "../model/PageData";
 
 /** css px per point, as `--scale-factor` reports it. */
 const SCALE = 2;
@@ -105,6 +125,7 @@ describe("PdfInkController lasso", () => {
 	let s1: InkStroke;
 	let ops: InkOp[];
 	let controller: PdfInkController;
+	let flushFrame: () => void;
 	let pen: {
 		penDown(s: PenSample): void;
 		penRaw(s: PenSample[]): void;
@@ -137,11 +158,15 @@ describe("PdfInkController lasso", () => {
 				},
 			],
 		};
+		const frames = new Map<number, () => void>();
+		let frameId = 0;
+		flushFrame = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach((fn) => fn()); };
 		const win = {
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: (id: number) => frames.delete(id),
+			requestAnimationFrame: (fn: () => void) => { frames.set(++frameId, fn); return frameId; },
 		};
 		controller = new PdfInkController(
 			{} as HTMLElement,
@@ -281,6 +306,29 @@ describe("PdfInkController lasso", () => {
 		// at page x=100 sits at 110.
 		expect(strokes[0]!.points.map((p) => p.x)).toEqual([110, 115, 120]);
 		expect(strokes[0]!.bbox.x).toBeCloseTo(s1.bbox.x + 10, 6);
+	});
+
+	it("does not spend history or clear the selection during a live drag", () => {
+		setTipMode("lasso");
+		lasso([[150, 150], [250, 150], [250, 250], [150, 250]]);
+		pen.penDown(sample(205, 205));
+		pen.penRaw([sample(225, 205)]);
+		pen.penUp(); // seed one completed move in history
+		pen.penDown(sample(225, 205));
+		pen.penRaw([sample(245, 205)]);
+		flushFrame(); // Observe the live move at its display frame.
+		const xDuring = strokes[0]!.points[0]!.x;
+		const opsBefore = ops.length;
+		const step = controller as unknown as { historyStep(redo: boolean): boolean };
+		expect(step.historyStep(false)).toBe(false);
+		expect(step.historyStep(true)).toBe(false);
+		expect(ops).toHaveLength(opsBefore);
+		expect(strokes[0]!.points[0]!.x).toBe(xDuring);
+		pen.penUp();
+		expect(step.historyStep(false)).toBe(true);
+		expect(strokes[0]!.points[0]!.x).toBeCloseTo(xDuring - 10);
+		expect(step.historyStep(true)).toBe(true);
+		expect(strokes[0]!.points[0]!.x).toBeCloseTo(xDuring);
 	});
 
 	// A BARE tip inside the selection drags it - onenote's grammar (alan,
@@ -475,7 +523,7 @@ describe("PdfInkController, the rest of what went wrong", () => {
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 		};
 		controller = new PdfInkController(
 			{} as HTMLElement,
@@ -556,12 +604,14 @@ describe("PdfInkController, the rest of what went wrong", () => {
 		);
 	});
 
-	// Op indices are positions in the WHOLE document, because that is the
-	// list the store applies every op against (applyOp over pdfStore.strokes).
-	// The controller only ever saw a page-filtered list, so its indices were
-	// page-local and right only on page one: undo an erase on page five and
-	// the ink came back at whatever depth those numbers happened to name.
-	it("indexes an erase against the document, not the page it happened on", () => {
+	// The undo entry's indices are positions in the WHOLE document, because
+	// that is the list undo applies against (applyOp over pdfStore.strokes).
+	// Page-local indices there were right only on page one: undo an erase on
+	// page five and the ink came back at whatever depth those numbers named.
+	// The per-sample live op is the other way round on purpose: it is a
+	// "live-page" op, applied to its page alone (PdfInkStore.applyLivePage),
+	// so its indices are the page's.
+	it("indexes an erase's undo entry against the document, and its live op against the page", () => {
 		// Two strokes on page 1 ahead of the target, so a page-local index (0)
 		// and a document index (2) cannot be mistaken for one another.
 		strokes = [inkAt("s1"), inkAt("s2"), { ...inkAt("s3"), page: 2 }];
@@ -575,7 +625,16 @@ describe("PdfInkController, the rest of what went wrong", () => {
 			removedAt: number[];
 		};
 		expect(replace.removed.map((st) => st.id)).toEqual(["s3"]);
-		expect(replace.removedAt).toEqual([2]);
+		expect(replace.removedAt, "the live op names the page's position").toEqual([0]);
+		expect(modes[ops.indexOf(replace as InkOp)]).toBe("live-page");
+
+		// Undo: the entry built at pen-up puts s3 back at its DOCUMENT position.
+		ops.length = 0;
+		expect((controller as unknown as { historyStep(redo: boolean): boolean }).historyStep(false)).toBe(true);
+		const undo = ops.find((op) => op.type === "replace") as { inserted: InkStroke[]; insertedAt: number[] };
+		expect(undo.inserted.map((st) => st.id)).toEqual(["s3"]);
+		expect(undo.insertedAt, "the undo entry names the document's position").toEqual([2]);
+		expect(strokes.map((st) => st.id)).toContain("s3");
 	});
 
 	it("indexes a selection delete against the document too", () => {
@@ -610,7 +669,7 @@ describe("PdfInkController, the rest of what went wrong", () => {
 
 		const replaces = modes.filter((m, i) => ops[i]!.type === "replace");
 		expect(replaces.length).toBeGreaterThan(0);
-		expect(replaces.every((m) => m === "live")).toBe(true);
+		expect(replaces.every((m) => m === "live-page")).toBe(true);
 		expect(persists).toEqual(["doc-1"]);
 	});
 
@@ -652,6 +711,24 @@ describe("PdfInkController, the rest of what went wrong", () => {
 		const ring = controller as unknown as { history: { depth: { done: number } } };
 		expect(ops.filter((op) => op.type === "replace").length).toBeGreaterThan(0);
 		expect(ring.history.depth.done).toBe(1);
+	});
+
+	it("does not undo a prior action while a live erase is unfinished", () => {
+		pen.penDown(sample(400, 400));
+		pen.penRaw([sample(430, 430)]);
+		pen.penUp(); // a completed add, so undo has something to consume
+		const added = strokes.find((s) => s.id !== "s1")!;
+		setTipMode("eraser");
+		pen.penDown(sample(200, 200));
+		const opsBefore = ops.length;
+		const step = controller as unknown as { historyStep(redo: boolean): boolean };
+		expect(step.historyStep(false)).toBe(false);
+		expect(step.historyStep(true)).toBe(false);
+		expect(ops).toHaveLength(opsBefore);
+		expect(strokes.some((s) => s.id === added.id)).toBe(true);
+		pen.penUp();
+		expect(step.historyStep(false)).toBe(true);
+		expect(strokes.some((s) => s.id === "s1")).toBe(true);
 	});
 
 	/**
@@ -744,7 +821,7 @@ describe("the contact draw is floored and the moving draw is not", () => {
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 		};
 		let strokes: InkStroke[] = [];
 		const controller = new PdfInkController(
@@ -981,7 +1058,7 @@ describe("a stroke weighs the same on the page at any zoom", () => {
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 		};
 		const controller = new PdfInkController(
 			{} as HTMLElement,
@@ -1052,7 +1129,7 @@ describe("pan and space on a pdf", () => {
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 		};
 		const controller = new PdfInkController(
 			{} as HTMLElement,
@@ -1242,7 +1319,7 @@ describe("PDF empty-page notice fires once per page, not once per contact", () =
 				{ pageNumber: 4, leftPx: 0, topPx: 800, widthPx: 600, heightPx: 800, hasCanvas: true },
 			],
 		};
-		const win = { devicePixelRatio: 1, clearTimeout: () => {}, setTimeout: () => 0, requestAnimationFrame: () => 0 };
+		const win = { devicePixelRatio: 1, clearTimeout: () => {}, setTimeout: () => 0, cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0 };
 		controller = new PdfInkController(
 			{} as HTMLElement,
 			win as unknown as Window,
@@ -1293,7 +1370,7 @@ describe("PDF empty-page notice fires once per page, not once per contact", () =
 		let strokesCalls = 0;
 		const spiedController = new PdfInkController(
 			{} as HTMLElement,
-			{ devicePixelRatio: 1, clearTimeout: () => {}, setTimeout: () => 0, requestAnimationFrame: () => 0 } as unknown as Window,
+			{ devicePixelRatio: 1, clearTimeout: () => {}, setTimeout: () => 0, cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0 } as unknown as Window,
 			(page) => { strokesCalls++; return strokes.filter((st) => (st.page ?? 1) === page); },
 			() => documentId,
 			() => strokes,
@@ -1381,6 +1458,140 @@ describe("the scale a pointer sample is converted with", () => {
 	});
 });
 
+describe("PDF destructive gestures while the sidecar is unknown", () => {
+	function rig(read: () => Promise<ParseResult>) {
+		resetTipModeForTest();
+		const notices: string[] = [];
+		const saved: string[][] = [];
+		const store = new PdfInkStore();
+		store.attachHost({
+			load: read,
+			schedule: (_id, data) => void saved.push(data.strokes.map((s) => s.id)),
+			notice: (message) => notices.push(message),
+		});
+		const scroller = { scrollLeft: 0, scrollTop: 0, classList: { add: () => {}, remove: () => {} }, querySelector: () => null };
+		probe.current = {
+			scroller, scaleFactor: SCALE, scaleSource: "test",
+			pages: [{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true }],
+		};
+		const win = { devicePixelRatio: 1, clearTimeout: () => {}, setTimeout: () => 0, cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0 };
+		const controller = new (PdfInkController as unknown as new (...args: any[]) => PdfInkController)(
+			{} as HTMLElement, win as unknown as Window,
+			(page: number) => store.strokesOnPage("doc-1", page), () => "doc-1", () => store.strokes("doc-1"),
+			(op: InkOp, mode?: string) => {
+				if (mode === "live-page") store.applyLivePage("doc-1", op);
+				else store.replaceAll("doc-1", applyOp(store.strokes("doc-1"), op));
+			},
+			() => {}, (message: string) => notices.push(message), (id: string) => store.save(id),
+			() => false, () => "darken", () => store.inkReady("doc-1")
+		);
+		(controller as unknown as { boundScroller: unknown }).boundScroller = scroller;
+		const pen = controller as unknown as { penDown(s: PenSample): void; penRaw(s: PenSample[]): void; penUp(): void };
+		return { store, controller, pen, notices, saved };
+	}
+
+	it("refuses an erase before the first read and makes the later erase undoable", async () => {
+		let finish!: (result: ParseResult) => void;
+		const pending = new Promise<ParseResult>((resolve) => { finish = resolve; });
+		const { store, controller, pen, notices, saved } = rig(() => pending);
+		const loading = store.ensureLoaded("doc-1");
+		setTipMode("eraser");
+		pen.penDown(sample(200, 200));
+		pen.penDown(sample(200, 200));
+		expect(controller.idle).toBe(true);
+		expect(notices).not.toContain("Handwriting: no ink on the page to erase");
+		expect(notices.filter((message) => message.includes("not ready"))).toHaveLength(1);
+		finish({ data: { ...emptyPage("doc-1"), surface: "pdf", strokes: [inkAt("saved"), { ...inkAt("other-page"), page: 2 }] }, recovered: false });
+		await loading;
+		pen.penRaw([sample(210, 210)]);
+		pen.penUp();
+		expect(store.strokes("doc-1").map((s) => s.id)).toEqual(["saved", "other-page"]);
+		expect(saved).toEqual([]);
+		pen.penDown(sample(200, 200));
+		pen.penUp();
+		expect(store.strokes("doc-1").map((s) => s.id)).toEqual(["other-page"]);
+		const step = controller as unknown as { historyStep(redo: boolean): boolean };
+		expect(step.historyStep(false)).toBe(true);
+		expect(store.strokes("doc-1").map((s) => s.id)).toEqual(["saved", "other-page"]);
+		expect(step.historyStep(true)).toBe(true);
+		expect(store.strokes("doc-1").map((s) => s.id)).toEqual(["other-page"]);
+	});
+
+	it("keeps a damaged or pending lasso silent and does not spend the later empty-page notice", async () => {
+		const bad: ParseResult = { data: emptyPage("doc-1"), recovered: true, damaged: true };
+		const answers = [bad, { data: { ...emptyPage("doc-1"), surface: "pdf" as const }, recovered: false }];
+		const { store, pen, notices } = rig(async () => answers.shift()!);
+		setTipMode("lasso");
+		const loading = store.ensureLoaded("doc-1");
+		pen.penDown(sample(200, 200));
+		pen.penUp();
+		await loading;
+		pen.penDown(sample(200, 200));
+		pen.penUp();
+		expect(notices).not.toContain("Handwriting: no ink on the page to select");
+		await store.ensureLoaded("doc-1");
+		pen.penDown(sample(200, 200));
+		pen.penUp();
+		expect(notices).toContain("Handwriting: no ink on the page to select");
+	});
+});
+
+describe("PDF page rotation changes while a pane stays open", () => {
+	function rig(widthPx: number, heightPx: number) {
+		resetTipModeForTest();
+		const notices: string[] = [];
+		const ops: InkOp[] = [];
+		const scroller = { scrollLeft: 0, scrollTop: 0, classList: { add: () => {}, remove: () => {} }, querySelector: () => null };
+		probe.current = {
+			scroller, scaleFactor: 1, scaleSource: "test",
+			pages: [{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx, heightPx, hasCanvas: true }],
+		};
+		const win = { devicePixelRatio: 1, clearTimeout: () => {}, setTimeout: () => 0, cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0 };
+		const controller = new PdfInkController(
+			{} as HTMLElement, win as unknown as Window, () => [], () => "doc-1", () => [],
+			(op) => ops.push(op), () => {}, (message) => notices.push(message)
+		);
+		(controller as unknown as { boundScroller: unknown }).boundScroller = scroller;
+		const measure = (page: number, w: number, h: number, scale: number) =>
+			(controller as unknown as { pageWidthPt(p: number, w: number, h: number, s: number): number })
+				.pageWidthPt(page, w, h, scale);
+		const pen = controller as unknown as { penDown(s: PenSample): void; penRaw(s: PenSample[]): void; penUp(): void };
+		return { controller, measure, pen, notices, ops };
+	}
+
+	it("does not call a near-square page rotated when zoom rounds its sides to a tie", () => {
+		const { controller, measure, pen, ops } = rig(301, 300);
+		measure(1, 301, 300, 1);
+		measure(1, 150, 150, 0.5);
+		measure(1, 150, 151, 0.5);
+		expect(controller.isRotated(1)).toBe(false);
+		pen.penDown(sample(100, 100));
+		pen.penRaw([sample(120, 120)]);
+		pen.penUp();
+		expect(ops.some((op) => op.type === "add")).toBe(true);
+	});
+
+	it("refuses a truly rotated page with a notice, then admits it after restoration", () => {
+		const { controller, measure, pen, notices, ops } = rig(300, 400);
+		measure(1, 300, 400, 1);
+		measure(2, 500, 700, 1);
+		measure(1, 400, 300, 1);
+		expect(controller.isRotated(1)).toBe(true);
+		expect(controller.isRotated(2)).toBe(false);
+		pen.penDown(sample(100, 100));
+		pen.penDown(sample(100, 100));
+		expect(ops).toEqual([]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("rotated");
+		measure(1, 300, 400, 1);
+		expect(controller.isRotated(1)).toBe(false);
+		pen.penDown(sample(100, 100));
+		pen.penRaw([sample(120, 120)]);
+		pen.penUp();
+		expect(ops.some((op) => op.type === "add")).toBe(true);
+	});
+});
+
 /**
  * Audit doc §5f: the note surface's hover dot obeys the "Pen reticle"
  * setting (and Boox mode, which turns it off for e-ink); this surface
@@ -1423,7 +1634,7 @@ describe("PdfInkController pen reticle", () => {
 			classList: { add: () => {}, remove: () => {} },
 			querySelector: () => null,
 			setCssStyles: () => {},
-			createDiv: () => {
+			createDiv: cursorChildren(() => {
 				cursorEl = {
 					setAttribute: () => {},
 					remove: () => {},
@@ -1434,7 +1645,7 @@ describe("PdfInkController pen reticle", () => {
 					parentElement: scroller,
 				};
 				return cursorEl;
-			},
+			}),
 		};
 		probe.current = {
 			scroller,
@@ -1450,7 +1661,7 @@ describe("PdfInkController pen reticle", () => {
 			devicePixelRatio: 1,
 			clearTimeout: clearTimeoutSpy,
 			setTimeout: setTimeoutSpy,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getComputedStyle: () => ({ position: "relative" }),
 		};
 		controller = new PdfInkController(
@@ -1524,7 +1735,7 @@ describe("PdfInkController pen reticle - mode-specific looks", () => {
 			classList: { add: () => {}, remove: () => {} },
 			querySelector: () => null,
 			setCssStyles: () => {},
-			createDiv: () => ({
+			createDiv: cursorChildren(() => ({
 				setAttribute: () => {},
 				remove: () => {},
 				classList: {
@@ -1540,7 +1751,7 @@ describe("PdfInkController pen reticle - mode-specific looks", () => {
 					Object.assign(cursorStyle, styles);
 				},
 				parentElement: scroller,
-			}),
+			})),
 		};
 		probe.current = {
 			scroller,
@@ -1554,7 +1765,7 @@ describe("PdfInkController pen reticle - mode-specific looks", () => {
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 1,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getComputedStyle: () => ({ position: "relative" }),
 		};
 		controller = new PdfInkController(
@@ -1686,7 +1897,7 @@ describe("PdfInkController pen reticle - stays alive through lasso and space, an
 			},
 			querySelector: () => null,
 			setCssStyles: () => {},
-			createDiv: () => ({
+			createDiv: cursorChildren(() => ({
 				setAttribute: () => {},
 				remove: () => {},
 				classList: { add: () => {}, remove: () => {}, toggle: () => {} },
@@ -1694,7 +1905,7 @@ describe("PdfInkController pen reticle - stays alive through lasso and space, an
 					Object.assign(cursorStyle, styles);
 				},
 				parentElement: scroller,
-			}),
+			})),
 		};
 		probe.current = {
 			scroller,
@@ -1710,7 +1921,7 @@ describe("PdfInkController pen reticle - stays alive through lasso and space, an
 			devicePixelRatio: 1,
 			clearTimeout: clearTimeoutSpy,
 			setTimeout: setTimeoutSpy,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getComputedStyle: () => ({ position: "relative" }),
 		};
 		controller = new PdfInkController(
@@ -1906,7 +2117,7 @@ describe("PdfInkController strip dispatch", () => {
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 		};
 		controller = new PdfInkController(
 			{} as HTMLElement,
@@ -2105,7 +2316,7 @@ describe("PdfInkController deleteSelectionCommand (what the strip, palette and a
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 		};
 		controller = new PdfInkController(
 			{} as HTMLElement,
@@ -2272,7 +2483,7 @@ describe("PdfInkController: the button's list and the delete's list resolve alik
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 		};
 		controller = new PdfInkController(
 			{} as HTMLElement,
@@ -2402,7 +2613,7 @@ describe("PdfInkController with a synthetic stroke source", () => {
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 		};
 		controller = new PdfInkController(
 			{} as HTMLElement,
@@ -2550,6 +2761,8 @@ describe("PdfInkController keyboard: Escape hands the tip back, Ctrl/Cmd+C and +
 		notices = [];
 		execs = [];
 		textSel = null;
+		setMouseInk(false);
+		clearToolPicked();
 		const scroller = {
 			scrollLeft: 0,
 			scrollTop: 0,
@@ -2572,7 +2785,7 @@ describe("PdfInkController keyboard: Escape hands the tip back, Ctrl/Cmd+C and +
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 0,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getSelection: () => textSel,
 		};
 		controller = new PdfInkController(
@@ -2666,7 +2879,7 @@ describe("PdfInkController keyboard: Escape hands the tip back, Ctrl/Cmd+C and +
 		expect(tipMode()).toBe("nib");
 	});
 
-	it("Escape with neither a selection nor a held mode is left alone", () => {
+	it("Escape with no selection, held mode or mouse tool is left alone", () => {
 		expect(press("Escape")).toBe(false);
 		expect(tipMode()).toBe("nib");
 	});
@@ -2782,13 +2995,13 @@ describe("PdfInkController pdf trace (pdf-pendown / pdf-raw / pdf-penup)", () =>
 			classList: { add: () => {}, remove: () => {} },
 			querySelector: () => null,
 			setCssStyles: () => {},
-			createDiv: () => ({
+			createDiv: cursorChildren(() => ({
 				setAttribute: () => {},
 				remove: () => {},
 				classList: { add: () => {}, remove: () => {}, toggle: () => {} },
 				setCssStyles: () => {},
 				parentElement: scroller,
-			}),
+			})),
 		};
 		probe.current = {
 			scroller,
@@ -2802,7 +3015,7 @@ describe("PdfInkController pdf trace (pdf-pendown / pdf-raw / pdf-penup)", () =>
 			devicePixelRatio: 1,
 			clearTimeout: () => {},
 			setTimeout: () => 1,
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getComputedStyle: () => ({ position: "relative" }),
 		};
 		controller = new PdfInkController(
@@ -2960,7 +3173,7 @@ describe("PdfInkController reticle - a mouse mid-gesture is exempt from the pen'
 			},
 			querySelector: () => null,
 			setCssStyles: () => {},
-			createDiv: () => ({
+			createDiv: cursorChildren(() => ({
 				setAttribute: () => {},
 				remove: () => {},
 				classList: {
@@ -2976,7 +3189,7 @@ describe("PdfInkController reticle - a mouse mid-gesture is exempt from the pen'
 					Object.assign(cursorStyle, styles);
 				},
 				parentElement: scroller,
-			}),
+			})),
 		};
 		probe.current = {
 			scroller,
@@ -2992,7 +3205,7 @@ describe("PdfInkController reticle - a mouse mid-gesture is exempt from the pen'
 			// tests need the watchdog to fire or not fire, not to be tallied.
 			setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
 			clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getComputedStyle: () => ({ position: "relative" }),
 		};
 		controller = new PdfInkController(
@@ -3151,7 +3364,7 @@ describe("PdfInkController reticle - an armed mouse leaving the pane puts the re
 		cursorStyle = { display: "none" };
 		const el = fakeEl() as ReturnType<typeof fakeEl> & Record<string, unknown>;
 		el.querySelector = () => null;
-		el.createDiv = () => ({
+		el.createDiv = cursorChildren(() => ({
 			setAttribute: () => {},
 			remove: () => {},
 			classList: { add: () => {}, remove: () => {}, toggle: () => {} },
@@ -3159,7 +3372,7 @@ describe("PdfInkController reticle - an armed mouse leaving the pane puts the re
 				Object.assign(cursorStyle, styles);
 			},
 			parentElement: el,
-		});
+		}));
 		scroller = el;
 		probe.current = {
 			scroller: el,
@@ -3177,7 +3390,7 @@ describe("PdfInkController reticle - an armed mouse leaving the pane puts the re
 			navigator: { userAgent: "", platform: "", maxTouchPoints: 0 },
 			setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
 			clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getComputedStyle: () => ({ position: "relative" }),
 		};
 		controller = new PdfInkController(
@@ -3406,7 +3619,7 @@ describe("PdfInkController: a stroke torn down with no pointerup stands the surf
 		cursorStyle = { display: "none" };
 		const el = fakeEl() as ReturnType<typeof fakeEl> & Record<string, unknown>;
 		el.querySelector = () => null;
-		el.createDiv = () => ({
+		el.createDiv = cursorChildren(() => ({
 			setAttribute: () => {},
 			remove: () => {},
 			classList: { add: () => {}, remove: () => {}, toggle: () => {} },
@@ -3414,7 +3627,7 @@ describe("PdfInkController: a stroke torn down with no pointerup stands the surf
 				Object.assign(cursorStyle, styles);
 			},
 			parentElement: el,
-		});
+		}));
 		scroller = el;
 		probe.current = {
 			scroller: el,
@@ -3429,7 +3642,7 @@ describe("PdfInkController: a stroke torn down with no pointerup stands the surf
 			navigator: { userAgent: "", platform: "", maxTouchPoints: 0 },
 			setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
 			clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getComputedStyle: () => ({ position: "relative" }),
 		};
 		ops = [];
@@ -3759,13 +3972,13 @@ describe("PdfInkController: the pen off on a pdf claims nothing", () => {
 		prevented = 0;
 		const el = fakeEl() as ReturnType<typeof fakeEl> & Record<string, unknown>;
 		el.querySelector = () => null;
-		el.createDiv = () => ({
+		el.createDiv = cursorChildren(() => ({
 			setAttribute: () => {},
 			remove: () => {},
 			classList: { add: () => {}, remove: () => {}, toggle: () => {} },
 			setCssStyles: () => {},
 			parentElement: el,
-		});
+		}));
 		scroller = el;
 		probe.current = {
 			scroller: el,
@@ -3780,7 +3993,7 @@ describe("PdfInkController: the pen off on a pdf claims nothing", () => {
 			navigator: { userAgent: "", platform: "", maxTouchPoints: 0 },
 			setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
 			clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
-			requestAnimationFrame: () => 0,
+			cancelAnimationFrame: () => {}, requestAnimationFrame: () => 0,
 			getComputedStyle: () => ({ position: "relative" }),
 		};
 		ops = [];

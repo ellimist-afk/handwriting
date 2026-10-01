@@ -9,6 +9,40 @@ import { fillRibbon } from "./RibbonRenderer";
 import { inkColorFor } from "./InkTheme";
 import { drawSegment } from "./StrokeRenderer";
 import { strokeWidthPolicy, type PressureProfile } from "./StrokeWidth";
+import { canvasLayerBox } from "../inline/ZoomScale";
+
+/**
+ * Side of the wet tile in canvas CSS px. Live strips draw into this small
+ * canvas, sized once outside strokes, instead of the full wet canvas; the
+ * full canvas takes the tile's pixels in one copy when a strip leaves it.
+ */
+const WET_TILE_CSS_PX = 256;
+
+/** A joint backing, CSS-layout and displayed-device grid, in backing px (same rule as the compact tail). */
+function wetTileGrid(backing: number, cssScale: number, dpr: number, hostZoom: boolean): number | null {
+	if (!(backing > 0) || !(cssScale > 0) || !(dpr > 0) ||
+		![backing, cssScale, dpr].every(Number.isFinite)) return null;
+	const k = !hostZoom && cssScale < 1 ? cssScale : 1;
+	const whole = (n: number) => Math.abs(n - Math.round(n)) < 1e-8;
+	for (let grid = 1; grid <= 64; grid++) {
+		if (whole(grid * cssScale * dpr / backing) &&
+			whole(64 * grid / backing) && whole(64 * grid * k / backing)) return grid;
+	}
+	return null;
+}
+
+/** Tile origin on one axis: centred on lo..hi, on the grid, inside the band, covering lo..hi. */
+function wetTileAxis(lo: number, hi: number, tile: number, full: number, grid: number): number {
+	const min = Math.max(0, hi - tile);
+	const max = Math.min(lo, Math.floor((full - tile) / grid) * grid);
+	const centred = Math.floor(((lo + hi) / 2 - tile / 2) / grid) * grid;
+	return Math.min(max, Math.max(min, centred));
+}
+
+type WetTileConfig = {
+	width: number; height: number; backing: number; cssScale: number; hostZoom: boolean;
+	grid: number | null; tileW: number; tileH: number;
+};
 
 /**
  * The wet ink layer: incremental screen-space drawing of the stroke that is
@@ -44,8 +78,178 @@ export class WetInkRenderer {
 	private strokeOwnsAllPixels = false;
 	private incompletePaint = false;
 	private backingScale = 1;
+	private tile: HTMLCanvasElement | null = null;
+	private tileCtx: CanvasRenderingContext2D | null = null;
+	private tileConfig: WetTileConfig | null = null;
+	private tileOn = true;
+	private tileThisStroke = false;
+	private tilePlaced = false;
+	private tileX = 0;
+	private tileY = 0;
+	private tileBlank = true;
+	private tileFallbacks = 0;
+	/**
+	 * Whether the page places a canvas with the CSS translate property; the
+	 * tile moves by translate and an old WebView ignores it. The overlay sets
+	 * its one answer before configureWetTile; false = no tile.
+	 */
+	tileTranslate = true;
 	beforeWrite?: () => void;
 	get provenBlank(): boolean { return this.blank; }
+	/** The tile's origin in backing px of the full canvas; null before its first strip or without a tile. */
+	get tileOrigin(): { x: number; y: number } | null {
+		return this.tileConfig && this.tilePlaced ? { x: this.tileX, y: this.tileY } : null;
+	}
+	/** Monotonic count of strips too large for the tile, drawn straight into the full canvas. */
+	get tileFallbackTotal(): number { return this.tileFallbacks; }
+	get wetTileEnabled(): boolean { return this.tileOn; }
+	/**
+	 * Size the wet tile for a band, once, outside strokes (resize and scale
+	 * changes only). No joint grid: no tile; strips draw into the full canvas.
+	 */
+	configureWetTile(tile: HTMLCanvasElement, cssWidth: number, cssHeight: number, backing: number, cssScale: number, hostZoom: boolean): void {
+		this.flushTile();
+		if (this.tile !== tile || !this.tileCtx) {
+			this.tile = tile;
+			this.tileCtx = tile.getContext("2d", { desynchronized: this.requested });
+		}
+		const dpr = tile.ownerDocument?.defaultView?.devicePixelRatio ?? backing;
+		const grid = wetTileGrid(backing, cssScale, dpr, hostZoom);
+		const fullW = Math.round(cssWidth * backing), fullH = Math.round(cssHeight * backing);
+		let tileW = 0, tileH = 0;
+		if (grid && this.tileTranslate) {
+			const side = Math.ceil(WET_TILE_CSS_PX * backing / grid) * grid;
+			tileW = Math.min(side, Math.floor(fullW / grid) * grid);
+			tileH = Math.min(side, Math.floor(fullH / grid) * grid);
+			if (!(tileW > 0 && tileH > 0 && tileW * tileH < fullW * fullH)) tileW = tileH = 0;
+		}
+		this.tileConfig = { width: cssWidth, height: cssHeight, backing, cssScale, hostZoom, grid, tileW, tileH };
+		// A tile that cannot be used keeps a small bitmap rather than none.
+		const w = tileW || 1, h = tileH || 1;
+		if (tile.width !== w) tile.width = w;
+		if (tile.height !== h) tile.height = h;
+		this.tilePlaced = false;
+		this.tileX = this.tileY = 0;
+		this.wipeTile(true);
+		this.placeTile();
+	}
+	/**
+	 * The full canvas was just reallocated and holds none of the pixels the
+	 * tile was drawn against. Wipe the tile rather than copy it into the new
+	 * backing: the copy would land at the old origin, unrecorded, and the lift
+	 * could leave it behind.
+	 */
+	dropWetTile(): void {
+		this.wipeTile();
+		this.tilePlaced = false;
+	}
+	/** Reapply the tile's CSS box after a band style update; a changed scale sizes it again. */
+	placeWetTile(cssScale: number, hostZoom: boolean): void {
+		const c = this.tileConfig;
+		if (!c || !this.tile) return;
+		if (c.cssScale !== cssScale || c.hostZoom !== hostZoom) {
+			// A live stroke finishes in the full canvas; the tile is sized again.
+			this.tileThisStroke = false;
+			this.configureWetTile(this.tile, c.width, c.height, c.backing, cssScale, hostZoom);
+			return;
+		}
+		this.placeTile();
+	}
+	/** Test build switch. Refused (false) while a stroke is live. */
+	setWetTile(on: boolean): boolean {
+		if (this.lastPoint !== undefined) return false;
+		this.flushTile();
+		this.tileOn = on;
+		return true;
+	}
+	private placeTile(): void {
+		const c = this.tileConfig, t = this.tile;
+		if (!c || !t) return;
+		const box = canvasLayerBox(t.width / c.backing, t.height / c.backing, c.cssScale, c.hostZoom);
+		const s = t.style;
+		const translation = this.tileX || this.tileY ? `${this.tileX / c.backing}px ${this.tileY / c.backing}px` : "none";
+		if (s.left !== "0px") s.left = "0px";
+		if (s.top !== "0px") s.top = "0px";
+		if (s.right !== "auto") s.right = "auto";
+		if (s.bottom !== "auto") s.bottom = "auto";
+		if (this.tileTranslate && s.translate !== translation) s.translate = translation;
+		if (s.width !== `${box.width}px`) s.width = `${box.width}px`;
+		if (s.height !== `${box.height}px`) s.height = `${box.height}px`;
+		if (s.transform !== box.transform) s.transform = box.transform;
+		const transformOrigin = box.transform ? "0 0" : "";
+		if (s.transformOrigin !== transformOrigin) s.transformOrigin = transformOrigin;
+	}
+	private wipeTile(force = false): void {
+		const t = this.tile, tc = this.tileCtx;
+		if (!t || !tc || (this.tileBlank && !force)) return;
+		tc.save();
+		tc.setTransform(1, 0, 0, 1, 0, 0);
+		tc.clearRect(0, 0, t.width, t.height);
+		tc.restore();
+		this.tileBlank = true;
+	}
+	/** The one full-canvas write the tile makes: its pixels, at the same backing pixels, then a wipe. */
+	private flushTile(): void {
+		const t = this.tile;
+		if (!t || !this.tilePlaced || this.tileBlank) return;
+		this.beforeWrite?.();
+		const ctx = this.ctx;
+		ctx.save();
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.globalCompositeOperation = "source-over";
+		ctx.globalAlpha = 1;
+		ctx.drawImage(t, this.tileX, this.tileY);
+		ctx.restore();
+		this.wipeTile();
+	}
+	/**
+	 * Where the next strip draws, given its CSS box: the tile when it fits
+	 * (moved, after a flush, when the strip leaves it), otherwise the full
+	 * canvas, counted.
+	 */
+	private target(box: { x0: number; y0: number; x1: number; y1: number }): CanvasRenderingContext2D {
+		const c = this.tileConfig, tc = this.tileCtx;
+		if (!this.tileThisStroke || !c || !tc || !c.grid || !(c.tileW > 0)) return this.ctx;
+		const b = c.backing, fullW = Math.round(c.width * b), fullH = Math.round(c.height * b);
+		const x0 = Math.max(0, Math.floor(box.x0 * b)), y0 = Math.max(0, Math.floor(box.y0 * b));
+		const x1 = Math.min(fullW, Math.ceil(box.x1 * b)), y1 = Math.min(fullH, Math.ceil(box.y1 * b));
+		if (![x0, y0, x1, y1].every(Number.isFinite) || x1 <= x0 || y1 <= y0) return this.ctx;
+		if (x1 - x0 > c.tileW || y1 - y0 > c.tileH) {
+			this.tileFallbacks++;
+			return this.ctx;
+		}
+		if (!(this.tilePlaced && x0 >= this.tileX && y0 >= this.tileY &&
+			x1 <= this.tileX + c.tileW && y1 <= this.tileY + c.tileH)) {
+			this.flushTile();
+			this.tileX = wetTileAxis(x0, x1, c.tileW, fullW, c.grid);
+			this.tileY = wetTileAxis(y0, y1, c.tileH, fullH, c.grid);
+			this.tilePlaced = true;
+			tc.setTransform(b, 0, 0, b, -this.tileX, -this.tileY);
+			this.placeTile();
+		}
+		this.tileBlank = false;
+		return tc;
+	}
+	private stripBox(cam: CameraState, strip: readonly RibbonPt[]): { x0: number; y0: number; x1: number; y1: number } | null {
+		let hw = 0, minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const p of strip) {
+			if (p.hw > hw) hw = p.hw;
+			if (p.x < minX) minX = p.x;
+			if (p.y < minY) minY = p.y;
+			if (p.x > maxX) maxX = p.x;
+			if (p.y > maxY) maxY = p.y;
+		}
+		if (!Number.isFinite(minX)) return null;
+		const pad = hw * cam.zoom + 2;
+		return {
+			x0: (minX - cam.x) * cam.zoom - pad, y0: (minY - cam.y) * cam.zoom - pad,
+			x1: (maxX - cam.x) * cam.zoom + pad, y1: (maxY - cam.y) * cam.zoom + pad,
+		};
+	}
+	private stripTarget(cam: CameraState, strip: readonly RibbonPt[]): CanvasRenderingContext2D {
+		const box = this.stripBox(cam, strip);
+		return box ? this.target(box) : this.ctx;
+	}
 	noteBackingCleared(): void { this.blank = true; this.strokeOwnsAllPixels = true; this.incompletePaint = false; }
 	notePixelsChanged(): void { this.blank = false; this.strokeOwnsAllPixels = false; }
 	/**
@@ -58,6 +262,9 @@ export class WetInkRenderer {
 	 */
 	carry(shiftX: number, shiftY: number): void {
 		if (shiftX === 0 && shiftY === 0) return;
+		if (this.zeroSized()) return;
+		// The tile's pixels go into the full canvas first, so they ride the shift.
+		this.flushTile();
 		this.beforeWrite?.();
 		const ctx = this.ctx, b = this.backingScale;
 		ctx.save();
@@ -66,6 +273,13 @@ export class WetInkRenderer {
 		ctx.drawImage(this.canvas, Math.round(shiftX * b), Math.round(shiftY * b));
 		ctx.restore();
 		if (this.dirty) this.dirty = { x0: this.dirty.x0 + shiftX, y0: this.dirty.y0 + shiftY, x1: this.dirty.x1 + shiftX, y1: this.dirty.y1 + shiftY };
+	}
+	/** A canvas with no backing (the highlighter pair until a note needs it, InkOverlay
+	 * allocateHighlightPair) has no pixels to write; a context call on it still reaches the GPU
+	 * process and its per-canvas rate limiter, so it gets none.
+	 */
+	private zeroSized(): boolean {
+		return this.canvas.width === 0 || this.canvas.height === 0;
 	}
 	private fullClearCovers(width: number, height: number): boolean {
 		return Number.isFinite(width) && Number.isFinite(height) && this.backingScale > 0 &&
@@ -117,7 +331,7 @@ export class WetInkRenderer {
 
 	/** Call after the canvas backing store has been resized (dpr-scaled). */
 	applyDpr(dpr: number): void {
-		this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+		if (!this.zeroSized()) this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		this.backingScale = dpr;
 	}
 
@@ -179,6 +393,7 @@ export class WetInkRenderer {
 		this.lastRibbon = undefined;
 		this.strokeOwnsAllPixels = this.blank;
 		this.dirty = null;
+		this.tileThisStroke = this.tileOn && !!this.tileCtx && !!this.tileConfig?.grid && (this.tileConfig?.tileW ?? 0) > 0;
 		// The committed rule, restated: shaped only for a non-flat tool on a
 		// device that shapes, with the switch on (drawStroke's `shaping`).
 		this.shapingThisStroke = this.shape && !flat && inkShapingEnabled();
@@ -211,7 +426,7 @@ export class WetInkRenderer {
 					hw: widthForPressure(style, p.pressure) / 2,
 				});
 				const strip: RibbonPt[] = [this.lastRibbon ?? rp(prev), rp(point)];
-				fillRibbon(this.ctx, cam, strip, inkColorFor(style));
+				fillRibbon(this.stripTarget(cam, strip), cam, strip, inkColorFor(style));
 				this.growDirtyStrip(cam, strip);
 				this.lastRibbon = strip[strip.length - 1];
 			} else if (this.smooth) {
@@ -227,29 +442,36 @@ export class WetInkRenderer {
 					// starts at the previous strip's last point, so consecutive
 					// fills share an edge exactly and leave no seam.
 					let flatSeg: RibbonPt[];
+					let startHw: number;
 					if (this.shapingThisStroke) {
 						const midHw = (this.prevSampleHw + sampleHw) / 2;
-						flatSeg = flattenSegmentHw(
-							seg,
-							this.lastMidHw ?? this.prevSampleHw,
-							midHw,
-							cam.zoom
-						);
+						startHw = this.lastMidHw ?? this.prevSampleHw;
+						flatSeg = flattenSegmentHw(seg, startHw, midHw, cam.zoom);
 						this.lastMidHw = midHw;
 					} else {
+						startHw = widthForPressure(style, seg.pressure) / 2;
 						flatSeg = flattenSegment(seg, style, cam.zoom);
 					}
-					const strip: RibbonPt[] = this.lastRibbon
-						? [this.lastRibbon, ...flatSeg]
-						: flatSeg;
-					fillRibbon(this.ctx, cam, strip, inkColorFor(style));
+					// A flattened segment leaves out its start, which the previous
+					// strip already drew. The stroke's FIRST segment has no previous
+					// strip, so it starts at its own start point: without it the
+					// wet line began half a sample in, while the committed line
+					// starts at the first sample.
+					const strip: RibbonPt[] = [
+						this.lastRibbon ?? { x: seg.from.x, y: seg.from.y, hw: startHw },
+						...flatSeg,
+					];
+					fillRibbon(this.stripTarget(cam, strip), cam, strip, inkColorFor(style));
 					this.growDirtyStrip(cam, strip);
 					this.lastRibbon = strip[strip.length - 1];
 				}
 				if (this.shapingThisStroke) this.prevSampleHw = sampleHw;
 			} else {
-				drawSegment(this.ctx, cam, style, this.lastPoint, point);
 				const hw = widthForPressure(style, (this.lastPoint.pressure + point.pressure) / 2) / 2;
+				const ax = (this.lastPoint.x - cam.x) * cam.zoom, ay = (this.lastPoint.y - cam.y) * cam.zoom;
+				const bx = (point.x - cam.x) * cam.zoom, by = (point.y - cam.y) * cam.zoom, pad = hw * cam.zoom + 2;
+				drawSegment(this.target({ x0: Math.min(ax, bx) - pad, y0: Math.min(ay, by) - pad, x1: Math.max(ax, bx) + pad, y1: Math.max(ay, by) + pad }),
+					cam, style, this.lastPoint, point);
 				this.growDirty(
 					(this.lastPoint.x - cam.x) * cam.zoom,
 					(this.lastPoint.y - cam.y) * cam.zoom,
@@ -360,7 +582,7 @@ export class WetInkRenderer {
 	 * at `baseWidth` itself would draw every tap at twice the nib.
 	 *
 	 * A tap draws at exactly the nib whatever the pressure sample says. That
-	 * was already the ruling; making it explicit preserves it now that the ON
+	 * was already the rule; making it explicit preserves it now that the ON
 	 * curve is allowed to exceed `baseWidth`.
 	 */
 	contactHalfWidth(style: PenStyle, _pressure: number): number {
@@ -394,7 +616,7 @@ export class WetInkRenderer {
 		this.markPaint();
 		const incomplete = this.incompletePaint;
 		this.incompletePaint = true;
-		fillRibbon(this.ctx, cam, strip, inkColorFor(style));
+		fillRibbon(this.stripTarget(cam, strip), cam, strip, inkColorFor(style));
 		this.growDirtyStrip(cam, strip);
 		this.lastRibbon = strip[strip.length - 1];
 		this.incompletePaint = incomplete;
@@ -402,8 +624,11 @@ export class WetInkRenderer {
 
 	clear(cssWidth: number, cssHeight: number): void {
 		this.beforeWrite?.();
-		this.ctx.clearRect(0, 0, cssWidth, cssHeight);
-		if (this.fullClearCovers(cssWidth, cssHeight)) this.noteBackingCleared();
+		this.wipeTile();
+		if (!this.zeroSized()) {
+			this.ctx.clearRect(0, 0, cssWidth, cssHeight);
+			if (this.fullClearCovers(cssWidth, cssHeight)) this.noteBackingCleared();
+		}
 		this.reset();
 	}
 
@@ -418,6 +643,12 @@ export class WetInkRenderer {
 	 */
 	clearStroke(cssWidth: number, cssHeight: number): void {
 		this.beforeWrite?.();
+		// The lift clears both: the tile's live pixels and the full canvas.
+		this.wipeTile(true);
+		if (this.zeroSized()) {
+			this.reset();
+			return;
+		}
 		const d = this.dirty;
 		const x0 = d ? Math.max(0, Math.floor(d.x0)) : NaN;
 		const y0 = d ? Math.max(0, Math.floor(d.y0)) : NaN;
@@ -496,6 +727,8 @@ export class WetInkRenderer {
 		hCss: number,
 		backing: number
 	): number {
+		// Diagnostic only: the tile's pixels join the full canvas before the read.
+		this.flushTile();
 		return countPaintedPixels(this.ctx, xCss, yCss, wCss, hCss, backing);
 	}
 }

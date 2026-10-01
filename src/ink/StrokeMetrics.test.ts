@@ -94,3 +94,50 @@ describe("StrokeMetrics rate reporting", () => {
 		expect(text.split("\n")[0]).not.toContain("not recorded");
 	});
 });
+
+describe("tail backing resize evidence", () => {
+	it("freezes each stroke's delta across later strokes and paste work", () => {
+		const m = new StrokeMetrics() as StrokeMetrics & {
+			begin(mode: string, now: number, resizeTotal: number): void;
+			end(now: number, resizeTotal: number): ReturnType<StrokeMetrics["end"]> & { tailBackingResizes: number | null };
+		};
+		m.begin("ink", 0, 10);
+		const first = m.end(100, 12);
+		expect(first.tailBackingResizes).toBe(2);
+		expect(StrokeMetrics.summaryText(first)).toContain("tail backing resizes 2");
+		m.begin("ink", 200, 12);
+		const second = m.end(300, 12);
+		expect(second.tailBackingResizes).toBe(0);
+		// Paste changes the renderer total between strokes, without a live stroke.
+		m.begin("ink", 400, 15);
+		const third = m.end(500, 16);
+		expect(third.tailBackingResizes).toBe(1);
+		expect(m.summaries.map(s => (s as typeof first).tailBackingResizes)).toEqual([2, 0, 1]);
+		expect(first.tailBackingResizes).toBe(2);
+	});
+
+	it("marks missing totals not recorded and never inherits another surface's baseline", () => {
+		const shared = new StrokeMetrics() as StrokeMetrics & {
+			begin(mode: string, now: number, resizeTotal?: number): void;
+			end(now: number, resizeTotal?: number): ReturnType<StrokeMetrics["end"]> & { tailBackingResizes: number | null };
+		};
+		shared.begin("ink", 0, 90);
+		shared.end(100, 91);
+		shared.begin("ink", 200);
+		const unmeasured = shared.end(300);
+		expect(unmeasured.tailBackingResizes).toBeNull();
+		expect(StrokeMetrics.summaryText(unmeasured)).toContain("tail backing resizes (not recorded)");
+		shared.begin("ink", 400, 2);
+		const otherSurface = shared.end(500, 4);
+		expect(otherSurface.tailBackingResizes).toBe(2);
+		shared.begin("ink", 600);
+		const missingStart = shared.end(700, 9);
+		expect(missingStart.tailBackingResizes).toBeNull();
+		expect(StrokeMetrics.summaryText(missingStart)).toContain("tail backing resizes (not recorded)");
+		shared.begin("ink", 800, 3);
+		const missingEnd = shared.end(900);
+		expect(missingEnd.tailBackingResizes).toBeNull();
+		expect(StrokeMetrics.summaryText(missingEnd)).toContain("tail backing resizes (not recorded)");
+		expect(shared.summaries.map(s => (s as typeof unmeasured).tailBackingResizes)).toEqual([1, null, 2, null, null]);
+	});
+});

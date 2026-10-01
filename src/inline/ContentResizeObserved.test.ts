@@ -68,6 +68,20 @@ function overlayCode(): string {
 	return codeOnly(text);
 }
 
+/**
+ * The observer's callback body. The callback is `onContentResize`: the
+ * wiring must call it, and its body is read up to the method's closing brace.
+ */
+function callbackBody(code: string): string {
+	const wiring = code.slice(code.indexOf("contentResizeObserver = new ResizeObserver"));
+	expect(wiring).not.toBe("");
+	expect(wiring.slice(0, wiring.indexOf(";"))).toContain("this.onContentResize()");
+	const start = code.indexOf("private onContentResize(): void {");
+	expect(start).toBeGreaterThanOrEqual(0);
+	const method = code.slice(start);
+	return method.slice(0, method.indexOf("\n\t}"));
+}
+
 describe("the .cm-content resize observer", () => {
 	it("observes contentDOM, the element Readable line length actually resizes", () => {
 		// The whole fix in one line. `view.dom` is already observed by the
@@ -84,9 +98,7 @@ describe("the .cm-content resize observer", () => {
 		// handleResize instead would hit its `unchanged` early-return on
 		// exactly the case this exists for, and land a no-op that reads like
 		// a fix.
-		const wiring = code.slice(code.indexOf("contentResizeObserver = new ResizeObserver"));
-		expect(wiring).not.toBe("");
-		const body = wiring.slice(0, wiring.indexOf("});"));
+		const body = callbackBody(code);
 		expect(body).toContain("this.syncCamera()");
 		expect(body).toContain("this.scheduleRepaint(");
 		expect(body).not.toContain("this.handleResize()");
@@ -97,9 +109,7 @@ describe("the .cm-content resize observer", () => {
 		// checks too: without it a mid-stroke content resize would schedule a
 		// repaint against the frozen pen-down camera. Cheap, and it states
 		// the invariant at the call site where it can be read.
-		const code = overlayCode();
-		const wiring = code.slice(code.indexOf("contentResizeObserver = new ResizeObserver"));
-		const body = wiring.slice(0, wiring.indexOf("});"));
+		const body = callbackBody(overlayCode());
 		expect(body).toContain("frame.locked");
 	});
 

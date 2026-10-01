@@ -1,4 +1,4 @@
-import type { MobileTools } from "./MobileTools";
+import type { MobileTools, NoteZoomControls } from "./MobileTools";
 
 /**
  * Pen-contact and pen-lift chrome for a MobileTools strip, plus the keyboard
@@ -28,8 +28,9 @@ import type { MobileTools } from "./MobileTools";
  * `stripPenUp`, below, restores it for every gesture already, so only the
  * hide was one-sided.
  */
-export function stripPenDown(tools: MobileTools | null | undefined): void {
+export function stripPenDown(tools: MobileTools | null | undefined, zoom?: NoteZoomControls | null): void {
 	tools?.setInking(true);
+	zoom?.setInking(true);
 	// Which pops close on pen contact: every one closeInkSliders knows about,
 	// the eraser's included (alan, 2026-09-02, reversing Slice Q's exception:
 	// "you eraser pop should close when pen touches down... we did it for
@@ -51,8 +52,9 @@ export function stripPenDown(tools: MobileTools | null | undefined): void {
  * runs once pen-up (and everything it dispatched) has returned, whichever
  * gesture it was.
  */
-export function stripPenUp(tools: MobileTools | null | undefined): void {
+export function stripPenUp(tools: MobileTools | null | undefined, zoom?: NoteZoomControls | null): void {
 	tools?.setInking(false);
+	zoom?.penUp();
 	queueMicrotask(() => tools?.refresh());
 }
 

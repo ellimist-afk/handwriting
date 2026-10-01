@@ -28,6 +28,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
+import { stripMarkdownExtension } from "./util/MarkdownPath";
 import mainSource from "./main.ts?raw";
 import { createFreshFile } from "./export/CreateFreshFile";
 import { inkToSvg } from "./ink/SvgExport";
@@ -62,7 +63,8 @@ expect(FLATTEN_BLOCK.match(/this\.firstFreePath\(/g)).toHaveLength(1);
 const js = (code: string): string => transformSync(code, { loader: "ts", target: "es2022" }).code;
 
 type Deps = Record<string, unknown>;
-const build = (code: string, deps: Deps): unknown => {
+const build = (code: string, given: Deps): unknown => {
+	const deps: Deps = { stripMarkdownExtension, ...given };
 	const names = Object.keys(deps);
 	return new Function(...names, js(code))(...names.map((n) => deps[n]));
 };
@@ -70,7 +72,7 @@ const build = (code: string, deps: Deps): unknown => {
 /** The two registered commands, as the real `onload` would register them. */
 function registerCommand(block: string, deps: Deps, host: PluginStub): CommandSpec {
 	// No stub dependencies left: the canvas page view the export blocks used to
-	// name went out in s197, and the blocks reference nothing of their own
+	// name went out, and the blocks reference nothing of their own
 	// beyond what each caller passes.
 	let captured: CommandSpec | null = null;
 	const self = { ...host, addCommand: (spec: CommandSpec) => void (captured = spec) };

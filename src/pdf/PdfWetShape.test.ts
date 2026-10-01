@@ -1,3 +1,20 @@
+
+/** Extend the existing cursor fixture with its owned clipping parent. */
+function cursorChildren(createCursor: () => any): (options?: { cls?: string }) => any {
+	return (options) => {
+		const cursor = createCursor();
+		if (options?.cls !== "handwriting-pdf-cursor-viewport") return cursor;
+		const viewport = {
+			parentElement: cursor.parentElement,
+			classList: { contains: (cls: string) => cls === "handwriting-pdf-cursor-viewport" },
+			setCssStyles() {},
+			createDiv: () => cursor,
+			remove() { cursor.remove(); viewport.parentElement = null; },
+		};
+		cursor.parentElement = viewport;
+		return viewport;
+	};
+}
 /**
  * The PDF wet layer and the commit must make the SAME shaping decision.
  *
@@ -124,7 +141,7 @@ function drawWith(pointerType: string | undefined): Drawn {
 		classList: { add: () => {}, remove: () => {} },
 		querySelector: () => null,
 		setCssStyles: () => {},
-		createDiv: () => el(),
+		createDiv: cursorChildren(() => ({ ...el(), parentElement: scroller })),
 	};
 	probe.current = {
 		scroller,

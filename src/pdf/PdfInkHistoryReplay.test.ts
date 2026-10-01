@@ -109,6 +109,7 @@ async function sharedPanes() {
 		};
 		Object.assign(controller, {
 			history: new PdfInkHistory(), syntheticSources: () => false, onOp,
+			builder: null, erasing: false, dragFrom: null, lassoPts: [], spaceLineY: null,
 			documentId: () => ID, clearSelection() {}, refresh() {}, refreshStrip() {},
 		});
 		return controller;

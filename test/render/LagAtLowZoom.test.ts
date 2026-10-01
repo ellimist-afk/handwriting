@@ -164,7 +164,7 @@ function checkArm(name: string, r: any): void {
 
 it("the scroll-then-draw sequence at 10% zoom is measured, not assumed", async () => {
 	const on = await arm("lag");
-	// s179 (Alan, 2026-09-20): the two Infinite-Canvas-off arms are retired. Both reached 10% zoom
+	// Alan, 2026-09-20: the two Infinite-Canvas-off arms are retired. Both reached 10% zoom
 	// by pinching with the canvas off, and the product no longer zooms in that mode, so the state
 	// they measured cannot occur. The refusal itself is pinned once for this rig, in
 	// ZoomFreezeTouch.test.ts, through the real touch listeners. The cost question these arms
@@ -260,7 +260,7 @@ it.each([
 	{ zoom: .15, axis: "both" as const, infiniteCanvas: true },
 	{ zoom: .1, axis: "x" as const, infiniteCanvas: true },
 	{ zoom: 1, axis: "both" as const, infiniteCanvas: true },
-	// s180: the canvas-off rows that stood here are retired. With the Infinite Canvas off the
+	// The canvas-off rows that stood here are retired. With the Infinite Canvas off the
 	// product now ignores every pinch phase, so the note stays at 100 percent and there is no
 	// zoomed canvas-off state left to measure. See RETIRED-CELLS.md.
 ])("fractional scroll/draw steps keep a stationary band cheap: $zoom/$axis/IC=$infiniteCanvas", async ({ zoom, axis, infiniteCanvas }) => {
@@ -362,7 +362,7 @@ it("a pinch to 0.019 settles at the ten-percent floor, and Fit's commit at 0.019
 	expect(fit.margin, "the fraction binds, not the lifted ceiling").toBeLessThan(320 / fit.cssScale);
 	// THE CLAIM. Same pane, same band in the reader's px, same allocation.
 	expect(fit.bandVisual!.height).toBeCloseTo(one.bandVisual!.height, 0);
-	// s180 add. 1 (Architect). WIDTH IS NOT A NEAR-EQUALITY UNDER THE CANVAS. The old row asked for
+	// WIDTH IS NOT A NEAR-EQUALITY UNDER THE CANVAS. The old row asked for
 	// the two visual widths to agree within 2 percent, on the cell's own note that "the horizontal
 	// margin is only spent when the surface is sideways scrollable, and in this arm neither scale
 	// reaches that". With the Infinite Canvas on the zoomed-out arm IS sideways scrollable, so it
@@ -377,13 +377,28 @@ it("a pinch to 0.019 settles at the ten-percent floor, and Fit's commit at 0.019
 	expect(Math.abs((fit.bandVisual!.width - one.bandVisual!.width) - 2 * (fit.marginVisual as number)),
 		`the zoomed-out band is wider by its two horizontal margins, px (band delta ${(fit.bandVisual!.width - one.bandVisual!.width).toFixed(2)}, margins ${(2 * (fit.marginVisual as number)).toFixed(2)})`)
 		.toBeLessThanOrEqual(1);
-	// s180 add. 1: the backing follows the band, and under the canvas the band is wider by its two
+	// The backing follows the band, and under the canvas the band is wider by its two
 	// margins, so the old "same backing as 1.0" row cannot hold either. Measured at aa437ff1:
 	// 42,780,000 device px against 33,192,000, a ratio of 1.2889, and the band width ratio is
 	// 1782.48 / 1383 = 1.2888 - the same number. THE CLAIM: the backing buys the band and nothing
 	// more, so the two ratios agree; a backing that grew for any other reason parts from it.
-	expect(fit.backingPx / one.backingPx, "the backing grows exactly as the band does, zoomed out : 1.0")
+	// Over the four band layers: the live tail's backing is compact, sized once,
+	// and does not follow the band, so it is asserted apart below.
+	const bandPx = (r: unknown) => (r as { bandLayersBackingPx: number }).bandLayersBackingPx;
+	expect(bandPx(fit) / bandPx(one), "the backing grows exactly as the band does, zoomed out : 1.0")
 		.toBeCloseTo(fit.bandVisual!.width / one.bandVisual!.width, 2);
+	type TailRead = { w: number; h: number; grid: number | null; tileW: number; tileH: number; backing: number; fullW: number; fullH: number };
+	for (const [name, r] of [["fit", fit], ["1.0", one]] as const) {
+		const t = (r as unknown as { tailBacking: TailRead | null }).tailBacking;
+		expect(t, `${name}: the tail's own backing is read`).toBeTruthy();
+		if (t!.grid) {
+			const side = Math.ceil(256 * t!.backing / t!.grid) * t!.grid;
+			const tile = { w: Math.min(side, Math.floor(t!.fullW / t!.grid) * t!.grid), h: Math.min(side, Math.floor(t!.fullH / t!.grid) * t!.grid) };
+			expect({ w: t!.w, h: t!.h }, `${name}: the idle tail is the 256 css px tile on the joint grid`).toEqual(tile);
+		} else {
+			expect({ w: t!.w, h: t!.h }, `${name}: no joint grid, the idle tail keeps the full band`).toEqual({ w: t!.fullW, h: t!.fullH });
+		}
+	}
 	// AND IT IS INSIDE THE CEILING THAT ACTUALLY EXISTS - per canvas, which is
 	// what `backingScale` trims against.
 	expect(fit.maxCanvasPx).toBeLessThanOrEqual(fit.capPerCanvas);
@@ -397,7 +412,7 @@ it("a pinch to 0.019 settles at the ten-percent floor, and Fit's commit at 0.019
  */
 it("after Fit to 5%, a pinch in to 7% settles, a pinch out to 6% leaves 7%, and from 12% a pinch out stops at 10%", async () => {
 	const r = await arm("bandCost", 0.05, { fitCommit: true, fitThenPinch: [0.07, 0.06, 0.12, 0.05] } as any);
-	const steps = (r as { fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null }[] }).fitPinchSteps;
+	const steps = (r as { fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null; bounceSyncs: number; bounceResized: number; bounceMoved: number }[] }).fitPinchSteps;
 	note(`FITFLOOR steps=${JSON.stringify(steps)}`);
 	expect(steps.map(s => s.target)).toEqual([0.07, 0.06, 0.12, 0.05]);
 	const settled = [0.07, 0.07, 0.12, 0.1];
@@ -405,7 +420,12 @@ it("after Fit to 5%, a pinch in to 7% settles, a pinch out to 6% leaves 7%, and 
 		expect(s.pinchScaleNow, `step ${i} ${s.from} -> ${s.target} committed`).toBeCloseTo(settled[i]!, 9);
 		// cssScale is measured back from the container's rect over its offset width.
 		expect(Math.abs(s.cssScale - settled[i]!), `step ${i} ${s.from} -> ${s.target} settled cssScale ${s.cssScale}`).toBeLessThanOrEqual(2 * settled[i]! / (s.offsetWidth ?? 1));
+		// A settle's ease moves the band at most once: the band is sized for the whole ease when it starts.
+		expect(s.bounceSyncs, `step ${i} ${s.from} -> ${s.target}: band moves while the ease plays`).toBeLessThanOrEqual(1);
 	});
+	// The pinch in from Fit's 5% eases the page back from right of its edge over scroll to its left: the band is resized
+	// once for that ease, and only once.
+	expect(steps[0]!.bounceResized, `step 0 ${steps[0]!.from} -> ${steps[0]!.target}: band resizes while the ease plays (${JSON.stringify(steps.map(s => [s.bounceResized, s.bounceMoved]))})`).toBe(1);
 });
 
 /**
@@ -477,7 +497,7 @@ it.each([
 	// the float32 step doubles again above 32768 visual px, and a fix that
 	// removed the magnitude from the measurement does not notice.
 	{ zoom: .15, far: FAR_ALAN * 4, infiniteCanvas: true },
-	// s180: the canvas-off rows that stood here are retired. With the Infinite Canvas off the
+	// The canvas-off rows that stood here are retired. With the Infinite Canvas off the
 	// product now ignores every pinch phase, so the note stays at 100 percent and there is no
 	// zoomed canvas-off state left to measure. See RETIRED-CELLS.md.
 ])("far extent fractional scroll/draw keeps a stationary band cheap: $zoom/$far/IC=$infiniteCanvas", async ({ zoom, far, infiniteCanvas }) => {

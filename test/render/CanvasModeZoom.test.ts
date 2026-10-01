@@ -1,6 +1,6 @@
 /**
- * s137/s179 (Alan, 2026-09-20): INFINITE CANVAS IS PER NOTE, and with the canvas OFF a note is stock
- * Obsidian: a two-finger gesture is not a zoom. s179 reverses s164, which had kept the pinch in both
+ * Alan, 2026-09-20: INFINITE CANVAS IS PER NOTE, and with the canvas OFF a note is stock
+ * Obsidian: a two-finger gesture is not a zoom. this reverses an earlier ruling, which had kept the pinch in both
  * modes for 1.4.20; the refusal and its cells are back, and this file carries the pin the other rigs copy.
  *
  * What ships here: a note answers for itself, its own frontmatter choice (`handwriting-canvas`) if
@@ -54,7 +54,7 @@ const pinchTo = (page: Page, to: number) => call(page, "pinchTo", to, 20, CX, CY
 const show = (rows: Read[]) => rows.map(r => `${r.k.toFixed(3)}${r.preview ? "p" : ""}`).join(" ");
 
 /**
- * s179 (Alan direct, reverses s164): THE PIN. With the canvas off a two-finger gesture is not a zoom.
+ * Alan direct, reverses the ruling: THE PIN. With the canvas off a two-finger gesture is not a zoom.
  *
  * This is the ONE cell each rig keeps about canvas-off zoom, and its shape is the shape the other seats
  * copy into their own files: canvas off, pinch, NOTHING MOVES - no preview frame is opened, the scale is
@@ -81,7 +81,7 @@ it("CANVAS OFF: a two-finger pinch is not a zoom - no preview, the scale stays 1
 		expect(final.scrollLeft, "the gesture wrote the scroller sideways").toBe(before.scrollLeft);
 		expect(final.scrollTop, "the gesture wrote the scroller down the page").toBe(before.scrollTop);
 		expect(final.busy, "the bar came back up after a gesture the canvas-off note refused").toBe(true);
-		// s185 (Alan, 2026-09-20, "it should stay obsidian stock behavior"): THE PLUGIN CLAIMS NOTHING.
+		// Alan, 2026-09-20, "it should stay obsidian stock behavior": THE PLUGIN CLAIMS NOTHING.
 		// The rows above are driven through `beginPinch`, which is downstream of the claim, so the
 		// gesture is driven once more as real contacts: two fingers land on the surface the router
 		// listens to and the router must leave both of them to the host.
@@ -135,7 +135,7 @@ it("THE GLOBAL TOGGLE reaches a mounted note both ways, and the canvas going off
 		const off = await call(page, "setGlobal", false) as Read;
 		expect(off.canvas, "the global off did not reach the mounted note").toBe(false);
 		const held = await call(page, "settle", 6) as Read;
-		// s179 reverses the 1.4.20 line here too: with the canvas off there is no note zoom to hold, so the
+		// The ruling reverses the 1.4.20 line here too: with the canvas off there is no note zoom to hold, so the
 		// toggle lands the note back at 100 percent through the ordinary commit. No saved zoom is lost by
 		// that - a note's scale lives only while it is mounted, so canvas on again starts from 100 percent.
 		expect(held.k, "the canvas going off left the note zoomed").toBeCloseTo(1, 2);

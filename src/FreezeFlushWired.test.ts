@@ -17,7 +17,7 @@ const MAIN = codeOnly(ALL_TS["./main.ts"] ?? "");
  * unless something dispatches the writes synchronously first. `flushOnHide`
  * does that, and `PageStore.flushDispatch` has its own tests.
  *
- * WHAT NOBODY ASSERTED, until this file: that anything CALLS it. alanl-sl
+ * WHAT NOBODY ASSERTED, until this file: that anything CALLS it. A review
  * found the two `registerDomEvent` lines deletable with the whole suite
  * green - every surface's protection against a swipe-away losing the last
  * strokes, held in place by nothing but the fact that no one had deleted the

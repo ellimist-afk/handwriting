@@ -23,9 +23,24 @@ const strideStart = source.indexOf(strideDeclaration);
 const strideEnd = source.indexOf("\n}", strideStart);
 expect(strideEnd).toBeGreaterThan(strideStart);
 const stride = source.slice(strideStart, strideEnd + 2);
-export const installLiveReloadPoll = new Function(
+const install = new Function(
 	"window", "document", "runDetached", "inlineReloadCandidates", "inlineInk",
 	"inkExternallyReloaded", "notifyInkChanged", "slidesReloadCandidate",
 	"reloadSlidesExternal", "console", "captureInlineReloadAdmission",
 	transformSync(`${stride}\n${registration}`, { loader: "ts", target: "es2022" }).code,
 );
+// The tick asks the plugin whether every window holding a pane is hidden
+// (audit 56). A stand-in without that census gets the old answer, the
+// `document` it was handed; a suite that measures popouts passes the real one.
+export const installLiveReloadPoll = function (this: object, ...args: unknown[]): unknown {
+	const self = this as { reloadPanesHidden?: (doc: { hidden: boolean }) => boolean };
+	self.reloadPanesHidden ??= (doc) => doc.hidden;
+	return install.apply(this, args);
+};
+// The same wrapper as one self-contained function source, for a suite that
+// injects the poll into a browser page: the wrapper above calls `install`
+// through a closure, and its toString() leaves that closure behind.
+export const installLiveReloadPollScript = `function (...args) {
+	this.reloadPanesHidden ??= (doc) => doc.hidden;
+	return (${install.toString()}).apply(this, args);
+}`;

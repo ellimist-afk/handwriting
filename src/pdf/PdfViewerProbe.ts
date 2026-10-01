@@ -186,6 +186,32 @@ export function viewerCanvasOf(pageEl: HTMLElement): HTMLCanvasElement | null {
 }
 
 /**
+ * The viewer's canvas that holds the WHOLE page, found by its box.
+ *
+ * Not `viewerCanvasOf`: once a zoomed page's canvas is capped, pdf.js adds a
+ * detail canvas after it that covers only the visible part of the page, and the
+ * last visible canvas is that one. A snip crops the page from (0,0) at one
+ * density, so it needs the canvas whose box spans the page div, lower
+ * resolution or not. Searched from the last so a fresh render wins over the
+ * previous zoom's; null when none spans the page.
+ */
+export function wholePageCanvasOf(pageEl: HTMLElement): HTMLCanvasElement | null {
+	const all = [...pageEl.querySelectorAll<HTMLCanvasElement>("canvas:not(.handwriting-pdf-ink)")];
+	for (let i = all.length - 1; i >= 0; i--) {
+		const c = all[i]!;
+		if (c.hidden || c.offsetParent !== pageEl) continue;
+		if (
+			c.offsetLeft <= 1 &&
+			c.offsetTop <= 1 &&
+			c.offsetLeft + c.clientWidth >= pageEl.clientWidth - 1 &&
+			c.offsetTop + c.clientHeight >= pageEl.clientHeight - 1
+		)
+			return c;
+	}
+	return null;
+}
+
+/**
  * Where the viewer's page canvas sits within its page div.
  *
  * `offsetLeft`/`offsetTop` are relative to the nearest positioned ancestor,

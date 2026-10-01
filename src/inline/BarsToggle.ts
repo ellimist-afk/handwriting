@@ -5,7 +5,7 @@ import type { PenToolsMode } from "./PenToolsMode";
  * What `barsRestore` is, and why it is still here.
  *
  * Until 1.4.20 one command hid the pen toolbar and the note zoom bar together
- * and remembered the pair it hid, so a user on Auto came back to Auto. s138
+ * and remembered the pair it hid, so a user on Auto came back to Auto. The canvas work
  * item 15 split that: the command is "Toolbar on / off" and moves the toolbar
  * only, because the zoom bar now answers to its own row AND to Infinite
  * Canvas, and with the canvas off there is no zoom bar for a command to put
@@ -16,7 +16,7 @@ import type { PenToolsMode } from "./PenToolsMode";
  * is live; the zoom bar's mode is carried through unchanged and never read
  * back out), so the shape and its normalizer stay exactly as they were. The
  * toggle function that used to compute the pair is gone with its caller
- * (s145): it had none left in src, and a tested helper nothing calls is a
+ * - it had none left in src, and a tested helper nothing calls is a
  * second answer waiting to disagree with the one that ships.
  */
 export interface BarsPair {

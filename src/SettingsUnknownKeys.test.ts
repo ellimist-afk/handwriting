@@ -119,7 +119,7 @@ describe("settings control consistency preserves saved behavior", () => {
 		// visibility row beside it - the two settings behave identically.
 		const toolbarVisibility = rows.find(row => row.name === "Toolbar visibility")!;
 		const zoomBar = rows.find(row => row.name === "Zoom bar")!;
-		// The row also carries a `disabled` predicate since s138 (SettingsCanvasRows.test.ts
+		// The row also carries a `disabled` predicate (SettingsCanvasRows.test.ts
 		// owns what it says); the shape asserted here is the dropdown itself.
 		expect(zoomBar.control?.type).toBe("dropdown");
 		expect(zoomBar.control?.key).toBe("noteZoomControls");
@@ -173,7 +173,7 @@ describe("loadSettings carries keys this build does not know", () => {
 		resetNoteZoomControlsForTest();
 	});
 
-	// The EDIT half of this case went with the canvas page in s197: the view
+	// The EDIT half of this case went with the canvas page: the view
 	// that wrote saved views, and the `editCanvasSavedViews` path that renamed
 	// them, are both deleted. What still matters - and is what this case was
 	// really guarding - is that a vault which HAS these records keeps them

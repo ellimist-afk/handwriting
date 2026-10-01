@@ -1,4 +1,5 @@
 import { activeSlidesActions } from "./SlidesInkSurface";
+import { isSlidesControl } from "./SlidesActions";
 import { presentationCommands } from "./SlidesTools";
 /**
  * The pure half of the slides ink surface (design §7).
@@ -326,6 +327,13 @@ describe("mouse ink claim (roadmap: mouse input; Alan/Paladin, mouse-only, 2026-
 	it("claims a primary pen contact whether or not mouse ink is on", () => {
 		expect(claimsContact("pen", true, 0, false)).toBe(true);
 		expect(claimsContact("pen", true, 0, true)).toBe(true);
+	});
+
+	it("claims a pen contact that is not the primary pointer", () => {
+		// Windows with a second mouse live beside the pen reports the pen with
+		// isPrimary false on every event; that pen drew nothing on a slide.
+		expect(claimsContact("pen", false, 0, false)).toBe(true);
+		expect(claimsContact("pen", false, 0, true)).toBe(true);
 	});
 
 	it("does not claim a mouse contact while mouse ink is off - today's behaviour, unchanged", () => {
@@ -856,8 +864,9 @@ body one
 		const moved = remapSlides(stored, after);
 		// "# two" is gone: unmatched, so it keeps index 1 and waits.
 		expect(moved.has(1)).toBe(false);
-		// "# three" moved from 2 to 1, and that IS resolvable.
-		expect(moved.get(2)).toBe(1);
+		// Index 1 is held for the deleted slide, so the surviving slide waits
+		// at 2 until the source is restored.
+		expect(moved.has(2)).toBe(false);
 	});
 
 	it("moves the strokes with the slides, on 1-based page numbers", () => {
@@ -1184,7 +1193,7 @@ class FakeEl {
 /**
  * A no-op 2d context that counts the calls the assertions care about.
  *
- * `granted` is a function rather than a constant (F4): what the browser GRANTS
+ * `granted` is a function rather than a constant: what the browser GRANTS
  * for `desynchronized` is independent of what was requested - that difference
  * is the whole reason the mount line prints both - so the fake has to be able
  * to say "you asked for false and got true" rather than echoing the request.
@@ -1226,7 +1235,7 @@ class FakeDoc {
 	refusedContextClass: string | undefined;
 	activeElement: unknown = null;
 	readonly clearCounts: ClearCounts = { clears: 0, rects: [] };
-	/** What `getContextAttributes().desynchronized` answers on this document's canvases (F4). */
+	/** What `getContextAttributes().desynchronized` answers on this document's canvases. */
 	grantedDesynchronized = false;
 	defaultView!: FakeWin;
 	/**
@@ -1246,7 +1255,7 @@ class FakeDoc {
 		};
 		canvas.getContext = () => el.className === doc.refusedContextClass ? null : fakeCtx(counts, () => doc.grantedDesynchronized, el);
 		// Accessors rather than plain fields, so that "was the backing store
-		// REALLOCATED" is answerable (F2/item 2). A plain assignment of the
+		// REALLOCATED" is answerable. A plain assignment of the
 		// same number is invisible to a reader that only sees the value, and
 		// reallocation - not the value - is what throws the pixels away.
 		let w = 0;
@@ -1410,8 +1419,9 @@ interface Rig {
 	savedNow: Array<{ id: string; page: PageData }>;
 	/** Every `claimId` call: a Markdown write on the note, the one to watch. */
 	claims: string[];
-	/** Every `loadSidecar` call, by id and in order - the adopt-merge's own witness (F1). */
+	/** Every `loadSidecar` call, by id and in order - the adopt-merge's own witness. */
 	loads: string[];
+	reads: string[];
 	/** Every Notice the surface raised, in order. */
 	notices: string[];
 	logs: string[];
@@ -1420,7 +1430,7 @@ interface Rig {
 	down(over?: Partial<AnyEvent>): void;
 	move(x: number, y: number, over?: Partial<AnyEvent>): void;
 	/**
-	 * One `pointermove` carrying N coalesced samples (F3), the way Chromium
+	 * One `pointermove` carrying N coalesced samples, the way Chromium
 	 * delivers a pen faster than the frame rate. The rig's ordinary `move`
 	 * never carries them, so a surface that read only the last one looked
 	 * identical to one that read them all.
@@ -1431,18 +1441,22 @@ interface Rig {
 }
 
 interface RigOptions {
+	sidecarPending?: () => boolean;
 	sections?: number;
 	source?: string | null;
+	candidatePaths?: string[];
+	sourceForPath?: (path: string) => string | null;
+	pageIdForPath?: (path: string) => string | null;
 	pageId?: string | null;
 	/**
-	 * The host's `loadSidecar`. Takes the id now (F1): the claim-identity rule
+	 * The host's `loadSidecar`. Takes the id now: the claim-identity rule
 	 * turns on WHICH sidecar is read, and a loader that could not see the id
 	 * could not tell the adopted one from the proposed one.
 	 */
 	load?: (sidecarId: string) => Promise<ParseResult | null>;
-	/** `devicePixelRatio` on the DECK's window, set before the deck is built (F2). */
+	/** `devicePixelRatio` on the DECK's window, set before the deck is built. */
 	devicePixelRatio?: number;
-	/** What the canvases' `getContextAttributes()` GRANTS for `desynchronized` (F4). */
+	/** What the canvases' `getContextAttributes()` GRANTS for `desynchronized`. */
 	grantedDesynchronized?: boolean;
 	refusedContextClass?: string;
 	/** The host's `claimId`, when a test needs to hold the claim open. */
@@ -1523,6 +1537,7 @@ function makeRig(opts: RigOptions = {}): Rig {
 	const savedNow: Array<{ id: string; page: PageData }> = [];
 	const claims: string[] = [];
 	const loads: string[] = [];
+	const reads: string[] = [];
 	const notices: string[] = [];
 	/** Every `eraseWholeStrokes()` call: proof the host member is read at all. */
 	let wholeReads = 0;
@@ -1535,8 +1550,9 @@ function makeRig(opts: RigOptions = {}): Rig {
 			: opts.source;
 	const host: SlidesInkHost = {
 		activeFilePath: () => "Deck.md",
-		readSource: async () => source,
-		readPageId: () => (opts.pageId === undefined ? "note-1" : opts.pageId),
+		...(opts.candidatePaths ? { candidatePaths: () => opts.candidatePaths! } : {}),
+		readSource: async path => { reads.push(path); return opts.sourceForPath ? opts.sourceForPath(path) : source; },
+		readPageId: path => opts.pageIdForPath ? opts.pageIdForPath(path) : (opts.pageId === undefined ? "note-1" : opts.pageId),
 		claimId: async (path, proposed) => {
 			claims.push(path);
 			if (opts.claim) return opts.claim(path, proposed);
@@ -1548,6 +1564,7 @@ function makeRig(opts: RigOptions = {}): Rig {
 			return opts.load ? opts.load(sidecarId) : null;
 		},
 		scheduleSidecar: (id, page) => void scheduled.push({ id, page }),
+		...{ hasQueuedSidecar: () => opts.sidecarPending?.() ?? true },
 		saveSidecarNow: async (id, page) => {
 			savedNow.push({ id, page });
 			await opts.saveNow?.(id, page);
@@ -1593,6 +1610,7 @@ function makeRig(opts: RigOptions = {}): Rig {
 		savedNow,
 		claims,
 		loads,
+		reads,
 		notices,
 		logs: deckLogs,
 		wholeReads: () => wholeReads,
@@ -1941,17 +1959,18 @@ describe("the note check (§3.5: is this the note on the screen?)", () => {
 				]
 			)
 		).toBe(false);
-		// And the needle is only the first NOTE_CHECK_NEEDLE_CHARS, so a note
-		// that agrees for a while and then diverges INSIDE the needle fails.
-		const nearlyAll = "a".repeat(NOTE_CHECK_NEEDLE_CHARS - 10);
-		expect(noteMatchesDeck([nearlyAll + "note tail"], [nearlyAll + "deck tail"])).toBe(false);
+		// And the relation is coverage: a note that agrees
+		// for a long run and then diverges fails when the run is less than 3 in
+		// 4 of its letters - here 30 of 41.
+		const agreed = "a".repeat(30);
+		expect(agreed.length).toBeGreaterThanOrEqual(NOTE_CHECK_NEEDLE_CHARS);
+		expect(noteMatchesDeck([agreed + "note tail abc"], [agreed + "deck tail xyz"])).toBe(false);
 	});
 
-	it("ignores what the two sides say past the needle", () => {
-		// The other side of the same boundary: agree for the whole needle and
-		// the rest is not compared, which is what lets a rendered slide run on.
-		const wholeNeedle = "a".repeat(NOTE_CHECK_NEEDLE_CHARS);
-		expect(noteMatchesDeck([wholeNeedle + "note tail"], [wholeNeedle + "deck tail"])).toBe(true);
+	it("matches when exactly 3 in 4 of the letters are covered", () => {
+		// The other side of the same boundary: 30 agreeing letters of 40.
+		const agreed = "a".repeat(30);
+		expect(noteMatchesDeck([agreed + "note tail ab"], [agreed + "deck tail xy"])).toBe(true);
 	});
 
 	it("treats two empty decks as a match", () => {
@@ -4302,8 +4321,9 @@ describe("scanForSlides: a pop-out window must not kill the live deck (S1)", () 
 		return { doc, setDeck: (el: FakeEl | null) => void (current = el) };
 	}
 
-	function makeHost(): SlidesInkHost {
+	function makeHost(documents?: () => Document[]): SlidesInkHost {
 		return {
+			...(documents ? { documents } : {}),
 			activeFilePath: () => "Deck.md",
 			readSource: async () => "slide 0",
 			readPageId: () => "note-1",
@@ -4437,7 +4457,7 @@ describe("scanForSlides: a pop-out window must not kill the live deck (S1)", () 
 		const main = makeScanDoc();
 		const popout = makeScanDoc();
 		(globalThis as { document?: unknown }).document = main.doc;
-		setSlidesInk(true, makeHost()); // nothing in either document yet
+		setSlidesInk(true, makeHost(() => [main.doc, popout.doc] as unknown as Document[])); // nothing in either document yet
 		deckLogs.length = 0;
 
 		const popoutDeck = makeDeckElements(popout.doc);
@@ -4779,7 +4799,7 @@ describe("main.ts registers onSlidesCssChange in its css-change handler (GAP 16)
  * ------------------------------------------------------------------------ */
 
 /**
- * A `claimId` the test holds open (F1). The frontmatter claim is a real await
+ * A `claimId` the test holds open. The frontmatter claim is a real await
  * in the source, and "the sidecar write happens AFTER it" is an ORDER, which a
  * claim that resolves immediately cannot express.
  */
@@ -5443,13 +5463,15 @@ describe("live reload while sidecar I/O is pending", () => {
 		}
 		expect(rig.deck.status().pendingGesture).toBe(true);
 		release(storedPageWith("note-1.slides", ["remote-new"]));
+		await tick();
+		expect(rig.deck.status().pendingGesture).toBe(true);
+		rig.end("pointerup", { buttons: 0 });
 		await reload;
 		const admitted = structuredClone(strokesOn(rig, 0));
 		expect(admitted.some(s => s.id === "remote-new")).toBe(true);
 		expect(admitted.some(s => s.id === "stored-1")).toBe(false);
 		if (mode === "draw") expect(admitted).toHaveLength(2);
 		if (mode === "partial erase") expect(admitted.length).toBeGreaterThan(1);
-		rig.end("pointerup", { buttons: 0 });
 		expect(strokesOn(rig, 0)).toEqual(admitted);
 		expect(rig.deck.status().undoLabel).toBeNull();
 		expect(rig.deck.run("undo")).toBe(false);
@@ -5510,7 +5532,7 @@ describe("live reload while sidecar I/O is pending", () => {
 		expect(strokesOn(rig, 0).map((s) => s.id).sort()).toEqual([mine, "stored-1"].sort());
 		if (outcome === "damaged") {
 			expect(rig.scheduled).toEqual([]);
-			expect(rig.deck.reloadCandidateSidecarId()).toBeNull();
+			expect(rig.deck.reloadCandidateSidecarId()).toBe("note-1.slides");
 		} else {
 			expect(rig.scheduled).toHaveLength(1);
 			expect(rig.scheduled[0]!.page.strokes).toHaveLength(2);
@@ -5831,58 +5853,272 @@ describe("reloadSlidesExternal: the wrapper, not the delegate", () => {
 	});
 });
 
-/**
- * CHARACTERISATION, AND THIS ONE IS WRONG-BUT-CURRENT.
- *
- * A stroke drawn on THIS device is never added to `adoptedIds`. Not when it is
- * drawn, and - the part that makes it permanent - not when it is later read
- * back from the sidecar either: `adoptSidecar` skips ids already on screen
- * ("Ids already on screen are SKIPPED, not appended"), so a stroke that has
- * synced out and come back is still, as far as this surface is concerned,
- * local ink.
- *
- * `replaceAdopted` then keeps exactly the strokes that are NOT adopted. So a
- * remote DELETE of a stroke this device drew cannot remove it, this device
- * writes it back on the next save, and the other device's delete is undone.
- * Resurrection, for the life of the deck.
- *
- * That is the opposite defect from the one notes and PDFs have, where adopt
- * REPLACES and ink is lost. Slides unions, so it loses nothing and forgets
- * nothing.
- *
- * THE ASSERTION BELOW IS THE BUG, PINNED AS IT BEHAVES TODAY. A fix will turn
- * it red, and that is the fix working - not a regression. Whoever fixes it
- * should delete this case and write the opposite one. It is NOT `it.fails`,
- * because it does not throw: it passes, describing something we do not want.
- */
-describe("a remote delete of locally-drawn ink (characterisation: today's behaviour is wrong)", () => {
-	it("does not remove it, even after that stroke has been round-tripped through the sidecar", async () => {
+describe("CX7 live sidecar reload regressions", () => {
+	it.each([false, true])("remote add plus erase respects saved ownership, pending=%s", async pending => {
+		let disk = storedPageWith("note-1.slides", ["stored-1"]);
+		const rig = makeRig({ load: async () => structuredClone(disk), sidecarPending: () => pending });
+		await tick();
+		drawStrokeOn(rig);
+		const mine = rig.scheduled.at(-1)!.page.strokes.find(s => s.id !== "stored-1")!.id;
+		// The false arm models the scheduled snapshot having reached disk before
+		// the remote device erases mine and adds remote-new. The true arm models
+		// a still-queued local stroke which the remote device has never seen.
+		disk = storedPageWith("note-1.slides", ["stored-1", "remote-new"]);
+		await rig.deck.reloadExternal("note-1.slides");
+		rig.deck.dispose();
+		const ids = rig.savedNow.at(-1)!.page.strokes.map(s => s.id);
+		expect(ids).toContain("remote-new");
+		expect(ids.includes(mine), "only unsaved local ink survives remote absence").toBe(pending);
+	});
+	it("first external reload respects erase of an already saved local stroke", async () => {
+		let disk = storedPageWith("note-1.slides", ["stored-1"]);
+		const rig = makeRig({ load: async () => structuredClone(disk), sidecarPending: () => false });
+		await tick();
+		drawStrokeOn(rig);
+		const persisted = rig.scheduled.at(-1)!;
+		expect(persisted.id).toBe("note-1.slides");
+		expect(persisted.page.strokes).toHaveLength(2);
+		disk = { data: structuredClone(persisted.page), recovered: false };
+		const mine = disk.data.strokes.find(s => s.id !== "stored-1")!.id;
+		disk.data.strokes = disk.data.strokes.filter(s => s.id !== mine);
+		await rig.deck.reloadExternal("note-1.slides");
+		rig.deck.dispose();
+		expect(rig.savedNow.at(-1)!.page.strokes.map(s => s.id)).toEqual(["stored-1"]);
+	});
+
+	it("removes a locally drawn stroke after it was saved and another device erased it", async () => {
 		let disk: ParseResult | null = storedPageWith("note-1.slides", ["stored-1"]);
 		const rig = makeRig({ load: async () => disk });
 		await tick();
-
 		drawStrokeOn(rig);
-		const mine = rig.scheduled.at(-1)!.page.strokes.find((s) => s.id !== "stored-1")!.id;
-
-		// It syncs out, and this device reads its own stroke back. This is the
-		// step that separates the case from "unsaved session ink survives",
-		// which is desirable and is already pinned above: after this reload
-		// the stroke is on disk AND on screen, and the surface still does not
-		// consider it adopted.
+		const mine = strokesOn(rig, 0).find(s => s.id !== "stored-1")!.id;
 		disk = storedPageWith("note-1.slides", ["stored-1", mine]);
 		await rig.deck.reloadExternal("note-1.slides");
-
-		// The other device deletes it.
+		expect(strokesOn(rig, 0).map(s => s.id)).toContain(mine);
 		disk = storedPageWith("note-1.slides", ["stored-1"]);
 		await rig.deck.reloadExternal("note-1.slides");
-
+		expect(strokesOn(rig, 0).map(s => s.id)).toEqual(["stored-1"]);
 		rig.deck.dispose();
-		const ids = rig.savedNow[0]!.page.strokes.map((s) => s.id);
-		expect(
-			ids,
-			"WRONG-BUT-CURRENT: the remote delete is undone because local ink is never adopted"
-		).toContain(mine);
-		expect(ids).toContain("stored-1");
+		expect(rig.savedNow.at(-1)?.page.strokes.map(s => s.id)).toEqual(["stored-1"]);
+	});
+
+	it("keeps a damaged live reload retryable and saves after a good retry", async () => {
+		let disk: ParseResult | null = storedPageWith("note-1.slides", ["stored-1"]);
+		const rig = makeRig({ load: async () => disk });
+		await tick();
+		disk = { ...storedPageWith("note-1.slides", ["ignored"]), damaged: true };
+		expect(await rig.deck.reloadExternal("note-1.slides")).toBe(false);
+		expect(strokesOn(rig, 0).map(s => s.id)).toEqual(["stored-1"]);
+		disk = storedPageWith("note-1.slides", ["stored-1", "stored-2"]);
+		expect(rig.deck.reloadCandidateSidecarId()).toBe("note-1.slides");
+		expect(await rig.deck.reloadExternal("note-1.slides")).toBe(true);
+		drawStrokeOn(rig);
+		expect(rig.scheduled.at(-1)?.page.strokes).toHaveLength(3);
+		rig.deck.dispose();
+	});
+
+	it("lets a pen stroke finish when a pending live read returns", async () => {
+		let release!: (result: ParseResult | null) => void;
+		let cold = true;
+		const rig = makeRig({ load: () => cold
+			? Promise.resolve(storedPageWith("note-1.slides", ["stored-1"]))
+			: new Promise(resolve => { release = resolve; }) });
+		await tick();
+		cold = false;
+		const reload = rig.deck.reloadExternal("note-1.slides");
+		rig.down();
+		rig.move(260, 260);
+		release(storedPageWith("note-1.slides", ["stored-1", "remote-new"]));
+		await tick();
+		expect(rig.deck.status().pendingGesture).toBe(true);
+		rig.move(300, 300);
+		rig.end("pointerup");
+		await reload;
+		const ids = strokesOn(rig, 0).map(s => s.id);
+		expect(ids).toContain("remote-new");
+		expect(ids).toHaveLength(3);
+		rig.deck.dispose();
+	});
+});
+
+describe("CX7 slide content hit targets", () => {
+	const root = { tagName: "DIV", parentElement: null } as unknown as HTMLElement;
+	const node = (tagName: string, parentElement: HTMLElement, classes: string[] = []): HTMLElement => ({
+		tagName,
+		parentElement,
+		getAttribute: () => null,
+		isContentEditable: false,
+		classList: { contains: (name: string) => classes.includes(name) },
+	} as unknown as HTMLElement);
+
+	it.each(["A", "INPUT", "BUTTON"])("lets a pen start on slide content %s", tag => {
+		const section = node("SECTION", root);
+		expect(isSlidesControl(node(tag, section), root)).toBe(false);
+	});
+
+	it("still leaves Reveal navigation and the close control interactive", () => {
+		const nav = node("DIV", root, ["controls"]);
+		expect(isSlidesControl(node("BUTTON", nav), root)).toBe(true);
+		expect(isSlidesControl(node("BUTTON", root, ["slides-close-btn"]), root)).toBe(true);
+	});
+});
+
+describe("CX7 slide identity regressions", () => {
+  it.each([false, true])("94: ink drawn during cold load keeps C identity after B is restored, replay=%s", async replay => {
+    const original = storedPageWith("note-1.slides", ["a-ink", "b-ink", "c-ink"]);
+    original.data.slides = ["A", "B", "C"].map((s,index) => ({index,hash:sectionHash(s)}));
+    original.data.strokes.forEach((s,i) => {s.page = pageOfSlide(i);});
+    let release!: (value: ParseResult) => void;
+    const shortened = makeRig({ sections:2, source:"A\n\n---\n\nC", sectionText:i => ["A","C"][i]!, load: () => new Promise(resolve => { release = resolve; }) });
+    await tick();
+    shortened.slides.children[0]!.classes.delete("present");
+    shortened.slides.children[1]!.classes.add("present");
+    shortened.reveal.dispatch({type:"slidechanged"});
+    expect(shortened.deck.status().index).toBe(1);
+    drawStrokeOn(shortened);
+    const mine = strokesOn(shortened,1).find(s => !["a-ink","b-ink","c-ink"].includes(s.id))!.id;
+    release(structuredClone(original));
+    await tick();
+    if (replay) {
+      expect(shortened.deck.run('undo')).toBe(true);
+      expect(shortened.deck.run('redo')).toBe(true);
+    }
+    shortened.deck.dispose();
+    const saved = shortened.savedNow.at(-1)!.page;
+    expect(saved.strokes.map(s=>s.id)).toContain(mine);
+    const restored = makeRig({ sections:3,source:"A\n\n---\n\nB\n\n---\n\nC",sectionText:i => ["A","B","C"][i]!,load:async()=>({data:structuredClone(saved),recovered:false}) });
+    await tick();
+    const result = {b:strokesOn(restored,1).map(s=>s.id),c:strokesOn(restored,2).map(s=>s.id)};
+    restored.deck.dispose();
+    expect(result, "new C ink must not acquire B identity").toEqual({b:["b-ink"],c:[mine,"c-ink"]});
+  });
+
+	it("new ink on surviving C stays with C after B is restored", async () => {
+		const original = storedPageWith("note-1.slides", ["a-ink", "b-ink", "c-ink"]);
+		original.data.slides = ["A", "B", "C"].map((s, index) => ({ index, hash: sectionHash(s) }));
+		original.data.strokes.forEach((s, i) => { s.page = pageOfSlide(i); });
+		const shortened = makeRig({
+			sections: 2, source: "A\n\n---\n\nC", sectionText: i => ["A", "C"][i]!,
+			load: async () => structuredClone(original),
+		});
+		await tick();
+		shortened.slides.children[0]!.classes.delete("present");
+		shortened.slides.children[1]!.classes.add("present");
+		shortened.reveal.dispatch({ type: "slidechanged" });
+		expect(shortened.deck.status().index).toBe(1);
+		drawStrokeOn(shortened);
+		const mine = strokesOn(shortened, 1).find(s => !["a-ink", "b-ink", "c-ink"].includes(s.id))!.id;
+		shortened.deck.dispose();
+		const saved = shortened.savedNow.at(-1)!.page;
+		expect(saved.strokes.map(s => s.id)).toContain(mine);
+		const restored = makeRig({
+			sections: 3, source: "A\n\n---\n\nB\n\n---\n\nC", sectionText: i => ["A", "B", "C"][i]!,
+			load: async () => ({ data: structuredClone(saved), recovered: false }),
+		});
+		await tick();
+		const result = { b: strokesOn(restored, 1).map(s => s.id), c: strokesOn(restored, 2).map(s => s.id) };
+		restored.deck.dispose();
+		expect(result).toEqual({ b: ["b-ink"], c: ["c-ink", mine] });
+	});
+
+	it("splits after a list continuation", () => {
+		const list = "- point one\n  second line\n---\n# Slide two\n";
+		expect(splitSlideSections(list)).toHaveLength(2);
+	});
+
+	it("keeps an HTML line over a rule together", () => {
+		const html = '# One\n<img src="a.png">\n---\n# Two\n';
+		expect(splitSlideSections(html)).toHaveLength(1);
+	});
+
+	it("does not move surviving ink into an unmatched deleted slide's reserved slot", () => {
+		const [a, b, c] = ["A", "B", "C"].map(sectionHash);
+		const stored = [{ index: 0, hash: a! }, { index: 1, hash: b! }, { index: 2, hash: c! }];
+		const moved = remapSlides(stored, [a!, c!]);
+		expect(moved.has(2)).toBe(false);
+		expect(moved.has(1)).toBe(false);
+	});
+
+	it("keeps the deleted slide's hash and ink through a close and restore", async () => {
+		const [a, b, c] = ["A", "B", "C"].map(sectionHash);
+		const original = storedPageWith("note-1.slides", ["a-ink", "b-ink", "c-ink"]);
+		original.data.slides = [{ index: 0, hash: a! }, { index: 1, hash: b! }, { index: 2, hash: c! }];
+		original.data.strokes.forEach((stroke, i) => { stroke.page = pageOfSlide(i); });
+		const shortened = makeRig({
+			sections: 2, source: "A\n\n---\n\nC", sectionText: i => ["A", "C"][i]!,
+			load: async () => original,
+		});
+		await tick();
+		shortened.deck.dispose();
+		const saved = shortened.savedNow.at(-1)?.page ?? shortened.scheduled.at(-1)?.page;
+		expect(saved?.slides).toEqual(original.data.slides);
+		expect(saved?.strokes.map(s => [s.id, s.page])).toEqual(original.data.strokes.map(s => [s.id, s.page]));
+		const restored = makeRig({
+			sections: 3, source: "A\n\n---\n\nB\n\n---\n\nC", sectionText: i => ["A", "B", "C"][i]!,
+			load: async () => ({ data: saved!, recovered: false }),
+		});
+		await tick();
+		expect(strokesOn(restored, 1).map(s => s.id)).toEqual(["b-ink"]);
+		expect(strokesOn(restored, 2).map(s => s.id)).toEqual(["c-ink"]);
+		restored.deck.dispose();
+	});
+});
+
+describe("CX7 presented note selection", () => {
+	const shown = "slide 0\n\n---\n\nslide 1";
+	const other = "unrelated zero\n\n---\n\nunrelated one";
+	const sources = (matchA: boolean, matchB: boolean) => (path: string): string | null =>
+		path === "A.md" ? (matchA ? shown : other) :
+		path === "B.md" ? (matchB ? shown : other) : null;
+	const ids = (path: string) => path === "A.md" ? "a-id" : "b-id";
+
+	it("saves a right-clicked B presentation to B while A is active", async () => {
+		const rig = makeRig({ candidatePaths: ["B.md", "A.md"], sourceForPath: sources(false, true), pageIdForPath: ids });
+		await tick();
+		expect(rig.loads).toEqual(["b-id.slides"]);
+		expect(rig.reads).toEqual(["B.md"]);
+		drawStrokeOn(rig);
+		expect(rig.scheduled.at(-1)?.id).toBe("b-id.slides");
+		expect(rig.claims).not.toContain("A.md");
+		rig.deck.dispose();
+	});
+
+	it("uses active A when it matches the deck and B is only another open note", async () => {
+		const rig = makeRig({ candidatePaths: ["A.md", "B.md"], sourceForPath: sources(true, false), pageIdForPath: ids });
+		await tick();
+		expect(rig.loads).toEqual(["a-id.slides"]);
+		drawStrokeOn(rig);
+		expect(rig.scheduled.at(-1)?.id).toBe("a-id.slides");
+		rig.deck.dispose();
+	});
+
+	it("ignores an expired menu choice so the matching active note is used", async () => {
+		const rig = makeRig({ candidatePaths: ["A.md", "B.md"], sourceForPath: sources(true, true), pageIdForPath: ids });
+		await tick();
+		drawStrokeOn(rig);
+		expect(rig.scheduled.at(-1)?.id).toBe("a-id.slides");
+		expect(mainSrc).toContain("RECYCLE_GRACE_MS");
+		rig.deck.dispose();
+	});
+
+	it("keeps ink in memory and writes nothing if no candidate matches", async () => {
+		const rig = makeRig({ candidatePaths: ["A.md", "B.md"], sourceForPath: sources(false, false), pageIdForPath: ids });
+		await tick();
+		drawStrokeOn(rig);
+		rig.deck.dispose();
+		expect(rig.loads).toEqual([]);
+		expect(rig.claims).toEqual([]);
+		expect(rig.scheduled).toEqual([]);
+		expect(rig.savedNow).toEqual([]);
+	});
+
+	it("prefers the fresh menu choice when two notes have identical slide text", async () => {
+		const rig = makeRig({ candidatePaths: ["B.md", "A.md"], sourceForPath: sources(true, true), pageIdForPath: ids });
+		await tick();
+		drawStrokeOn(rig);
+		expect(rig.scheduled.at(-1)?.id).toBe("b-id.slides");
+		expect(rig.reads).toEqual(["B.md"]);
+		rig.deck.dispose();
 	});
 });
 
@@ -6001,5 +6237,122 @@ describe("presentation actions own the deck history", () => {
 			expect(rig.deck.run("clear-all")).toBe(false); expect(rig.deck.run("undo")).toBe(false);
 			expect(rig.scheduled).toEqual([]); rig.deck.dispose();
 		}
+	});
+});
+
+describe("a first ink read that throws is held, not reported as damage", () => {
+	const settle = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+	const DAMAGE_TEXT = "Handwriting: this presentation's ink file could not be read, so new ink is not being saved.";
+	const TRANSIENT_TEXT =
+		"Handwriting: this presentation's ink file could not be read yet. New ink on it is not saved until it loads.";
+	const HEAL_TEXT =
+		"Handwriting: this presentation's ink file is readable again. The saved ink is restored and saving is back on.";
+	const GONE_TEXT =
+		"Handwriting: this presentation's ink file is gone. The presentation starts fresh, and saving is back on.";
+	/** What PageStore.load returns when the read itself threw. */
+	const thrown = (id: string): ParseResult =>
+		({ data: emptyPage(id), recovered: true, damaged: true, transient: true, problem: "EIO" }) as ParseResult;
+	/** What PageStore.load returns for bytes that were read and did not parse. */
+	const damaged = (id: string): ParseResult =>
+		({ data: emptyPage(id), recovered: true, damaged: true, problem: "bad json" }) as ParseResult;
+
+	it("ink drawn while held is saved with the stored ink once a read succeeds, and stays undoable", async () => {
+		const answers = [thrown("note-1.slides"), storedPage("note-1.slides", "stored")];
+		const rig = makeRig({ load: async () => answers.shift() ?? null });
+		await settle();
+		expect(rig.notices).toEqual([]);
+		drawStrokeOn(rig);
+		expect(rig.notices, "a stroke on a held deck is told at once that it is not saved yet").toEqual([TRANSIENT_TEXT]);
+		expect(rig.scheduled).toEqual([]);
+		expect(rig.savedNow).toEqual([]);
+		expect(rig.deck.status().mutable, "undo and clear are refused while the file is unread").toBe(false);
+		expect(await rig.deck.reloadExternal("note-1.slides")).toBe(true);
+		expect(rig.notices, "the reader who was told hears that saving is back").toEqual([TRANSIENT_TEXT, HEAL_TEXT]);
+		expect(rig.scheduled).toHaveLength(1);
+		const saved = rig.scheduled[0]!.page.strokes.map(s => s.id);
+		expect(saved).toContain("stored");
+		expect(saved).toHaveLength(2);
+		expect(rig.deck.status().mutable, "the actions are back once the file is read").toBe(true);
+		expect(rig.deck.status().undoLabel, "the stroke drawn while held can still be undone").not.toBeNull();
+		rig.deck.dispose();
+	});
+
+	it("a retry that reads real damage still reports it and locks", async () => {
+		const answers = [thrown("note-1.slides"), damaged("note-1.slides")];
+		const rig = makeRig({ load: async () => answers.shift() ?? null });
+		await settle();
+		expect(rig.notices).toEqual([]);
+		await rig.deck.reloadExternal("note-1.slides");
+		expect(rig.notices).toEqual([DAMAGE_TEXT]);
+		expect(rig.deck.reloadCandidateSidecarId()).toBeNull();
+		drawStrokeOn(rig);
+		expect(rig.scheduled).toEqual([]);
+		rig.deck.dispose();
+	});
+
+	it("ink drawn while the first read was in flight is told when that read throws, and closing does not repeat it", async () => {
+		let release: ((result: ParseResult) => void) | null = null;
+		const rig = makeRig({ load: () => new Promise<ParseResult | null>((resolve) => { release = resolve; }) });
+		await settle();
+		drawStrokeOn(rig);
+		expect(release, "premise: the first read is still in flight").not.toBeNull();
+		expect(rig.notices, "nothing is said while the read is in flight").toEqual([]);
+		release!(thrown("note-1.slides"));
+		await settle();
+		expect((rig.deck as unknown as { totalStrokes(): number }).totalStrokes(), "premise: the stroke is held").toBe(1);
+		expect(rig.notices, "the held stroke is told as soon as the read throws").toEqual([TRANSIENT_TEXT]);
+		rig.deck.dispose();
+		expect(rig.notices, "closing with the ink held does not repeat it").toEqual([TRANSIENT_TEXT]);
+		expect(rig.scheduled).toEqual([]);
+		expect(rig.savedNow).toEqual([]);
+	});
+
+	it("closing a held deck with no ink drawn says nothing", async () => {
+		const rig = makeRig({ load: async (id) => thrown(id) });
+		await settle();
+		rig.deck.dispose();
+		expect(rig.notices).toEqual([]);
+	});
+
+	it("a held deck whose ink file is gone on the retry starts fresh, says so once, and saves the ink drawn while held", async () => {
+		const answers: Array<ParseResult | null> = [thrown("note-1.slides"), null];
+		const rig = makeRig({ load: async () => (answers.length > 0 ? answers.shift()! : null) });
+		await settle();
+		drawStrokeOn(rig);
+		expect(rig.notices, "premise: the held stroke was told").toEqual([TRANSIENT_TEXT]);
+		expect(rig.scheduled, "premise: nothing saved while held").toEqual([]);
+		await rig.deck.reloadExternal("note-1.slides");
+		expect(rig.notices, "the reader who was told hears the file is gone and saving is back").toEqual([
+			TRANSIENT_TEXT,
+			GONE_TEXT,
+		]);
+		expect(rig.scheduled, "the stroke drawn while held is saved").toHaveLength(1);
+		expect(rig.scheduled[0]!.page.strokes).toHaveLength(1);
+		expect(rig.deck.status().mutable, "the actions are back").toBe(true);
+		expect(rig.deck.reloadCandidateSidecarId(), "the deck stays on the poll").toBe("note-1.slides");
+		rig.deck.dispose();
+	});
+
+	it("a held deck nobody was told about heals quietly when its ink file is gone, and saves as normal", async () => {
+		const answers: Array<ParseResult | null> = [thrown("note-1.slides"), null];
+		const rig = makeRig({ load: async () => (answers.length > 0 ? answers.shift()! : null) });
+		await settle();
+		await rig.deck.reloadExternal("note-1.slides");
+		expect(rig.notices, "a lock the reader never heard of lifts as quietly as it came").toEqual([]);
+		expect(rig.deck.status().mutable, "the actions are back").toBe(true);
+		drawStrokeOn(rig);
+		expect(rig.notices, "a stroke after the heal is not told it is held").toEqual([]);
+		expect(rig.scheduled, "the stroke is saved").toHaveLength(1);
+		rig.deck.dispose();
+	});
+
+	it("a first read of real damage is unchanged: one notice, locked, off the poll", async () => {
+		const rig = makeRig({ load: async (id) => damaged(id) });
+		await settle();
+		expect(rig.notices).toEqual([DAMAGE_TEXT]);
+		expect(rig.deck.reloadCandidateSidecarId()).toBeNull();
+		drawStrokeOn(rig);
+		expect(rig.scheduled).toEqual([]);
+		rig.deck.dispose();
 	});
 });

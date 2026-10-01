@@ -185,10 +185,19 @@ import { drawStroke } from "../ink/StrokeRenderer";
 import { TailRenderer } from "../ink/TailRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { parseMarkdownPage } from "../model/MarkdownPage";
-import { PageData, ParseResult, emptyPage } from "../model/PageData";
+import { PageData, emptyPage } from "../model/PageData";
+import type { LoadResult } from "../persistence/PageStore";
 import { SlidesMoveTrace } from "./SlidesMoveTrace";
 
 const COMMITTED_CLASS = "handwriting-slides-ink";
+/** How long a deck held on a thrown first read stays silent while reads keep throwing (the note surface's bound). */
+const TRANSIENT_SILENCE_MS = 60_000;
+const TRANSIENT_NOTICE =
+	"Handwriting: this presentation's ink file could not be read yet. New ink on it is not saved until it loads.";
+const TRANSIENT_HEALED =
+	"Handwriting: this presentation's ink file is readable again. The saved ink is restored and saving is back on.";
+const TRANSIENT_GONE =
+	"Handwriting: this presentation's ink file is gone. The presentation starts fresh, and saving is back on.";
 const WET_CLASS = "handwriting-slides-ink-wet";
 /**
  * The transient layer above the wet one, holding the unsmoothed head that
@@ -315,8 +324,14 @@ export interface SlideNib {
  */
 export interface SlidesInkHost {
 	mountTools?(parent: HTMLElement, actions: SlidesActions): () => void;
-	/** The presented note's vault path, read once when the deck appears. */
-	activeFilePath(): string | null;
+	/** Ranked note paths; the deck verifies their content before using one. */
+	candidatePaths?(): string[];
+	/** Kept for older hosts; the release host supplies candidatePaths. */
+	activeFilePath?(): string | null;
+	/** All live workspace documents, including popout windows. */
+	documents?(): Document[];
+	/** Calls back after a workspace window opens or closes. */
+	onDocumentChange?(cb: () => void): () => void;
 	/** The note's text, for the section hashes. */
 	readSource(path: string): Promise<string | null>;
 	/** The note's persisted page id from cheap metadata, or null. */
@@ -325,8 +340,11 @@ export interface SlidesInkHost {
 	claimId(path: string, proposedId: string): Promise<{ pageId: string; futureVersion?: number }>;
 	/** A fresh page id to propose. */
 	newPageId(): string;
-	loadSidecar(sidecarId: string): Promise<ParseResult | null>;
+	/** `transient` on a damaged result: the read threw, and the file may be healthy. */
+	loadSidecar(sidecarId: string): Promise<LoadResult | null>;
 	scheduleSidecar(sidecarId: string, page: PageData): void;
+	/** Includes queued, in-flight, and failed writes awaiting retry. */
+	hasQueuedSidecar?(sidecarId: string): boolean;
 	/** No quiet period: the first save after an identity claim. */
 	saveSidecarNow(sidecarId: string, page: PageData): Promise<void>;
 	nib(): SlideNib;
@@ -803,7 +821,8 @@ export function swallowDuringPenContact(
  * turning on mouse-ink mode (`MouseInk.ts`, roadmap: mouse input) had no
  * effect here even though the editor surface already honoured it.
  *
- * Pen: any primary contact, unchanged - Reveal's touch plugin ignores pens
+ * Pen: any contact, primary or not - Windows reports a pen as not primary
+ * whenever a second mouse is live beside it. Reveal's touch plugin ignores pens
  * outright (S6, top of file), so claiming one never costs the deck a
  * navigation gesture. Mouse: only while mouse-ink mode is on AND the LEFT
  * button is down - the same two-part test `InlinePenRouter.mouseActsAsPen`
@@ -823,7 +842,7 @@ export function claimsContact(
 	buttons: number,
 	mouseInk: boolean
 ): boolean {
-	if (pointerType === "pen") return isPrimary !== false;
+	if (pointerType === "pen") return true;
 	if (pointerType === "mouse") return mouseInk && (buttons & 1) !== 0;
 	return false;
 }
@@ -1061,6 +1080,8 @@ const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
  * one of them is a break rather than that line's setext underline.
  */
 const OPENS_OTHER_BLOCK = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|[-*+][ \t]|\d{1,9}[.)][ \t]|<)/;
+const LIST_START = /^ {0,3}(?:[-*+][ \t]|\d{1,9}[.)][ \t])/;
+const INLINE_HTML_LINE = /^ {0,3}<img\b/i;
 
 /** Clean one inline block: %% closes on its line; HTML and code may span soft breaks. */
 function stripInlineComments(line: string): string {
@@ -1145,8 +1166,11 @@ export function splitSlideSections(source: string): string[] {
 	// removed. `%%hidden%%\n---` is a setext heading, while `%%hidden%%---`
 	// is ordinary text. Neither becomes a rule when its comment disappears.
 	let paragraphRun = 0;
+	let listContinuation = false;
 	for (let index = 0; index < lines.length; index++) {
 		let raw = lines[index]!;
+		if (LIST_START.test(raw)) listContinuation = true;
+		else if (raw.trim() === "" || !/^[ \t]/.test(raw)) listContinuation = false;
 		if (fence) {
 			current.push(raw);
 			const close = FENCE_CLOSE.exec(raw)?.[1];
@@ -1218,7 +1242,8 @@ export function splitSlideSections(source: string): string[] {
 			continue;
 		}
 		if (raw.trim() !== "") hasNode = true;
-		paragraphRun = raw.trim() !== "" && (htmlSetext || !OPENS_OTHER_BLOCK.test(raw)) ? paragraphRun + 1 : 0;
+		paragraphRun = raw.trim() !== "" && !listContinuation &&
+			(htmlSetext || INLINE_HTML_LINE.test(raw) || !OPENS_OTHER_BLOCK.test(raw)) ? paragraphRun + 1 : 0;
 		if (paragraphRun > 0) inlineRun.push(raw);
 		else {
 			flushInline();
@@ -1255,8 +1280,11 @@ export function sectionHashes(source: string): string[] {
 	return splitSlideSections(source).map(sectionHash);
 }
 
-/** How much of the first section is compared. Enough to be a fingerprint. */
-export const NOTE_CHECK_CHARS = 200;
+/**
+ * How much of each section's opening is compared with its slide (see
+ * NOTE_CHECK_NEEDLE_CHARS). Enough to be a fingerprint.
+ */
+export const NOTE_CHECK_CHARS = 240;
 
 /**
  * Pass as the normaliser's limit to take the whole thing.
@@ -1321,13 +1349,29 @@ export function deckSectionText(section: DeckSectionEl): string {
 }
 
 /**
- * How much of the note's first section has to turn up in the deck's.
+ * The shortest run of a section's letters that counts as found on its slide.
  *
- * Shorter than NOTE_CHECK_CHARS on purpose: it is a needle to find, not a
- * string to match, and the deck's copy of it can be surrounded by anything
- * Obsidian chose to render around the slide.
+ * A window of this length is slid over the first NOTE_CHECK_CHARS of each
+ * section, and every letter inside a window the slide shows counts as covered.
+ * A section no longer than one window must turn up whole. Short enough that a
+ * construct the reduction to rendered text does not know (inline math, say)
+ * costs only its own letters and the few around it, rather than the whole
+ * window it sits in.
  */
-export const NOTE_CHECK_NEEDLE_CHARS = 80;
+export const NOTE_CHECK_NEEDLE_CHARS = 20;
+
+/**
+ * How many of the counted letters must be covered, over every section, for the
+ * note to be the deck's: 3 in 4.
+ *
+ * A single found run used to be enough, and two notes made from one template
+ * share a heading and an agenda on purpose - a wrong note passed and its page
+ * id was written into another file. A different note sharing a template's
+ * opening covers about 60% of it; the note's own slides, with an unknown
+ * construct or two, cover well over 75%.
+ */
+export const NOTE_CHECK_COVERAGE_NUMERATOR = 3;
+export const NOTE_CHECK_COVERAGE_DENOMINATOR = 4;
 
 /**
  * Markdown source and rendered text, reduced to the one thing they share.
@@ -1359,11 +1403,50 @@ export const NOTE_CHECK_NEEDLE_CHARS = 80;
  */
 function normaliseSectionText(text: string, limit: number = NOTE_CHECK_CHARS): string {
 	return text
-		.replace(/`{1,3}[^`]*`{1,3}/g, " ")
-		.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
 		.replace(/[^\p{L}\p{N}]+/gu, "")
 		.toLowerCase()
 		.slice(0, limit);
+}
+
+/**
+ * The note's Markdown, reduced to the text the presenter shows for it, before
+ * the fingerprint above is taken.
+ *
+ * The rendered side has no syntax at all, so anything the renderer drops or
+ * rewrites has to be dropped or rewritten here the same way, or a note whose
+ * first slide opens with it never matches its own deck: saved ink stayed
+ * hidden and new ink was never saved. A code block shows its code, never its
+ * fences or their language tag; inline code keeps its text (the backticks
+ * go); a callout shows its title, never its `[!type]` marker; an image,
+ * Markdown or embed, shows no text; a link shows its text, and an aliased
+ * wikilink its alias; a task's checkbox shows no text; inline HTML shows its
+ * text, never its tags (a tag opens with a letter or a slash, so a < or >
+ * in a sentence stays text); math, a `$$` block or inline `$...$`, is
+ * typeset and its source letters never reach the slide's text. Inline math follows
+ * Obsidian's rule - no space just inside either `$` - so "$5 and $6" stays
+ * text.
+ */
+function renderedNoteText(text: string): string {
+	// Code shows its text literally, so it is set aside before the tag and math
+	// strips can reach a `<span>` or a `$x$` inside it, and put back after.
+	const code: string[] = [];
+	const setAside = (kept: string): string => `\u0001${code.push(kept) - 1}\u0001`;
+	return text
+		.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^[ \t]*\1[ \t]*$/gm, (_m, _fence, body: string) => setAside(body))
+		.replace(/`{1,3}([^`]*)`{1,3}/g, (_m, body: string) => setAside(body))
+		.replace(/<\/?[A-Za-z][^<>]*>/g, " ")
+		.replace(/\$\$[\s\S]*?\$\$/g, " ")
+		.replace(/\$(?=\S)[^$\n]*?\S\$/g, " ")
+		.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*$/gm, " ")
+		.replace(/^([ \t]*>[ \t]*)\[![^\]]+\][+-]?/gm, "$1")
+		.replace(/!\[\[[^\]]*\]\]/g, " ")
+		.replace(/\[\[[^\]|]*\|([^\]]*)\]\]/g, "$1")
+		.replace(/\[\[([^\]]*)\]\]/g, "$1")
+		.replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+		.replace(/^(\s*(?:[-*+]|\d+[.)])\s+)\[[ xX]\]\s/gm, "$1")
+		// eslint-disable-next-line no-control-regex -- U+0001 is the set-aside marker setAside writes above; note text never carries it.
+		.replace(/\u0001(\d+)\u0001/g, (_m, i: string) => code[Number(i)] ?? "");
 }
 
 /**
@@ -1378,41 +1461,75 @@ function normaliseSectionText(text: string, limit: number = NOTE_CHECK_CHARS): s
  * feature must never do.
  *
  * Two cheap questions, both of which a wrong note fails: the deck has one
- * section per `---` in the source, so the COUNTS must agree; and the first
- * slide as rendered must CONTAIN the first section's opening words. A note
- * whose first slide says something else fails that outright. A note that
- * passes both is
- * the note, near enough to write to. A note that fails either takes the
- * memory-only arm: ink still flows, nothing is stamped, nothing is saved.
+ * section per `---` in the source, so the COUNTS must agree; and, slide by
+ * slide, most of each section's opening must turn up on its slide as
+ * rendered: at least 3 in 4 of the counted letters, over every section,
+ * covered by runs of NOTE_CHECK_NEEDLE_CHARS the slide shows. A note that
+ * passes both is the note, near enough to write to. A note that fails either
+ * takes the memory-only arm: ink still flows, nothing is stamped, nothing is
+ * saved.
  *
- * An empty first section (a title slide that is only an image, say) proves
- * nothing either way, so the count alone decides it rather than a blank string
- * being read as a mismatch.
+ * An empty section on either side (a title slide that is only an image, say)
+ * proves nothing either way and is not counted; when no section is counted,
+ * the count alone decides rather than a blank string being read as a mismatch.
+ *
+ * What it cannot do: two notes whose rendered text agrees on more than 3 in 4
+ * of every slide's opening letters cannot be told apart, and a title-only
+ * slide no longer than one window that opens with a construct the reduction
+ * does not know still refuses, as 1.4.21 did. The failure log line keeps both
+ * heads, so either shows up in a report. Cost: once per presentation start,
+ * at most NOTE_CHECK_CHARS - NOTE_CHECK_NEEDLE_CHARS + 1 `includes` per
+ * section.
  */
 export function noteMatchesDeck(
 	sectionTexts: readonly string[],
 	deckTexts: readonly string[]
 ): boolean {
 	if (sectionTexts.length !== deckTexts.length) return false;
-	if (sectionTexts.length === 0) return true;
-	const note = normaliseSectionText(sectionTexts[0] ?? "");
-	const deck = normaliseSectionText(deckTexts[0] ?? "", UNCUT);
-	// A note whose body opens with a bare `---` right under its frontmatter
-	// gives `splitSlideSections` an empty string for section 0 (kept on
-	// purpose, see above), so `note` is "" here. That is fine: the deck's
-	// first section is frontmatter-only and the gather above strips that
-	// text to "" too, so an empty needle is the CORRECT match, not a blank
-	// standing in for an unknown one.
-	if (note === "" || deck === "") return true;
-	// CONTAINS, not a prefix: the rendered side legitimately carries text the
-	// source does not begin with. The frontmatter is the case that cost this
-	// feature every save it ever tried to make - Obsidian renders the note's
-	// properties into the FIRST slide, so the deck's text began with
-	// `handwriting-page-id...` while the note's began with the body, and a
-	// prefix relation failed on every note that had ever been inked. The
-	// gather above drops that block by class; this is the belt to its braces,
-	// and it holds for anything else Obsidian decides to render around a slide.
-	return deck.includes(note.slice(0, NOTE_CHECK_NEEDLE_CHARS));
+	let counted = 0;
+	let covered = 0;
+	for (let i = 0; i < sectionTexts.length; i++) {
+		const note = normaliseSectionText(renderedNoteText(sectionTexts[i] ?? ""));
+		const deck = normaliseSectionText(deckTexts[i] ?? "", UNCUT);
+		// A note whose body opens with a bare `---` right under its
+		// frontmatter gives `splitSlideSections` an empty string for section
+		// 0 (kept on purpose, see above), and the deck's first section is
+		// frontmatter-only, which the gather above strips to "" too. Neither
+		// side says anything, so the section is not counted either way.
+		if (note === "" || deck === "") continue;
+		counted += note.length;
+		covered += coveredLetters(note, deck);
+	}
+	if (counted === 0) return true;
+	return covered * NOTE_CHECK_COVERAGE_DENOMINATOR >= counted * NOTE_CHECK_COVERAGE_NUMERATOR;
+}
+
+/**
+ * How many of `note`'s letters lie inside a NOTE_CHECK_NEEDLE_CHARS run that
+ * `deck` contains.
+ *
+ * CONTAINS, not a prefix: the rendered side legitimately carries text the
+ * source does not begin with. The frontmatter is the case that cost this
+ * feature every save it ever tried to make - Obsidian renders the note's
+ * properties into the FIRST slide, so the deck's text began with
+ * `handwriting-page-id...` while the note's began with the body, and a prefix
+ * relation failed on every note that had ever been inked. The gather above
+ * drops that block by class; this is the belt to its braces, and it holds for
+ * anything else Obsidian decides to render around a slide.
+ */
+function coveredLetters(note: string, deck: string): number {
+	const width = NOTE_CHECK_NEEDLE_CHARS;
+	if (note.length <= width) return deck.includes(note) ? note.length : 0;
+	let covered = 0;
+	// Letters before `end` are already counted; windows come in order, so a
+	// found window adds only the part of it past the last one.
+	let end = 0;
+	for (let at = 0; at + width <= note.length; at++) {
+		if (!deck.includes(note.slice(at, at + width))) continue;
+		covered += at + width - Math.max(at, end);
+		end = at + width;
+	}
+	return covered;
 }
 
 export interface StoredSlide {
@@ -1480,6 +1597,19 @@ export function remapSlides(
 			if (d < bd || (d === bd && c < best)) best = c;
 		}
 		moved.set(best, target);
+	}
+	// An unmatched slide keeps its old index. A moved slide cannot claim that
+	// slot, nor a slot newly kept because its own target was reserved.
+	const reserved = new Set(stored.filter(slide => !moved.has(slide.index)).map(slide => slide.index));
+	let blocked = true;
+	while (blocked) {
+		blocked = false;
+		for (const [source, target] of moved) {
+			if (!reserved.has(target)) continue;
+			moved.delete(source);
+			reserved.add(source);
+			blocked = true;
+		}
 	}
 	return moved;
 }
@@ -1895,6 +2025,7 @@ export class SlidesDeck implements SlidesActions {
 			undoLabel: this.history.undoLabel, redoLabel: this.history.redoLabel };
 	}
 	finishGesture(): void { if (!this.disposed) this.endStrokeForSlideChange(); }
+	repaintSettings(): void { if (!this.disposed) this.repaint(); }
 	onChange(fn: () => void): () => void { this.actionListeners.add(fn); return () => { this.actionListeners.delete(fn); }; }
 	private actionsChanged(): void { this.actionRevision++; for (const fn of this.actionListeners) fn(); }
 	run(action: SlidesAction): boolean {
@@ -2076,6 +2207,10 @@ export class SlidesDeck implements SlidesActions {
 	private sidecarId: string | null = null;
 	private basePage: PageData | null = null;
 	private hashes: string[] = [];
+	/** Stored identities whose slide cannot safely move into the current deck. */
+	private retainedSlides = new Map<number, StoredSlide>();
+	/** A visible slide may keep an older storage slot when a deleted slide reserves its index. */
+	private visualSlots = new Map<number, number>();
 	private deckSize: { width: number; height: number } | null = null;
 	private claimInFlight: Promise<void> | null = null;
 	/**
@@ -2099,8 +2234,24 @@ export class SlidesDeck implements SlidesActions {
 	/** One Notice per presentation for the read-only locks, like save failures. */
 	private readOnlyNoticed = false;
 	private futureLocked = false;
+	/** A damaged live read holds writes until a good retry restores a trusted base. */
+	private reloadDamaged = false;
 	/**
-	 * Stroke ids adopted from the sidecar, including ids erased since adoption.
+	 * The first read of the sidecar threw, so nothing has been adopted yet.
+	 * A throw is not damage: the file may be healthy and not readable yet (a
+	 * sync client mid-write, a cloud placeholder). The deck holds writes as for
+	 * a damaged live read, says nothing, stays a poll candidate, and the next
+	 * read runs as the first load rather than as a reload.
+	 */
+	private coldReadPending = false;
+	/** When the first read first threw, for the 60 s bound on the silence. Null otherwise. */
+	private transientSince: number | null = null;
+	/** The "could not be read yet" notice was shown for the current hold. */
+	private transientNoticed = false;
+	/** A successful live read waits here when the pen landed during its I/O. */
+	private reloadAfterStroke: (() => void) | null = null;
+	/**
+	 * Stroke ids adopted from or queued for the sidecar, including ids erased since adoption.
 	 *
 	 * `adoptSidecar` APPENDS (that is what lets a load-window stroke survive),
 	 * so a SECOND adopt of the same sidecar - a live reload after another
@@ -2109,6 +2260,8 @@ export class SlidesDeck implements SlidesActions {
 	 * ids here as well, so subsequent polls cannot resurrect a saved copy.
 	 */
 	private adoptedIds = new Set<string>();
+	/** Stroke ids in the latest snapshot submitted to the store's save queue. */
+	private queuedIds = new Set<string>();
 	/**
 	 * The load has finished and `sidecarId` may be written through.
 	 *
@@ -2166,7 +2319,7 @@ export class SlidesDeck implements SlidesActions {
 		// A4: the active file is read NOW, at container time, not at the first
 		// stroke. Start presentation acts on the active file, and by the time
 		// the reader draws, the workspace behind the deck may have moved on.
-		this.path = this.host.activeFilePath();
+		this.path = this.host.candidatePaths ? null : (this.host.activeFilePath?.() ?? null);
 		const unmountTools = this.host.mountTools?.(this._container, this);
 		if (unmountTools) this.disposers.push(unmountTools);
 		if (diagnosticsEnabled()) log(`file resolved: ${this.path ?? "none"}`);
@@ -2213,7 +2366,34 @@ export class SlidesDeck implements SlidesActions {
 	 * back with no identity but its index.
 	 */
 	private async loadSidecar(): Promise<void> {
-		const path = this.path;
+		let path = this.path;
+		let sections: string[] | null = null;
+		if (this.host.candidatePaths) {
+			const deckTexts = this.sections().map(s => deckSectionText(s));
+			for (const candidate of new Set(this.host.candidatePaths())) {
+				if (!candidate) continue;
+				try {
+					const source = await this.host.readSource(candidate);
+					if (this.stale()) return;
+					if (source === null) continue;
+					const parsed = splitSlideSections(source);
+					if (!noteMatchesDeck(parsed, deckTexts)) continue;
+					path = candidate;
+					sections = parsed;
+					break;
+				} catch (err) {
+					log(`could not read ${candidate} for slide identity: ${String(err)}`);
+				}
+			}
+			if (!path) {
+				this.noteMismatch = true;
+				this.noteMemoryOnly("no candidate note matches the deck on screen");
+				this.finishLoad();
+				return;
+			}
+			this.path = path;
+			if (diagnosticsEnabled()) log(`file resolved: ${path}`);
+		}
 		if (!path) {
 			this.noteMemoryOnly(
 				"no active file when the presentation opened",
@@ -2222,16 +2402,17 @@ export class SlidesDeck implements SlidesActions {
 			this.finishLoad();
 			return;
 		}
-		let sections: string[] | null = null;
-		try {
-			const source = await this.host.readSource(path);
-			if (source !== null) sections = splitSlideSections(source);
-			else this.sourceUncertain = true;
-		} catch (err) {
-			// A note we cannot read still takes ink; it just keeps its slides
-			// by index alone until the next presentation reads it.
-			this.sourceUncertain = true;
-			log(`could not read ${path} for section hashes: ${String(err)}`);
+		if (!this.host.candidatePaths) {
+			try {
+				const source = await this.host.readSource(path);
+				if (source !== null) sections = splitSlideSections(source);
+				else this.sourceUncertain = true;
+			} catch (err) {
+				// A note we cannot read still takes ink; it just keeps its slides
+				// by index alone until the next presentation reads it.
+				this.sourceUncertain = true;
+				log(`could not read ${path} for section hashes: ${String(err)}`);
+			}
 		}
 		if (this.stale()) return;
 		if (sections) {
@@ -2246,7 +2427,7 @@ export class SlidesDeck implements SlidesActions {
 			if (!noteMatchesDeck(sections, deckTexts)) {
 				// The counts alone never said WHICH side was wrong. The two
 				// fingerprints do, and this runs once per presentation.
-				const noteHead = normaliseSectionText(sections[0] ?? "").slice(0, 40);
+				const noteHead = normaliseSectionText(renderedNoteText(sections[0] ?? "")).slice(0, 40);
 				const deckHead = normaliseSectionText(deckTexts[0] ?? "").slice(0, 40);
 				log(
 					`note check failed: ${path}, deck ${deckTexts.length} sections vs ` +
@@ -2316,12 +2497,14 @@ export class SlidesDeck implements SlidesActions {
 		sidecarId: string,
 		replaceAdopted = false
 	): Promise<{ remapped: number; hashesChanged: number } | null> {
+		const persistedIds = replaceAdopted && this.host.hasQueuedSidecar?.(sidecarId) === false
+			? new Set(this.queuedIds) : new Set<string>();
 		const beforeIds = new Set<string>();
 		if (replaceAdopted) {
 			for (const id of this.adoptedIds) beforeIds.add(id);
 			for (const list of this.strokes.values()) for (const s of list) beforeIds.add(s.id);
 		}
-		let result: ParseResult | null = null;
+		let result: LoadResult | null = null;
 		const erased = new Set<string>();
 		try {
 			result = await this.host.loadSidecar(sidecarId);
@@ -2347,10 +2530,51 @@ export class SlidesDeck implements SlidesActions {
 		if (this.stale()) return null;
 		if (!result) {
 			if (replaceAdopted) this.actionsReadBlocked = true;
+			if (this.coldReadPending) {
+				// The file a thrown read held the deck on is GONE (removed, or a
+				// sync client took it away). InlineInkStore.retryDamaged's rule:
+				// nothing is left to read, so the hold lifts, the ink drawn while
+				// held starts a fresh file (finishLoad runs its deferred write),
+				// and only a reader who was told hears that saving is back.
+				this.reloadDamaged = false;
+				this.actionsReadBlocked = false;
+				this.coldReadPending = false;
+				this.transientSince = null;
+				if (this.transientNoticed) this.host.notify(TRANSIENT_GONE);
+				this.transientNoticed = false;
+				log(`sidecar loaded: none (${sidecarId} is gone); the held deck starts fresh`);
+				return null;
+			}
 			if (diagnosticsEnabled()) log(`sidecar loaded: none (${sidecarId} has no file yet)`);
 			return null;
 		}
+		if (result.damaged && result.transient) {
+			// The read threw. Hold writes, say nothing: telling the reader a
+			// healthy file is broken, and locking the deck for the rest of the
+			// presentation, is the defect. The poll re-reads it; ink drawn
+			// meanwhile waits in memory and is saved once a read succeeds.
+			this.reloadDamaged = true;
+			this.actionsReadBlocked = true;
+			if (!replaceAdopted) {
+				this.coldReadPending = true;
+				// The silence is bounded, as on a note: a stroke (persist) or
+				// 60 s of reads that keep throwing gives one plain notice. A
+				// stroke drawn while this read was in flight reaches persist
+				// through finishLoad now, so held ink is told before any close.
+				const now = Date.now();
+				if (this.transientSince === null) this.transientSince = now;
+				if (now - this.transientSince >= TRANSIENT_SILENCE_MS) this.noticeTransient();
+			}
+			log(`sidecar load deferred: ${sidecarId} could not be read yet`);
+			return null;
+		}
 		if (result.damaged) {
+			if (replaceAdopted) {
+				this.reloadDamaged = true;
+				this.actionsReadBlocked = true;
+				log(`sidecar reload deferred: damaged read for ${sidecarId}`);
+				return null;
+			}
 			// Fail closed, the store's own rule, and there is genuinely nothing
 			// to draw: `parsePage`'s catch arm hands back `emptyPage`, which is
 			// a placeholder rather than the reader's ink. Ink still flows; it
@@ -2362,6 +2586,16 @@ export class SlidesDeck implements SlidesActions {
 			);
 			return null;
 		}
+		this.reloadDamaged = false;
+		// The first load has now happened: the actions its failed read blocked are back.
+		if (this.coldReadPending) {
+			this.actionsReadBlocked = false;
+			// A hold the reader was never told about heals as quietly as it came.
+			if (this.transientNoticed && result.futureVersion === undefined) this.host.notify(TRANSIENT_HEALED);
+		}
+		this.coldReadPending = false;
+		this.transientSince = null;
+		this.transientNoticed = false;
 		if (result.futureVersion !== undefined) {
 			// READ-ONLY, NOT INVISIBLE - InlineInkStore's rule, on the same
 			// evidence ("this used to return here, so a note whose sidecar came
@@ -2389,7 +2623,14 @@ export class SlidesDeck implements SlidesActions {
 		// the authoritative history boundary. Its write remains parked behind
 		// this reload; the merged state below is what finishLoad persists.
 		// Failed/refused reads leave both the gesture and its history intact.
+		if (replaceAdopted && !this.futureLocked && this.session.phase === "drawing") {
+			await new Promise<void>(resolve => { this.reloadAfterStroke = resolve; });
+			if (this.stale()) return null;
+		}
 		if (replaceAdopted && !this.futureLocked) this.endStrokeForSlideChange();
+		// Only the store can distinguish a saved snapshot from a queued one.
+		// Capture its state before the read: ink drawn during the await is local.
+		for (const id of persistedIds) this.adoptedIds.add(id);
 		// A live reload keeps the displayed ink until this read has succeeded.
 		// Its starting ids also identify any ink erased during the await:
 		// those ids must not be resurrected by the older disk snapshot.
@@ -2407,6 +2648,40 @@ export class SlidesDeck implements SlidesActions {
 		if (page.deck) this.deckSize = page.deck;
 		const stored = page.slides ?? [];
 		const moved = this.hashes.length > 0 ? remapSlides(stored, this.hashes) : new Map<number, number>();
+		this.retainedSlides = new Map(stored
+			.filter(slide => this.hashes[slide.index] !== slide.hash && !moved.has(slide.index))
+			.map(slide => [slide.index, slide]));
+		this.visualSlots.clear();
+		const used = new Set(this.hashes.map((_, index) => index)
+			.filter(index => !this.retainedSlides.has(index)));
+		let next = Math.max(this.hashes.length - 1, ...stored.map(slide => slide.index)) + 1;
+		for (let index = 0; index < this.hashes.length; index++) {
+			if (!this.retainedSlides.has(index)) continue;
+			const hash = this.hashes[index]!;
+			const matches = stored.filter(slide => slide.hash === hash);
+			const slot = matches.length === 1 && !used.has(matches[0]!.index)
+				? matches[0]!.index : next++;
+			this.visualSlots.set(index, slot);
+			used.add(slot);
+		}
+		// Resolve local pre-load ink by its visible slide, before adding disk ink.
+		// Share replacements with history so undo/redo cannot revive old slots.
+		const resolvedLocal = new Map<InkStroke, InkStroke>();
+		const resolveLocal = (stroke: InkStroke, index: number): InkStroke => {
+			const page = pageOfSlide(this.visualSlots.get(index) ?? index);
+			if (stroke.page === page) return stroke;
+			let resolved = resolvedLocal.get(stroke);
+			if (!resolved) {
+				resolved = { ...stroke, page };
+				resolvedLocal.set(stroke, resolved);
+			}
+			return resolved;
+		};
+		if (!replaceAdopted) {
+			for (const [index, list] of this.strokes) {
+				this.strokes.set(index, list.map(stroke => resolveLocal(stroke, index)));
+			}
+		}
 		const strokes = page.strokes.slice();
 		const remapped = remapStrokes(strokes, moved);
 		// Ids already on screen are SKIPPED, not appended. On a cold load this
@@ -2416,9 +2691,17 @@ export class SlidesDeck implements SlidesActions {
 		const present = new Set<string>();
 		for (const list of this.strokes.values()) for (const s of list) present.add(s.id);
 		const additions = new Map<number, InkStroke[]>();
+		const visualBySlot = new Map([...this.visualSlots].map(([visual, slot]) => [slot, visual]));
 		for (const s of strokes) {
-			if (present.has(s.id) || erased.has(s.id)) continue;
-			const index = slideOfPage(s.page);
+			if (erased.has(s.id)) continue;
+			if (present.has(s.id)) {
+				// A local stroke becomes disk-owned once it has round-tripped.
+				// A later remote erase must be able to remove it.
+				this.adoptedIds.add(s.id);
+				continue;
+			}
+			const slot = slideOfPage(s.page);
+			const index = visualBySlot.get(slot) ?? slot;
 			const list = this.strokes.get(index) ?? [];
 			list.push(s);
 			this.strokes.set(index, list);
@@ -2448,9 +2731,10 @@ export class SlidesDeck implements SlidesActions {
 			this.actionsReadBlocked = false;
 			this.history.clear();
 		} else if (!replaceAdopted) {
-			this.history.rebaseInitial(additions);
+			this.history.rebaseInitial(additions, resolveLocal);
 			const gesture = this.gestureBefore;
 			if (gesture) {
+				gesture.strokes = gesture.strokes.map(stroke => resolveLocal(stroke, gesture.index));
 				const ids = new Set(gesture.strokes.map(s => s.id));
 				gesture.strokes.push(...(additions.get(gesture.index) ?? []).filter(s => !ids.has(s.id)));
 			}
@@ -3579,7 +3863,13 @@ export class SlidesDeck implements SlidesActions {
 		// leaves the same stale session behind it (`onPointerDown` returns
 		// early while one is live, so the reader's NEXT stroke is the one that
 		// is lost).
-		this.armQuietTimer(SILENT_LIFT_QUIET_MS);
+		//
+		// Pens only. A mouse held still sends nothing while its button is
+		// down, so silence proves nothing about it: the deadline ended a held
+		// dot as a lift (the dot vanished) and ended a drag that paused, so
+		// the rest of it drew nothing. A mouse always sends its button-up,
+		// and the tap-or-stroke test at that button-up decides the dot.
+		if (ev.pointerType === "pen") this.armQuietTimer(SILENT_LIFT_QUIET_MS);
 		if (erasing) {
 			// B1: no hit test yet - promotion (on move or at TAP_MS) decides
 			// whether this contact ever touches the slide's ink at all.
@@ -4103,6 +4393,9 @@ export class SlidesDeck implements SlidesActions {
 	}
 
 	private commitStroke(pointerId: number, reason: StrokeEndReason, samples: number): void {
+		const resumeReload = this.reloadAfterStroke;
+		this.reloadAfterStroke = null;
+		resumeReload?.();
 		const builder = this.builder;
 		this.builder = null;
 		this.activeStyle = null;
@@ -4286,7 +4579,7 @@ export class SlidesDeck implements SlidesActions {
 		// travel would look like a bug rather than the hardware artefact it is.
 		const finished = builder.finishReleaseFiltered();
 		if (finished.length > 0) {
-			for (const s of finished) s.page = pageOfSlide(l.index);
+			for (const s of finished) s.page = pageOfSlide(this.visualSlots.get(l.index) ?? l.index);
 			const list = this.strokes.get(l.index) ?? [];
 			list.push(...finished);
 			this.strokes.set(l.index, list);
@@ -4329,7 +4622,10 @@ export class SlidesDeck implements SlidesActions {
 		// gate exists to stop. `finishLoad` runs this again the moment the store
 		// has answered, by which time `basePage` and the fail-closed lock are
 		// both real.
-		if (!this.loaded) {
+		// Ink drawn on a deck held on a thrown first read is not saved until a
+		// read succeeds: say so now, once, rather than let it go silently.
+		if (this.coldReadPending) this.noticeTransient();
+		if (!this.loaded || this.reloadDamaged) {
 			this.saveAfterLoad = true;
 			return;
 		}
@@ -4395,7 +4691,7 @@ export class SlidesDeck implements SlidesActions {
 	/** The page this deck would write right now, or null if it must not write. */
 	private snapshot(): PageData | null {
 		const sidecarId = this.sidecarId;
-		if (!sidecarId || this.futureLocked) return null;
+		if (!sidecarId || this.futureLocked || this.reloadDamaged) return null;
 		const base = this.basePage ?? emptyPage(sidecarId);
 		const strokes: InkStroke[] = [];
 		for (const list of this.strokes.values()) strokes.push(...list);
@@ -4406,7 +4702,13 @@ export class SlidesDeck implements SlidesActions {
 			coordSpace: "slide-logical",
 			...(this.deckSize ? { deck: this.deckSize } : {}),
 			...(this.hashes.length > 0
-				? { slides: this.hashes.map((hash, index) => ({ index, hash })) }
+				? { slides: Array.from(new Map<number, StoredSlide>([
+					...this.hashes.map((hash, index): [number, StoredSlide] => {
+						const slot = this.visualSlots.get(index) ?? index;
+						return [slot, { index: slot, hash }];
+					}),
+					...this.retainedSlides.entries(),
+				]).values()).sort((a, b) => a.index - b.index) }
 				: {}),
 			strokes,
 		};
@@ -4426,6 +4728,7 @@ export class SlidesDeck implements SlidesActions {
 		const page = this.snapshot();
 		const sidecarId = this.sidecarId;
 		if (!page || !sidecarId) return;
+		this.queuedIds = new Set(page.strokes.map(stroke => stroke.id));
 		if (!immediate) {
 			this.host.scheduleSidecar(sidecarId, page);
 			if (diagnosticsEnabled()) log(`save scheduled: ${sidecarId}, ${page.strokes.length} stroke(s)`);
@@ -4461,6 +4764,13 @@ export class SlidesDeck implements SlidesActions {
 		if (this.readOnlyNoticed) return;
 		this.readOnlyNoticed = true;
 		this.host.notify(message);
+	}
+
+	/** The one notice a deck held on a thrown first read gives, when its silence ends. */
+	private noticeTransient(): void {
+		if (this.transientNoticed) return;
+		this.transientNoticed = true;
+		this.host.notify(TRANSIENT_NOTICE);
 	}
 
 	/**
@@ -4520,13 +4830,17 @@ export class SlidesDeck implements SlidesActions {
 		const before = this.strokeFingerprint();
 		this.loaded = false;
 		let changed = false;
-		const loading = this.adoptSidecar(sidecarId, true)
+		// Nothing was adopted yet when the first read threw: this read is the
+		// first load, with its merge of ink drawn meanwhile and its undo history.
+		const loading = this.adoptSidecar(sidecarId, !this.coldReadPending)
 			.then((result) => {
 				if (!this.stale() && result) changed = this.strokeFingerprint() !== before;
 			})
 			.finally(() => {
 				this.loadInFlight = null;
+				const deferredSave = this.saveAfterLoad;
 				if (!this.stale()) this.finishLoad();
+				if (changed && this.dirty && !deferredSave && !this.disposed && !this.reloadDamaged) this.save(false);
 				this.actionsChanged();
 			});
 		this.loadInFlight = loading;
@@ -4715,7 +5029,8 @@ export class SlidesDeck implements SlidesActions {
 // ---- module-level controller ----------------------------------------------
 
 let enabled = false;
-let observer: MutationObserver | null = null;
+const observers = new Map<Document, MutationObserver>();
+let stopDocumentChanges: (() => void) | null = null;
 let deck: SlidesDeck | null = null;
 let host: SlidesInkHost | null = null;
 /**
@@ -4801,19 +5116,35 @@ function findDeck(
 export function scanForSlides(): void {
 	if (!enabled || !host) return;
 	if (deck) {
-		if (deck.container.isConnected) return;
+		if (deck.container.isConnected && observers.has(deck.ownerDocument)) return;
 		deck.dispose();
 		deck = null;
 	}
-	// No live deck (or the old one just proved dead): look for a new one.
-	// The active document first, then the main window's document too if
-	// `activeDocument` has pointed us at a pop-out - the presentation is
-	// still on the main screen even while a pop-out has focus.
+	// No live deck: search every watched window, with the active one first.
 	const active = presentationDoc();
-	const found = findDeck(active) ?? (active !== document ? findDeck(document) : null);
+	const ordered = [active, ...observers.keys()].filter((doc, i, docs) =>
+		observers.has(doc) && docs.indexOf(doc) === i);
+	const found = ordered.map(findDeck).find(Boolean) ?? null;
 	if (found) {
 		deck = new SlidesDeck(found.container, found.reveal, found.slides, host);
 	}
+}
+
+function syncSlidesDocuments(): void {
+	if (!enabled || !host) return;
+	const wanted = new Set(host.documents?.() ?? [presentationDoc()]);
+	for (const [doc, observer] of observers) {
+		if (wanted.has(doc)) continue;
+		observer.disconnect();
+		observers.delete(doc);
+	}
+	for (const doc of wanted) {
+		if (observers.has(doc) || !doc.body) continue;
+		const observer = new MutationObserver(() => scanForSlides());
+		observer.observe(doc.body, { childList: true });
+		observers.set(doc, observer);
+	}
+	scanForSlides();
 }
 
 /**
@@ -4895,8 +5226,10 @@ export function setSlidesInk(on: boolean, next?: SlidesInkHost): void {
 	if (on === enabled) return;
 	enabled = on;
 	if (!on) {
-		observer?.disconnect();
-		observer = null;
+		stopDocumentChanges?.();
+		stopDocumentChanges = null;
+		for (const observer of observers.values()) observer.disconnect();
+		observers.clear();
 		deck?.dispose();
 		deck = null;
 		if (diagnosticsEnabled()) log("slides ink off");
@@ -4909,14 +5242,11 @@ export function setSlidesInk(on: boolean, next?: SlidesInkHost): void {
 		log("slides ink asked to start with no host; ignored");
 		return;
 	}
-	const doc = presentationDoc();
-	// The only reliable mount signal there is (S1). `childList` on `body`
-	// alone: the container is a direct child, and a subtree observer on the
-	// whole body during a presentation would fire on every Reveal transition.
-	observer = new MutationObserver(() => scanForSlides());
-	observer.observe(doc.body, { childList: true });
-	if (diagnosticsEnabled()) log(`slides ink on; watching body for .slides-container, build ${host.buildId}`);
-	scanForSlides();
+	// Each body owns its direct-child mount signal. Watching no subtree keeps
+	// Reveal transitions from waking a full deck scan.
+	stopDocumentChanges = host.onDocumentChange?.(syncSlidesDocuments) ?? null;
+	syncSlidesDocuments();
+	if (diagnosticsEnabled()) log(`slides ink on; watching ${observers.size} body(s), build ${host.buildId}`);
 }
 
 /** No underlying note fallback: commands resolve only a live deck in their document. */

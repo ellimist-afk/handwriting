@@ -32,7 +32,7 @@
 }
 
 /*
- * The only text-container rule left after s197: `PointerRouter` still asks
+ * The only text-container rule left after the canvas page was removed: `PointerRouter` still asks
  * `closest(".cm-editor, .handwriting-box-editor")` before it claims a
  * contact, so the selector stays live even though the canvas page that built
  * these elements is gone.
@@ -75,6 +75,9 @@
 	   third of the reticle's apparent size. */
 	border: 1.5px solid var(--background-primary);
 	box-shadow: 0 0 0 1px var(--text-normal);
+	/* Its own layer: shown and hidden by opacity, moved by transform, so the
+	   reticle never repaints the window around it. */
+	will-change: transform, opacity;
 }
 
 /*
@@ -376,6 +379,21 @@ div.handwriting-snap-chip.handwriting-snap-chip {
 	max-width: none;
 }
 
+/* A reading view's scroll room for ink left of its column: a 1 px spacer that
+   widens the scroll range, and the sideways scroll it needs to reach it. */
+.handwriting-embed-scroll-reserve {
+	position: absolute;
+	top: 0;
+	width: 1px;
+	height: 1px;
+	visibility: hidden;
+	pointer-events: none;
+}
+
+.markdown-preview-view.handwriting-embed-hscroll {
+	overflow-x: auto;
+}
+
 /* ---- paper ---- */
 
 /*
@@ -422,7 +440,7 @@ div.handwriting-snap-chip.handwriting-snap-chip {
 .handwriting-paper-swatch[data-paper="lines"],
 body.handwriting-paper-lines .markdown-source-view .cm-scroller,
 body [data-handwriting-paper][data-handwriting-paper="lines"] .markdown-source-view .cm-scroller {
-	/* s192: this scroller is not grid, whatever a global grid class says. The overlay reads this one property to
+	/* This scroller is not grid, whatever a global grid class says. The overlay reads this one property to
 	   decide whether the second box below belongs here; every paper kind states it, so a note's own choice wins. */
 	--handwriting-paper-grid: 0;
 	background-image: repeating-linear-gradient(
@@ -438,8 +456,8 @@ body [data-handwriting-paper][data-handwriting-paper="lines"] .markdown-source-v
 	background-position: 0 0;
 }
 
-/* GRID PAPER PAINTS ONE AXIS PER BOX (s192; Alan on Orion at 51.8 percent: rules missing in long stretches, the
-   rest smeared or alternating strong and faint). Measured, s192 add. 5: the FIRST of two repeating gradients on
+/* GRID PAPER PAINTS ONE AXIS PER BOX (Alan on Orion at 51.8 percent: rules missing in long stretches, the
+   rest smeared or alternating strong and faint). Measured: the FIRST of two repeating gradients on
    one box degrades with that box's area - clean at 2021 x 1729, 37.8 percent spread at 3749 x 1729, five rules
    lost at 4613 x 1729 - and a scroller under the Infinite Canvas is both tall and wide. One gradient per box is
    clean at every area measured. So the scroller keeps the horizontal layer, exactly as lined paper has it, and
@@ -476,7 +494,7 @@ body [data-handwriting-paper][data-handwriting-paper="grid"] .markdown-source-vi
 	/* THE DEFAULT IS STILL BOTH LAYERS, and it has to be: the box below is the overlay's, so a grid scroller with no
 	   overlay on it - or one in the frames before the overlay's first pass - would paint lined paper if this rule
 	   dropped the vertical layer on its own. Half a grid is worse than the flaw being fixed. The scroller drops to
-	   one layer only under the class the overlay adds in the same call that puts the box up (s192 add. 6). */
+	   one layer only under the class the overlay adds in the same call that puts the box up. */
 	background-image:
 		repeating-linear-gradient(
 			to bottom,
@@ -573,7 +591,7 @@ body [data-handwriting-paper][data-handwriting-paper="dots"] .markdown-source-vi
 	   and the text's pinch pan as their tile position. */
 	background-position: calc(var(--handwriting-paper-phase-x, 0px) + var(--handwriting-paper-pan-x, 0px)) calc(var(--handwriting-paper-phase, 0px) + var(--handwriting-paper-pan-y, 0px));
 	background-attachment: local;
-	/* s192: not grid, so no second box. */
+	/* Not grid, so no second box. */
 	--handwriting-paper-grid: 0;
 }
 
@@ -588,7 +606,7 @@ body [data-handwriting-paper][data-handwriting-paper="dots"] .markdown-source-vi
 	background-image: none !important;
 	background-color: transparent !important;
 }
-/* s192: the preview element carries BOTH axes (two layers on a pane-sized box, measured clean), so the grid's own
+/* The preview element carries BOTH axes (two layers on a pane-sized box, measured clean), so the grid's own
    box goes quiet under the same class - no frame shows an axis twice or not at all. */
 .cm-scroller.handwriting-paper-previewing .handwriting-paper-grid-column {
 	background-image: none !important;
@@ -605,7 +623,7 @@ body [data-handwriting-paper][data-handwriting-paper="dots"] .markdown-source-vi
    dots and grid set their own. */
 body [data-handwriting-paper][data-handwriting-paper="none"] .markdown-source-view .cm-scroller {
 	background-image: none;
-	/* s192: not grid, so no second box, whatever a global grid class says. */
+	/* Not grid, so no second box, whatever a global grid class says. */
 	--handwriting-paper-grid: 0;
 }
 
@@ -983,14 +1001,19 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
 	   low-latency wet canvas, and without isolation its repaints and the
 	   canvas's invalidate each other - measured as stroke lag whenever the
 	   toolbar was unfolded (orion, 1.0.4 era). */
-	will-change: transform;
+	will-change: transform, opacity;
 	/* NO paint containment here: the drop-downs (sliders, swatches) hang
 	   BELOW the strip's box, and contain:paint clips children to the box -
 	   it silently swallowed every pop. layout+style keep the isolation. */
 	contain: layout style;
 	/* Reappear 160ms after the last pen-up; vanish near-instantly at
-	   pen-down. The delay keeps an eraser scrub from strobing the strip. */
-	transition: opacity 60ms linear 160ms, visibility 0s linear 160ms;
+	   pen-down. The delay keeps an eraser scrub from strobing the strip.
+	   Opacity only: a visibility transition cannot run on the compositor,
+	   so it ticked on the main thread and repainted the whole window at
+	   every pen-down and pen-up (Orion full-screen profile, 1.4.22). The
+	   160ms in which the strip is still invisible after a lift is kept
+	   unhittable by is-stepping-back (MobileTools setInking). */
+	transition: opacity 60ms linear 160ms;
 	display: flex;
 	/* Phones: the row is wider than the screen wants; wrap instead of clip. */
 	flex-wrap: wrap;
@@ -1803,6 +1826,15 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
 .handwriting-slider-pop button.handwriting-preset-star {
 	padding: 0;
 }
+/* The eraser's own Stroke/Reticle chips (item 147) were left out of the tie
+   above, so on a tablet the host's padding rule outranked
+   `.handwriting-mode-chip`'s own padding and the chips overflowed the pop's
+   fixed width. They tie the host the same way, but keep their own padding:
+   the chips are 30px tall from it, not from a fixed height as the three
+   above are, and `padding: 0` would shrink them to 16px on every device. */
+.handwriting-slider-pop button.handwriting-mode-chip {
+	padding: 7px 8px;
+}
 
 .handwriting-color-swatch.is-current {
 	box-shadow: 0 0 0 2px var(--background-secondary), 0 0 0 3.5px var(--interactive-accent);
@@ -1975,16 +2007,27 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
 .handwriting-pen-pill.is-inking,
 .handwriting-note-viewport-controls.is-inking {
 	opacity: 0;
-	visibility: hidden;
-	transition: opacity 40ms linear, visibility 0s linear 40ms;
+	/* Unhittable while the pen is down, as visibility: hidden made it,
+	   without a visibility change the compositor cannot animate. */
+	pointer-events: none;
+	transition: opacity 40ms linear;
+}
+
+/* The return delay after a lift: still invisible, still unhittable, until
+   the fade starts. MobileTools setInking adds it at pen-up and takes it off
+   160ms later, or at the next pen-down. */
+.handwriting-mobile-tools.is-stepping-back,
+.handwriting-pen-pill.is-stepping-back,
+.handwriting-note-viewport-controls.is-stepping-back {
+	pointer-events: none;
 }
 
 .handwriting-pen-pill {
 	position: absolute;
 	z-index: 12;
-	will-change: transform;
+	will-change: transform, opacity;
 	contain: layout style paint;
-	transition: opacity 60ms linear 160ms, visibility 0s linear 160ms;
+	transition: opacity 60ms linear 160ms;
 	display: none;
 	width: 34px;
 	height: 34px;
@@ -2330,17 +2373,24 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
  * writes frontmatter, the hidden row adds zero height, and a Properties
  * block whose ONLY property is handwriting-page-id is hidden as one unit.
  * User properties are untouched: any other key keeps the block visible.
+ *
+ * `handwriting-canvas` (the per-note Infinite Canvas override) is the same
+ * kind of internal key as `handwriting-paper`: writing it must not turn a
+ * hidden id-only block into a visible one with just that row showing
+ * (audit 196). `MetadataVisibility.ts`'s `isInternalProperty` treats all
+ * three the same; this list must keep matching that one.
  */
 /* Match the host's editing, reading and Bases popover scopes with the
  * maintained id-only class. Normal specificity wins their display rules. */
 .metadata-property[data-property-key="handwriting-page-id"],
-.metadata-property[data-property-key="handwriting-paper"] {
+.metadata-property[data-property-key="handwriting-paper"],
+.metadata-property[data-property-key="handwriting-canvas"] {
 	display: none;
 }
-.metadata-container.handwriting-metadata-id-only,
-.markdown-source-view.is-live-preview.show-properties .metadata-container.handwriting-metadata-id-only:not(.mod-error),
-.markdown-preview-view.show-properties .metadata-container.handwriting-metadata-id-only,
-.hover-popover.bases-new-item-popover .markdown-source-view.is-live-preview .metadata-container.handwriting-metadata-id-only {
+.metadata-container.handwriting-metadata-id-only:not(:has(.metadata-property:not([data-property-key]), .metadata-property[data-property-key=""])),
+.markdown-source-view.is-live-preview.show-properties .metadata-container.handwriting-metadata-id-only:not(.mod-error):not(:has(.metadata-property:not([data-property-key]), .metadata-property[data-property-key=""])),
+.markdown-preview-view.show-properties .metadata-container.handwriting-metadata-id-only:not(:has(.metadata-property:not([data-property-key]), .metadata-property[data-property-key=""])),
+.hover-popover.bases-new-item-popover .markdown-source-view.is-live-preview .metadata-container.handwriting-metadata-id-only:not(:has(.metadata-property:not([data-property-key]), .metadata-property[data-property-key=""])) {
 	display: none;
 }
 /*
@@ -2348,9 +2398,13 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
  * items like Custom sort) is a fixed overlay in the bottom-right corner.
  * Harmless over prose, but on a Handwriting page it physically covers the lower
  * edge of the writing surface and the horizontal scrollbar. No native
- * setting moves it, so it is hidden exactly while the ACTIVE note is a
- * Handwriting page (body class managed by the plugin); every other note and
- * every other workspace state keeps it.
+ * setting moves it, so it can be hidden while the ACTIVE note is a Handwriting
+ * page - OPT-IN, and off by default.
+ *
+ * The rule is inert unless `handwriting-active-page` is on <body>, and the only
+ * thing that puts it there is `applyStatusBarVisibility` (main.ts), which
+ * returns without stamping unless `hideStatusBarOnInkedNotes` is on. A vault
+ * that never touches the setting never matches this selector.
  */
 body.handwriting-active-page .status-bar {
 	display: none;
@@ -2440,7 +2494,8 @@ body.handwriting-active-page .status-bar {
 /* The dot's own tooltip: Obsidian's answers mouse hover only, and a
    hovering pen showed nothing - and every button was mute, not just the
    dot. Positioned under the strip, aligned to the hovered control. */
-.handwriting-strip-tip {
+.handwriting-strip-tip,
+.handwriting-pill-tip {
 	display: none;
 	position: absolute;
 	top: 100%;
@@ -2457,8 +2512,14 @@ body.handwriting-active-page .status-bar {
 	z-index: 30;
 }
 
-.handwriting-strip-tip.is-showing {
+.handwriting-strip-tip.is-showing,
+.handwriting-pill-tip.is-showing {
 	display: block;
+}
+
+/* The folded pill's tip sits on the pane, not under the strip: JS places it from the pill's offsets. */
+.handwriting-pill-tip {
+	margin-top: 0;
 }
 
 /* Screen readers read it; nobody sees it; Obsidian's tooltip cannot key on
@@ -2477,10 +2538,24 @@ body.handwriting-active-page .status-bar {
 /* Boox mode: e-ink pays for every repaint, so the chrome stops moving -
    no fade on the strip or pill, no pulse on the recording dot, no press
    scale. Everything still appears and responds; it snaps instead of
-   animating. */
+   animating.
+
+   `transition: none` used to kill the RETURN delay too (the 160ms beat
+   `.handwriting-mobile-tools`'s own base rule holds before reappearing
+   after a stroke), so the strip blinked back on every pen-up instead of
+   staying hidden across a quick run of strokes (item 37). Zero DURATION
+   still removes the fade; the DELAY is kept so the reappearance still
+   waits the same 160ms. */
 body.handwriting-boox .handwriting-mobile-tools,
 body.handwriting-boox .handwriting-pen-pill {
-	transition: none;
+	transition: opacity 0s linear 160ms, visibility 0s linear 160ms;
+}
+/* The hide side (is-inking) has no delay to keep - it always vanished
+   near-instantly - and needs its own zero-duration override here because
+   this selector's specificity would otherwise beat is-inking's. */
+body.handwriting-boox .handwriting-mobile-tools.is-inking,
+body.handwriting-boox .handwriting-pen-pill.is-inking {
+	transition: opacity 0s linear, visibility 0s linear;
 }
 body.handwriting-boox .handwriting-recording-dot {
 	animation: none;
@@ -3067,11 +3142,11 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
  margin-right: auto !important;
 }
 /*
- * s184 (Alan, Orion, 2026-09-20): A THEME THAT CENTRES ITS OWN LINES GETS THE SAME FREEZE AS THE SIZER. Minimal
+ * Alan, Orion, 2026-09-20: A THEME THAT CENTRES ITS OWN LINES GETS THE SAME FREEZE AS THE SIZER. Minimal
  * centres each line with `margin-inline-start: var(--content-margin-start) !important` (max(50% - line/2, ...)),
  * resolved against a `.cm-content` the owned host widens by 1/k, so the column re-centred further right after every
  * zoom-out - the column's home read 392, 998, 1554, 1697 host px across three pinches on Alan's device while the
- * settle itself landed at pan 0 each time. s121 (Alan direct): the plugin centres nowhere. The line's inset is held
+ * settle itself landed at pan 0 each time. Alan: the plugin centres nowhere. The line's inset is held
  * to the value measured at 100% - the same clamp the sizer margin takes above - and the theme's own auto term
  * (`--handwriting-column-auto-left`, written for this case too) still wins at k > 1, where it is the smaller.
  * Specificity: Minimal's selector plus the two owned classes, so the tie the reset below lost is won here.
@@ -3090,7 +3165,7 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
                                var(--handwriting-column-auto-left, calc((100% - var(--file-line-width)) / 2)))) !important;
 }
 /*
- * s191 (Alan, Orion, 2026-09-21, Minimal, 20.7%): "the untitled title moves to the right as i pinch outward". Obsidian
+ * Alan, Orion, 2026-09-21, Minimal, 20.7%: "the untitled title moves to the right as i pinch outward". Obsidian
  * hangs the inline title, the properties block and the backlinks off the SIZER, beside the contentContainer, so the
  * freeze above - written on the content's children - never reached them. Minimal centres all three with
  * `margin-inline: var(--content-margin) !important` (theme.css:1860-1867) inside a sizer the owned host widens by 1/k,
@@ -3120,11 +3195,19 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
 }
 /* The RETURN transition (after .is-inking comes off) is the strip's own base
    one (.handwriting-mobile-tools above), not the pill's - they read the same
-   today (opacity 60ms linear 160ms, visibility 0s linear 160ms) but this is
+   today (opacity 60ms linear 160ms) but this is
    copied from the strip on purpose: the zoom bar sits alongside the strip,
    not the collapsed pill. */
-.handwriting-note-viewport-controls { position:absolute; top:52px; right:8px; z-index:30; display:flex; gap:2px; padding:3px; border:1px solid var(--background-modifier-border); border-radius:8px; background:var(--background-primary); box-shadow:0 2px 8px #0002; transition: opacity 60ms linear 160ms, visibility 0s linear 160ms; }
+.handwriting-note-viewport-controls { position:absolute; top:52px; right:8px; z-index:30; display:flex; gap:2px; padding:3px; border:1px solid var(--background-modifier-border); border-radius:8px; background:var(--background-primary); box-shadow:0 2px 8px #0002; will-change: transform, opacity; transition: opacity 60ms linear 160ms; }
 .handwriting-note-viewport-controls button { min-width:30px; height:30px; padding:0 6px; font-size:12px; }
+/* Below the pen strip and its folded pill on a phone, never over them. The fixed top above is sized for the
+   desktop strip; a notched phone pushes the strip and pill down by its safe-area inset, and Android moves them
+   below the notification shade (top 48 and 55 above), so there the bar sat over the pill and the strip's right
+   end and a tap meant to reopen the toolbar zoomed instead. Same inset, below the strip's lowest edge: the mobile
+   strip is 50px tall from inset + 8, so it ends at inset + 58, and 60 leaves the same 2px gap the Android rule
+   leaves (98 to 100). 52 put the bar 6px over the open strip on an iPad. */
+.is-mobile .handwriting-note-viewport-controls { top: calc(env(safe-area-inset-top, 0px) + 60px); }
+.handwriting-android .handwriting-note-viewport-controls { top: calc(env(safe-area-inset-top, 0px) + 100px); }
 /* Hide is a permanent state chosen in settings, not a step-aside - out of
    paint, the tab order and the accessibility tree, same idiom as
    .handwriting-mobile-tools.is-collapsed above. */
@@ -3134,3 +3217,6 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
 
 /* Only Infinite Canvas note routers opt in; wheel input remains native. */
 .handwriting-no-momentum { touch-action: none; }
+.view-action.handwriting-canvas-action.is-active {
+	color: var(--interactive-accent);
+}

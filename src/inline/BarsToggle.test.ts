@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { normalizeBarsRestore } from "./BarsToggle";
 
 /**
- * What survives s145. `toggleBars` and `BarsSettings` are gone with the
- * command that used them (s138 item 15 left the toolbar half in main.ts,
+ * What survives the cleanup. `toggleBars` and `BarsSettings` are gone with the
+ * command that used them (the canvas work left the toolbar half in main.ts,
  * written inline against the live settings), so the cells that drove the pair
  * through a toggle are gone too - they described a function, not a shipped
  * behaviour, and the behaviour they would have pinned is now main.ts's.

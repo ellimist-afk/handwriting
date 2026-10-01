@@ -1,6 +1,6 @@
 {
 	"name": "handwriting",
-	"version": "1.4.21",
+	"version": "1.4.22",
 	"description": "Handwrite, highlight, erase and lasso on your notes and PDFs. Your notes stay Markdown.",
 	"main": "main.js",
 	"private": true,
@@ -24,7 +24,7 @@
 	"author": "Alan",
 	"license": "CC-BY-NC-ND-4.0",
 	"devDependencies": {
-		"@codemirror/commands": "^6.6.0",
+		"@codemirror/commands": "6.10.2",
 		"@codemirror/state": "6.5.0",
 		"@codemirror/view": "6.38.6",
 		"esbuild": "^0.28.2",

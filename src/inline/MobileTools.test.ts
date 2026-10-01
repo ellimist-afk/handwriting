@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import postcss from "postcss";
 import css from "../../styles.css?raw";
 import mainSrc from "../main.ts?raw";
 import stripSrc from "./MobileTools.ts?raw";
@@ -8,6 +9,7 @@ import {
 	DEFAULT_FOLD_ORDER,
 	MobileTools,
 	nibIsLit,
+	setStripFoldOrder,
 	normalizeFoldOrder,
 	type MobileToolsHost,
 } from "./MobileTools";
@@ -655,7 +657,7 @@ describe("MobileTools: iPhone finger entry", () => {
 	});
 
 	it("Keyboard exit can re-enter through Pen or Highlighter", () => {
-		const { doc, pane, execed, focused, host } = buildPhone();
+		const { doc, pane, strip, execed, focused, host } = buildPhone();
 		const keyboard = pane.findByTipLabel("Keyboard mode (pen input off)");
 		const pen = pane.findByTipLabel("Pen");
 		const highlighter = pane.findByTipLabel("Highlighter");
@@ -669,6 +671,10 @@ describe("MobileTools: iPhone finger entry", () => {
 		doc.flushFrames();
 		expect(penInkEnabled()).toBe(true);
 		expect(nibIsLit(host, "pen")).toBe(true);
+		// ITEM 200: leaving Keyboard mode through a nib is the SAME first
+		// grant as the cold-start tap above - it must not open the nib's
+		// size/colour pop over the note either.
+		expect(strip.openNibSlider, "Pen's pop opened when leaving Keyboard mode").toBeNull();
 
 		keyboard.fire("click", { pointerType: "touch" });
 		doc.flushFrames();
@@ -676,6 +682,7 @@ describe("MobileTools: iPhone finger entry", () => {
 		doc.flushFrames();
 		expect(penInkEnabled()).toBe(true);
 		expect(nibIsLit(host, "highlighter")).toBe(true);
+		expect(strip.openNibSlider, "Highlighter's pop opened when leaving Keyboard mode").toBeNull();
 		expect(execed).toEqual([
 			"handwriting:pen-ink-toggle",
 			"handwriting:inline-tool-pen",
@@ -3347,9 +3354,27 @@ describe("MobileTools: colour lives in the nib pops and on the nib icons", () =>
 		const pen = pane.findByTipLabel("Pen: red");
 		const hl = pane.findByTipLabel("Highlighter: yellow");
 		if (!pen || !hl) throw new Error("a nib button was not built");
-		expect(pen.style.color).toBe("#dd2222");
+		// ITEM 140: blended toward the theme's own text colour, not the raw
+		// hex, so a pen this close to the background (black in dark mode,
+		// white in light mode) does not go invisible while unlit.
+		expect(pen.style.color).toBe("color-mix(in srgb, #dd2222 70%, var(--text-normal))");
 		// Not the pen's colour, and not the active tool's: its own.
-		expect(hl.style.color).toBe("#ffee55");
+		expect(hl.style.color).toBe("color-mix(in srgb, #ffee55 70%, var(--text-normal))");
+	});
+
+	// ITEM 140 (AUDIT-1421): the icon used to be painted with the pen's raw
+	// hex and no contrast fallback, so a black pen in dark mode (or a white
+	// one in light mode) nearly disappeared while unlit. Every hex, not just
+	// the extreme ones, blends toward `--text-normal` - a fixed rule is what
+	// a fixed-severity "nearly invisible" claim needs, not a per-colour guess
+	// at what counts as "too dark".
+	it("ITEM 140: a black pen's icon is blended toward the theme's text colour, not painted flat black", () => {
+		const { pane } = build({ toolColor: () => "#000000" });
+		const pen = pane.findByTipLabel("Pen");
+		if (!pen) throw new Error("no Pen button was built");
+		expect(pen.style.color).toContain("#000000");
+		expect(pen.style.color).toContain("var(--text-normal)");
+		expect(pen.style.color, "painted with the flat, unblended hex").not.toBe("#000000");
 	});
 
 	it("names the colour beside the tool in the tooltip, so a hover can say it", () => {
@@ -4195,11 +4220,12 @@ describe("main.ts reads the fold order off disk and applies it", () => {
 	// placement quietly failed to survive a restart.
 	it("registers the placement writer inside loadSettings, and it saves", () => {
 		const hook = onlyIndexOf("setPersistToolbarCorner((corner) => {", "the placement write hook");
-		const normalise = onlyIndexOf(
-			"stripFoldOrder: normalizeFoldOrder(raw?.stripFoldOrder),",
-			"the fold-order normalise"
-		);
-		expect(normalise, "the hook must be registered inside loadSettings").toBeLessThan(hook);
+		// loadSettings runs from its declaration to the next method, which is
+		// settingsFrom, which it calls.
+		const load = onlyIndexOf("private async loadSettings(): Promise<void> {", "loadSettings");
+		const next = onlyIndexOf("private settingsFrom(", "settingsFrom, after loadSettings");
+		expect(hook, "the hook must be registered inside loadSettings").toBeGreaterThan(load);
+		expect(hook, "the hook must be registered inside loadSettings").toBeLessThan(next);
 
 		const end = src.indexOf("});", hook);
 		expect(end, "the hook body has no end in main.ts any more").toBeGreaterThan(hook);
@@ -4416,6 +4442,49 @@ describe("MobileTools: a strip destroyed inside a timer's window fires nothing",
 		// event that follows the hold that already fired.
 		chip!.fire("contextmenu");
 		expect(forgetPreset).toHaveBeenCalledTimes(1);
+	});
+
+	// ITEM 73 (AUDIT-1421): on Windows the hold timer fires forgetPreset and
+	// rebuilds the row BEFORE the finger actually lifts. The button under the
+	// finger is destroyed; a DIFFERENT button (the former neighbour, shifted
+	// into that screen slot) is now there, with a FRESH `held = false`
+	// closure. The release's contextmenu lands on that new button, which has
+	// no memory of the hold that just ran, and forgets a second preset.
+	it("ITEM 73: a hold-delete's neighbour is not forgotten by the release's contextmenu after the row rebuilds", () => {
+		markToolPicked();
+		const presets: InkPreset[] = [
+			{ tool: "pen", hex: "#1a1a1a", name: "black", size: 1 },
+			{ tool: "pen", hex: "#dd2222", name: "red", size: 1 },
+		];
+		const forgetPreset = vi.fn((_tool: string, index: number) => {
+			presets.splice(index, 1);
+		});
+		const { doc, pane } = build({ presetsFor: () => presets, forgetPreset });
+		const collectChips = (el: FakeEl): FakeEl[] =>
+			el.children.flatMap((k) => (k.classes.has("handwriting-preset-chip") ? [k] : collectChips(k)));
+
+		const penBtn = pane.findByTipLabel("Pen");
+		penBtn!.fire("pointerenter", { pointerType: "mouse" });
+		doc.flushFrames();
+		const before = collectChips(pane);
+		expect(before, "two starred presets should draw two chips").toHaveLength(2);
+
+		// Hold the FIRST chip until the 600ms timer forgets it and the row rebuilds.
+		before[0]!.fire("pointerdown", { preventDefault: () => {} });
+		vi.advanceTimersByTime(600);
+		doc.flushFrames();
+		expect(forgetPreset).toHaveBeenCalledTimes(1);
+		expect(presets).toHaveLength(1);
+
+		// The neighbour now occupies the slot the finger is physically still
+		// over. Its button is a NEW element with a fresh `held` closure.
+		const after = collectChips(pane);
+		expect(after, "the row should have rebuilt down to one chip").toHaveLength(1);
+
+		// The release's contextmenu, on Windows, follows the hold and lands here.
+		after[0]!.fire("contextmenu", { preventDefault: () => {} });
+		expect(forgetPreset, "the neighbour was forgotten by the stray release contextmenu").toHaveBeenCalledTimes(1);
+		expect(presets).toHaveLength(1);
 	});
 
 	it("the hover tooltip does not appear", () => {
@@ -4807,7 +4876,9 @@ describe("MobileTools: dragging the toolbar to an anchor", () => {
 		rig.doc.fire("pointerup", { pointerId: 7 });
 		expect(rig.placed, "a right-button drag moved the toolbar").toEqual([]);
 
-		rig.grip.fire("pointerdown", { pointerId: 8, clientX: 100, clientY: 100, isPrimary: false });
+		// A second finger. A pen can also report isPrimary false (Windows, with a
+		// second mouse live) and still drags; PenNotPrimary.test.ts covers it.
+		rig.grip.fire("pointerdown", { pointerId: 8, clientX: 100, clientY: 100, isPrimary: false, pointerType: "touch" });
 		rig.grip.fire("pointermove", { pointerId: 8, clientX: 400, clientY: 700 });
 		rig.doc.fire("pointerup", { pointerId: 8 });
 		expect(rig.placed, "a secondary contact dragged the toolbar").toEqual([]);
@@ -4815,7 +4886,7 @@ describe("MobileTools: dragging the toolbar to an anchor", () => {
 });
 
 /**
- * s137 item 9 and s138: the zoom bar answers to Infinite Canvas as well as to
+ * The zoom bar answers to Infinite Canvas as well as to
  * its own row, and the canvas is per note.
  *
  * The strip never reads the setting - it does not import InkOverlay - so the
@@ -4976,5 +5047,364 @@ describe("zoom bar visibility and Infinite Canvas", () => {
 		expect(code.includes("setZoomBarCanvasEnabled(this.settings.extendCanvasWhileScrolling)"), "at load").toBe(true);
 		expect(code.includes("setZoomBarCanvasEnabled(on)"), "at the row").toBe(true);
 		expect(code.includes("refreshNoteZoomControlsAll()"), "the push").toBe(true);
+	});
+});
+
+/**
+ * ITEM 101 (AUDIT-1421): Escape swallowed by a pop hidden inside the folded
+ * toolbar. Folding hides the whole strip (`is-collapsed { display: none }`)
+ * but `setCollapsed` used to close only the More row, leaving `openInkSlider`
+ * live. `hasOpenPop()` does not know about folding, so the first Escape
+ * pressed after folding found "something open" and consumed itself
+ * (`stripEscapeVerdict` -> "close-consume") with nothing visible to show
+ * for it - the user had to press Escape twice.
+ */
+/**
+ * ITEM 37 (AUDIT-1421): Boox mode's `transition: none` on the strip and
+ * pill killed the RETURN delay along with the fade, so the strip blinked
+ * back into view at every pen-up instead of waiting the usual 160ms - which
+ * is what stops a quick run of strokes from strobing an e-ink refresh at
+ * every lift. The fix keeps the delay and zeroes only the duration.
+ */
+describe("styles.css - Boox mode keeps the strip's return delay, drops only the fade (item 37)", () => {
+	function transitionOf(selectorPrefix: string): string | null {
+		const code = codeOnly(css);
+		const re = new RegExp(`body\\.handwriting-boox ${selectorPrefix}[^{]*\\{([^}]*)\\}`);
+		const m = code.match(re);
+		const decl = m?.[1]?.match(/transition\s*:\s*([^;]+);/);
+		return decl ? decl[1]!.trim() : null;
+	}
+
+	it("the base (not inking) rule keeps a 160ms delay on both opacity and visibility", () => {
+		const t = transitionOf("\\.handwriting-mobile-tools(?!\\.is-inking)");
+		expect(t, "no boox transition rule found for the base strip").not.toBeNull();
+		expect(t).toMatch(/opacity\s+0s\s+linear\s+160ms/);
+		expect(t).toMatch(/visibility\s+0s\s+linear\s+160ms/);
+		expect(t, "the base rule must not disable the return delay entirely").not.toBe("none");
+	});
+
+	it("the is-inking (hide) override has no delay to preserve", () => {
+		const t = transitionOf("\\.handwriting-mobile-tools\\.is-inking");
+		expect(t, "no boox is-inking override found").not.toBeNull();
+		expect(t).not.toMatch(/160ms/);
+	});
+});
+
+/**
+ * ITEM 137 (AUDIT-1421): the pen size range's min (0.3x = 0.66px) is not on
+ * the same grid as its default (1x = 2.2px) or its max (3x = 6.6px) at a
+ * step of 0.1px - the nearest grid point to each is 0.04px short. A step
+ * fine enough to divide evenly into both distances from the min lands on
+ * both exactly.
+ */
+describe("MobileTools: pen size slider lands exactly on its default and max (item 137)", () => {
+	function findByAria(el: FakeEl, aria: string): FakeEl | null {
+		for (const kid of el.children) {
+			if (kid.getAttribute("aria-label") === aria) return kid;
+			const deep = findByAria(kid, aria);
+			if (deep) return deep;
+		}
+		return null;
+	}
+
+	it("min/step reach the default width and the max width with no remainder", () => {
+		const pane = new FakeEl("div", new FakeDoc());
+		new MobileTools(pane as unknown as HTMLElement, fakeHost());
+		const input = findByAria(pane, "Pen size");
+		expect(input, "no Pen size slider was built").not.toBeNull();
+		const min = Number(input!.getAttribute("min"));
+		const max = Number(input!.getAttribute("max"));
+		const step = Number(input!.getAttribute("step"));
+		const defaultPx = Math.round(1 * DEFAULT_PEN.baseWidth * 1000) / 1000;
+		const maxPx = Math.round(3 * DEFAULT_PEN.baseWidth * 1000) / 1000;
+		expect(maxPx).toBe(max);
+		const stepsToDefault = (defaultPx - min) / step;
+		const stepsToMax = (maxPx - min) / step;
+		expect(
+			Math.abs(stepsToDefault - Math.round(stepsToDefault)),
+			`default width ${defaultPx}px is ${Math.abs(defaultPx - min - Math.round(stepsToDefault) * step).toFixed(3)}px off the nearest grid point from min ${min}px, step ${step}px`
+		).toBeLessThan(1e-6);
+		expect(
+			Math.abs(stepsToMax - Math.round(stepsToMax)),
+			`max width ${maxPx}px is ${Math.abs(maxPx - min - Math.round(stepsToMax) * step).toFixed(3)}px off the nearest grid point from min ${min}px, step ${step}px`
+		).toBeLessThan(1e-6);
+	});
+});
+
+/**
+ * ITEM 147 (AUDIT-1421): Obsidian's `.is-tablet button:not(.clickable-icon)`
+ * padding rule and this plugin's own `.handwriting-slider-pop button.X`
+ * selectors are the same specificity (0,2,1); the plugin's sheet loading
+ * after the host's is what lets it win, for the three selectors this list
+ * already names. `.handwriting-mode-chip` (the eraser's Stroke/Reticle
+ * chips) was left off that list, so the host's padding still outranks it on
+ * a tablet and the chips overflow the pop's fixed width.
+ */
+describe("styles.css - the eraser mode chips tie the host's tablet padding rule (item 147)", () => {
+	const SELECTOR = ".handwriting-slider-pop button.handwriting-mode-chip";
+	/** Every declared padding value for a rule whose selector list holds `selector`. */
+	function paddingsFor(selector: string): string[] {
+		const values: string[] = [];
+		postcss.parse(css).walkRules((rule) => {
+			if (!rule.selectors.some((sel) => sel.trim() === selector)) return;
+			rule.walkDecls("padding", (d) => {
+				values.push(d.value.trim());
+			});
+		});
+		return values;
+	}
+
+	it("ties the host's (0,2,1) tablet padding rule with the chip's own padding, not the swatch's zero", () => {
+		const values = paddingsFor(SELECTOR);
+		expect(values, "the chip has a tying rule").not.toHaveLength(0);
+		expect(values, "a padding:0 here shrinks the 30px chips to 16px on every device").not.toContain("0");
+		expect(values).toContain("7px 8px");
+	});
+
+	it("keeps the swatch, preset chip and star in the padding:0 tie", () => {
+		for (const name of ["color-swatch", "preset-chip", "preset-star"]) {
+			expect(paddingsFor(`.handwriting-slider-pop button.handwriting-${name}`)).toContain("0");
+		}
+	});
+});
+
+describe("MobileTools: folding the strip closes its own open pop (item 101)", () => {
+	function buildWithEraserPopOpen(): { doc: FakeDoc; pane: FakeEl; strip: MobileTools } {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const eraser = { value: false };
+		const strip = new MobileTools(pane as unknown as HTMLElement, fakeHost({ eraserOn: () => eraser.value }));
+		// The OFF-to-ON edge is what opens the pop; starting ON at mount seeds
+		// `eraserPopClosed` from the prior session and stays closed.
+		eraser.value = true;
+		strip.refreshNow();
+		return { doc, pane, strip };
+	}
+
+	it("the first Escape after folding reaches the editor instead of being swallowed", () => {
+		const { doc, pane, strip } = buildWithEraserPopOpen();
+		strip.setCollapsed(true);
+		const preventDefault = vi.fn();
+		const stopPropagation = vi.fn();
+		doc.fire("keydown", { key: "Escape", target: pane, preventDefault, stopPropagation });
+		expect(preventDefault, "Escape was consumed even though the strip is folded").not.toHaveBeenCalled();
+		expect(stopPropagation, "Escape was consumed even though the strip is folded").not.toHaveBeenCalled();
+	});
+
+	it("CONTROL: an open pop on an UNFOLDED strip still consumes the first Escape", () => {
+		const { doc, pane } = buildWithEraserPopOpen();
+		const preventDefault = vi.fn();
+		const stopPropagation = vi.fn();
+		doc.fire("keydown", { key: "Escape", target: pane, preventDefault, stopPropagation });
+		expect(preventDefault, "control: an open pop on a visible strip should still consume Escape").toHaveBeenCalled();
+		expect(stopPropagation).toHaveBeenCalled();
+	});
+});
+
+/**
+ * Items 138, 139 and 173: the folded pill's tooltip, and the recording dot's place and fold. The unit rig has no
+ * layout, so these pin structure and call counts rather than pixels: where the tip element lives, where the dot
+ * sits among its siblings after the strip lays itself out, and how often the layout runs when recording flips.
+ */
+describe("MobileTools: pill tooltip and recording dot (items 138, 139, 173)", () => {
+	beforeEach(() => {
+		resetPenToolsForTest();
+		setStripFoldOrder(DEFAULT_FOLD_ORDER);
+		vi.useFakeTimers();
+		vi.stubGlobal("window", globalThis);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	const build = (
+		over: Partial<MobileToolsHost> = {}
+	): { doc: FakeDoc; pane: FakeEl; strip: MobileTools; row: FakeEl } => {
+		const doc = new FakeDoc();
+		const pane = new FakeEl("div", doc);
+		const strip = new MobileTools(pane as unknown as HTMLElement, fakeHost({ activeTool: () => "pen", ...over }));
+		doc.flushFrames();
+		const row = pane.querySelector(".handwriting-mobile-tools");
+		if (!row) throw new Error("no strip was built");
+		// A strip born folded (the fold is remembered for the session, across tests) measures nothing: open it.
+		if (row.classes.has("is-collapsed")) pane.querySelector(".handwriting-pen-pill")!.fire("click");
+		return { doc, pane, strip, row };
+	};
+
+	/** Give the strip a pane to measure against, so layoutOverflow gets past its bail. Every width is 0 but the pane's. */
+	const measurable = (pane: FakeEl, row: FakeEl): void => {
+		(row as unknown as { parentElement: unknown }).parentElement = pane;
+		(row as unknown as { clientWidth: number }).clientWidth = 0;
+		(pane as unknown as { clientWidth: number }).clientWidth = 400;
+	};
+
+	it("138: the folded pill's hover tip is not inside the strip that is hidden while folded", () => {
+		const { pane, row } = build();
+		const pill = pane.querySelector(".handwriting-pen-pill");
+		expect(pill, "the pill is built").not.toBeNull();
+		pill!.fire("pointerenter", { pointerType: "mouse" });
+		vi.advanceTimersByTime(400);
+		const tip = pane.querySelector(".handwriting-pill-tip");
+		expect(tip, "the pill has its own tip element").not.toBeNull();
+		expect(row.contains(tip), "the tip is under the strip, which is display:none while folded").toBe(false);
+		expect(pane.children.includes(tip as FakeEl), "the tip is on the strip's parent, beside the pill").toBe(true);
+		expect(tip!.classes.has("is-showing"), "hovering the pill shows its tip").toBe(true);
+		expect(tip!.textContent).toBe("Pen tools");
+	});
+
+	it("138: the strip's own buttons still use the tip inside the strip", () => {
+		const { pane, row } = build();
+		const undo = pane.findByTipLabel("Undo");
+		undo!.fire("pointerenter", { pointerType: "mouse" });
+		vi.advanceTimersByTime(400);
+		const stripTip = row.querySelector(".handwriting-strip-tip");
+		expect(stripTip!.classes.has("is-showing")).toBe(true);
+		expect(pane.querySelector(".handwriting-pill-tip")!.classes.has("is-showing")).toBe(false);
+	});
+
+	it("138: destroy takes the pill's tip away with the pill", () => {
+		const { pane, strip } = build();
+		const tip = pane.querySelector(".handwriting-pill-tip") as FakeEl;
+		expect(tip).not.toBeNull();
+		const removed = vi.spyOn(tip, "remove");
+		strip.destroy();
+		expect(removed).toHaveBeenCalledTimes(1);
+	});
+
+	it("138: a pill at a bottom corner puts its tip above it, beside the pill", () => {
+		const { pane } = build();
+		const pill = pane.querySelector(".handwriting-pen-pill") as FakeEl;
+		const tip = pane.querySelector(".handwriting-pill-tip") as FakeEl;
+		pill.classes.add("handwriting-corner-bottom-right");
+		Object.assign(pill, { offsetTop: 300, offsetHeight: 32, offsetLeft: 20 });
+		Object.assign(tip, { offsetHeight: 24, offsetWidth: 60 });
+		(pane as unknown as { clientWidth: number }).clientWidth = 400;
+		(pill as unknown as { parentElement: unknown }).parentElement = pane;
+		pill.fire("pointerenter", { pointerType: "mouse" });
+		vi.advanceTimersByTime(400);
+		expect(tip.style.top).toBe("270px");
+		expect(tip.style.left).toBe("20px");
+	});
+
+	it("139: after the strip lays out, the dot is the last thing before the chevron, after every button", () => {
+		const { pane, row, strip } = build({ recordingOn: () => true });
+		measurable(pane, row);
+		(strip as unknown as { layoutOverflow(): void }).layoutOverflow();
+		const kids = row.children;
+		console.log("KIDS", kids.map((k) => (k.classList.contains("handwriting-recording-dot") ? "DOT" : k.dataset.tipLabel ?? "-")).join("|"));
+		const dot = kids.findIndex((k) => k.classes.has("handwriting-recording-dot"));
+		const more = kids.findIndex((k) => k.classes.has("handwriting-tools-more"));
+		const pen = kids.findIndex((k) => k.dataset.tipLabel === "Pen");
+		expect(dot).toBeGreaterThan(-1);
+		expect(pen, "the Pen button is on the row").toBeGreaterThan(-1);
+		expect(dot, "the dot lands before Pen, in front of the tools").toBeGreaterThan(pen);
+		expect(dot, "the chevron is next after the dot").toBe(more - 1);
+	});
+
+	it("173: flipping the recording state re-runs the fold once, and an unchanged refresh does not", () => {
+		let recording = false;
+		const { strip } = build({ recordingOn: () => recording });
+		const layout = vi.spyOn(strip as unknown as { layoutOverflow(): void }, "layoutOverflow");
+		strip.refreshNow();
+		expect(layout, "nothing changed").toHaveBeenCalledTimes(0);
+		recording = true;
+		strip.refreshNow();
+		expect(layout, "recording began: the dot took a cell").toHaveBeenCalledTimes(1);
+		strip.refreshNow();
+		expect(layout, "unchanged").toHaveBeenCalledTimes(1);
+		recording = false;
+		strip.refreshNow();
+		expect(layout, "recording ended: the dot gave the cell back").toHaveBeenCalledTimes(2);
+	});
+});
+
+/**
+ * LANE LAG (1.4.22): the step-aside is an opacity fade only. A visibility
+ * transition cannot run on the compositor, so at every pen-down and pen-up it
+ * ticked on the main thread and repainted the whole window (Orion full-screen
+ * profile). What visibility also did - keep the invisible chrome unhittable -
+ * is carried by pointer-events: is-inking while the pen is down, and
+ * is-stepping-back through the 160ms before the fade starts.
+ */
+describe("step-aside by opacity only, unhittable while invisible (lane LAG)", () => {
+	function rule(selector: string): string {
+		const code = codeOnly(css);
+		const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const m = code.match(new RegExp(`(^|\\})\\s*${esc}\\s*\\{([^}]*)\\}`, "m"));
+		return m?.[2] ?? "";
+	}
+	function withTimers(): { doc: FakeDoc; fire: () => void; pending: () => number; cleared: () => number } {
+		const doc = new FakeDoc();
+		const queued = new Map<number, () => void>();
+		let next = 1, clears = 0;
+		Object.assign(doc.defaultView, {
+			setTimeout: (fn: () => void, ms: number): number => { expect(ms).toBe(160); queued.set(next, fn); return next++; },
+			clearTimeout: (id: number): void => { if (queued.delete(id)) clears++; },
+		});
+		return {
+			doc,
+			fire: () => { const fns = [...queued.values()]; queued.clear(); for (const fn of fns) fn(); },
+			pending: () => queued.size,
+			cleared: () => clears,
+		};
+	}
+
+	it("no step-aside rule transitions or sets visibility", () => {
+		for (const sel of [".handwriting-mobile-tools", ".handwriting-pen-pill"]) {
+			const base = rule(sel);
+			expect(base, `${sel} base rule found`).toMatch(/transition\s*:/);
+			expect(base, `${sel} base transition`).not.toMatch(/visibility/);
+		}
+		const zoom = codeOnly(css).match(/\.handwriting-note-viewport-controls\s*\{\s*position:absolute[^}]*\}/)?.[0] ?? "";
+		expect(zoom, "zoom controls base rule found").toMatch(/transition\s*:/);
+		expect(zoom).not.toMatch(/visibility/);
+		const inking = rule(".handwriting-note-viewport-controls.is-inking");
+		expect(inking).toMatch(/opacity\s*:\s*0/);
+		expect(inking).toMatch(/pointer-events\s*:\s*none/);
+		expect(inking).not.toMatch(/visibility/);
+		expect(rule(".handwriting-note-viewport-controls.is-stepping-back")).toMatch(/pointer-events\s*:\s*none/);
+	});
+
+	it("a lift keeps the strip, pill and zoom bar unhittable for 160ms, then releases them", () => {
+		const t = withTimers();
+		const pane = new FakeEl("div", t.doc);
+		const strip = new MobileTools(pane as unknown as HTMLElement, fakeHost({ noteViewport: fakeNoteViewport() }));
+		const els = [".handwriting-mobile-tools", ".handwriting-pen-pill", ".handwriting-note-viewport-controls"].map((s) => pane.querySelector(s)!);
+		strip.setInking(true);
+		expect(els.map((e) => e.classes.has("is-inking"))).toEqual([true, true, true]);
+		expect(els.map((e) => e.classes.has("is-stepping-back"))).toEqual([false, false, false]);
+		strip.setInking(false);
+		expect(els.map((e) => e.classes.has("is-inking"))).toEqual([false, false, false]);
+		expect(els.map((e) => e.classes.has("is-stepping-back"))).toEqual([true, true, true]);
+		// refresh() re-applies the same state and must not cut the delay short.
+		strip.setInking(false);
+		expect(els.map((e) => e.classes.has("is-stepping-back"))).toEqual([true, true, true]);
+		t.fire();
+		expect(els.map((e) => e.classes.has("is-stepping-back"))).toEqual([false, false, false]);
+	});
+
+	it("a pen-down inside the delay cancels it and hides again at once", () => {
+		const t = withTimers();
+		const pane = new FakeEl("div", t.doc);
+		const strip = new MobileTools(pane as unknown as HTMLElement, fakeHost({ noteViewport: fakeNoteViewport() }));
+		const bar = pane.querySelector(".handwriting-mobile-tools")!;
+		strip.setInking(true);
+		strip.setInking(false);
+		expect(t.pending()).toBe(2); // the strip's and the zoom bar's
+		strip.setInking(true);
+		expect(t.cleared()).toBe(2);
+		expect(bar.classes.has("is-stepping-back")).toBe(false);
+		expect(bar.classes.has("is-inking")).toBe(true);
+	});
+
+	it("destroy cancels a pending release", () => {
+		const t = withTimers();
+		const pane = new FakeEl("div", t.doc);
+		const strip = new MobileTools(pane as unknown as HTMLElement, fakeHost({ noteViewport: fakeNoteViewport() }));
+		strip.setInking(true);
+		strip.setInking(false);
+		strip.destroy();
+		expect(t.cleared()).toBe(2);
 	});
 });

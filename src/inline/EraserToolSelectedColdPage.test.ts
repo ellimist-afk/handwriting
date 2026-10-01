@@ -87,6 +87,7 @@ import { InkStroke } from "../ink/Stroke";
 import { DEFAULT_PEN } from "../ink/PenStyle";
 import type { PenSample } from "../input/PointerRouter";
 import { fakeEl, installFakeWindow } from "../../test/routerHarness";
+import { hideReticle, reticleShown } from "../testUtils/ReticleShown";
 
 const PATH = "eraser-tool-cold-page.md";
 /** Where the ink is, and where the tip lands on it. */
@@ -386,7 +387,7 @@ describe("the eraser TOOL, first contact of the session, ink already on the page
 				rig.ringClasses.has(ERASER_CURSOR_CLASS),
 				"the hover ring did not take the eraser look"
 			).toBe(true);
-			expect(rig.ringStyle.display).toBe("block");
+			expect(reticleShown(rig.ringStyle)).toBe(true);
 			// And nothing happened to the page. This is the whole point: the
 			// reported symptom - an eraser reticle under the pen and untouched
 			// ink - is what a session that never got a `penDown` looks like.
@@ -442,7 +443,7 @@ describe("the eraser TOOL, first contact of the session, ink already on the page
 			// ON - which is what removes this refusal from the list of things
 			// that could have been happening on the owner's screen.
 			rig.fire(hoverEvent(AT.x + 4, AT.y + 4, 110));
-			expect(rig.ringStyle.display, "pen off must paint no hover ring").toBe("none");
+			expect(reticleShown(rig.ringStyle), "pen off must paint no hover ring").toBe(false);
 			expect(rig.ringClasses.has(ERASER_CURSOR_CLASS)).toBe(false);
 		} finally {
 			rig.destroy();
@@ -472,9 +473,9 @@ describe("the eraser TOOL, first contact of the session, ink already on the page
 			// this and the test above, BOTH of the router's pen refusals take
 			// the ring down with them - so a ring that is up and following the
 			// pen says neither of them was in force.
-			rig.ringStyle.display = "none";
+			hideReticle(rig.ringStyle);
 			rig.fire(hoverEvent(400, 300, 120));
-			expect(rig.ringStyle.display, "a live stroke must paint no hover ring").toBe("none");
+			expect(reticleShown(rig.ringStyle), "a live stroke must paint no hover ring").toBe(false);
 		} finally {
 			rig.destroy();
 		}

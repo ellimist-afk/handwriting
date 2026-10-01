@@ -100,13 +100,34 @@ for(const [zoom,scaled] of [[.1,false],[.4,false],[1,false],[.1,true],[.4,true]]
   if(!scaled){expect(diff.max).toBeLessThanOrEqual(2);expect(diff.changed).toBe(0);const restored=await state('restore');expect(restored.originalHashes).toEqual(before.originalHashes);expect(restored.pixels[3]).toBe(0);expect((await page.screenshot()).equals(original)).toBe(true);}
   if(scaled)return;
   for(const action of ['restore','tail','tail-clear','repaint','resize','wet-clear','wet','pen']){
-   await state('restore');const active=await state('preview');if(action==='tail-clear'){expect(active.composite).toBe(true);expect(active.pixels[4]).toBeGreaterThan(0);}
+   // The tail-clear arm paints its tail on the full surface: the composite takes a
+   // full-size occupied tail only (a compact one is refused; see the cell below).
+   await state('restore');if(action==='tail-clear'){await state('tail-full');await state('tail');}const active=await state('preview');if(action==='tail-clear'){expect(active.composite).toBe(true);expect(active.pixels[4]).toBeGreaterThan(0);}
    const after=await state(action);expect.soft(after.composite,action).toBe(false);expect.soft(after.visible.every((v:string)=>v==='visible'),action).toBe(true);
    if(action==='tail-clear'||action==='wet-clear'){expect.soft(after.pixels[3],action).toBe(0);expect.soft(after.blank[3],action).toBe(true);}
    if(action==='tail-clear')expect(after.pixels[4]).toBe(0);
    if(action!=='pen')expect(after.strokes,action).toBe(before.strokes);
    if(action==='wet'){expect(after.pixels[3]).toBeGreaterThan(0);expect(after.blank[3]).toBe(false);const fallback=await state('preview');expect(fallback.composite).toBe(false);expect(fallback.visible[3]).toBe('visible');await state('restore');const cleared=await state('wet-clear');expect(cleared.blank[3]).toBe(true);expect(cleared.pixels[3]).toBe(0);}
   }
+ }finally{await page.close();}
+});
+it('refuses the pinch composite over a compact occupied tail and keeps every inked layer visible',async()=>{
+ const page=await browser.newPage({viewport:{width:900,height:700},deviceScaleFactor:2});
+ try{
+  await mount(page,250,false,false,'overlap');
+  const state=(action:string)=>page.evaluate(a=>(window as any).zoomDrift.layerVisual(a.action,a.zoom),{action,zoom:1});
+  const before=await state('setup');expect(before.pixels[2]).toBeGreaterThan(0);
+  const drawn=await state('tail');expect(drawn.pixels[4],'tail occupied').toBeGreaterThan(0);
+  expect(drawn.tailBacking.w*drawn.tailBacking.h,'tail is compact').toBeLessThan(drawn.tailBacking.bandW*drawn.tailBacking.bandH);
+  const original=await page.screenshot();
+  const preview=await state('preview');
+  expect(preview.composite,'composite refused over a compact tail').toBe(false);
+  // Blank layers may hide for the preview, as they do on every pinch; no inked one may,
+  // and the occupied tail least of all.
+  for(let i=0;i<5;i++)if(preview.pixels[i]>0)expect(preview.visible[i],`inked canvas ${i} stays visible`).toBe('visible');
+  expect(preview.visible[4],'the occupied compact tail stays visible').toBe('visible');
+  expect((await page.screenshot()).equals(original),'the screen is unchanged').toBe(true);
+  await state('restore');
  }finally{await page.close();}
 });
 for(const mixed of [false,true])it(`uses one visible raster during repeated low-zoom pinches, mixed=${mixed}`,async()=>{
@@ -117,7 +138,11 @@ for(const mixed of [false,true])it(`uses one visible raster during repeated low-
    expect(r.liveDimensions.canvases.filter((c:any)=>c.visibility!=='hidden').length).toBe(1);
    expect(r.finalDimensions.canvases.every((c:any)=>c.visibility!=='hidden')).toBe(true);
    expect(r.before.strokes).toEqual(r.after.strokes);expect(r.before.saved).toBe(r.after.saved);
-   expect(r.backingWrites).toBe(0);expect(r.liveClears).toBe(0);expect(r.liveTransactions).toBe(0);
+   // The pre-pinch scroll released the wet canvas. A pen-only pinch then writes no backing; a mixed note's composite
+   // sizes the wet canvas once, at its start (width and height), and nothing else.
+   expect(r.wetReleasedBefore,'premise: the scroll before the pinch released the wet canvas').toBe(true);
+   expect(r.wetBackingWrites,'wet canvas backing writes in the live pinch').toBe(mixed?2:0);
+   expect(r.backingWrites-r.wetBackingWrites,'other backing writes in the live pinch').toBe(0);expect(r.liveClears).toBe(0);expect(r.liveTransactions).toBe(0);
   }
  }finally{await page.close();}
 });

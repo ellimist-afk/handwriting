@@ -231,7 +231,7 @@ it("SPACING: the rules' screen pitch is 28 x z at 100, 50 and 25 percent, anchor
  * Self-contained (page.evaluate serialises the callback - no outer closure).
  */
 async function pinchWriteProbe(p: Page, id: string, ratios: number[], plant: "none" | "preview" | "commit"): Promise<{ previewWrites: number; commitPitchPhase: number; commitPhase: number; phaseAfter: number; commitThickness: number; finalZoom: number; elementWriteFrames: number; elementWritesMax: number; panWriteFrames: number; panCallsMax: number; panWritesUnchanged: number }> {
-	// s189: the probe counts writes on ITS pinch. A lift eases for up to 500 ms under the canvas, and a pinch begun inside that
+	// The probe counts writes on ITS pinch. A lift eases for up to 500 ms under the canvas, and a pinch begun inside that
 	// window cancels the ease, which is one pan write at the gesture's start and not a per-frame cost. Start from rest.
 	await p.evaluate(() => (window as any).viewportFixture.rest());
 	return p.evaluate(({ id, ratios, plant }) => {

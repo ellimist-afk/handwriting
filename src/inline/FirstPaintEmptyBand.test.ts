@@ -301,7 +301,13 @@ function makeRig(): Rig {
 	o.highlightWetCanvas = canvas("highlightWet");
 	o.committedCtx = recordingCtx(true);
 	o.highlightCtx = recordingCtx(false);
-	const layer = { applyDpr: () => undefined, clear: () => undefined, clearAll: () => undefined };
+	const layer = {
+		applyDpr: () => undefined, clear: () => undefined, clearAll: () => undefined,
+		configureInlineBacking: () => undefined,
+		placeInline: () => undefined,
+		restoreFullSurface: () => undefined,
+		prepareLive: () => undefined,
+	};
 	o.wet = layer;
 	o.highlightWet = layer;
 	o.tail = layer;
