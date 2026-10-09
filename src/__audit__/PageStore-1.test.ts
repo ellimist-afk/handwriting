@@ -47,7 +47,7 @@ const resolveBody = source.slice(rStart, rEnd);
 // The cited lines are in the slice being executed.
 expect(resolveBody).toContain("(await this.store.readPdfPaths(cid))");
 expect(resolveBody).toContain("await this.pdfStore.ensureLoaded(choice.id);");
-expect(resolveBody).toContain("this.pdfStore.claimPath(choice.id, path);");
+expect(resolveBody).toContain("this.pdfStore.claimPath(choice.id, file.path);");
 const makeResolve = new Function(
 	"readPdfHead", "pdfInkIdFromHead", "familyOf", "chooseInstance", "window",
 	transformSync(

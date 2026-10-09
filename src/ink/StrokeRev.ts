@@ -28,6 +28,27 @@ import { InkStroke } from "./Stroke";
 
 const revs = new WeakMap<InkStroke, number>();
 
+/**
+ * One revision for all ink. Every stroke's bump moves it, and so does every
+ * in-place change to a stroke list a store hands out (an add, a remove, a
+ * replace). A cache that holds the same list object at the same length and
+ * the same ink revision therefore holds the same strokes at the same
+ * revisions, and confirms that in one compare instead of one per stroke.
+ * It is shared by every note: a change in another note costs a cache one
+ * full check, never a wrong answer.
+ */
+let ink = 0;
+
+/** The ink revision: moves whenever any stroke or any store's list changes. */
+export function inkRevision(): number {
+	return ink;
+}
+
+/** Record that a stroke list changed in place (an add, a remove, a replace). */
+export function bumpInkRevision(): void {
+	ink++;
+}
+
 /** The stroke's current revision. Never mutated = 0. */
 export function strokeRev(stroke: InkStroke): number {
 	return revs.get(stroke) ?? 0;
@@ -36,4 +57,5 @@ export function strokeRev(stroke: InkStroke): number {
 /** Record that this stroke's geometry changed under its own identity. */
 export function bumpStrokeRev(stroke: InkStroke): void {
 	revs.set(stroke, (revs.get(stroke) ?? 0) + 1);
+	ink++;
 }

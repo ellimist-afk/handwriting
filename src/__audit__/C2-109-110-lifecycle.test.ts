@@ -34,6 +34,7 @@ vi.mock("obsidian", async (importOriginal) => {
 import { TFile, editorInfoField } from "obsidian";
 import type { Editor, MarkdownFileInfo } from "obsidian";
 import { InkOverlayPlugin, inlineInk } from "../inline/InkOverlay";
+import { setCanvasNoteOverrideForTest } from "../inline/CanvasNoteOverride";
 
 class NoopObserver {
 	observe(): void {}
@@ -315,5 +316,60 @@ describe("C2-110: a sidecar read that finishes after unmount does not revive the
 		await unmountDuringRead("c2/110-dead.md");
 		expect(observers.live, "an observer is watching the dead overlay's DOM").toBe(0);
 		expect(observers.created, "the continuation created an observer after unmount").toBe(0);
+	});
+});
+
+// Obsidian reuses one editor, and so one overlay, across notes. The canvas answer is per note (its frontmatter, else the
+// global setting), so a note opened in a pane that showed a canvas note must take its own answer, not keep the old one.
+describe("a note switch takes the opened note's own canvas answer", () => {
+	const live: Priv[] = [];
+	afterEach(() => {
+		setCanvasNoteOverrideForTest(null);
+		for (const o of live.splice(0)) {
+			try { o.destroy(); } catch { /* DOM-less fake */ }
+		}
+	});
+	/** Global setting off; only "canvas.md" has Infinite Canvas on by its frontmatter. */
+	function withOverride(): void {
+		setCanvasNoteOverrideForTest({
+			canvasForNote: (path: string | null, globalDefault: boolean) => (path === "switch/canvas.md" ? true : globalDefault),
+			onChanged: () => () => {},
+		} as never);
+	}
+	function mountOn(path: string): Fixture & { overlay: Priv & { canvasMode: boolean } } {
+		withOverride();
+		const f = mountOverlay(tfile(path));
+		live.push(f.overlay);
+		// What mount() sets on a real mount: this note's own canvas answer.
+		(f.overlay as Priv & { canvasMode: boolean }).canvasMode = path === "switch/canvas.md";
+		// The router's momentum answer as mount() leaves it: this note's own. The stub keeps the setter and the field it
+		// sets; every other router call the switch makes is a no-op.
+		const router = {
+			canvasMomentumDisabled: path === "switch/canvas.md",
+			setCanvasMomentumDisabled(on: boolean) { this.canvasMomentumDisabled = on; },
+		};
+		f.overlay.router = new Proxy(router, { get: (t, k) => (k in t ? t[k as keyof typeof t] : () => undefined) });
+		return f as Fixture & { overlay: Priv & { canvasMode: boolean } };
+	}
+	const momentumOff = (f: Fixture): unknown => (f.overlay.router as { canvasMomentumDisabled: boolean }).canvasMomentumDisabled;
+
+	it("a plain note opened after a canvas note is not a canvas note", () => {
+		const f = mountOn("switch/canvas.md");
+		expect(f.overlay.canvasMode, "premise: the canvas note mounted in canvas mode").toBe(true);
+		f.setFile(tfile("switch/plain.md"));
+		f.overlay.update(scrollUpdate(f));
+		expect(f.overlay.lastPath, "premise: the switch ran").toBe("switch/plain.md");
+		expect(f.overlay.canvasMode, "the plain note kept the canvas note's mode").toBe(false);
+		expect(momentumOff(f), "the router kept the canvas note's momentum answer").toBe(f.overlay.canvasMode);
+	});
+
+	it("a canvas note opened after a plain note is a canvas note", () => {
+		const f = mountOn("switch/plain.md");
+		expect(f.overlay.canvasMode, "premise: the plain note mounted with the canvas off").toBe(false);
+		f.setFile(tfile("switch/canvas.md"));
+		f.overlay.update(scrollUpdate(f));
+		expect(f.overlay.lastPath, "premise: the switch ran").toBe("switch/canvas.md");
+		expect(f.overlay.canvasMode, "the canvas note kept the plain note's mode").toBe(true);
+		expect(momentumOff(f), "the router kept the plain note's momentum answer").toBe(f.overlay.canvasMode);
 	});
 });

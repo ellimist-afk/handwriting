@@ -36,8 +36,55 @@ function matchesSimpleSelector(el: FakeEl, sel: string): boolean {
 	throw new Error(`FakeEl: unsupported selector ${sel}`);
 }
 
+
+type Handler = (ev: unknown) => void;
+type ListenerOpts = boolean | { capture?: boolean } | undefined;
+interface Registered {
+	fn: Handler;
+	capture: boolean;
+}
+
+/** The only option that decides which listener a removal matches (DOM: type + callback + capture). */
+function captureOf(opts: ListenerOpts): boolean {
+	return typeof opts === "boolean" ? opts : opts?.capture === true;
+}
+
+/**
+ * A listener table that behaves like the DOM's: adding the same (type, callback, capture) twice keeps one,
+ * and a removal must name the same capture flag to find it. A removal that finds nothing is a no-op, as in the
+ * DOM, so a missing or mismatched removal shows up as a count that stays above zero.
+ */
+class ListenerTable {
+	private readonly table = new Map<string, Registered[]>();
+	add(type: string, fn: Handler, opts?: ListenerOpts): void {
+		const capture = captureOf(opts);
+		const list = this.table.get(type) ?? [];
+		if (list.some((r) => r.fn === fn && r.capture === capture)) return;
+		list.push({ fn, capture });
+		this.table.set(type, list);
+	}
+	remove(type: string, fn: Handler, opts?: ListenerOpts): void {
+		const capture = captureOf(opts);
+		const list = this.table.get(type);
+		if (!list) return;
+		const at = list.findIndex((r) => r.fn === fn && r.capture === capture);
+		if (at >= 0) list.splice(at, 1);
+		if (list.length === 0) this.table.delete(type);
+	}
+	handlers(type: string): Handler[] {
+		return (this.table.get(type) ?? []).map((r) => r.fn);
+	}
+	count(type?: string): number {
+		if (type !== undefined) return this.table.get(type)?.length ?? 0;
+		let n = 0;
+		for (const list of this.table.values()) n += list.length;
+		return n;
+	}
+}
+
 export class FakeDoc {
-	readonly listeners = new Map<string, Array<(ev: unknown) => void>>();
+	private readonly docListeners = new ListenerTable();
+	private readonly winListeners = new ListenerTable();
 	readonly frames: Array<() => void> = [];
 	activeElement: FakeEl | null = null;
 	head: FakeEl | undefined = undefined;
@@ -74,8 +121,8 @@ export class FakeDoc {
 				addEventListener: (): undefined => undefined,
 				removeEventListener: (): undefined => undefined,
 			}) as unknown as MediaQueryList,
-		addEventListener: (): void => {},
-		removeEventListener: (): void => {},
+		addEventListener: (type: string, fn: Handler, opts?: ListenerOpts): void => this.winListeners.add(type, fn, opts),
+		removeEventListener: (type: string, fn: Handler, opts?: ListenerOpts): void => this.winListeners.remove(type, fn, opts),
 		MutationObserver: class {
 			observe(): void {}
 			disconnect(): void {}
@@ -84,16 +131,24 @@ export class FakeDoc {
 	createElement(tag: string): FakeEl {
 		return new FakeEl(tag, this);
 	}
-	addEventListener(type: string, fn: (ev: unknown) => void): void {
-		const list = this.listeners.get(type) ?? [];
-		list.push(fn);
-		this.listeners.set(type, list);
+	addEventListener(type: string, fn: Handler, opts?: ListenerOpts): void {
+		this.docListeners.add(type, fn, opts);
 	}
-	removeEventListener(): void {}
+	removeEventListener(type: string, fn: Handler, opts?: ListenerOpts): void {
+		this.docListeners.remove(type, fn, opts);
+	}
 	/** Fire a DOCUMENT-level handler, e.g. a drag's pointer-end registered off the target. */
 	fire(type: string, ev: Record<string, unknown> = {}): void {
 		const event = { type, preventDefault: (): void => {}, pointerType: "mouse", ...ev };
-		for (const fn of this.listeners.get(type) ?? []) fn(event);
+		for (const fn of this.docListeners.handlers(type)) fn(event);
+	}
+	/** Listeners still registered on the document (all of them, or one type). A pane that cleaned up reads 0. */
+	documentListenerCount(type?: string): number {
+		return this.docListeners.count(type);
+	}
+	/** Listeners still registered on the document's window. */
+	windowListenerCount(type?: string): number {
+		return this.winListeners.count(type);
 	}
 	/** Run every frame callback queued, including any queued by one. */
 	flushFrames(): void {
@@ -125,7 +180,7 @@ class FakeElImpl {
 			getPropertyValue: (prop: string): string => record[prop] ?? "",
 		});
 	})();
-	readonly listeners = new Map<string, Array<(ev: unknown) => void>>();
+	private readonly elListeners = new ListenerTable();
 	textContent = "";
 	value = "";
 	className = "";
@@ -201,11 +256,14 @@ class FakeElImpl {
 	 * already a child rather than adding a second copy of it.
 	 */
 	insertBefore(node: FakeEl, ref: FakeEl | null): FakeEl {
-		const had = this.children.indexOf(node);
-		if (had >= 0) this.children.splice(had, 1);
+		// The DOM refuses a reference that is not a child, before it moves anything.
+		if (ref && this.children.indexOf(ref) < 0) throw new Error("FakeEl.insertBefore: reference node is not a child");
+		// A node that is already somewhere (here or under another parent) is MOVED, never copied.
+		if (node.parentElement) node.remove();
 		const at = ref ? this.children.indexOf(ref) : -1;
 		if (at < 0) this.children.push(node);
 		else this.children.splice(at, 0, node);
+		node.parentElement = this;
 		return node;
 	}
 	empty(): void {
@@ -288,12 +346,16 @@ class FakeElImpl {
 		if (node === this) return true;
 		return this.children.some((kid) => kid.contains(node));
 	}
-	addEventListener(type: string, fn: (ev: unknown) => void): void {
-		const list = this.listeners.get(type) ?? [];
-		list.push(fn);
-		this.listeners.set(type, list);
+	addEventListener(type: string, fn: Handler, opts?: ListenerOpts): void {
+		this.elListeners.add(type, fn, opts);
 	}
-	removeEventListener(): void {}
+	removeEventListener(type: string, fn: Handler, opts?: ListenerOpts): void {
+		this.elListeners.remove(type, fn, opts);
+	}
+	/** Listeners still registered on this element (all of them, or one type). */
+	listenerCount(type?: string): number {
+		return this.elListeners.count(type);
+	}
 	/** Fire the handlers this element registered, the way a real click/pointer event would. */
 	fire(type: string, ev: Record<string, unknown> = {}): void {
 		const event = {
@@ -304,11 +366,11 @@ class FakeElImpl {
 			target: this,
 			...ev,
 		};
-		for (const fn of this.listeners.get(type) ?? []) fn(event);
+		for (const fn of this.elListeners.handlers(type)) fn(event);
 	}
 	/** Raw dispatch to this element's own listeners, unlike `fire` it adds no defaults to `ev`. */
 	dispatch(ev: Record<string, unknown>): void {
-		for (const fn of (this.listeners.get(ev.type as string) ?? []).slice()) fn(ev);
+		for (const fn of this.elListeners.handlers(ev.type as string)) fn(ev);
 	}
 	/** The control carrying this label - ownName moves aria-label to dataset. */
 	findByTipLabel(label: string): FakeEl | null {

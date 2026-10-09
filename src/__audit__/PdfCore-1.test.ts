@@ -68,6 +68,7 @@ const hostText = source.slice(hostStart, hostEnd);
 expect(hostText).toContain("load: (id, options) => this.store.load(id, options),");
 const installPdfHost = new Function(
 	"Notice",
+	"blockNotice",
 	transformSync(hostText, { loader: "ts", target: "es2022" }).code
 );
 
@@ -166,7 +167,7 @@ async function rig() {
 	) as { resolvePdfId: (...a: unknown[]) => Promise<void>; pdfHeadSource: (f: unknown) => unknown };
 	host.pdfHeadSource = (f: unknown) => fns.pdfHeadSource.call(host, f);
 	class SilentNotice { constructor(_m: string) {} }
-	installPdfHost.call(host, SilentNotice);
+	installPdfHost.call(host, SilentNotice, (m: string) => new SilentNotice(m));
 	installLiveReloadPoll.call(
 		host,
 		{ setInterval(fn: () => void) { fire = fn; return 1; } },

@@ -65,6 +65,7 @@ const makeProcessorRaw = new Function(
 	"runDetached",
 	"embedInkIsLiveEditorBlock",
 	"isMarkdownPath",
+	"overlayForPath",
 	transformSync(`return (el: any, ctx: any) => {\n${body}\n};`, { loader: "ts", target: "es2022" }).code
 ) as (
 	mrc: unknown,
@@ -72,7 +73,8 @@ const makeProcessorRaw = new Function(
 	store: InlineInkStore,
 	detached: typeof runDetached,
 	liveBlock: typeof embedInkIsLiveEditorBlock,
-	isMd: typeof isMarkdownPath
+	isMd: typeof isMarkdownPath,
+	overlay: () => null
 ) => (el: unknown, ctx: unknown) => void;
 // 1.4.22 lane R: the post-processor also calls embedInkIsLiveEditorBlock (issue 22 fix).
 const makeProcessor = (
@@ -80,7 +82,7 @@ const makeProcessor = (
 	attach: typeof attachEmbedInkOnceReady,
 	store: InlineInkStore,
 	detached: typeof runDetached
-) => makeProcessorRaw(mrc, attach, store, detached, embedInkIsLiveEditorBlock, isMarkdownPath);
+) => makeProcessorRaw(mrc, attach, store, detached, embedInkIsLiveEditorBlock, isMarkdownPath, () => null);
 
 // ---- host Component semantics (app.js 1.13.7) ------------------------------
 class Component {
@@ -163,8 +165,20 @@ class El {
 	}
 	querySelector<T = El>(sel: string): T | null {
 		const m = /^:scope > (.+)$/.exec(sel);
-		if (!m) throw new Error(`El: unsupported querySelector ${sel}`);
-		return (this.children.find((k) => k.matches(m[1]!)) ?? null) as unknown as T | null;
+		if (m) return (this.children.find((k) => k.matches(m[1]!)) ?? null) as unknown as T | null;
+		// Any other selector is a descendant query: depth first, in document
+		// order, as the browser walks it. One these fakes cannot read still
+		// throws, in matches.
+		this.matches(sel);
+		const walk = (n: El): El | null => {
+			for (const k of n.children) {
+				if (k.matches(sel)) return k;
+				const deeper = walk(k);
+				if (deeper) return deeper;
+			}
+			return null;
+		};
+		return walk(this) as unknown as T | null;
 	}
 	appendChild(c: El): El {
 		c.parentElement?.children.splice(c.parentElement.children.indexOf(c), 1);

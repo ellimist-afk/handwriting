@@ -145,6 +145,15 @@ export interface PageData {
 	 * keeps it as an unknown top-level field, so the schema version stays.
 	 */
 	fontRefPx?: number;
+	/**
+	 * This note's own Infinite Canvas and paper background choices. Absent:
+	 * the note follows the global setting. They live here and not in the
+	 * note's properties, which hold the page id alone. Additive, like
+	 * fontRefPx: an older build keeps them as unknown top-level fields. A value
+	 * this build does not know stays in unknownTop and is written back as found.
+	 */
+	noteCanvas?: boolean;
+	notePaper?: NotePaperKind;
 	textBoxes: TextBoxData[];
 	images: ImageData[];
 	strokes: InkStroke[];
@@ -217,6 +226,12 @@ export interface ParseResult {
 	 * writing would drop whatever the newer version added.
 	 */
 	futureVersion?: number;
+	/**
+	 * Set with `damaged` when the file's only fault is ink under a key this
+	 * build does not read. Such a file is most likely newer than any leftover
+	 * save beside it, so the store never puts that save in its place.
+	 */
+	onlyUnknownPointKeys?: boolean;
 }
 
 export function newId(prefix: string): string {
@@ -282,6 +297,10 @@ export function emptyPage(pageId: string): PageData {
 	};
 }
 
+/** The paper kinds a note can choose for itself. */
+export const NOTE_PAPER_KINDS = ["none", "lines", "grid", "dots"] as const;
+export type NotePaperKind = (typeof NOTE_PAPER_KINDS)[number];
+
 const KNOWN_TOP = new Set([
 	"schemaVersion",
 	"pageId",
@@ -291,6 +310,8 @@ const KNOWN_TOP = new Set([
 	"deck",
 	"slides",
 	"fontRefPx",
+	"noteCanvas",
+	"notePaper",
 	"textBoxes",
 	"images",
 	"strokes",
@@ -298,7 +319,7 @@ const KNOWN_TOP = new Set([
 const KNOWN_BOX = new Set(["id", "x", "y", "width", "z"]);
 const KNOWN_IMAGE = new Set(["id", "x", "y", "width", "height", "z"]);
 const KNOWN_STROKE = new Set(["id", "tool", "color", "width", "createdAt", "device", "widthMode", "pts",
-	"ptsd", "points", "page", "pressureProfile"]);
+	"ptsd", "points", "page", "pressureProfile", "pressureSensitivity"]);
 
 /** Everything in `raw` that is not a key we claim to own. */
 function unknownKeys(raw: Record<string, unknown>, known: Set<string>): Record<string, unknown> {
@@ -496,6 +517,10 @@ export function serializePage(page: PageData, version: number = SCHEMA_VERSION):
 				...(typeof page.fontRefPx === "number" && Number.isFinite(page.fontRefPx) && page.fontRefPx > 0
 					? { fontRefPx: page.fontRefPx }
 					: {}),
+				...(typeof page.noteCanvas === "boolean" ? { noteCanvas: page.noteCanvas } : {}),
+				...(page.notePaper !== undefined && NOTE_PAPER_KINDS.includes(page.notePaper)
+					? { notePaper: page.notePaper }
+					: {}),
 				textBoxes: page.textBoxes.map((b) =>
 					withUnknown(
 						{
@@ -525,13 +550,18 @@ export function serializePage(page: PageData, version: number = SCHEMA_VERSION):
 					withUnknown(
 						{
 							id: s.id,
-							tool: s.tool,
+							// A tool this build read as its fallback pen keeps the value
+							// it was written with, through the field map below.
+							...(s.tool === "pen" && page.unknownByObject[s.id]?.tool !== undefined ? {} : { tool: s.tool }),
 							color: s.color,
 							width: round(s.width, 3),
 							createdAt: s.createdAt,
 							...(s.device === "mouse" ? { device: s.device } : {}),
 							...(s.widthMode === "uniform" ? { widthMode: s.widthMode } : {}),
 							...(s.pressureProfile === "exp7" ? { pressureProfile: s.pressureProfile } : {}),
+							...(s.pressureSensitivity === "on" || s.pressureSensitivity === "off"
+								? { pressureSensitivity: s.pressureSensitivity }
+								: {}),
 							...(typeof s.page === "number" ? { page: s.page } : {}),
 							...(version >= 2
 								? { ptsd: packPointsV2(s.points) }
@@ -570,6 +600,12 @@ export interface DecodeLoss {
 	unusableId: number;
 	/** Strokes whose nonempty point payload decoded to nothing at all. */
 	unreadablePoints: number;
+	/**
+	 * Strokes dropped because their points sit only under a key this build does
+	 * not read: a newer build's points, most likely. Damage like the rest, but
+	 * the one kind that says nothing is wrong with the file itself.
+	 */
+	unknownPointKeys: number;
 	/** Strokes that decoded some of their samples, but not all of them. */
 	partialPoints: number;
 	/** Text boxes dropped because the entry was not an object at all. */
@@ -600,6 +636,7 @@ function emptyDecodeLoss(): DecodeLoss {
 	return {
 		unusableId: 0,
 		unreadablePoints: 0,
+		unknownPointKeys: 0,
 		partialPoints: 0,
 		unreadableBoxes: 0,
 		unusableBoxes: 0,
@@ -616,6 +653,7 @@ function wasLossy(loss: DecodeLoss): boolean {
 	return (
 		loss.unusableId > 0 ||
 		loss.unreadablePoints > 0 ||
+		loss.unknownPointKeys > 0 ||
 		loss.partialPoints > 0 ||
 		loss.unreadableBoxes > 0 ||
 		loss.unusableBoxes > 0 ||
@@ -628,6 +666,11 @@ function wasLossy(loss: DecodeLoss): boolean {
 	);
 }
 
+/** True when ink under a key this build does not read is the file's only fault. */
+function onlyUnknownPointKeys(loss: DecodeLoss): boolean {
+	return loss.unknownPointKeys > 0 && !wasLossy({ ...loss, unknownPointKeys: 0 });
+}
+
 /**
  * Counts only, never content: this string travels into logs, and a sidecar's
  * coordinates are the user's handwriting.
@@ -637,7 +680,8 @@ function describeDecodeLoss(loss: DecodeLoss): string {
 	const parts: string[] = [];
 	if (loss.unreadableStrokes > 0) parts.push(`${loss.unreadableStrokes} unreadable`);
 	if (loss.unusableId > 0) parts.push(`${loss.unusableId} with no usable id`);
-	if (loss.unreadablePoints > 0) parts.push(`${loss.unreadablePoints} with unreadable points`);
+	const unreadablePoints = loss.unreadablePoints + loss.unknownPointKeys;
+	if (unreadablePoints > 0) parts.push(`${unreadablePoints} with unreadable points`);
 	if (loss.partialPoints > 0) parts.push(`${loss.partialPoints} missing some points`);
 	if (parts.length > 0) groups.push(`strokes ${parts.join(", ")}`);
 	const boxes: string[] = [];
@@ -732,7 +776,14 @@ export function migratePageData(
 		const paths = o.pdfPaths.filter((p): p is string => typeof p === "string" && p !== "");
 		if (paths.length > 0) page.pdfPaths = paths;
 	}
+	if (typeof o.noteCanvas === "boolean") page.noteCanvas = o.noteCanvas;
+	if (NOTE_PAPER_KINDS.includes(o.notePaper as NotePaperKind)) page.notePaper = o.notePaper as NotePaperKind;
 	page.unknownTop = unknownKeys(o, KNOWN_TOP);
+	// A choice this build cannot read (a paper kind from a later release) is
+	// not dropped: it rides as an unknown field, so the note follows the
+	// setting here and keeps its value for the build that wrote it.
+	if (o.noteCanvas !== undefined && page.noteCanvas === undefined) page.unknownTop.noteCanvas = o.noteCanvas;
+	if (o.notePaper !== undefined && page.notePaper === undefined) page.unknownTop.notePaper = o.notePaper;
 
 	if (loss && unreadableList(o.textBoxes)) loss.unreadableBoxList = true;
 	if (Array.isArray(o.textBoxes)) {
@@ -801,6 +852,17 @@ export function migratePageData(
 
 	if (loss && unreadableList(o.strokes)) loss.unreadableStrokeList = true;
 	if (Array.isArray(o.strokes)) {
+		// Two strokes under one id are still two strokes. Every consumer keys
+		// strokes by id, so the second one gets a name of its own here: the
+		// first `<id>-N` no object in the file carries (strokes, text boxes and
+		// images share one id space through unknownByObject), so a real
+		// `<id>-2` keeps its name and the same file always reads the same.
+		// An exact copy, equal in every field, is one stroke written twice and
+		// loads once: kept twice, a highlighter copy would draw darker.
+		const taken = fileObjectIds(o);
+		// Raw entries by file id. Compared (canonicalJson) only when an id
+		// repeats, so an ordinary file pays one map write per stroke.
+		const variants = new Map<string, Array<Record<string, unknown>>>();
 		for (const item of o.strokes) {
 			// Counted like its two neighbours: the entry is still on disk.
 			if (!item || typeof item !== "object") {
@@ -809,7 +871,24 @@ export function migratePageData(
 			}
 			const s = item as Record<string, unknown>;
 			// See the textBoxes loop above: same id shape check, same reason.
-			const id = isSafePageId(s.id) ? s.id : undefined;
+			let id = isSafePageId(s.id) ? s.id : undefined;
+			if (id !== undefined) {
+				const seen = variants.get(id);
+				if (seen) {
+					const shape = canonicalJson(s);
+					if (seen.some((other) => canonicalJson(other) === shape)) continue;
+					seen.push(s);
+					let n = 2;
+					while (taken.has(`${id}-${n}`)) n++;
+					const own = `${id}-${n}`;
+					taken.add(own);
+					// A name the id rules refuse is an unusable id at this read:
+					// the note locks rather than the stroke being lost.
+					id = isSafePageId(own) ? own : undefined;
+				} else {
+					variants.set(id, [s]);
+				}
+			}
 			// Skipped exactly as before - an id we cannot write back to is
 			// unusable - but the stroke's points are still on disk, so losing
 			// it silently is what the caller must not do.
@@ -834,6 +913,19 @@ export function migratePageData(
 				// what was there: an empty array (or no point field at all)
 				// had nothing to lose; a nonempty one did.
 				if (loss && sample.lost) loss.unreadablePoints++;
+				// No point list this build reads, yet the stroke holds a field it
+				// does not know: a newer build's points, most likely. Dropping it
+				// quietly let the next save write the page without it, so it
+				// counts as unreadable and the damage lock holds the file.
+				else if (
+					loss &&
+					s.ptsd === undefined &&
+					s.pts === undefined &&
+					s.points === undefined &&
+					Object.keys(unknownKeys(s, KNOWN_STROKE)).length > 0
+				) {
+					loss.unknownPointKeys++;
+				}
 				continue;
 			}
 			if (loss && sample.lost) loss.partialPoints++;
@@ -854,10 +946,13 @@ export function migratePageData(
 				// Recomputed rather than trusted: a stale bbox silently breaks
 				// culling and eraser hit-testing.
 				bbox: computeBBox(points, width * 2),
-				createdAt: num(s.createdAt) ?? Date.now(),
+				createdAt: num(s.createdAt) ?? 0,
 				...(s.device === "mouse" ? { device: "mouse" as const } : {}),
 				...(s.widthMode === "uniform" ? { widthMode: "uniform" as const } : {}),
 				...(s.pressureProfile === "exp7" ? { pressureProfile: "exp7" as const } : {}),
+				...(s.pressureSensitivity === "on" || s.pressureSensitivity === "off"
+					? { pressureSensitivity: s.pressureSensitivity }
+					: {}),
 				// Page numbers are 1-based; anything else is not a page and is
 				// dropped rather than stored as a number that indexes nowhere.
 				...(Number.isInteger(s.page) && (s.page as number) >= 1
@@ -870,10 +965,42 @@ export function migratePageData(
 			if (s.pressureProfile !== undefined && s.pressureProfile !== "exp7") {
 				extra.pressureProfile = s.pressureProfile;
 			}
+			// The same for a tool, device or width mode this build has no
+			// meaning for: the stroke is drawn with the fallback, and a re-save
+			// writes back the value it was written with, not the fallback.
+			if (s.tool !== undefined && s.tool !== "pen" && s.tool !== "highlighter") extra.tool = s.tool;
+			if (s.device !== undefined && s.device !== "mouse") extra.device = s.device;
+			if (s.widthMode !== undefined && s.widthMode !== "uniform") extra.widthMode = s.widthMode;
+			if (s.pressureSensitivity !== undefined && s.pressureSensitivity !== "on" && s.pressureSensitivity !== "off") {
+				extra.pressureSensitivity = s.pressureSensitivity;
+			}
 			if (Object.keys(extra).length > 0) page.unknownByObject[id] = extra;
 		}
 	}
 	return page;
+}
+
+/** Every id an object in the raw file carries: strokes, text boxes and images, as written. */
+function fileObjectIds(o: Record<string, unknown>): Set<string> {
+	const out = new Set<string>();
+	for (const list of [o.strokes, o.textBoxes, o.images]) {
+		if (!Array.isArray(list)) continue;
+		for (const item of list) {
+			const id = item && typeof item === "object" ? (item as Record<string, unknown>).id : undefined;
+			if (typeof id === "string") out.add(id);
+		}
+	}
+	return out;
+}
+
+/** JSON with object keys sorted, so two entries equal in every field compare equal however they were written. */
+function canonicalJson(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+	if (value && typeof value === "object") {
+		const o = value as Record<string, unknown>;
+		return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "null";
 }
 
 function unpackObjectPoints(arr: unknown[], loss?: PointLoss): InkPoint[] {
@@ -893,7 +1020,11 @@ function unpackObjectPoints(arr: unknown[], loss?: PointLoss): InkPoint[] {
 
 export function parsePage(json: string, fallbackPageId: string): ParseResult {
 	try {
-		const raw: unknown = JSON.parse(json);
+		// One leading byte-order mark is not part of the JSON. A tool that saves
+		// the file with one made JSON.parse throw, so the note showed no ink and
+		// locked. Dropped here as the Markdown side drops it; the next save
+		// writes the file without it.
+		const raw: unknown = JSON.parse(json.startsWith("\uFEFF") ? json.slice(1) : json);
 		const declared =
 			raw && typeof raw === "object"
 				? num((raw as Record<string, unknown>).schemaVersion)
@@ -918,7 +1049,13 @@ export function parsePage(json: string, fallbackPageId: string): ParseResult {
 		// of the strokes that failed. Damage is what makes the stores hold
 		// the original bytes and stop writing.
 		if (wasLossy(loss)) {
-			return { data, recovered: false, damaged: true, problem: describeDecodeLoss(loss) };
+			return {
+				data,
+				recovered: false,
+				damaged: true,
+				problem: describeDecodeLoss(loss),
+				...(onlyUnknownPointKeys(loss) ? { onlyUnknownPointKeys: true } : {}),
+			};
 		}
 		return { data, recovered: false };
 	} catch (err) {

@@ -87,6 +87,23 @@ export function ownedEffectiveScale(inputs: ScaleInputs, owned: number): number 
 	return combined;
 }
 
+/**
+ * The scale the canvas backings and the live-canvas grids are built from.
+ *
+ * The measured scale is a rect width over `offsetWidth`, and `offsetWidth` is
+ * rounded to a whole px, so a pane at an owned scale of exactly 1 measures
+ * 0.9999960866 or 0.9998392990 (measured on a device). The small live canvases need
+ * a scale whose backing lands on a whole pixel grid, and a quotient that is off
+ * in its sixth decimal has none: they were switched off at 100%. Within
+ * `epsilon` of the owned scale the difference is that rounding, not a zoom, so
+ * the owned scale is the one used. A real external zoom is far outside it and
+ * keeps the measured value.
+ */
+export function rasterScale(measured: number, owned: number, epsilon: number): number {
+	if (!validCameraScale(owned) || !Number.isFinite(measured) || measured <= 0) return measured;
+	return Math.abs(measured / owned - 1) <= epsilon ? owned : measured;
+}
+
 /** Callers validate provenance when adopting geometry, not on each conversion. */
 function coherentScale(scale: number): number {
 	return Number.isFinite(scale) && scale > 0 && Number.isFinite(1 / scale) ? scale : 1;

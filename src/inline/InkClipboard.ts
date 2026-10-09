@@ -8,8 +8,10 @@
  * a one-line MARKER does, because ctrl+v has nothing else to go on. See
  * inkClipboardMarker below.
  *
- * Coordinates ride along unchanged: ink lives on a fixed grid, so a stroke
- * pasted into another note lands at the same place on that note's page.
+ * Coordinates ride along in the frame of the source note's font reference
+ * size. A paste into a note with a different known reference scales each
+ * stroke by target over source, so the ink keeps its look; an unknown size on
+ * either side (or a PDF source) pastes unchanged.
  * Pasting back into the SOURCE note staggers by 16px per paste, or the copy
  * would sit invisibly on its original.
  *
@@ -19,11 +21,13 @@
  */
 
 import { InkStroke, newStrokeId } from "../ink/Stroke";
+import { scaleStroke } from "../objects/Selection";
 
 const PASTE_STAGGER_PX = 16;
 
 let held: InkStroke[] = [];
 let sourcePath: string | null = null;
+let sourceFontRefPx: number | null = null;
 let pastesIntoSource = 0;
 let token: string | null = null;
 
@@ -72,10 +76,15 @@ const clone = (s: InkStroke): InkStroke => ({
 	bbox: { ...s.bbox },
 });
 
-export function copyInk(strokes: readonly InkStroke[], fromPath: string): number {
+export function copyInk(
+	strokes: readonly InkStroke[],
+	fromPath: string,
+	fromFontRefPx: number | null = null
+): number {
 	if (strokes.length === 0) return 0;
 	held = strokes.map(clone);
 	sourcePath = fromPath;
+	sourceFontRefPx = fromFontRefPx;
 	pastesIntoSource = 0;
 	token = newStrokeId();
 	return held.length;
@@ -86,8 +95,12 @@ export function clipboardSize(): number {
 }
 
 /** Fresh strokes for one paste; empty when the clipboard is. */
-export function pasteInk(intoPath: string): InkStroke[] {
+export function pasteInk(intoPath: string, intoFontRefPx: number | null = null): InkStroke[] {
 	if (held.length === 0) return [];
+	const k =
+		sourceFontRefPx !== null && intoFontRefPx !== null && sourceFontRefPx !== intoFontRefPx
+			? intoFontRefPx / sourceFontRefPx
+			: 1;
 	let dx = 0;
 	if (intoPath === sourcePath) {
 		pastesIntoSource++;
@@ -96,6 +109,7 @@ export function pasteInk(intoPath: string): InkStroke[] {
 	return held.map((s) => {
 		const c = clone(s);
 		c.id = newStrokeId();
+		if (k !== 1) scaleStroke(c, k);
 		if (dx !== 0) {
 			// dx offsets BOTH axes on purpose: one stagger value moves each
 			// repeated paste diagonally instead of stacking pastes exactly.
@@ -114,6 +128,7 @@ export function pasteInk(intoPath: string): InkStroke[] {
 export function clearInkClipboard(): void {
 	held = [];
 	sourcePath = null;
+	sourceFontRefPx = null;
 	pastesIntoSource = 0;
 	token = null;
 }

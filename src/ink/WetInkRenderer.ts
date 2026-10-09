@@ -28,6 +28,11 @@ function wetTileGrid(backing: number, cssScale: number, dpr: number, hostZoom: b
 		if (whole(grid * cssScale * dpr / backing) &&
 			whole(64 * grid / backing) && whole(64 * grid * k / backing)) return grid;
 	}
+	// No exact grid: the backing has no whole multiple of 1/64 px, as at a device
+	// ratio of 1.8257 (200% display, 91% page zoom). When the box is not
+	// transform-scaled and a backing px is a displayed device px, only the CSS
+	// layout rule failed, so whole backing px are a grid.
+	if ((hostZoom || cssScale >= 1) && Math.abs(cssScale * dpr / backing - 1) <= 1e-9) return 1;
 	return null;
 }
 
@@ -103,6 +108,8 @@ export class WetInkRenderer {
 	/** Monotonic count of strips too large for the tile, drawn straight into the full canvas. */
 	get tileFallbackTotal(): number { return this.tileFallbacks; }
 	get wetTileEnabled(): boolean { return this.tileOn; }
+	/** The tile's pixel grid as last configured; null with no grid (no tile) or before the first configure. */
+	get tileGrid(): number | null { return this.tileConfig?.grid ?? null; }
 	/**
 	 * Size the wet tile for a band, once, outside strokes (resize and scale
 	 * changes only). No joint grid: no tile; strips draw into the full canvas.

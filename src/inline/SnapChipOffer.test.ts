@@ -561,7 +561,8 @@ describe("where the chip sits", () => {
 	it("stays inside the pane at either edge", () => {
 		expect(snapChipOrigin(PANE.width, PANE.height, PANE)).toEqual({
 			left: PANE.width - SNAP_CHIP_W,
-			top: PANE.height - SNAP_CHIP_H,
+			// Squeezed into the corner the chip goes above the stroke's end, not onto it.
+			top: PANE.height - SNAP_CHIP_OFFSET - SNAP_CHIP_H,
 		});
 		// A pane too small to hold the chip clamps to its corner rather than
 		// going negative and hanging off the other side.

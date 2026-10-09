@@ -1758,8 +1758,15 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 		const pr = pane.getBoundingClientRect();
 		const endpointPixels = (canvas: HTMLCanvasElement, x: number, y: number, red: number) => {
 			const r = canvas.getBoundingClientRect(), sx = canvas.width/r.width, sy = canvas.height/r.height;
-			if (x-5<r.left || x+5>r.right || y-5<r.top || y+5>r.bottom) return 0;
-			const data = canvas.getContext("2d")!.getImageData(Math.floor((x-r.left-5)*sx), Math.floor((y-r.top-5)*sy), Math.ceil(10*sx), Math.ceil(10*sy)).data;
+			// The 10 px box around the endpoint, clipped to the canvas. A compact live canvas (the tail at a scale
+			// with a pixel grid) can end a few px past the head, so a box that crosses its edge is read for the part
+			// inside it; only a box wholly outside reads 0.
+			const left = Math.max(x-5, r.left), top = Math.max(y-5, r.top), right = Math.min(x+5, r.right), bottom = Math.min(y+5, r.bottom);
+			if (right <= left || bottom <= top) return 0;
+			const bx = Math.floor((left-r.left)*sx), by = Math.floor((top-r.top)*sy);
+			const bw = Math.min(canvas.width-bx, Math.ceil((right-left)*sx)), bh = Math.min(canvas.height-by, Math.ceil((bottom-top)*sy));
+			if (bw <= 0 || bh <= 0) return 0;
+			const data = canvas.getContext("2d")!.getImageData(bx, by, bw, bh).data;
 			let count = 0;
 			for(let j=0;j<data.length;j+=4) if(data[j+3]!>20 && Math.abs(data[j]!-red)<5 && data[j+1]!<5 && data[j+2]!>250) count++;
 			return count;
@@ -2632,8 +2639,8 @@ async function runCentroidPan(readable: boolean, infiniteCanvas: boolean) {
 /** Top exposure is measured against the note's actual zero-scroll layout,
  * including a title and padding. A strict top bound must not erase that inset.
  */
-async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny = false, external = 1, axis: 'top' | 'left' | 'corner' = 'top', debug = false) {
-	const { pane, view, overlay, sizer, path } = await mount(`${axis}-${readable}-${infiniteCanvas}-${tiny}`, readable, infiniteCanvas);
+async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny = false, external = 1, axis: 'top' | 'left' | 'corner' = 'top', debug = false, paneSize?: { w: number; h: number }) {
+	const { pane, view, overlay, sizer, path } = await mount(`${axis}-${readable}-${infiniteCanvas}-${tiny}`, readable, infiniteCanvas, undefined, false, 400, paneSize);
 	const title = document.createElement('div'); title.textContent = 'A note title'; title.style.cssText = 'height:52px;flex:none';
 	sizer.style.paddingTop = '16px'; sizer.insertBefore(title, sizer.firstChild);
 	pane.style.transform = `scale(${external})`; pane.style.transformOrigin = '0 0'; overlay.handleResize();
@@ -2662,7 +2669,7 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 	// the product path at this head and comes out before landing; this arms it for the two named
 	// cells and nothing else, so one run can say which of the three named causes is the real one.
 	if (debug) { (globalThis as any).__HW_PAN_DEBUG = true; (globalThis as any).__HW_SETTLE_PAN = []; }
-	const router = overlay.router, rows: any[] = [], releases: any[] = [];
+	const router = overlay.router, rows: any[] = [], releases: any[] = [], easeCovers: any[] = [];
 	// THE RULE WANTS THE FINGERS' DISPLACEMENT, NOT A MEASURED NUMBER. The rig already owns the only
 	// inputs that displacement is made of - the centroid it placed the touches at and the spread between
 	// them - so it records them beside every sample and the cell derives the expected exposure from them.
@@ -2697,6 +2704,16 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 	const end = async (phase: string, y: number) => {
 		const before = sample(`${phase}-before-lift`); router.endPinch(event('pointerup'), centroid(y));
 		const immediate = sample(`${phase}-lift`), hold = overlay.panAnchorHold;
+		// The ink raster at the first frame of a settle's ease, against the pane. A negative start offset moves
+		// the page left or up, so the raster must reach past the pane's right or bottom by the offset. Read at the lift
+		// when the ease started inside it, else on the first animation frame it is running, up to 30. Beside it, the ink
+		// layer's css scale, the band margin for the pane at that scale, and the scroll room right of and below the scroll.
+		const cover: any = { phase, frames: 0, from: null }; easeCovers.push(cover);
+		const readCover = (): boolean => { const o = overlay as any, b = o.overscrollBounceReadout?.(); if (!b || !b.active) return false;
+			const ink = o.committedCanvas?.getBoundingClientRect?.(), pane = view.scrollDOM.getBoundingClientRect(), sd = view.scrollDOM, cs = o.cssScale;
+			Object.assign(cover, { from: [b.fromX, b.fromY], offset: [b.x, b.y], ink: ink ? [ink.left, ink.top, ink.right, ink.bottom] : null, pane: [pane.left, pane.top, pane.right, pane.bottom],
+				cssScale: cs, margin: bandMargin(sd.clientHeight, cs), room: [sd.scrollWidth - sd.scrollLeft - sd.clientWidth, sd.scrollHeight - sd.scrollTop - sd.clientHeight] }); return true; };
+		if (!readCover()) { const poll = () => { if (!readCover() && ++cover.frames < 30) requestAnimationFrame(poll); }; requestAnimationFrame(poll); }
 		router.touchPos.clear(); await settle(8); const after = sample(`${phase}-settled`);
 		// ARRIVED. The `-settled` sample above is read 8 frames after the lift - about 133 ms
 		// into an ease that runs for ~500 ms - so it is a GLIDE READ, not a position: three identical
@@ -2800,9 +2817,9 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 				const arrived: any = sample('pending-arrived');
 				arrived.eased = steady >= 2; arrived.easeFrames = frames;
 			}
-			return { axis, readable, infiniteCanvas, tiny, external, naturalInset, naturalLeft, rows, releases, contentBoxHost: parseFloat(getComputedStyle(view.scrollDOM).width), columnBox: sizer.offsetWidth, reachableDelta: after.top - before.top, reachableX: after.left - before.left, anchorUnchanged, inkUnchanged: JSON.stringify(inlineInk.strokes(path)) === inkBefore, settlePan: debug ? (globalThis as any).__HW_SETTLE_PAN : undefined };
+			return { axis, readable, infiniteCanvas, tiny, external, naturalInset, naturalLeft, rows, releases, contentBoxHost: parseFloat(getComputedStyle(view.scrollDOM).width), columnBox: sizer.offsetWidth, reachableDelta: after.top - before.top, reachableX: after.left - before.left, anchorUnchanged, inkUnchanged: JSON.stringify(inlineInk.strokes(path)) === inkBefore, settlePan: debug ? (globalThis as any).__HW_SETTLE_PAN : undefined, easeCovers };
 		}
-		return { axis, readable, infiniteCanvas, tiny, external, naturalInset, naturalLeft, rows, releases, contentBoxHost: parseFloat(getComputedStyle(view.scrollDOM).width), columnBox: sizer.offsetWidth, inkUnchanged: JSON.stringify(inlineInk.strokes(path)) === inkBefore, settlePan: debug ? (globalThis as any).__HW_SETTLE_PAN : undefined };
+		return { axis, readable, infiniteCanvas, tiny, external, naturalInset, naturalLeft, rows, releases, contentBoxHost: parseFloat(getComputedStyle(view.scrollDOM).width), columnBox: sizer.offsetWidth, inkUnchanged: JSON.stringify(inlineInk.strokes(path)) === inkBefore, settlePan: debug ? (globalThis as any).__HW_SETTLE_PAN : undefined, easeCovers };
 	} finally { view.destroy(); pane.remove(); }
 }
 
@@ -2984,9 +3001,9 @@ async function runInfiniteTraversal(readable: boolean, infiniteCanvas: boolean, 
 				const after = sample(`${axis}-${i}-after`);
 				await settle(10);
 				after.jumpX = after.x - last.x; after.jumpY = after.y - last.y;
-				// Alan 2026-09-21: under the canvas the settle measures the painted travel, so the last move a pending
-				// cadence never painted (200 px) is eased after the lift and no longer lands in the lift's own frame. Measured
-				// at d624596d plus the travelled flag: jump 0 where this row read -200. The rest is still read at `-done`.
+				// Under the canvas the lift lands the last painted frame. The last move a pending cadence never painted
+				// (200 px) is dropped: the lift's own frame does not jump, and the page rests where that frame painted it,
+				// which the `-done` row reads.
 				const pendingJump = infiniteCanvas ? 0 : -200;
 				after.expectedJumpX = axis === 'x' ? cadence === 'zero' ? -800 : cadence === 'pending' ? pendingJump : 0 : 0;
 				after.expectedJumpY = axis === 'y' ? cadence === 'zero' ? -800 : cadence === 'pending' ? pendingJump : 0 : 0;
@@ -3592,7 +3609,10 @@ async function runScrollDraw(zoom: number, scroll: boolean, infiniteCanvas: bool
 			const r=overlay.container ? rect.call(overlay.container) : null;
 			lifecycle={ending,beforeDeferred,afterResetDeferred,afterDeferred:!!overlay.bandSyncDeferred,locked:overlay.frame.locked,queued:overlay.repaintQueued,
 				covered:r!==null && r.left<=pr.left && r.right>=pr.right,
-				mounted:!!overlay.container,unchangedMemory:JSON.stringify(inlineInk.strokes(path))===beforeInk,unchangedSidecar:sidecars.get(ids.get(path)!)===beforeSaved};
+				mounted:!!overlay.container,unchangedMemory:JSON.stringify(inlineInk.strokes(path))===beforeInk,unchangedSidecar:sidecars.get(ids.get(path)!)===beforeSaved,
+				// Strokes the ending added: in the store, and in the saved sidecar.
+				addedMemory:inlineInk.strokes(path).length-JSON.parse(beforeInk).length,
+				addedSidecar:((t:string|undefined)=>t?parsePage(t,ids.get(path)!).data.strokes.length:0)(sidecars.get(ids.get(path)!))-((t:string|undefined)=>t?parsePage(t,ids.get(path)!).data.strokes.length:0)(beforeSaved)};
 		}
 		const strokes=inlineInk.strokes(path), stored=sidecars.get(ids.get(path)!)!;
 		const parsed=parsePage(stored,ids.get(path)!).data;
@@ -3783,7 +3803,7 @@ async function runLayerBoundsTeardown() {
  * a frame whose raster or transform changed while the screenshot was taken is
  * flagged rather than silently counted.
  */
-async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backing = false, options: { external?: number; riseAt?: number; risePx?: number; pauseAt?: number[]; pauseAction?: "stroke" | "resize" | "font" | "watchdog" | "host"; shiftPlant?: number } = {}) {
+async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backing = false, options: { external?: number; riseAt?: number; risePx?: number; pauseAt?: number[]; pauseAction?: "stroke" | "resize" | "font" | "watchdog" | "host"; shiftPlant?: number; markInset?: number } = {}) {
 	const shot = (window as any).__scpShot as ((clip: { x: number; y: number; width: number; height: number }) => Promise<{ ms: number; index: number }>) | undefined;
 	if (!shot) throw new Error("runPixelColumn needs the test-side __scpShot binding");
 	const rig = await mount(`pixels-${readable ? "rll" : "full"}-${infiniteCanvas ? "ic" : "noic"}`, readable, infiniteCanvas);
@@ -3860,7 +3880,7 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 	scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
 	await settle(10); await new Promise(r3 => setTimeout(r3, 300)); await settle(6);
 	const colLeftDraw = contentOriginLeft(view.contentDOM) ?? paneRect.left;
-	const markX0 = Math.round(colLeftDraw + 422), markY0 = Math.round(paneRect.top + 300);
+	const markX0 = Math.round(colLeftDraw + (options.markInset ?? 422)), markY0 = Math.round(paneRect.top + 300);
 	for (let i = 0; i < 20; i++) {
 		const x = markX0 + i * 3;
 		pen("pointerdown", x, markY0, 700 + i, 1);

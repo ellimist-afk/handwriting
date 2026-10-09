@@ -65,6 +65,7 @@ for(const [zoom,scaled] of [[.1,false],[.4,false],[1,false],[.1,true],[.4,true]]
   await mount(page,250,false,false,'overlap');
   const state=(action:string)=>page.evaluate(a=>(window as any).zoomDrift.layerVisual(a.action,a.zoom),{action,zoom});
   const before=await state('setup');expect(before.pixels[0]).toBeGreaterThan(0);expect(before.pixels[2]).toBeGreaterThan(0);
+  expect(before.standInHeld,'setup: the zoom stand-in was still held 4 s after the zoom, so the baseline would be its pixels, not the sharp layer').toBe(false);
   let original=await page.screenshot();const preview=await state(scaled?'scaled-preview':'preview');expect(preview.composite).toBe(true);expect(preview.blank[3]).toBe(false);
   if(process.env.HW_COMPOSITE_THIN_PLANT)await state('thin-gap-plant');
   if(process.env.HW_COMPOSITE_SHIFT_PLANT)await state(`shift-plant:${process.env.HW_COMPOSITE_SHIFT_PLANT}`);

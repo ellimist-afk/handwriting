@@ -17,7 +17,7 @@
 
 import { flattenStroke, ribbonSides, jointIndices, RibbonPt } from "./Ribbon";
 import { flattenStrokeShaped } from "./InkShape";
-import { PenStyle, shapeFor } from "./PenStyle";
+import { PenStyle, enterStrokePressure, leaveStrokePressure, shapeFor } from "./PenStyle";
 import { InkStroke } from "./Stroke";
 import { strokeWidthPolicy } from "./StrokeWidth";
 
@@ -43,8 +43,21 @@ export interface StrokeOutline {
 	discs: readonly Disc[];
 }
 
-/** The flattened ribbon, exactly as the committed renderer would build it. */
+/**
+ * The flattened ribbon, exactly as the committed renderer would build it,
+ * under the stroke's own pressure setting when it carries one. SVG export and
+ * PDF ink both come through here.
+ */
 export function ribbonOf(stroke: InkStroke): RibbonPt[] {
+	const previous = enterStrokePressure(stroke.pressureSensitivity);
+	try {
+		return ribbonUnderItsPressure(stroke);
+	} finally {
+		leaveStrokePressure(previous);
+	}
+}
+
+function ribbonUnderItsPressure(stroke: InkStroke): RibbonPt[] {
 	const pts = stroke.points;
 	if (pts.length === 0) return [];
 	const flat = stroke.tool === "highlighter";

@@ -114,7 +114,7 @@ describe("settings control consistency preserves saved behavior", () => {
 		expect(exported.control).toEqual({ type: "dropdown", key: "inkReadableInExports", options: { auto: "Automatic readability", keep: "Keep original colors" } });
 		expect(pdf.control?.type).toBe("dropdown");
 		expect(pdf.control?.options).toEqual({ darken: "Darken for light pages", lighten: "Lighten for dark pages", keep: "Keep original colors" });
-		expect(rows.find(row => row.name === "Paper background")?.desc).toBe("Lined, grid, or dotted paper. Global setting. Default none.");
+		expect(rows.find(row => row.name === "Paper background")?.desc).toBe("Lined, grid, or dotted paper. Global setting. A note can override it with handwriting-paper in its frontmatter. Default none.");
 		// The zoom bar's option labels are copied verbatim from the Toolbar
 		// visibility row beside it - the two settings behave identically.
 		const toolbarVisibility = rows.find(row => row.name === "Toolbar visibility")!;

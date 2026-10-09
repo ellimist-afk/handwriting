@@ -36,12 +36,13 @@ interface Harness {
 
 function plugin(disk: Record<string, unknown> | undefined): Harness {
 	const g = globalThis as unknown as { document?: unknown; window?: unknown };
-	g.document ??= { body: { classList: { add: () => {}, toggle: () => {}, contains: () => false } } };
+	g.document ??= { body: { classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false } } };
 	g.window ??= {
 		setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
 		clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
 	};
 	const p = Object.create(HandwritingPlugin.prototype) as Record<string, unknown>;
+	p.gatedCommandDefs = new Map();
 	p.disk = disk === undefined ? undefined : { ...disk };
 	p.reads = 0;
 	p.writes = [];

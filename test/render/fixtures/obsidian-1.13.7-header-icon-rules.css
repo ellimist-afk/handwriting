@@ -1,0 +1,8 @@
+/* Obsidian 1.13.7 app.css, header icon rules, copied verbatim from obsidian.asar (extracted 2026-10-04).
+   The first rule is the base colour as measured in the app; the rest are verbatim. */
+.clickable-icon { color: var(--icon-color); }
+.clickable-icon svg { opacity: var(--icon-opacity); transition: opacity var(--anim-duration-fast) ease-in-out; }
+.clickable-icon.is-active { color: var(--icon-color-active); background-color: var(--background-modifier-active-hover); }
+.clickable-icon.is-active svg { opacity: var(--icon-opacity-hover); }
+.clickable-icon:hover { box-shadow: none; color: var(--icon-color-hover); background-color: var(--background-modifier-hover); }
+.clickable-icon.is-active:hover { background-color: var(--background-modifier-active-hover); }

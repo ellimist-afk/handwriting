@@ -11,6 +11,7 @@ import { contentOrigin, contentOriginLeft } from "./ContentOrigin";
 import { anchorPaddingTop, anchorTop } from "./DocumentTop";
 import { RUNG_SPACING, anchorParityBar, cameraOriginYLayout, documentAnchorLadder, growDocumentAnchorLadder, impliedDocumentTop, refuseDocumentAnchor, rungIndexFor, unmountDocumentAnchor } from "./DocumentAnchor";
 import { stableCameraOriginY, type CameraOriginY } from "./CameraOriginY";
+import { noteCameras } from "./NoteCamera";
 import {
 	penContactIntent,
 	releaseTipMode,
@@ -23,6 +24,7 @@ import {
 	blankLinesAbove,
 	boundsOf,
 	lineSteps,
+	sameRowSides,
 	strokeIdsBelow,
 	sweptRect,
 	InsertSpaceRows,
@@ -142,6 +144,61 @@ const PAN_FIT_SLACK_PX = 1;
  * it. An in-then-out pinch that comes back near its start is the same case.
  */
 const PAN_SETTLE_ZOOM_BAND = { below: 0.8, above: 1.25 };
+
+/**
+ * The most device pixels one extent raster may hold, per layer. Below 100 percent a note's whole ink, drawn once, fills the strips a
+ * pan uncovers by copy instead of by path: on the MCB EXAM 3 note at 10 percent a strip drew 160,000 to 198,000 path points (17 to
+ * 24 ms on the rig, far more on Orion), and a far fling at 17 percent froze for 543 to 951 ms redrawing the whole layer. That note's
+ * ink is 6.2 million device px at 10 percent and 18.1 million at 17 percent at a ratio of 2 (15.1 million on Orion), so the desktop
+ * cap holds the largest exam note at 17 percent: 80 MB a layer at most. Mobile canvas memory is tight, so a phone or tablet keeps
+ * the smaller cap and pans a larger note by path as before.
+ */
+export const EXTENT_RASTER_MAX_PX_DESKTOP = 20_000_000;
+export const EXTENT_RASTER_MAX_PX_MOBILE = 8_000_000;
+/**
+ * The settings that change how a stroke paints without changing the stroke, as one number: the width law and smoothing
+ * (InkShape), pressure, and the theme adaptation and its override. An extent raster drawn under one value is stale under another.
+ * Live paint ignores the theme today (InkTheme.inkColorFor returns the stored colour on screen); the two theme bits keep the raster
+ * honest if that ever changes, at no cost.
+ */
+function inkLookKey(): number {
+	const o = inkThemeOverride();
+	return (inkShapingEnabled() ? 1 : 0) | (pressureSensitivityEnabled() ? 2 : 0) | (inkThemeAdaptationEnabled() ? 4 : 0) | (o === null ? 0 : o ? 8 : 16);
+}
+/** Whether an extent raster of w x h device px may be kept on this platform. */
+/** The longest a piece of the extent raster's build draws before it yields, in ms; one stroke may run past it (INBOX row 511). */
+export const EXTENT_PIECE_MS = 4;
+/** How long a piece that may not run waits before it asks again, in ms. */
+const EXTENT_PIECE_RETRY_MS = 50;
+/** How long after the last scroll repaint was asked for before a piece may run, in ms: a wheel or trackpad pan holds no contact. */
+const EXTENT_SCROLL_QUIET_MS = 150;
+
+export function extentRasterFits(w: number, h: number, mobile: boolean = Platform.isMobile): boolean {
+	const cap = mobile ? EXTENT_RASTER_MAX_PX_MOBILE : EXTENT_RASTER_MAX_PX_DESKTOP;
+	return w > 0 && h > 0 && w <= 16_384 && h <= 16_384 && w * h <= cap;
+}
+/** While a zoom stand-in is held, the stand-in and the build together may hold this many times the raster cap (arm: 96 MB peak on MCB). */
+export const EXTENT_PAIR_FACTOR = 1.6;
+/**
+ * The smallest scale a zoom stand-in is copied at. A raster shown much smaller drops floor-width strokes between its samples (a Fit
+ * far below 10 percent copied at about one twentieth showed the note blank for some 200 ms; one fifth kept the ink), so below this
+ * the layer is drawn by path, as before the stand-in. The small slack keeps a copy at exactly one quarter on the stand-in.
+ */
+export const STAND_IN_MIN_FACTOR = 0.25;
+/**
+ * Whether a zoom stand-in may be taken at all. Off for 1.4.23: a stand-in taken while a bounce plays over the
+ * zoom commit was a small old picture at the layer's corner, its ink 500 to 575 device px from where the sharp ink lands, held
+ * about a second, which Alan saw as a box over the ink and then the whole picture jumping. Off, the layer is drawn by path, as
+ * before the stand-in; the rest of the stand-in code stays dormant for 1.4.24.
+ */
+export const ZOOM_STAND_IN_ENABLED: boolean = false;
+export function standInFactorFits(f: number): boolean {
+	return f >= STAND_IN_MIN_FACTOR - 1e-9;
+}
+/** Whether a build of `buildPx` device px (both layers) may run beside a held stand-in of `heldPx`. */
+export function extentPairFits(buildPx: number, heldPx: number, mobile: boolean = Platform.isMobile): boolean {
+	return buildPx + heldPx <= EXTENT_PAIR_FACTOR * (mobile ? EXTENT_RASTER_MAX_PX_MOBILE : EXTENT_RASTER_MAX_PX_DESKTOP);
+}
 /**
  * THE OVERSCROLL BOUNCE. Where the settle of a zoom clamps a
  * page that hung off the pane back inside it (panAxisWindow), the correction
@@ -178,6 +235,21 @@ const OVERSCROLL_BOUNCE_MIN_PX = 2;
  */
 const OVERSCROLL_GIVE_PX = 96;
 
+/**
+ * HOW FAR A TRAVELLED EASE MAY SLIDE BACK LEFTWARD OR UPWARD, in band px, per axis: one maximal band margin at the
+ * ink's css scale, and never more than the scroll room on the side the ease uncovers. The settle eases a correction
+ * within it and refuses one past it, and syncBand widens the band for the ease by no more than it, so the band is
+ * never asked to cover a slide of thousands of px (a zoom-out to 0.322 at scrollTop 5000 settled a 3433 px
+ * correction, and widening the band for it crashed the renderer).
+ */
+function travelledEaseRoom(v: BandViewport): { x: number; y: number } {
+	const max = bandMarginMax(v.scale ?? 1);
+	return {
+		x: Math.min(max, Math.max(0, v.scrollWidth - v.scrollLeft - v.clientWidth)),
+		y: Math.min(max, Math.max(0, v.scrollHeight - v.scrollTop - v.clientHeight)),
+	};
+}
+
 interface PinchConstraintGeometry {
 	left: number; top: number; paneWidth: number; paneHeight: number;
 	/** The painted scrollbar in SCREEN px, measured at the last settle. Not predictable from the
@@ -189,6 +261,9 @@ interface PinchConstraintGeometry {
 	/** Zero-native-scroll content-box inset, including its normal title/padding. */
 	naturalLeft: number | null;
 	naturalTop: number | null;
+	/** The native scroll this snapshot was read at. Scroll taken after it moved the painted page with no preview frame
+	 *  to follow it, so the settle carries that much on into its target. */
+	scrollLeft: number; scrollTop: number;
 }
 
 interface PinchConstraint {
@@ -258,9 +333,10 @@ import { computeCanvasSize, countPaintedPixels } from "../diag/Raster";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { routineNoticesVisible } from "../diag/RoutineNotices";
 import { eraserRect, splitStrokeByCircle, strokesHitByCircle } from "../ink/Eraser";
-import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle } from "../ink/PenStyle";
+import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN, PenStyle, pressureSensitivityEnabled } from "../ink/PenStyle";
 import { clampInkSize } from "../ink/InkSize";
-import { withInkDestination } from "../ink/InkTheme";
+import { inkThemeAdaptationEnabled, inkThemeOverride, withInkDestination } from "../ink/InkTheme";
+import { inkShapingEnabled } from "../ink/InkShape";
 import { applyInkColor, colorsFor, getInkColorHex } from "../ink/InkColor";
 import {
 	applyInkPreset,
@@ -287,7 +363,7 @@ import { TailRenderer } from "../ink/TailRenderer";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { PenSample, silentLift } from "../input/PointerRouter";
 import { SnapPreview, SnapPreviewCanvas } from "./SnapPreview";
-import { padBBox, pointInBBox } from "../objects/Selection";
+import { padBBox, pointInBBox, scaleStroke } from "../objects/Selection";
 import { SelectionModel } from "../objects/SelectionModel";
 import { runDetached } from "../util/Detached";
 import {
@@ -307,7 +383,7 @@ import {
 	removeSelectedInlineStrokes,
 } from "./InlineSelectionDelete";
 import { StrokeFrame } from "./StrokeFrame";
-import { Band, BandViewport, bandCovers, bandFor, bandNeedsMove } from "./ScrollBand";
+import { Band, BandViewport, bandCovers, bandFor, bandMarginMax, bandNeedsMove } from "./ScrollBand";
 import { EINK_CAPS, adaptiveCaps, buildTail, correctionError } from "../ink/Prediction";
 import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
 import { predictionEinkOn, predictionEnabled } from "./StrokePrediction";
@@ -347,11 +423,13 @@ const sessionStartMs = Date.now();
 import { anchoredScroll, pinchScale, fitInkBounds, clampToReachable, MIN_PINCH_SCALE, MAX_PINCH_SCALE, PINCH_GIVE, MAX_VIEWPORT_LAYOUT, type InkFitBounds } from "./PinchScale";
 import { WheelZoomRun, WHEEL_ZOOM_QUIET_MS } from "./WheelZoom";
 import { canvasForNote, onCanvasOverrideChanged } from "./CanvasNoteOverride";
+import { setNoteChoiceSource } from "./NoteChoiceHint";
 import { ERASER_CURSOR_CLASS } from "./PenCursor";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius } from "../ink/EraserSize";
 import {
 	backingScale,
 	ownedEffectiveScale,
+	rasterScale,
 	validCameraScale,
 	fontZoomFactor,
 	noteToVisual,
@@ -378,6 +456,7 @@ import {
 	bboxVisibleInViewport,
 	scrollProbeCommit,
 	scrollProbeExtent,
+	scrollProbeLayers,
 	scrollProbePenDown,
 	scrollProbeRepaint,
 	scrollProbeSchedule,
@@ -611,7 +690,11 @@ export function getInkSizeMult(tool: InkTool): number {
 }
 
 export function setInkSizeMult(tool: InkTool, mult: number): void {
-	inkSizeMult[tool] = clampInkSize(mult);
+	const size = clampInkSize(mult);
+	if (inkSizeMult[tool] === size) return;
+	inkSizeMult[tool] = size;
+	// A held snap shows the shape at the old size; it goes. A size applied again
+	// unchanged (a settings sync applies both) leaves it.
 	for (const overlay of instances) overlay.clearSnapPreview();
 }
 
@@ -987,8 +1070,24 @@ export function applyInkSize(tool: InkTool, mult: number): void {
 	persistInkSize?.(tool, getInkSizeMult(tool));
 }
 
+/** What the committed layers hold after a zoom stand-in's last whole copy: camera, backing, device ratio, canvas size, highlight pair
+ * state and stroke set (array, count, generation). A whole repaint that finds all of them unchanged paints nothing. */
+type StandInMark = {
+	x: number; y: number; zoom: number; backing: number; dpr: number; w: number; h: number; hlDeferred: boolean;
+	strokes: readonly InkStroke[]; count: number; generation: number;
+};
+
 export const inlineInk = new InlineInkStore();
+setNoteChoiceSource(inlineInk);
 const instances = new Set<InkOverlayPlugin>();
+
+/**
+ * What each replayed `remove` actually took, by the op's stroke array. invertInkOp hands
+ * the same array to the inverse and back, so the redo of that undo finds it here and puts
+ * back only those strokes: a stroke the undo did not take (another pane, or another device
+ * through a sync adoption, removed or erased it first) does not come back over what is there.
+ */
+const removedByHistory = new WeakMap<readonly InkStroke[], ReadonlySet<string>>();
 
 let scrollExpansionEnabled = false;
 export function setScrollExpansionEnabled(on: boolean): void {
@@ -1035,6 +1134,45 @@ export function isInlineInkEnabled(): boolean {
 export function setInlineInkEnabled(on: boolean): void {
 	enabled = on;
 	for (const p of instances) (on ? p.mount() : p.unmount());
+}
+
+/**
+ * How the line-number gutters follow a pan written on `.cm-sizer`.
+ *
+ * RIDE: the gutters are not inside the sizer (stock CodeMirror), so they take the sizer's translate themselves.
+ * COUNTER: they are inside it but absolutely positioned against the scroller (Obsidian nests them in
+ * `.cm-contentContainer`; Minimal makes them `position: absolute !important`). A transformed sizer becomes their
+ * containing block, which moves them by the sizer's offset inside the scroller on the first panned frame (48 px with
+ * Minimal's line-number padding); the counter translate takes that offset back off. Layout px, like the offsets.
+ * NONE: inside it and in flow or sticky, so the sizer's translate already carries them.
+ */
+type GutterPanMode = { kind: "ride" } | { kind: "counter"; translate: string } | { kind: "none" };
+
+/**
+ * Read once per pan, and again after a column margin write moves the sizer. Safe with a live sizer transform: the
+ * precondition below never reads `offsetParent` (which switches to a transformed sizer), and `offsetLeft`/`offsetTop`
+ * ignore transforms.
+ */
+function gutterPanMode(sizer: HTMLElement | null, gutters: HTMLElement, scroller: HTMLElement | undefined): GutterPanMode {
+	if (!sizer || typeof sizer.contains !== "function" || !sizer.contains(gutters)) return { kind: "ride" };
+	const win = gutters.ownerDocument?.defaultView;
+	const cs = win?.getComputedStyle?.(gutters);
+	// The anchored test needs COMPUTED values: getComputedStyle resolves a positioned element's `top: auto` to its used
+	// offset ("32px"), while the Typed OM keeps the keyword. No Typed OM (the unit fixtures) means NONE.
+	if (!cs || !win || typeof gutters.computedStyleMap !== "function") return { kind: "none" };
+	if (cs.position !== "absolute" && cs.position !== "fixed") return { kind: "none" };
+	// Absolutely positioned against the scroller only while nothing between them is positioned or transformed, the
+	// sizer's own transform aside (it is ours).
+	let el = gutters.parentElement;
+	for (; el && el !== scroller; el = el.parentElement) {
+		const s = win.getComputedStyle(el);
+		if (s.position !== "static" || (el !== sizer && s.transform !== "none")) return { kind: "none" };
+	}
+	if (!el) return { kind: "none" };
+	const map = gutters.computedStyleMap();
+	const dx = String(map.get("left")) !== "auto" ? sizer.offsetLeft + sizer.clientLeft : 0;
+	const dy = String(map.get("top")) !== "auto" ? sizer.offsetTop + sizer.clientTop : 0;
+	return { kind: "counter", translate: dx === 0 && dy === 0 ? "" : `translate(${-dx}px,${-dy}px)` };
 }
 
 /** The mounted overlay showing `path`, if any editor has it open. */
@@ -1222,6 +1360,14 @@ export function closeInlineInkDocument(doc: Document): void {
 	}
 }
 
+/**
+ * The most a drag may move ink up (a value at or below 0) before its box meets
+ * the note's top. A box already at or above the top may not go up at all.
+ */
+function topWallRoom(box: BBox | null): number {
+	return box ? Math.min(0, -box.y) : -Infinity;
+}
+
 /** Bubble on the window so host dialogs and every pane get Escape first. */
 export function bindInkEscapeWindow(win: Window, peelSelection: (event: KeyboardEvent) => boolean): () => void {
 	const doc = win.document;
@@ -1267,10 +1413,12 @@ export function armMouseInkQuietlyEverywhere(): void {
 /**
  * Repaint every surface's committed ink: the shaping, smoothing and pressure
  * toggles all change render-time geometry and none of them touches a stroke,
- * so nothing else would.
+ * so nothing else would. A held shape snap stays: a theme change or a synced
+ * setting arriving mid-hold changes nothing it would commit, and its own check
+ * (tool, colour, size) drops it when something does.
  */
 export function repaintAllInkOverlays(): void {
-	for (const p of instances) { p.clearSnapPreview(); p.scheduleRepaint("shaping-toggle"); }
+	for (const p of instances) p.scheduleRepaint("shaping-toggle");
 	for (const repaint of repaintSurfaces) repaint();
 }
 
@@ -1664,6 +1812,62 @@ export class InkOverlayPlugin {
 	private lastPaintCam: { x: number; y: number; zoom: number } | null = null;
 	/** How many strokes the store held at the last committed paint, full or partial. A band carry trusts the raster only while the store still holds that many. */
 	private paintedStrokeCount = -1;
+	/**
+	 * The note's whole ink drawn once below 100 percent (within extentRasterFits), on the committed raster's device grid: origin
+	 * `kx, ky` device px from the camera `cam0` it was built at, drawn at the camera `at`, covering the world rect `world`. Valid
+	 * while its content holds - the note, the zoom, the backing, the device ratio, the settings that shape ink (inkLookKey) and the
+	 * store's stroke list (the same array, count and generation) - whatever frame asks. A pen commit draws its strokes into it and keeps it valid; any other change to
+	 * the ink leaves it stale, and the next whole repaint that is no pan, stroke or bounce frame builds it again.
+	 */
+	private extentRaster: {
+		path: string; pen: HTMLCanvasElement; hl: HTMLCanvasElement | null; kx: number; ky: number;
+		cam0: { x: number; y: number; zoom: number }; at: { x: number; y: number; zoom: number };
+		world: { x0: number; y0: number; x1: number; y1: number }; backing: number; dpr: number; look: number;
+		strokes: readonly InkStroke[]; generation: number; count: number;
+	} | null = null;
+	/** Whether this repaint's one paint may start building the extent raster; set by `repaint`, false otherwise. */
+	private extentMayBuild = false;
+	/** One extent raster arm asked by an insert space release, consumed by the next partial repaint (paintCommittedWork). */
+	private extentArmAsked = false;
+	/** A tail shrink waiting for its task (queueTailShrink). */
+	private tailShrinkQueued = false;
+	/**
+	 * The extent raster being built, a piece at a time, after the frame that asked for it (INBOX rows 501 and 511): that frame paints by
+	 * path as it always did, and the raster is drawn on later tasks, stroke by stroke in store order, each piece at most
+	 * EXTENT_PIECE_MS plus one stroke, never while a contact, a stroke, a pan, a pinch, a bounce or a queued repaint is live. Its
+	 * target is what the finished raster must hold; `next` is the store index the next piece starts at. Used only once whole.
+	 */
+	private extentBuild: {
+		path: string; cam0: { x: number; y: number; zoom: number }; at: { x: number; y: number; zoom: number }; kx: number; ky: number;
+		w: number; h: number; world: { x0: number; y0: number; x1: number; y1: number }; backing: number; dpr: number; look: number;
+		floor: ReturnType<typeof committedFloorFor>; strokes: readonly InkStroke[]; count: number; generation: number; hasHl: boolean;
+		pen: HTMLCanvasElement | null; hl: HTMLCanvasElement | null; next: number; timer: number;
+	} | null = null;
+	/**
+	 * A picture of the ink shown at a new scale while the sharp extent raster is built (zoom settle design, 2026-10-04): the old whole
+	 * raster once only its zoom or backing no longer match, or a copy of the layer's own pixels taken just before a resize clears them.
+	 * Device px = (world - at) * at.zoom * backing. It holds the store's first `count` strokes; strokes added at the end since are drawn
+	 * by path over the copy. Released by the whole repaint that copies the finished raster in, and on any fallback (usableStandIn).
+	 * `mark` is what the layers hold after its last whole copy (copyFromStandIn writes it); any other paint onto the committed layers
+	 * and a resize clear it.
+	 */
+	private standIn: {
+		path: string; pen: HTMLCanvasElement; hl: HTMLCanvasElement | null; at: { x: number; y: number; zoom: number }; backing: number;
+		dpr: number; look: number; strokes: readonly InkStroke[]; count: number; generation: number; mark: StandInMark | null;
+	} | null = null;
+	/** Stand-ins taken from the layer's own pixels, counted for the suites (one per settle); read nowhere else. */
+	private standInSnapshots = 0;
+	/** Whole repaints that left the stand-in copy to the queued frame, counted for the suites; read nowhere else. */
+	private standInDeferrals = 0;
+	/**
+	 * The wait before a whole repaint is asked for a stand-in that a whole repaint kept with no build started (see retryStandInLater);
+	 * 0 when none is pending.
+	 */
+	private standInRetryTimer = 0;
+	/** True while the frame scheduleRepaint queued is running its repaint (requestAnimationFrame, before that frame paints). */
+	private inQueuedFrame = false;
+	/** When the last scroll repaint was asked for (performance.now): a wheel or trackpad pan has no contact down between its events. */
+	private lastScrollAskAt = -Infinity;
 	/** Diagnostic only: this frame's band move carried its pixels. Read by the scroll probe's repaint line, nowhere else. */
 	private bandCarriedThisFrame = false;
 	private originStyles = new WeakMap<Element, CSSStyleDeclaration>();
@@ -1677,6 +1881,15 @@ export class InkOverlayPlugin {
 	private lassoActive = false;
 	private dragFrom: { x: number; y: number } | null = null;
 	private dragTotal: { dx: number; dy: number } | null = null;
+	/**
+	 * The selection's box at pen-down, and how many objects it held. The box of
+	 * a live drag is this box moved by the distance travelled: the selection
+	 * cannot gain strokes mid-drag, so reading it from every stroke of the
+	 * note on each sample only repeats what pen-down already knew. A selection
+	 * that changed size (Escape, an ink change that removed strokes) stops
+	 * using it.
+	 */
+	private dragBox: { box: BBox; size: number } | null = null;
 	/** The strokes a selection drag picked up at pen-down; see commitLiveDrag. */
 	private dragIds: string[] = [];
 	/** The note a live selection drag moves ink in; see rollbackLiveGesture. */
@@ -1696,6 +1909,9 @@ export class InkOverlayPlugin {
 	private spaceRowsCache = new InsertSpaceRows();
 	private spaceTextEnd: {doc:Text;pos:number;blocks:SpaceProtectedBlock[]} | null = null;
 	private spacePreview: {plan:SpaceBoundary;doc:Text;moving:string[];staying:string[];rows:ReturnType<InsertSpaceRows["get"]>} | null = null;
+	/** The hover preview's strokes on screen with their colors, in store order, and what they were read from (spaceDrawItems). */
+	private spaceDrawList: {moving:string[];staying:string[];rows:ReturnType<InsertSpaceRows["get"]>;x:number;y:number;zoom:number;
+		w:number;h:number;scale:number;items:{stroke:InkStroke;color:string}[]} | null = null;
 	private spaceHoverY: number | null = null;
 	private spaceFeedbackRaf: number | null = null;
 	/** What the last hover feedback frame drew, so an identical frame is skipped. */
@@ -1705,6 +1921,10 @@ export class InkOverlayPlugin {
 	private panLast: { x: number; y: number } | null = null;
 	private spaceFromY = 0;
 	private spaceTotalDy = 0;
+	/** The rows the drag froze its ids from, and every dy it moved them by,
+	 * so the commit can shift the cached rows instead of rebuilding them. */
+	private spaceRows: ReturnType<InsertSpaceRows["get"]> | null = null;
+	private spaceSteps: number[] = [];
 	private penCursorEl: HTMLElement | null = null;
 	private penCursorPinned = false;
 	private penCursorClient: PenSample | null = null;
@@ -1888,6 +2108,22 @@ export class InkOverlayPlugin {
 	private pinchScrollAt = 0;
 	/** Live transform owns the existing raster until the final layout transaction. */
 	private pinchPreview = false;
+	/**
+	 * Where the last preview frame held the fingers: its target (constraint client point and offset, or the bare target).
+	 * The lift lands this frame, not a finger reading that arrived after it and was never drawn. Written once per painted
+	 * frame, four numbers, never per pointer event.
+	 */
+	private pinchPaintedValid = false;
+	private pinchPaintedX = 0;
+	private pinchPaintedY = 0;
+	private pinchPaintedOffsetX = 0;
+	private pinchPaintedOffsetY = 0;
+	/** The give is finishing: its own lift settles on the cap through the ordinary end path, not the painted frame. */
+	private pinchGiveEnding = false;
+	/** A pinch is held: its gesture has started and not ended, or its preview still owns the raster. */
+	private pinchHeld(): boolean {
+		return this.pinchRefScale !== null || this.pinchPreview;
+	}
 	/** CodeMirror measures held back for the preview lifetime; null when CodeMirror schedules its own. */
 	private measureHold: MeasureHold | null = null;
 	/** True while CodeMirror is delivering an update to this plugin; see `update`. */
@@ -1915,6 +2151,8 @@ export class InkOverlayPlugin {
 	private predReal: PenSample[] = [];
 	/** The tail drawn last event, kept only to score it against what arrived. */
 	private predLastTail: readonly PenSample[] = [];
+	/** The target and scale the last preview frame painted at; the settle's probe line compares the commit's against it. */
+	private pinchPaintedTarget: { x: number; y: number; scale: number; columnLocal: number | null; geometry: PinchConstraintGeometry | null } | null = null;
 	/** Gesture-start state the whole pinch is computed from; see anchoredScroll. */
 	private pinchAnchor: {
 		scrollLeft: number;
@@ -2067,6 +2305,12 @@ export class InkOverlayPlugin {
 	private previewColumnLocal: number | null = null;
 	/** `.cm-sizer`, cached: `writeViewportPan` runs once per preview frame. */
 	private panSizerEl: HTMLElement | null = null;
+	private panGuttersEl: HTMLElement | null = null;
+	/** How the gutters follow the sizer's pan, read once when a pan starts; null while the pan is empty
+	 *  and after a column margin write, which moves the sizer the counter translate was read from. */
+	private panGuttersMode: GutterPanMode | null = null;
+	/** The transform last written on `panGuttersEl`, so a frame that changes nothing writes nothing. */
+	private panGuttersWritten = "";
 	/**
 	 * Armed for the duration of ONE settle transaction, so the several scroll
 	 * writes inside `commitCameraScale` each re-derive the pan they need rather
@@ -2074,7 +2318,7 @@ export class InkOverlayPlugin {
 	 */
 	private panAnchorHold: {
 		focalX: number; focalY: number; targetX?: number; targetY?: number; hostLeft: number; hostTop: number;
-		columnLocal: number | null; contentTopLocal: number | null; fromScale: number; scrollTop: number; toScale: number; generation: number; path: string | null; container: HTMLElement | null;
+		columnLocal: number | null; contentTopLocal: number | null; fromScale: number; scrollLeft: number; scrollTop: number; toScale: number; generation: number; path: string | null; container: HTMLElement | null;
 		expansion?: { left: number; top: number } | null;
 		left: number; top: number; ready: boolean; outcome: "pending" | "converged" | "cancelled" | "failed"; attempts: number; request: unknown; issuance: readonly unknown[];
 	} | null = null;
@@ -2128,7 +2372,7 @@ export class InkOverlayPlugin {
 	/** The ink band's box in scroller-content coordinates; see ScrollBand. */
 	private band: Band | null = null;
 	/** The band's widening for the ease playing now, fixed at its first sync (syncBand). */
-	private bandEase: { bounce: object; px: number } | null = null;
+	private bandEase: { bounce: object; x: number; y: number } | null = null;
 	private bandSyncDeferred = false;
 	/** A pane resize arrived while a stroke held the zoomed layout; see handleResize. */
 	private resizeDeferred = false;
@@ -2172,6 +2416,10 @@ export class InkOverlayPlugin {
  private viewportLayout: {parent:HTMLElement; paneWidth:number; paneHeight:number; externalScale:number; gutterScreen:number; baseTransform:string; baseZoom:number; zoomVerified?:boolean; width:number; height:number; column:number; columnBox:number; gutterX:number; sizerColumn:boolean; columnInset:boolean; ownLines:boolean; left:string; right:string; columnLocal:number|null; columnReserve:number; columnAuto:{lineWidth:number;fixed:number;scrollbar:number}|null; styles:Map<string,{value:string;priority:string}>} | null = null;
  /** `CSS.supports("zoom", "0.5")`, asked once per overlay. See `hostZoomSupported`. */
  private hostZoomSupport: boolean | null = null;
+ /** The form `applyViewportBox` last wrote (true: zoom), so a crossing of k = 1 re-places the canvases. Null until one is. */
+ private hostZoomWritten: boolean | null = null;
+ /** The inverse note zoom the last box write put on the scroller's bar (`scrollbarUnscaleAt`), null at 100 percent or where the bar is not Obsidian's styled one. */
+ private scrollbarUnscale: number | null = null;
  private translateSupport: boolean | null = null;
  /** Whether the page places a canvas with CSS translate (the wet tile moves by it). Asked once per overlay. */
  private translateSupported():boolean {
@@ -2373,7 +2621,10 @@ export class InkOverlayPlugin {
 	}
 
 	mount(): void {
-		if (this.container || !enabled) return;
+		// Destroyed: out of `instances` for good (its popout closed, closeInlineInkDocument).
+		// A late editor update must not mount it again: CodeMirror's own destroy() returns
+		// early for an overlay no longer registered, so nothing would ever release that mount.
+		if (this.container || !enabled || this.destroyed) return;
 		this.retiring = false;
 		// Not a file-backed markdown editor (e.g. a bare CM instance): stay inert.
 		// An owner with no file (a Canvas text card) has nowhere to save ink:
@@ -2720,6 +2971,14 @@ export class InkOverlayPlugin {
 			// scroll belongs to navigation, including programmatic scrolling.
 			const hold = this.panAnchorHold;
 			if (hold && (scrollLeft !== hold.left || scrollTop !== hold.top)) this.retirePanSettle("a scroll off the settle target");
+			// A scroll the overlay did not write moves the page by whole px, so the residual still holds the offset's
+			// fraction and stays. Except at either end of an axis: there the residual would hold the page past its edge.
+			const residual = this.scrollResidual;
+			if (residual && (residual.x !== 0 || residual.y !== 0) && (scrollLeft !== residual.left || scrollTop !== residual.top)) {
+				const atEnd = (v: number, max: number) => v <= 0 || v >= max;
+				this.setScrollResidual(atEnd(scrollLeft, scroller.scrollWidth - scroller.clientWidth) ? 0 : residual.x,
+					atEnd(scrollTop, scroller.scrollHeight - scroller.clientHeight) ? 0 : residual.y, scrollLeft, scrollTop);
+			}
 			if (!during) this.router?.refreshRect();
 			if (diagnosticsEnabled()) {
 				scrollProbeScroll(scrollLeft, scrollTop, during);
@@ -2819,6 +3078,7 @@ export class InkOverlayPlugin {
 		});
 		this.lastPath = this.filePath();
 		this.lastFile = this.currentFile();
+		this.armNoteCameraRestore(this.lastPath);
 		this.updateHandwritingPageClass();
 		this.loadInk(this.lastPath);
 	}
@@ -2967,13 +3227,21 @@ export class InkOverlayPlugin {
 	/** Persisted ink arrives lazily; an untouched note costs one cache lookup. */
 	private loadInk(path: string | null): void {
 		if (!path) return;
+		// The read starts first: its synchronous part makes the note's record,
+		// so the font size the adoption below latches when nothing is stored
+		// yet reaches the store (setFontRefPx). Ink drawn before the read lands
+		// is in that frame, and the store moves it into the stored one when
+		// the file arrives.
+		const loaded = inlineInk.ensureLoaded(path);
 		this.adoptStoredFontRef(path);
 		runDetached(
-			inlineInk.ensureLoaded(path).then((changed) => {
+			loaded.then((changed) => {
 				// A read that finishes after unmount must not revive the page-class
 				// observer on a torn-down editor (audit 110).
 				if (this.filePath() === path && !this.retiring && this.container) {
 					this.adoptStoredFontRef(path);
+					// A restore the measure could not commit gets one more try, with the font reference and ink in.
+					this.restoreNoteCamera(path);
 					this.mobileTools?.refresh();
 					this.noteZoomControls?.refresh();
 					this.updateHandwritingPageClass();
@@ -3000,10 +3268,38 @@ export class InkOverlayPlugin {
 	private adoptStoredFontRef(path: string): void {
 		const stored = inlineInk.fontRefPx(path);
 		if (stored !== null && stored === this.refFontPx) return;
+		// A contact owns its coordinate frame (see `frame`): the stroke in
+		// flight is in the old one. Held to the lift, where the finished
+		// strokes are moved into the new frame before they are stored or
+		// painted (`releaseHeldFontRef`).
+		if (this.frame.locked) {
+			this.heldFontRef = path;
+			return;
+		}
 		this.refFontPx = stored ?? 0;
 		// syncCamera recomputes fontZoom only on a font change it has not seen.
 		this.lastSyncFontStr = "";
 		if (this.container) this.handleResize();
+	}
+
+	/** A font reference adoption held while a contact owned the frame; see adoptStoredFontRef. */
+	private heldFontRef: string | null = null;
+
+	/**
+	 * Run an adoption held while a contact owned the frame, now that it is
+	 * over. Returns the factor that takes ink drawn in the frame before into
+	 * the frame after (1 when nothing was held or nothing changed).
+	 */
+	private releaseHeldFontRef(): number {
+		const path = this.heldFontRef;
+		this.heldFontRef = null;
+		// `!path`, not `=== null`: a unit rig built with Object.create never runs the initialiser.
+		// An overlay on its way out (unmount) drops the hold and re-measures nothing.
+		if (!path || this.retiring || path !== this.filePath()) return 1;
+		const before = this.refFontPx;
+		this.adoptStoredFontRef(path);
+		const after = this.refFontPx;
+		return before > 0 && after > 0 ? after / before : 1;
 	}
 
 	/**
@@ -3266,9 +3562,17 @@ export class InkOverlayPlugin {
 		this.applyToolbarCorner();
 	}
 
-	/** Drop the six ink canvases to 0x0, releasing their backing memory now. */
+	/** Drop the six ink canvases and the extent raster to 0x0, releasing their backing memory now. */
 	private releaseBackings(): void {
+		this.dropStandIn();
+		// The extent raster and a build in progress are whole-note copies of the ink, as big as the layers; the next whole repaint
+		// after a re-show paints by path, and builds again only where extentBuildAllowed() holds.
+		this.dropExtentBuild();
+		const ext = this.extentRaster;
+		this.extentRaster = null;
 		for (const c of [
+			ext?.pen,
+			ext?.hl,
 			this.committedCanvas,
 			this.wetCanvas,
 			this.wetTileCanvas,
@@ -3283,6 +3587,9 @@ export class InkOverlayPlugin {
 	}
 
 	unmount(): void {
+		// Before anything below moves the camera: the zoom and scroll the note leaves with come back when it reopens.
+		this.saveNoteCamera();
+		this.noteCameraRestore = null;
 		this.retiring = true;
 		this.endPreviewPaper("unmount");
 		this.cancelOverscrollBounce();
@@ -3290,6 +3597,11 @@ export class InkOverlayPlugin {
 		this.invalidateReloadBindings(this.lastPath, this.filePath());
 		this.reloadCameraSettlement = null;
 		if (diagnosticsEnabled() && this.undoIdentity) discardUndoTrace(this.undoIdentity);
+		// An ink or highlighter stroke in flight when the view goes (a pane or pop-out closed
+		// mid-stroke) is committed, as a window blur commits it. Only while a stroke builder
+		// exists: an insert space, an erase or a selection drag cut off by the close is rolled
+		// back by resetGestureState below, as a file switch rolls it back.
+		if (this.builder) this.router?.finishActiveStroke();
 		this.router?.dispose();
 		this.router = null;
 		this.resizeObserver?.disconnect();
@@ -3319,6 +3631,8 @@ export class InkOverlayPlugin {
 			this.winRef.clearTimeout(this.wheelZoomTimer);
 			this.wheelZoomTimer = 0;
 		}
+		this.dropExtentBuild();
+		this.dropStandIn();
 		// No end step on the way out: the overlay is going, and `pinch` refuses
 		// once `retiring` is set anyway.
 		this.wheelZoomRun.cancel();
@@ -3450,6 +3764,21 @@ export class InkOverlayPlugin {
 	}
 
 	private updateInner(u: ViewUpdate): void {
+		// Ink history ops re-dispatched by the editor's undo/redo. Original
+		// gestures carry the inkApplied annotation (the store already reflects
+		// them); anything else is history's work and gets applied here. The op
+		// carries its own path, so undo after a file switch still acts on the
+		// note where the ink lives. FIRST, before either return below: an undo
+		// taken while the editor's root is lost (a tab being moved), or as the
+		// update that mounts the overlay again, took the step off the editor's
+		// history and never reached the ink, so the stroke stayed and the next
+		// undo took something else (item 6b). The ops touch only the store.
+		for (const tr of u.transactions) {
+			if (tr.annotation(inkApplied)) continue;
+			for (const effect of tr.effects) {
+				if (effect.is(inkEffect)) this.applyInkOp(effect.value);
+			}
+		}
 		// Attachment/reparenting can change ownership without changing the file.
 		// Retire a surface that lost its root; a later valid update can remount it.
 		if (!this.ownsMarkdownEditorRoot()) {
@@ -3470,17 +3799,6 @@ export class InkOverlayPlugin {
 		// (which clears the canvas even when that entry is empty). Without
 		// this the old bitmap sat there until the next repaint trigger: the
 		// v0.9.1 cross-file ink leak.
-		// Ink history ops re-dispatched by the editor's undo/redo. Original
-		// gestures carry the inkApplied annotation (the store already reflects
-		// them); anything else is history's work and gets applied here. The op
-		// carries its own path, so undo after a file switch still acts on the
-		// note where the ink lives.
-		for (const tr of u.transactions) {
-			if (tr.annotation(inkApplied)) continue;
-			for (const effect of tr.effects) {
-				if (effect.is(inkEffect)) this.applyInkOp(effect.value);
-			}
-		}
 
 		const path = this.filePath();
 		const file = this.currentFile();
@@ -3493,6 +3811,8 @@ export class InkOverlayPlugin {
 			this.lastPath = path;
 			this.updateHandwritingPageClass();
 		} else {
+			// The note leaving keeps its zoom and scroll for when it comes back; read before the reset below.
+			this.saveNoteCamera();
 			this.lastFile = file;
 			this.endPreviewPaper("note-switch");
 			this.cancelOverscrollBounce();
@@ -3520,6 +3840,10 @@ export class InkOverlayPlugin {
    this.view.scrollDOM.scrollLeft=0; this.view.scrollDOM.scrollTop=0;
    this.scrollExpansion?.rebase(0,0);
 			this.lastPath = path;
+			this.armNoteCameraRestore(path);
+			// The opened note's own canvas answer, as a mount takes it: the pane may have shown a note with the other answer.
+			this.canvasMode = canvasForNote(path, scrollExpansionEnabled);
+			this.router?.setCanvasMomentumDisabled(this.canvasMode);
 			this.updateHandwritingPageClass();
 			// A fresh note starts reading, so the strip starts as the pill.
 			this.mobileTools?.closeInkSliders();
@@ -3604,7 +3928,62 @@ export class InkOverlayPlugin {
 
 	destroy(): void {
 		if (!instances.delete(this)) return;
+		this.destroyed = true;
 		this.unmount();
+	}
+
+	/** Set where the overlay leaves `instances`, its one way out; mount() refuses from then on. */
+	private destroyed = false;
+
+	/** The note whose remembered camera waits to be restored (issue 9); see restoreNoteCamera. */
+	private noteCameraRestore: string | null = null;
+	/** The key of the restore's measure request, so a second arm replaces the first. */
+	private readonly noteCameraMeasure = {};
+
+	/**
+	 * Keep the zoom and scroll of the note leaving this editor (issue 9: Back reloads a note, or leaves it and comes
+	 * back, and it must return where it was). Skipped where the reading would not be the note at rest: nothing mounted,
+	 * a live pinch preview, invalid scale geometry, or a hidden pane, whose scroller reads 0 and would overwrite the
+	 * camera the note really has.
+	 */
+	private saveNoteCamera(): void {
+		const path = this.lastPath;
+		if (!path || !this.container || this.pinchPreview || this.scaleGeometryValid === false) return;
+		const scroller = this.view.scrollDOM;
+		if (scroller.clientHeight === 0) return;
+		noteCameras.save(path, { zoom: this.pinchScaleNow, left: scroller.scrollLeft, top: scroller.scrollTop });
+	}
+
+	/**
+	 * A note opening in this editor: if it has a remembered camera, restore it in CodeMirror's next measure. Mount and
+	 * the note switch run inside CodeMirror's update, where a commit may not run; the measure runs after the update and
+	 * before that frame is painted, so no frame shows the note at the default camera first. A remembered note was read
+	 * this session, so its ink and font reference are in the store already.
+	 */
+	private armNoteCameraRestore(path: string | null): void {
+		this.noteCameraRestore = path !== null && noteCameras.get(path) !== null ? path : null;
+		if (this.noteCameraRestore === null) return;
+		const armed = this.noteCameraRestore;
+		this.view.requestMeasure({ key: this.noteCameraMeasure, read: () => null, write: () => this.restoreNoteCamera(armed) });
+	}
+
+	/**
+	 * Put a reopened note back at its remembered zoom and scroll, through the camera commit the pinch settle and Fit
+	 * use, so the box, extent, band and paper are written as one settled camera. Only onto the note as it opened: a
+	 * reader who has already zoomed or scrolled it wins. bypassFloor carries a remembered zoom back exactly as it was
+	 * saved, which can be one Fit reached below the manual floor; nothing else passes the floor this way. A commit the
+	 * camera refuses (geometry not valid yet) stays armed, and the ink read's continuation tries once more. Never on
+	 * the pen path.
+	 */
+	private restoreNoteCamera(path: string): void {
+		if (this.noteCameraRestore !== path || this.filePath() !== path || !this.container || this.retiring) return;
+		const camera = noteCameras.get(path);
+		const scroller = this.view.scrollDOM;
+		if (!camera || this.pinchScaleNow !== 1 || scroller.scrollLeft !== 0 || scroller.scrollTop !== 0) {
+			this.noteCameraRestore = null;
+			return;
+		}
+		if (this.commitCameraScale(camera.zoom, { left: camera.left, top: camera.top }, undefined, false, true)) this.noteCameraRestore = null;
 	}
 
 	handleKeyDown(event: KeyboardEvent): boolean {
@@ -3755,6 +4134,9 @@ export class InkOverlayPlugin {
 	/** See inkExternallyReloaded. */
 	noteExternallyReloaded(path: string): void {
 		if (this.filePath() !== path) return;
+		// The adopted file may name another font reference than the one latched
+		// here; its ink is in that frame, and so is what is drawn from now on.
+		this.adoptStoredFontRef(path);
 		if (this.selection.clear()) this.redrawSelectionUI();
 		this.scheduleRepaint("external-reload");
 	}
@@ -3917,6 +4299,7 @@ export class InkOverlayPlugin {
 			if (!this.frame.locked && this.committedCanvas.width > 0) this.releaseBackings();
 			return;
 		}
+		const paintedDpr = this.dpr;
 		this.dpr = this.winRef.devicePixelRatio || 1;
 		// The canvases live INSIDE whatever is scaled, so their coordinate
 		// space is layout px, the same unit ink is stored in. Size them from
@@ -3992,9 +4375,15 @@ export class InkOverlayPlugin {
 		// Backing resolution: device px per SCREEN css px. The font zoom is
 		// GEOMETRY (applied by the camera before rasterization), not
 		// resolution. Folding it in here was the part-2 bug's sibling.
+		// The backing, the canvas boxes and both live-canvas grids take the
+		// owned scale when the measured one differs from it only by the
+		// rounding of offsetWidth (`rasterScale`): off in its sixth decimal,
+		// the measured scale has no pixel grid and the wet tile and compact
+		// tail were off at 100%.
+		const raster = rasterScale(measuredCssScale, this.pinchScaleNow, SCALE_EPSILON);
 		const backing = backingScale(
 			this.dpr,
-			measuredCssScale,
+			raster,
 			layoutW,
 			layoutH,
 			Platform.isMobileApp
@@ -4050,6 +4439,7 @@ export class InkOverlayPlugin {
 			}
 			return;
 		}
+		this.takeStandIn(paintedDpr, backing);
 		for (const c of [
 			this.committedCanvas,
 			this.wetCanvas,
@@ -4068,11 +4458,13 @@ export class InkOverlayPlugin {
 				c.width = size.backingW;
 				c.height = size.backingH;
 			}
+			// A reallocated backing is blank, even at the same size.
+			if (this.standIn) this.standIn.mark = null;
 			// The compositor's layer follows this box, not the backing: keep it
 			// at the visual size and stretch it over the band (canvasLayerBox).
 			// Under a zoom-shrunk host the inherited zoom already does that, so
 			// the same call returns the plain band box and no transform.
-			const box = canvasLayerBox(size.cssW, size.cssH, measuredCssScale, this.hostZoomSupported());
+			const box = canvasLayerBox(size.cssW, size.cssH, raster, this.zoomFormAt(this.pinchScaleNow));
 			c.setCssStyles({ width: `${box.width}px`, height: `${box.height}px`, transform: box.transform, transformOrigin: box.transform ? "0 0" : "" });
 		}
 		// The backing just allocated against the device pixels the container
@@ -4097,9 +4489,9 @@ export class InkOverlayPlugin {
 		this.wet.dropWetTile?.();
 		this.highlightWet.noteBackingCleared?.();
 		this.tail.noteBackingCleared?.();
-		this.tail.configureInlineBacking(size.cssW, size.cssH, backing, measuredCssScale, this.hostZoomSupported());
+		this.tail.configureInlineBacking(size.cssW, size.cssH, backing, raster, this.zoomFormAt(this.pinchScaleNow));
 		this.wet.tileTranslate = this.translateSupported();
-		this.wet.configureWetTile?.(this.wetTileCanvas, size.cssW, size.cssH, backing, measuredCssScale, this.hostZoomSupported());
+		this.wet.configureWetTile?.(this.wetTileCanvas, size.cssW, size.cssH, backing, raster, this.zoomFormAt(this.pinchScaleNow));
 		this.committedBlank = this.highlightBlank = true;
 		// Same guard as the unchanged arm's: re-basing the router's rect
 		// mid-stroke shifts every sample after it while the camera stays
@@ -4238,7 +4630,7 @@ export class InkOverlayPlugin {
 	private backingNow(layoutW?: number, layoutH?: number): number {
 		const w = layoutW ?? this.container?.offsetWidth ?? 0;
 		const h = layoutH ?? this.container?.offsetHeight ?? 0;
-		return backingScale(this.dpr, this.cssScale, w, h, Platform.isMobileApp);
+		return backingScale(this.dpr, rasterScale(this.cssScale, this.pinchScaleNow, SCALE_EPSILON), w, h, Platform.isMobileApp);
 	}
 
 	/**
@@ -5351,7 +5743,7 @@ export class InkOverlayPlugin {
 	 */
 	private anchorTopExactOnZoomHost(overlayTop: number): boolean {
 		const layout = this.viewportLayout;
-		if (!layout || !this.container || !this.hostZoomSupported()) return false;
+		if (!layout || !this.container || !this.zoomFormAt(this.pinchScaleNow)) return false;
 		if (layout.baseTransform !== "none" && layout.baseTransform !== "") return false;
 		if (this.dpr !== 1 && this.dpr !== 2) return false;
 		const width = this.container.offsetWidth;
@@ -5420,6 +5812,13 @@ export class InkOverlayPlugin {
 		// `> 0`, not the field alone: a unit rig built with Object.create never runs the initialiser.
 		const reserveBefore = this.leftReserveHeld > 0 ? this.leftReserveHeld : 0;
 		this.endPenGesture(ev);
+		// A canvas-off reset refused while this contact owned the frame. The
+		// retry at the top of endPenGesture serves the gestures that hold no
+		// stroke builder; an ink stroke's builder is cleared only once its
+		// strokes are finished, and the retry refuses while one is set. Here
+		// every branch is done, and the page is at 100 percent before any
+		// stranded pan resumes below.
+		this.retryCanvasOffReset();
 		// Alan: nothing moves unless the page is past its edge, then it eases
 		// back - no infinite blank standing forever. A pen that catches a bounce mid-flight and draws holds
 		// the page still for the stroke (the fold, unchanged); after it lifts, a page still standing past
@@ -5448,6 +5847,10 @@ export class InkOverlayPlugin {
 		this.frame.end();
 		// A canvas-off reset refused while this stroke owned the frame runs now.
 		this.retryCanvasOffReset();
+		// A font reference adoption held through this contact: a gesture that
+		// leaves no stroke takes it now; the ink branch below takes it after
+		// its strokes are finished, so it can move them with it.
+		if (this.mode !== "ink") this.releaseHeldFontRef();
 		// Complete a band update skipped while the contact froze its geometry.
 		if (this.bandSyncDeferred) {
 			this.bandSyncDeferred = false;
@@ -5487,6 +5890,9 @@ export class InkOverlayPlugin {
 		}
 		if (this.mode === "space") {
 			this.mode = "ink";
+			// The preview goes without a draw of its own: every way out of spaceUp draws the selection layer, and dropping it
+			// in hideSpaceCursor drew the layer a first time.
+			this.clearSpaceFeedback(false);
 			// Same reasoning as pan above.
 			this.hideSpaceCursor();
 			this.spaceUp();
@@ -5620,12 +6026,30 @@ export class InkOverlayPlugin {
 				}
 			}
 		}
+		// A font reference adoption held through this contact runs before
+		// anything is stored or painted. The finished strokes are in the frame
+		// the contact began in; they move into the note's stored frame with
+		// the rest of its ink, so the stroke lands where the wet ink showed it.
+		const reframe = this.releaseHeldFontRef();
+		if (reframe !== 1) {
+			const moved = (s: InkStroke): InkStroke => {
+				const copy = structuredClone(s);
+				scaleStroke(copy, reframe);
+				return copy;
+			};
+			strokes = strokes.map(moved);
+			if (snapReplaced) snapReplaced = moved(snapReplaced);
+			if (snapOffered) snapOffered = moved(snapOffered);
+		}
 		const stroke = strokes.at(-1);
 		const path = stroke ? this.filePath() : null;
 		// Paint ground truth, part 1: was the WET ink actually in the backing
 		// store? Sampled over the stroke's screen bbox (clamped to canvas).
 		let wetPx = -1;
 		let sample = { x: 0, y: 0, w: 0, h: 0, clippedPct: 0 };
+		// Before the live layers are cleared: whether this stroke drew into
+		// the small live canvases or the full-size ones.
+		if (diagnosticsEnabled()) this.probeStrokeLayers();
 		if (diagnosticsEnabled() && stroke && path) {
 			sample = this.strokeScreenSample(stroke);
 			wetPx = this.activeWet.countPainted(
@@ -5647,7 +6071,9 @@ export class InkOverlayPlugin {
 		}
 		handoffFinishedStroke({
 			store: () => {
+				const extentHeld = this.extentHoldsStore(path);
 				inlineInk.commitGesture(path, strokes);
+				if (extentHeld) this.drawIntoExtent(path, strokes);
 				// The index has to hear about the stroke, and the commit is
 				// the one mutation that reaches this view's store without
 				// passing through scheduleRepaint's full-repaint branch: it
@@ -6037,6 +6463,26 @@ export class InkOverlayPlugin {
 		});
 	}
 
+	/** The scroll probe's per-stroke line: the scales, the backing, and the live canvases' grids and backing sizes. */
+	private probeStrokeLayers(): void {
+		const tail = this.tail?.inlineGrid ?? null;
+		scrollProbeLayers({
+			cssScale: this.cssScale,
+			rasterScale: rasterScale(this.cssScale, this.pinchScaleNow, SCALE_EPSILON),
+			backing: this.committedBacking ?? this.backingNow(),
+			tileW: this.wetTileCanvas?.width ?? 0,
+			tileH: this.wetTileCanvas?.height ?? 0,
+			tileGrid: this.wet?.tileGrid ?? null,
+			tailW: this.tailCanvas?.width ?? 0,
+			tailH: this.tailCanvas?.height ?? 0,
+			tailGrid: tail?.grid ?? null,
+			tailMode: tail?.mode ?? "none",
+			bandW: this.committedCanvas?.width ?? 0,
+			bandH: this.committedCanvas?.height ?? 0,
+			dpr: this.winRef.devicePixelRatio,
+		});
+	}
+
 	/**
 	 * The stroke's screen-space bbox (camera frame, CSS px), padded by the
 	 * pen width and clamped to the canvas. `clippedPct` is how much of the
@@ -6222,6 +6668,8 @@ export class InkOverlayPlugin {
 			this.pinchStartPan.x = this.viewportPan?.x ?? 0; this.pinchStartPan.y = this.viewportPan?.y ?? 0;
 			this.pinchBand.history.length = 0;
 			this.pinchBand.lastPan.x = this.pinchStartPan.x; this.pinchBand.lastPan.y = this.pinchStartPan.y;
+			this.pinchPaintedTarget = null;
+			this.pinchPaintedValid = false;
 			this.pinchAnchor = {
 				scrollLeft: scroller.scrollLeft,
 				scrollTop: scroller.scrollTop,
@@ -6250,6 +6698,18 @@ export class InkOverlayPlugin {
 		const constraint = anchor?.constraint;
 		const targetMoved = !!anchor && Number.isFinite(centroid.x) && Number.isFinite(centroid.y) &&
 			(centroid.x !== (constraint?.clientX ?? anchor.targetX ?? anchor.focalX) || centroid.y !== (constraint?.clientY ?? anchor.targetY ?? anchor.focalY));
+		// THE LIFT LANDS THE FRAME THE USER LAST SAW. A finger reading that arrives after the last preview frame is never
+		// painted; committing it moved the page at the lift - on Alan's Orion run, a 0.1 to 0.2 percent scale step at scroll
+		// offsets in the thousands moved it 2.85 to 8.38 px, and the settle eased it back. With a frame painted, the lift
+		// takes that frame's scale and target and drops the unpainted reading. With none painted, the lift is unchanged.
+		const landPainted = phase === "end" && !!anchor && this.pinchPreview && this.pinchPaintedValid && !this.pinchGiveEnding;
+		if (landPainted) {
+			this.pinchPending = null;
+			if (constraint) {
+				constraint.clientX = this.pinchPaintedX; constraint.clientY = this.pinchPaintedY;
+				constraint.offsetX = this.pinchPaintedOffsetX; constraint.offsetY = this.pinchPaintedOffsetY;
+			} else { anchor.targetX = this.pinchPaintedX; anchor.targetY = this.pinchPaintedY; }
+		}
 		// A live frame may reach past the cap by PINCH_GIVE (preview only); the lift below eases it back.
 		let next = phase === "end" ? this.pinchPending?.next ?? this.pinchScaleNow : pinchScale(this.pinchRefScale ?? this.pinchScaleNow, ratio, this.zoomFloor, true);
 		if (phase === "end" && anchor && this.pinchRefScale !== null && this.pinchGive === null) {
@@ -6257,19 +6717,21 @@ export class InkOverlayPlugin {
 			const cap = pinchScale(this.pinchRefScale, next / this.pinchRefScale, this.zoomFloor);
 			if (Number.isFinite(cap) && Math.abs(cap - next) > 1e-9) {
 				// Painted past the cap: ease the preview back to it over the bounce's half second, then settle there.
-				if (this.pinchPreview) { this.startPinchGive(next, cap, centroid); return; }
+				if (this.pinchPreview) { this.startPinchGive(next, cap, landPainted ? { x: this.pinchPaintedX, y: this.pinchPaintedY } : centroid); return; }
 				// Nothing painted past the cap yet (the lift beat the frame): settle inside the range, as before.
 				this.pinchPending = { next: cap };
 				next = cap;
 			}
 		}
-		if (anchor && Number.isFinite(centroid.x) && Number.isFinite(centroid.y)) {
+		if (landPainted) this.reducePinchConstraint(next, true);
+		else if (anchor && Number.isFinite(centroid.x) && Number.isFinite(centroid.y)) {
 			if (constraint) { constraint.clientX = centroid.x; constraint.clientY = centroid.y; }
 			else { anchor.targetX = centroid.x; anchor.targetY = centroid.y; }
 			this.reducePinchConstraint(next, phase === "end");
 		}
 		if (phase === "end") {
-			if (targetMoved && this.pinchPending === null) this.pinchPending = { next: this.pinchScaleNow };
+			if (landPainted) this.pinchPending = { next: this.pinchScaleNow };
+			else if (targetMoved && this.pinchPending === null) this.pinchPending = { next: this.pinchScaleNow };
 			// Nothing may still be queued behind the settle: a live frame
 			// running after it would write the mid-gesture styles back.
 			if (this.pinchRaf !== 0) {
@@ -6286,6 +6748,7 @@ export class InkOverlayPlugin {
 				this.pinchRefScale = null;
 				this.pinchAnchor = null;
 				this.pinchPreview = false;
+				this.pinchPaintedValid = false;
 				// A preview that ended without its settle (cancelled, refused, or thrown) takes its paper down here.
 				if (!this.previewPaperHandoff) this.endPreviewPaper("cancel");
 				this.previewPaperHandoff = false;
@@ -6319,8 +6782,9 @@ export class InkOverlayPlugin {
 		const path = this.filePath(), extent = path ? surfaceExtents.get(path) : { x: 0, y: 0 };
 		const width = Math.max(layout.columnBox, extent.x * this.fontZoom);
 		const height = Math.max(this.view.contentHeight, extent.y * this.fontZoom);
-		const naturalLeft = columnLocal === null ? null : columnLocal + this.view.scrollDOM.scrollLeft * layout.externalScale;
-		const naturalTop = contentTopLocal === null ? null : contentTopLocal + this.view.scrollDOM.scrollTop * layout.externalScale;
+		const scrollLeft = this.view.scrollDOM.scrollLeft, scrollTop = this.view.scrollDOM.scrollTop;
+		const naturalLeft = columnLocal === null ? null : columnLocal + scrollLeft * layout.externalScale;
+		const naturalTop = contentTopLocal === null ? null : contentTopLocal + scrollTop * layout.externalScale;
 		if (![origin.left, origin.top, layout.width, layout.paneHeight, layout.gutterScreen, width, height, layout.externalScale].every(Number.isFinite) ||
 			layout.width <= 0 || layout.paneHeight <= 0 || layout.gutterScreen < 0 || !validCameraScale(layout.externalScale) || width < 0 || height < 0) return;
 		// PREVIEW-TOUCHING (refreshPinchConstraint, called at :5618). `layout.width` (computed style, fractional)
@@ -6332,7 +6796,7 @@ export class InkOverlayPlugin {
 			// the right quantity for an overlap bound and the wrong one for "does the page fit the pane", so the
 			// page's own box travels beside it. See the fit test in `reducePinchConstraint`.
 			width, pageWidth: this.pageContentWidth(), height, external: layout.externalScale, x: naturalLeft !== null && Number.isFinite(naturalLeft), naturalLeft,
-			y: naturalTop !== null && Number.isFinite(naturalTop), naturalTop };
+			y: naturalTop !== null && Number.isFinite(naturalTop), naturalTop, scrollLeft, scrollTop };
 	}
 
 	/** Consume blocked motion in input order while leaving rendering coalesced.
@@ -6433,6 +6897,11 @@ export class InkOverlayPlugin {
 		if (pending) this.applyPinchScale(pending.next, settle);
 		else if (settle && (this.pinchPreview || this.pinchScaleNow !== this.pinchRasterScale))
 			this.applyPinchScale(this.pinchScaleNow, true);
+		// Only the probe reads this; with diagnostics off nothing is kept.
+		const anchor = this.pinchAnchor;
+		if (!settle && pending && anchor && diagnosticsEnabled())
+			this.pinchPaintedTarget = { x: anchor.targetX ?? anchor.focalX, y: anchor.targetY ?? anchor.focalY, scale: pending.next,
+				columnLocal: this.previewColumnLocal, geometry: anchor.constraint?.geometry ? { ...anchor.constraint.geometry } : null };
 	}
 
 	/**
@@ -6484,6 +6953,7 @@ export class InkOverlayPlugin {
 			// raster does not follow it. That left the canvas lift with no true-travel measurement, so the whole
 			// correction landed in the commit's own turn.
 			this.previewPaintedBlank = this.settleBlank();
+			if (diagnosticsEnabled()) { this.settlePaperT0 = performance.now(); this.traceSettlePaper("settle before commit"); }
 			const spendable = !!pan && Number.isFinite(effScale) && effScale > 0;
 			let nextLeft = spendable && Number.isFinite(pan.x)
 				? Math.max(0, anchor.scrollLeft - pan.x / effScale)
@@ -6502,10 +6972,18 @@ export class InkOverlayPlugin {
 				const result = (origin + (q + inset) * next - target) / effScale;
 				return Number.isFinite(result) ? Math.max(0, Math.min(MAX_VIEWPORT_LAYOUT, result)) : null;
 			};
-			const left = this.canvasMode && geometry ? offset(anchor.focalX, anchor.hostLeft, anchor.columnLocal,
-				anchor.targetX ?? anchor.focalX, geometry.left, geometry.naturalLeft, geometry.x) : null;
-			const top = this.canvasMode && geometry ? offset(anchor.focalY, anchor.hostTop, anchor.contentTopLocal,
-				anchor.targetY ?? anchor.focalY, geometry.top, geometry.naturalTop, geometry.y) : null;
+			// THE SCROLL TAKEN SINCE THE LAST PREVIEW FRAME. The snapshot is that frame's, so offset() lands the page where
+			// that frame painted it; but the fingers' own touch scroll kept moving the page after it, with no frame to
+			// re-pan, and the lift is where the user left it. That scroll, in scroller px, goes on into the target at the
+			// same scale it was taken at. Measured on the rig: 5.00 scroller px after the last frame, a 5.42 px slide.
+			const sx = this.view.scrollDOM.scrollLeft, sy = this.view.scrollDOM.scrollTop;
+			const carry = (v: number | null, late: number): number | null =>
+				v === null || !Number.isFinite(late) ? v : Math.max(0, Math.min(MAX_VIEWPORT_LAYOUT, v + late));
+			const lateX = geometry ? sx - geometry.scrollLeft : 0, lateY = geometry ? sy - geometry.scrollTop : 0;
+			const left = carry(this.canvasMode && geometry ? offset(anchor.focalX, anchor.hostLeft, anchor.columnLocal,
+				anchor.targetX ?? anchor.focalX, geometry.left, geometry.naturalLeft, geometry.x) : null, lateX);
+			const top = carry(this.canvasMode && geometry ? offset(anchor.focalY, anchor.hostTop, anchor.contentTopLocal,
+				anchor.targetY ?? anchor.focalY, geometry.top, geometry.naturalTop, geometry.y) : null, lateY);
 			if (left !== null) nextLeft = left;
 			// THE SETTLE DOES NOT SCROLL INTO THE LEFT RESERVE. That scroll is room for ink left of the page, reached by
 			// scrolling, so the fingers' place is written into the scroll no further left than the reserve, or than where
@@ -6514,6 +6992,16 @@ export class InkOverlayPlugin {
 			const reserveLeft = this.leftReserveHeld > 0 ? this.leftReserveHeld : 0;
 			nextLeft = Math.max(nextLeft, Math.min(anchor.scrollLeft, reserveLeft));
 			if (top !== null) nextTop = top;
+			// The device probe's commit line: which path set the target, the scroll taken since the anchor, and the
+			// commit's target and scale against what the last preview frame painted, in screen px and in scroller px.
+			// Then the geometry inputs, as the last preview frame read them and as the commit holds them, so a device's lines
+			// name the term if a landing still slides.
+			if (diagnosticsEnabled()) { const p = this.pinchPaintedTarget, l = this.viewportLayout, n = (v: number | null | undefined) => v == null ? "-" : v.toFixed(2);
+				const tx = anchor.targetX ?? anchor.focalX, ty = anchor.targetY ?? anchor.focalY, dx = p ? tx - p.x : NaN, dy = p ? ty - p.y : NaN;
+				scrollProbeExtent(`settle commit path ${left !== null ? "geometry" : "anchor"},${top !== null ? "geometry" : "anchor"} drift ${(sx - anchor.scrollLeft).toFixed(2)},${(sy - anchor.scrollTop).toFixed(2)} late ${lateX.toFixed(2)},${lateY.toFixed(2)} target-painted ${dx.toFixed(2)},${dy.toFixed(2)} screen ${(dx / effScale).toFixed(2)},${(dy / effScale).toFixed(2)} scroller scale ${next.toFixed(4)} painted ${p ? p.scale.toFixed(4) : "-"}`);
+				const g = p?.geometry;
+				scrollProbeExtent(`settle geom paint gutterScreen ${n(g?.gutterScreen)} naturalLeft ${n(g?.naturalLeft)} naturalTop ${n(g?.naturalTop)} columnLocal ${n(p?.columnLocal)} contentTopLocal ${n(g && g.naturalTop !== null ? g.naturalTop - g.scrollTop * g.external : null)} paneWidth ${n(g?.paneWidth)} paneHeight ${n(g?.paneHeight)} pageWidth ${n(g?.pageWidth)} external ${g ? g.external.toFixed(4) : "-"} scale ${p ? p.scale.toFixed(4) : "-"} scroll ${n(g?.scrollLeft)},${n(g?.scrollTop)}`);
+				scrollProbeExtent(`settle geom commit gutterScreen ${n(l?.gutterScreen)} naturalLeft ${n(geometry?.naturalLeft)} naturalTop ${n(geometry?.naturalTop)} columnLocal ${n(anchor.columnLocal)} contentTopLocal ${n(anchor.contentTopLocal)} paneWidth ${n(l?.width)} paneHeight ${n(l?.paneHeight)} pageWidth ${n(this.pageContentWidth())} external ${external.toFixed(4)} scale ${next.toFixed(4)} scroll ${n(sx)},${n(sy)} target ${n(nextLeft)},${n(nextTop)}`); }
 			// This settle, and only this one, closes a preview this gesture painted.
 			this.previewSettleOwed = true;
 			this.pinchPreview = false;
@@ -6532,7 +7020,7 @@ export class InkOverlayPlugin {
 				focalX: anchor.focalX, focalY: anchor.focalY, targetX: anchor.targetX, targetY: anchor.targetY,
 				hostLeft: anchor.hostLeft, hostTop: anchor.hostTop,
 				columnLocal: anchor.columnLocal, contentTopLocal: anchor.contentTopLocal,
-				fromScale: anchor.fromScale, scrollTop: anchor.scrollTop, toScale: next,
+				fromScale: anchor.fromScale, scrollLeft: anchor.scrollLeft, scrollTop: anchor.scrollTop, toScale: next,
 				generation: this.viewportGeneration + 1, path: this.filePath(), container: this.container,
 				left: this.view.scrollDOM.scrollLeft, top: this.view.scrollDOM.scrollTop, ready: false, outcome: "pending", attempts: 0, request: null, issuance: [],
 			} : null;
@@ -6546,8 +7034,9 @@ export class InkOverlayPlugin {
 			// no gesture tracking it.
 			if (!committed) { this.endPreviewPaper("cancel"); this.retirePanSettle("the settle commit was refused"); this.clearViewportPan(); return; }
 			this.pinchRasterScale = next;
-			this.setViewportScroll(nextLeft,nextTop);
-			this.reanchorPan();
+			// The commit has written the scroll, with its own corrections to x (the page box, the margin debt, a fitting
+			// column), and re-anchored the pan to it. Writing nextLeft again here put the scroll back to before those
+			// corrections until the settle's measure restored them: a sideways flicker of the page for one frame.
 			// The preview paper comes down with the settle - unless a bounce is already playing, which happens when this
 			// settle's own commit started one: then the element rides it, re-copied here at the settled zoom. A bounce begun
 			// later, by the hold's measure or a convergence pass, puts its own element up (startOverscrollBounce), so
@@ -6555,6 +7044,7 @@ export class InkOverlayPlugin {
 			this.previewPaperHandoff = true;
 			if (this.bounceState) this.rebasePreviewPaper();
 			else this.endPreviewPaper("settle");
+			if (diagnosticsEnabled()) { this.traceSettlePaper("settle after commit"); this.traceSettlePaperFrames(); }
 		} else {
 			const effective = external * next;
 			// The preview's ceiling is the given one; the commit guard (commitCameraScale) keeps the bare cap.
@@ -6625,6 +7115,13 @@ export class InkOverlayPlugin {
 			// frame that takes one, the deferred re-stamp above would otherwise go unpainted - exactly the frame at
 			// the previous scale's quotient the re-stamp exists to prevent. No-op when anchorPanTo already wrote.
 			if (this.previewPaperBoxDirty) { this.writePaperPan(); this.previewPaperBoxDirty = false; }
+			// This frame painted: record where it held the fingers, for the lift.
+			const held = anchor.constraint;
+			this.pinchPaintedX = held ? held.clientX : anchor.targetX ?? anchor.focalX;
+			this.pinchPaintedY = held ? held.clientY : anchor.targetY ?? anchor.focalY;
+			this.pinchPaintedOffsetX = held ? held.offsetX : 0;
+			this.pinchPaintedOffsetY = held ? held.offsetY : 0;
+			this.pinchPaintedValid = true;
 		}
 		this.refreshPenCursor();
 		// Stamp AFTER the writes: the scroll events they queue are the ones
@@ -6715,9 +7212,39 @@ export class InkOverlayPlugin {
 	 */
 	private inkInputPanX(): number { return this.inkPanX() + this.previewInkOffset * this.cssScale; }
 	private inkInputPanY(): number { return this.inkPanY() + (this.previewInkOffsetY || 0) * this.cssScale; }
+	/**
+	 * The raster pan a bake moves to, in layout px: the resting pan, with the move from the raster pan now snapped to
+	 * whole backing (device) px, so the bake can carry the painted pixels exactly (carryBakedPan). The part under one
+	 * backing px stays in the ink layer's translate (writeInkLayerTransform), where the pen's mapping reads it too.
+	 * With no usable backing the target is the resting pan itself.
+	 */
+	private rasterPanTarget(): { x: number; y: number } {
+		const k = this.cssScale, from = this.rasterPan ?? { x: 0, y: 0 };
+		const x = this.restPanX() / k, y = this.restPanY() / k;
+		const backing = this.committedBacking ?? 0;
+		if (!(backing > 0) || !Number.isFinite(backing)) return { x, y };
+		// Below 100 percent only, and only when carryBakedPan will carry: there a whole-layer bake is the lag (every edge
+		// bounce at 10 percent re-rastered all of the visible ink). Everywhere else the bake goes to the exact resting pan and
+		// redraws, as before.
+		if (!(k < 1) || !this.bakeCanCarry()) return { x, y };
+		const sx = from.x + Math.round((x - from.x) * backing) / backing, sy = from.y + Math.round((y - from.y) * backing) / backing;
+		// A move of whole backing px carries exactly: the exact pan is the target.
+		if (Math.abs(sx - x) * backing < 1e-3 && Math.abs(sy - y) * backing < 1e-3) return { x, y };
+		// Part of a pixel left in the translate shows the carried ink resampled, a little soft, until a whole redraw. Only a
+		// page held past its top or left edge takes that: it goes back to the edge, where its snapped moves cancel to the
+		// exact pan and the ink is sharp again. A page at rest bakes to the exact pan and redraws.
+		return this.restPanX() > 0 || this.restPanY() > 0 ? { x: sx, y: sy } : { x, y };
+	}
+	/** carryBakedPan's guard, read before the bake: a raster of the zoom now held, painted while the store held this many strokes. */
+	private bakeCanCarry(): boolean {
+		const last = this.lastPaintCam, path = this.filePath();
+		return !!last && last.zoom === this.camera.snapshot.zoom && this.paintedStrokeCount === (path ? inlineInk.strokes(path).length : 0);
+	}
+	/** A bake is owed when the snapped target differs from the raster pan, never for the remainder the target leaves. */
 	private rasterPanNeedsBake(): boolean {
-		return !this.frame.locked && this.builder === null && !this.pinchPreview && Number.isFinite(this.cssScale) && this.cssScale > 0 &&
-			((this.rasterPan?.x ?? 0) !== this.restPanX() / this.cssScale || (this.rasterPan?.y ?? 0) !== this.restPanY() / this.cssScale);
+		if (this.frame.locked || this.builder !== null || this.pinchPreview || !Number.isFinite(this.cssScale) || !(this.cssScale > 0)) return false;
+		const to = this.rasterPanTarget(), from = this.rasterPan ?? { x: 0, y: 0 };
+		return to.x !== from.x || to.y !== from.y;
 	}
 	private hideBlankPinchLayers(): void {
 		this.restorePinchLayers();
@@ -6814,6 +7341,8 @@ export class InkOverlayPlugin {
 		this.pinchHiddenCanvases?.clear();
 	}
 	private markCommittedPaint(tool: InkTool): void {
+		// Any paint onto the committed layers: they no longer hold only the stand-in's last whole copy.
+		if (this.standIn) this.standIn.mark = null;
 		this.restorePinchLayers();
 		if (tool === "highlighter") this.highlightBlank = false; else this.committedBlank = false;
 	}
@@ -7016,7 +7545,26 @@ export class InkOverlayPlugin {
 		const s = Number.isFinite(k) && k > 0 ? 1 / k : 0;
 		const x = this.panX() * s, y = this.panY() * s;
 		const sizer = this.panSizer();
-		if (sizer?.style) sizer.style.transform = x === 0 && y === 0 ? "" : `translate(${x}px,${y}px)`;
+		const translate = x === 0 && y === 0 ? "" : `translate(${x}px,${y}px)`;
+		let gutters = this.panGuttersEl;
+		if (!gutters?.isConnected) {
+			// Stock CodeMirror keeps the gutters beside the sizer; Obsidian nests them in `.cm-contentContainer`.
+			gutters = this.panGuttersEl = this.view?.scrollDOM?.querySelector?.<HTMLElement>(
+				":scope > .cm-gutters, :scope > .cm-sizer > .cm-contentContainer > .cm-gutters") ?? null;
+			this.panGuttersWritten = "";
+		}
+		// Re-read after an empty pan or a column margin write cleared it; the read holds with the sizer already panned.
+		if (translate !== "" && this.panGuttersMode === null && gutters) {
+			this.panGuttersMode = gutterPanMode(sizer, gutters, this.view?.scrollDOM);
+		}
+		if (sizer?.style) sizer.style.transform = translate;
+		const mode = this.panGuttersMode;
+		const gutterTransform = translate === "" || !mode ? "" : mode.kind === "ride" ? translate : mode.kind === "counter" ? mode.translate : "";
+		if (gutters?.style && gutterTransform !== this.panGuttersWritten) {
+			gutters.style.transform = gutterTransform;
+			this.panGuttersWritten = gutterTransform;
+		}
+		if (translate === "") this.panGuttersMode = null;
 		// The sizer and ink layer above are stamped either way - a caller that defers the paper still needs the
 		// scale it just changed reflected on those. Only the preview paper's own write can wait for anchorPanTo,
 		// which runs synchronously before paint on the one caller that passes true (the live pinch frame).
@@ -7180,6 +7728,49 @@ export class InkOverlayPlugin {
 		if (!box?.style || ax === this.paperGridBoxPanX) return;
 		if (ax) box.style.setProperty("--handwriting-paper-pan-x", ax); else box.style.removeProperty("--handwriting-paper-pan-x");
 		this.paperGridBoxPanX = ax;
+	}
+
+	/** When the settle being traced began, performance.now() ms; NaN outside one. Diagnostics only. */
+	private settlePaperT0 = Number.NaN;
+	/** The frame chain that traces the paper after a settle; 0 when none is queued. Diagnostics only. */
+	private settlePaperRaf = 0;
+
+	/**
+	 * THE "settle paper" TRACE LINE: every layer that can move the paper, in one line, so a device trace names on which
+	 * frame each one moved and by how much. Written in the settle task, at each settle measure attempt and on the 12
+	 * frames after the lift. Call sites hold it behind `diagnosticsEnabled()`; it writes nothing and moves nothing.
+	 */
+	private traceSettlePaper(stage: string): void {
+		const scroller = this.view?.scrollDOM, host = this.view?.dom;
+		if (!scroller?.style || !host?.style) return;
+		const n = (v: number | null | undefined) => v == null || !Number.isFinite(v) ? "-" : v.toFixed(2);
+		const v = (s: string | undefined | null) => s ? s.replace(/\s+/g, "") : "-";
+		const t = performance.now(), since = Number.isFinite(this.settlePaperT0) ? t - this.settlePaperT0 : Number.NaN;
+		const el = this.previewPaperEl, anchor = this.pinchAnchor ?? this.panAnchorHold;
+		scrollProbeExtent(`settle paper ${stage} t ${t.toFixed(1)} since ${n(since)} scroll ${n(scroller.scrollLeft)},${n(scroller.scrollTop)}`
+			+ ` sizer ${v(this.panSizer()?.style.transform)} ink ${v(this.inkLayer?.style.transform)}`
+			+ ` pan ${v(scroller.style.getPropertyValue("--handwriting-paper-pan-x"))},${v(scroller.style.getPropertyValue("--handwriting-paper-pan-y"))}`
+			+ ` phase ${v(host.style.getPropertyValue("--handwriting-paper-phase-x"))},${v(host.style.getPropertyValue("--handwriting-paper-phase"))}`
+			+ ` preview ${el ? (el.isConnected ? "up" : "held") : "down"} transform ${v(this.previewPaperTransform)} inset ${v(this.previewPaperInset)}`
+			+ ` gridbox ${this.paperGridBox ? this.paperGridBoxPanX || "0" : "none"} origin ${n(this.paperOriginLeft)},${n(this.paperOriginLayout)}`
+			+ ` drift ${n(this.paperColumnDrift)},${n(this.paperRewrapY)} residual ${n(this.paperSnapResidual.x)},${n(this.paperSnapResidual.y)}`
+			+ ` viewpan ${n(this.panX())},${n(this.panY())} scale ${this.cssScale.toFixed(4)}`
+			+ ` column preview ${n(this.previewColumnLocal)} anchor ${n(anchor?.columnLocal)} anchorScroll ${n(anchor?.scrollLeft)}`);
+	}
+
+	/** The same line on each of the 12 frames after a settle; a newer settle restarts the count. Diagnostics only. */
+	private traceSettlePaperFrames(): void {
+		const win = this.winRef;
+		if (!win?.requestAnimationFrame) return;
+		if (this.settlePaperRaf !== 0) win.cancelAnimationFrame(this.settlePaperRaf);
+		let frame = 0;
+		const step = (): void => {
+			this.settlePaperRaf = 0;
+			if (!diagnosticsEnabled() || !this.view?.scrollDOM) return;
+			this.traceSettlePaper(`frame ${++frame}`);
+			if (frame < 12) this.settlePaperRaf = win.requestAnimationFrame(step);
+		};
+		this.settlePaperRaf = win.requestAnimationFrame(step);
 	}
 
 	/** One frame's worth of the watch's work, however many mutations arrived. */
@@ -7530,7 +8121,7 @@ export class InkOverlayPlugin {
 	 */
 	private anchorPanTo(
 		next: number,
-		a: { focalX: number; focalY: number; targetX?: number; targetY?: number; hostLeft: number; hostTop: number; columnLocal: number | null; contentTopLocal: number | null; fromScale: number; scrollTop: number },
+		a: { focalX: number; focalY: number; targetX?: number; targetY?: number; hostLeft: number; hostTop: number; columnLocal: number | null; contentTopLocal: number | null; fromScale: number; scrollLeft: number; scrollTop: number },
 		columnLocal: number | null,
 		contentTopLocal?: number | null,
 		/** Only the settle of a gesture that changed the scale asks for the fitting bound; a preview frame must keep the note under the focal point. */
@@ -7592,9 +8183,16 @@ export class InkOverlayPlugin {
 		// re-centres inside the host (Readable line length under a zoom-in) the text moves against the scroller by exactly
 		// that re-centring, in the painted px this formula uses, and the paper, which lives on the scroller, moves with
 		// it. Preview frames only: the settle re-measures the origin instead (capturePaperOrigin).
+		// THE SCROLL TAKEN UNDER THE FINGERS IS NOT RE-CENTRING. The column is read off a client rect, so a scroll of s
+		// layout px moves columnLocal by s outer px, and the preview paper's offset already takes that scroll through
+		// paperScrollLeft. Counted in both, the vertical rules slid off the column by the scroll times the zoom: 6 device
+		// px at dpr 2 for a 3 px touch scroll during a pinch (GridPinchMidPage, the scrolled-sideways arms). The scroll's
+		// share is put back here, in outer px and before the multiplication by the scale, the convention of the settle.
+		const nativeLeft = this.view.scrollDOM.scrollLeft, nativeTop = this.view.scrollDOM.scrollTop;
 		let paperDriftMoved = false;
 		if (this.pinchPreview) {
-			const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal) * next;
+			const outer = this.viewportLayout?.externalScale ?? 1;
+			const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;
 			paperDriftMoved = Number.isFinite(drift) && drift !== this.paperColumnDrift;
 			if (paperDriftMoved) this.paperColumnDrift = drift;
 		}
@@ -7618,7 +8216,6 @@ export class InkOverlayPlugin {
 		// Only native scroll may be spent into right/down pan. At scroll zero
 		// the content stays at its natural inset, including column/title margins.
 		// Use the same origin-first precedence as the ordered input reducer.
-		const nativeLeft = this.view.scrollDOM.scrollLeft, nativeTop = this.view.scrollDOM.scrollTop;
 		// The preview paper's offset is taken against this scroll (zooming out clamps it); the read is this frame's already.
 		if (this.previewPaperEl) { this.paperScrollLeft = nativeLeft; this.paperScrollTop = nativeTop; }
 		// The scroller's CONTENT box: the page is laid out inside it, and the scrollbar is not room the column may use.
@@ -7801,9 +8398,12 @@ export class InkOverlayPlugin {
 		const restCeilX = dragFrame ? (this.columnRestPan(next, effective) ?? 0) : 0;
 		// THE BAND STOPS TRAVEL, IT NEVER MOVES A RESTING PAGE. Measured after a zoom-button
 		// commit to 50% with Readable line length on: viewportPan.x was 0 and the next touch still bounced,
-		// because the ceiling clamped a frame the page was already legally sitting on. Widening each end to
-		// the pan the GESTURE started from fixes that without a new quantity: a page resting outside its room
-		// keeps its position, and a frame may still never carry it further out than the give allows.
+		// because the ceiling clamped a frame the page was already legally sitting on. The last frame's pan
+		// below keeps that page where it stands. THE ALLOWANCE IS MEASURED FROM THE BOUND, NOT FROM THE START:
+		// a regrab mid-spring starts on the pan the cancelled spring folded in, and a ceiling of start plus the
+		// allowance let each regrab go a further allowance out, so sixty regrabs walked the page more than a
+		// thousand px past its top and left (the one-finger pull was fixed for the same walk on 2026-09-20).
+		// The start pan is kept for the readout only.
 		const startX = Number.isFinite(this.pinchStartPan.x) ? this.pinchStartPan.x : 0;
 		const startY = Number.isFinite(this.pinchStartPan.y) ? this.pinchStartPan.y : 0;
 		// The band's edges are widened to where the page ALREADY stands (the last frame's pan), so
@@ -7829,10 +8429,10 @@ export class InkOverlayPlugin {
 		// rest under one device px past the bound, which is not a visible overscroll. Settle only; preview and
 		// drag frames are untouched.
 		const cx = bounded ? onDeviceGrid(rawX, this.canvasMode ? Math.min(rawX, 0) : plainX, this.dpr)
-			: dragFrame ? (this.canvasMode ? Math.min(rawX, Math.max(Math.max(restCeilX, startX) + give, lastX)) : plainX)
+			: dragFrame ? (this.canvasMode ? Math.min(rawX, Math.max(restCeilX + give, lastX)) : plainX)
 			: rawX;
 		const cy = bounded ? onDeviceGrid(rawY, this.canvasMode ? Math.min(rawY, 0) : plainY, this.dpr)
-			: dragFrame ? (this.canvasMode ? Math.min(rawY, Math.max(Math.max(0, startY) + give, lastY)) : plainY)
+			: dragFrame ? (this.canvasMode ? Math.min(rawY, Math.max(give, lastY)) : plainY)
 			: rawY;
 		if (!settling) { this.pinchBand.lastPan.x = cx; this.pinchBand.lastPan.y = cy; }
 		this.boundReadout.rawX = rawX; this.boundReadout.cx = cx; this.boundReadout.rawY = rawY; this.boundReadout.cy = cy;
@@ -7923,6 +8523,8 @@ export class InkOverlayPlugin {
 		if (this.canvasMode) {
 			// IC on only, byte-identical to 3578f29e.
 			const correctionX = paintedBefore.x - landed.x, correctionY = paintedBefore.y - landed.y;
+			// The device probe's settle line: what the preview painted and where the commit landed, with the outer scale, dpr and pane.
+			if (diagnosticsEnabled()) { const l = this.viewportLayout; scrollProbeExtent(`settle blank painted ${paintedBefore.x.toFixed(2)},${paintedBefore.y.toFixed(2)} landed ${landed.x.toFixed(2)},${landed.y.toFixed(2)} outer ${l ? l.externalScale.toFixed(4) : "-"} dpr ${this.winRef.devicePixelRatio} pane ${l ? `${l.paneWidth.toFixed(1)},${l.paneHeight.toFixed(1)}` : "-"}`); }
 			if ((correctionX !== 0 || correctionY !== 0) && this.startOverscrollBounce(a, correctionX, correctionY, true)) this.writeViewportPan();
 			return;
 		}
@@ -8008,6 +8610,22 @@ export class InkOverlayPlugin {
 	}
 
 	/**
+	 * THE MARGIN THE COLUMN IS PAINTED AT, host-local, read off the element that carries it: the first line when the theme
+	 * centres its own lines (every line takes the same margin), the sizer otherwise. Null when there is no column or nothing
+	 * to read, and the caller falls back to `appliedColumnMargin`. It forces style, so a commit reads it twice - once at its
+	 * top, for what the page is showing, and once after its own layout writes - and a preview frame never reads it.
+	 */
+	private paintedColumnMargin(): number | null {
+		const layout = this.viewportLayout;
+		if (!layout || layout.columnLocal === null) return null;
+		const el = layout.ownLines ? this.view.contentDOM?.firstElementChild : layout.sizerColumn ? this.panSizer() : null;
+		const win = el?.ownerDocument?.defaultView;
+		if (!el || !win) return null;
+		const px = parseFloat(win.getComputedStyle(el).marginLeft);
+		return Number.isFinite(px) ? px : null;
+	}
+
+	/**
 	 * THE MARGIN THE PAGE ACTUALLY SITS AT at scale `next`, host-local: what the box write asked for, after the
 	 * stylesheet clamps it against the auto term. NOT the custom property, which is written unclamped - measured on a
 	 * tiny note at 10% with Readable line length off, the property reads 6907.03 and the page sits at 6562.5, and it is
@@ -8021,7 +8639,7 @@ export class InkOverlayPlugin {
 		if (!layout || layout.columnLocal === null) return 0;
 		const want = Math.max(0, this.columnRestMargin ?? this.columnMarginLocal(layout)!);
 		return (layout.sizerColumn || layout.ownLines) && auto
-			? Math.max(0, Math.min(Math.max(0, (layout.width / next - auto.fixed - (this.hostZoomSupported() ? auto.scrollbar / next : auto.scrollbar) - auto.lineWidth) / 2), want))
+			? Math.max(0, Math.min(Math.max(0, (layout.width / next - auto.fixed - this.scrollbarLocalAt(auto.scrollbar, next) - auto.lineWidth) / 2), want))
 			: want;
 	}
 
@@ -8041,13 +8659,24 @@ export class InkOverlayPlugin {
 	 * debt is measured against what the page WAS showing - the previous commit's settled margin - and never against the
 	 * stale write this call replaces, which the page never presented.
 	 */
-	private restColumnAgainstCurrentGrant(next: number, effective: number): void {
+	private restColumnAgainstCurrentGrant(next: number, effective: number, shownPainted: number | null = null): void {
 		const layout = this.viewportLayout;
 		if (!layout || this.pinchPreview || layout.columnLocal === null) return;
 		this.columnRestMargin = !layout.sizerColumn ? null : this.columnRestCentred(next, layout.externalScale * next);
-		const settled = this.appliedColumnMargin(next), shown = this.restingColumnMargin;
 		const host = this.view.dom, value = `${Math.max(0, this.columnRestMargin ?? (layout.sizerColumn || layout.ownLines ? this.columnMarginLocal(layout)! : 0))}px`;
-		if (host.style.getPropertyValue("--handwriting-column-margin-left") !== value) host.style.setProperty("--handwriting-column-margin-left", value);
+		if (host.style.getPropertyValue("--handwriting-column-margin-left") !== value) {
+			host.style.setProperty("--handwriting-column-margin-left", value);
+			// The margin moves the sizer, so the gutters' counter translate is re-read on the next pan write.
+			this.panGuttersMode = null;
+		}
+		// The debt is what the PAINTED column moved by, not what the margin law says it should have. The stylesheet clamps the
+		// margin against the theme's own auto term, which tracks the pane live during a preview, so the law's value can move
+		// while the painted one does not: measured with Readable line length on, 221 to 123 percent, the law went 0 to 151.73
+		// while each line was painted at 151.73 in the last preview frame and after the commit, and paying that difference
+		// as scroll glided the page 186 px left after the lift. The law stands in only where there is nothing to read, and
+		// then for both ends: a painted value is never netted against a law value.
+		const after = shownPainted === null ? null : this.paintedColumnMargin(), painted = after !== null;
+		const settled = painted ? after : this.appliedColumnMargin(next), shown = painted ? shownPainted : this.restingColumnMargin;
 		this.restingColumnMargin = settled;
 		if (shown === null || settled === shown) return;
 		this.columnMarginDebt += (shown - settled) * effective;
@@ -8246,6 +8875,9 @@ export class InkOverlayPlugin {
 	private holdOverscrollGive(x: number, y: number): void {
 		const offset = this.bounceOffset;
 		if (!offset) return;
+		// A CLOSED OVERLAY TAKES NO GIVE. Its paper has come down and its router is going; a pull that
+		// still arrives would put a fresh paper up on a scroller the next note keeps.
+		if (this.retiring) return;
 		// A give that arrives mid-bounce replaces it: the finger is back on the glass and
 		// owns the page again.
 		if (this.bounceState) this.cancelOverscrollBounce();
@@ -8279,6 +8911,10 @@ export class InkOverlayPlugin {
 	private releaseOverscrollGive(): void {
 		const offset = this.bounceOffset;
 		if (!offset) return;
+		// A CLOSED OVERLAY SENDS NOTHING HOME. Disposing the router releases a give that was held, and
+		// that release arrives after unmount took the paper down: the return below would start a bounce,
+		// put a new paper up on the scroller the next note keeps, and could pay scroll into it.
+		if (this.retiring) return;
 		const x = offset.x, y = offset.y;
 		// A RELEASE WITH NOTHING HELD STILL SENDS A STANDING PAGE HOME. With the give measured
 		// from the rest, a finger that lands on a page already standing the allowance past its end
@@ -8297,9 +8933,13 @@ export class InkOverlayPlugin {
 		pan.x += x;
 		pan.y += y;
 		if (this.resumeStrandedPan()) return;
-		// Nothing was held and nothing is owed (or a spring already running carries it): leave
-		// the page and its paper exactly as they are.
-		if (x === 0 && y === 0) return;
+		// Nothing was held and nothing is owed. A spring already running, or a pinch preview, still shows the
+		// paper and takes it down itself; otherwise a give that came back to zero before the lift leaves the
+		// paper this gesture put up, so it comes down here.
+		if (x === 0 && y === 0) {
+			if (!this.bounceState && !this.pinchPreview) this.endPreviewPaper("bounce-end");
+			return;
+		}
 		// It would not take it: a bounce already running, a preview holding the frame, or a
 		// give too small to animate. Put the page back on the bound and take the preview
 		// paper down - what a refused bounce did here before.
@@ -8328,17 +8968,28 @@ export class InkOverlayPlugin {
 		if (!offset || this.bouncedHold === hold) return false;
 		// A LEFTWARD OR UPWARD EASE SHOWS THE INK RASTER'S FAR EDGE. The ink canvases ride the page by the same
 		// offset, and they cover the pane plus the band margin and no more (measured: 185 to 200 px spare at rest; an
-		// offset of -326 left 141 px of the pane's right with no ink raster while the ease played). So measured travel in
-		// that direction is eased only as far as the raster already covers; past that it lands in the commit's frame,
-		// as it did before the slide. One rect pair, at the settle only, and only when such a correction exists.
-		let coverX = Infinity, coverY = Infinity;
-		if (travelled && this.canvasMode && (dx < 0 || dy < 0)) {
+		// offset of -326 left 141 px of the pane's right with no ink raster while the ease played). The band now covers
+		// the ease instead: syncBand widens it by the bounce's start offset on the side the ease uncovers, at the sync
+		// that follows the settle's pan write. So measured travel is eased in every direction, up to the bound
+		// travelledEaseRoom sets on each axis; a travelled correction leftward or upward past it lands in the commit's
+		// frame, as it did before the slide. An untravelled correction leftward or upward still lands as it always did:
+		// with Infinite Canvas on there is no edge there. The ink cover past the pane is read for the probe line only,
+		// with diagnostics on.
+		let coverX = Infinity, coverY = Infinity, room = { x: Infinity, y: Infinity };
+		if (travelled && (dx < 0 || dy < 0) && this.cssScale > 0) {
+			const s = this.view.scrollDOM;
+			room = travelledEaseRoom({ scrollLeft: s.scrollLeft, scrollTop: s.scrollTop, clientWidth: s.clientWidth, clientHeight: s.clientHeight, scrollWidth: this.bandFreeScrollWidth ?? s.scrollWidth, scrollHeight: s.scrollHeight, scale: this.cssScale });
+		}
+		if (travelled && diagnosticsEnabled() && (dx < 0 || dy < 0)) {
 			const ink = this.committedCanvas?.getBoundingClientRect?.(), pane = this.view?.scrollDOM?.getBoundingClientRect?.();
 			coverX = ink && pane ? Math.max(0, ink.right - pane.right) : 0;
 			coverY = ink && pane ? Math.max(0, ink.bottom - pane.bottom) : 0;
 		}
-		const bx = Math.abs(dx) >= OVERSCROLL_BOUNCE_MIN_PX && !(this.canvasMode && dx < 0 && (!travelled || -dx > coverX)) ? dx : 0;
-		const by = Math.abs(dy) >= OVERSCROLL_BOUNCE_MIN_PX && !(this.canvasMode && dy < 0 && (!travelled || -dy > coverY)) ? dy : 0;
+		const bx = Math.abs(dx) >= OVERSCROLL_BOUNCE_MIN_PX && !(this.canvasMode && dx < 0 && (!travelled || Math.ceil(-dx / this.cssScale) > room.x)) ? dx : 0;
+		const by = Math.abs(dy) >= OVERSCROLL_BOUNCE_MIN_PX && !(this.canvasMode && dy < 0 && (!travelled || Math.ceil(-dy / this.cssScale) > room.y)) ? dy : 0;
+		// One line per settle ease (the travelled call is the settle's only), for the device probe. The cover is the
+		// band before the widening sync.
+		if (travelled) scrollProbeExtent(`settle ease ${bx === 0 && by === 0 ? "refused" : "eased"} correction ${dx.toFixed(2)},${dy.toFixed(2)} cover ${coverX.toFixed(2)},${coverY.toFixed(2)} pan ${this.viewportPan.x.toFixed(2)},${this.viewportPan.y.toFixed(2)} offset ${offset.x.toFixed(2)},${offset.y.toFixed(2)} to ${(bx === 0 && by === 0 ? offset.x : bx).toFixed(2)},${(bx === 0 && by === 0 ? offset.y : by).toFixed(2)}`);
 		if (bx === 0 && by === 0) return false;
 		this.cancelOverscrollBounce();
 		this.bouncedHold = hold;
@@ -8601,7 +9252,11 @@ export class InkOverlayPlugin {
 		// unit fixtures have no field to read, and a stale transform left on a
 		// real `.cm-sizer` outlives this overlay.
 		if (had) this.writeViewportPan();
+		if (this.panGuttersEl?.style && this.panGuttersWritten !== "") this.panGuttersEl.style.removeProperty("transform");
 		this.panSizerEl = null;
+		this.panGuttersEl = null;
+		this.panGuttersMode = null;
+		this.panGuttersWritten = "";
 	}
 
 	/**
@@ -8856,6 +9511,8 @@ export class InkOverlayPlugin {
 		const target = c ? { x: c.clientX, y: c.clientY } : { x: anchor.targetX ?? anchor.focalX, y: anchor.targetY ?? anchor.focalY };
 		const base = this.pinchLastRatio || 1;
 		this.pinch("end", 1, target);
+		// A preview past the cap lifts into the ease back to the cap; a re-anchor would cancel it and leave the zoom past the cap.
+		if (this.pinchGive) return;
 		this.pinch("start", 1, target);
 		this.pinchRatioBase = base;
 	}
@@ -8928,7 +9585,9 @@ export class InkOverlayPlugin {
 		const a = this.pinchAnchor, sd = this.view.scrollDOM;
 		if (a) { a.scrollLeft += sd.scrollLeft - give.scrollLeft; a.scrollTop += sd.scrollTop - give.scrollTop; }
 		this.pinchPending = { next: give.to };
-		this.pinch("end", 1, give.centroid);
+		// The give's last eased frame painted a hair above the cap; its settle lands the cap itself, once.
+		this.pinchGiveEnding = true;
+		try { this.pinch("end", 1, give.centroid); } finally { this.pinchGiveEnding = false; }
 	}
 
 	private deferPinchRaster(): boolean {
@@ -8953,6 +9612,7 @@ export class InkOverlayPlugin {
   this.releaseMeasures(true);
   this.clearViewportPan();
   this.clearPreviewInkOffset();
+  this.hostTransformScale=null;this.scrollResidual={x:0,y:0,left:0,top:0};
   this.rasterColumnLocal=null; this.previewAnchorStale=false; this.clearDeferredRepaint();
   this.viewportGeneration++;
   this.viewportPaneObserver?.disconnect();this.viewportPaneObserver=null;
@@ -8966,7 +9626,7 @@ export class InkOverlayPlugin {
   // measured cssScale still holds the gesture's until the next refresh.
   this.paperRestZoom=layout.externalScale;
   const host=this.view.dom;
-  host.classList.remove("handwriting-note-viewport","handwriting-note-viewport-own-lines");
+  host.classList.remove("handwriting-note-viewport","handwriting-note-viewport-own-lines","handwriting-scrollbar-unscaled");this.scrollbarUnscale=null;
   layout.parent.classList.remove("handwriting-note-viewport-pane");
   for(const [name,saved] of layout.styles) {
    if(saved.value) host.style.setProperty(name,saved.value,saved.priority); else host.style.removeProperty(name);
@@ -8990,7 +9650,7 @@ export class InkOverlayPlugin {
    // saved inline value, so a later capture sees the theme's again.
    // Not a finite positive number - `normal`, or a rig with no `zoom` at
    // all - is a factor of 1, which writes exactly what it wrote before.
-   const names=["width","height","transform","transform-origin","zoom","--handwriting-note-column-width","--handwriting-note-column-margin-left","--handwriting-note-column-margin-right","--handwriting-column-margin-left","--handwriting-column-auto-left","--handwriting-paper-pitch","--handwriting-paper-rule","--handwriting-paper-dot","--handwriting-paper-phase","--handwriting-paper-phase-x"];
+   const names=["width","height","transform","transform-origin","zoom","--handwriting-note-column-width","--handwriting-note-column-margin-left","--handwriting-note-column-margin-right","--handwriting-column-margin-left","--handwriting-column-auto-left","--handwriting-paper-pitch","--handwriting-paper-rule","--handwriting-paper-dot","--handwriting-paper-phase","--handwriting-paper-phase-x","--handwriting-scrollbar-unscale"];
    const layout:NonNullable<InkOverlayPlugin["viewportLayout"]>={parent,paneWidth:parent.clientWidth,paneHeight:parent.clientHeight,externalScale:this.cssScale/this.pinchScaleNow,baseTransform:this.winRef.getComputedStyle(host).transform,baseZoom:(()=>{const z=Number.parseFloat(this.winRef.getComputedStyle(host).zoom);return Number.isFinite(z)&&z>0?z:1;})(),width:Number.parseFloat(this.winRef.getComputedStyle(host).width)||host.clientWidth,height:Number.parseFloat(this.winRef.getComputedStyle(host).height)||host.clientHeight,column:0,columnBox:0,gutterX:0,gutterScreen:0,sizerColumn:false,columnInset:false,ownLines:false,left:"",right:"",columnLocal:null,columnReserve:0,columnAuto:null,styles:new Map(names.map(n=>[n,{value:host.style.getPropertyValue(n),priority:host.style.getPropertyPriority(n)}]))};
    this.viewportLayout=layout;
    {
@@ -9121,7 +9781,7 @@ export class InkOverlayPlugin {
   const sizer=this.panSizer();
   const column=this.view.contentDOM.offsetWidth;
   const natural=contentOrigin(this.view.contentDOM);
-  const rectScale=!box||this.hostZoomSupported()?this.cssScale/this.pinchScaleNow:this.cssScale;
+  const rectScale=!box||this.zoomFormAt(this.pinchScaleNow)?this.cssScale/this.pinchScaleNow:this.cssScale;
   const hostRect=host.getBoundingClientRect();
   // Takeover's read used to be `columnLocalAt`, which leaves the host's painted
   // origin for the gesture's later reads; kept, so a takeover inside a gesture
@@ -9210,10 +9870,46 @@ export class InkOverlayPlugin {
   return {lineWidth,fixed:Math.max(0,hostWidth-scrollerLocal)+edge,scrollbar:bar};
  }
 
+ /**
+  * WHAT THE BROWSER DID NOT KEEP of the last owned scroll write, host-local px per axis: the written offset less the
+  * kept one. The transform form's scroller keeps whole px, so a settle that writes 2586.5 gets 2587 and the page lands
+  * half a host px short, k times that on screen (measured: 1 px at k 2, the focal settle cells). It rides on the host's
+  * transform as a translate until the next owned write. A scroll the overlay did not write moves by whole px and keeps
+  * it, except at either end of an axis. A clamp at either end of the range is never a residual: the page edge does not
+  * move. The zoom form keeps nothing here.
+  */
+ private scrollResidual={x:0,y:0,left:0,top:0};
+ /** The factor the host's transform form was last written with, or null while the host is in the zoom form or released. */
+ private hostTransformScale:number|null=null;
+
  private setViewportScroll(left:number,top:number):void {
   const scroller=this.view.scrollDOM;
   scroller.scrollLeft=left;scroller.scrollTop=top;
-  this.scrollExpansion?.rebase(scroller.scrollLeft,scroller.scrollTop);
+  const keptLeft=scroller.scrollLeft,keptTop=scroller.scrollTop;
+  const part=(want:number,kept:number,max:number):number=>{
+   const d=want-kept;
+   return Math.abs(d)<1&&!(kept<=0&&want<0)&&!(kept>=max&&want>max)?d:0;
+  };
+  // `== null`, not `=== null`: a class field initialiser does not run for an object made with `Object.create`, which
+  // is how the unit rigs build one.
+  const x=this.hostTransformScale==null?0:part(left,keptLeft,scroller.scrollWidth-scroller.clientWidth);
+  const y=this.hostTransformScale==null?0:part(top,keptTop,scroller.scrollHeight-scroller.clientHeight);
+  this.setScrollResidual(x,y,keptLeft,keptTop);
+  this.scrollExpansion?.rebase(keptLeft,keptTop);
+ }
+
+ /** Records the residual and rewrites the host's transform when it changed; a whole target writes no translate. */
+ private setScrollResidual(x:number,y:number,left:number,top:number):void {
+  const r=this.scrollResidual,changed=(r?.x??0)!==x||(r?.y??0)!==y;
+  this.scrollResidual={x,y,left,top};
+  if(changed&&this.hostTransformScale!=null&&this.viewportLayout)this.view.dom.style.transform=this.hostTransform(this.hostTransformScale);
+ }
+
+ /** The transform form's host transform at factor k: the theme's own, then the scroll residual, then the scale. */
+ private hostTransform(k:number):string {
+  const layout=this.viewportLayout!,base=layout.baseTransform!=="none"?layout.baseTransform+" ":"";
+  const x=this.scrollResidual?.x??0,y=this.scrollResidual?.y??0;
+  return `${base}${x!==0||y!==0?`translate(${-x*k}px, ${-y*k}px) `:""}scale(${k})`;
  }
 
  /**
@@ -9241,6 +9937,40 @@ export class InkOverlayPlugin {
  }
 
  /**
+  * THE FORM THE HOST IS IN at the camera's own factor `k`, one rule on every platform. Above 1 the transform form:
+  * the zoom form lays the text out again at the zoomed font size with whole-px glyph metrics, and the glyphs move
+  * against the ink, which scales exactly (0.54 CSS px at 1.79 on a 1.8257 display; the transform form keeps both
+  * within 0.05 note px). At or below 1 the zoom form, where the engine has it. Before this the form above 1 hung on
+  * the read-back's spelling of the gesture's first factor: random per gesture on Blink, desktop and mobile alike.
+  * Every reader that asks which form is on the host asks here, at the same k the box write used.
+  */
+ private zoomFormAt(k:number):boolean {
+  return this.hostZoomSupported()&&!(k>1+SCALE_EPSILON);
+ }
+
+ /**
+  * THE SCROLLER'S BAR KEEPS ITS 100 PERCENT WIDTH at every note zoom (Alan, 2026-10-02: thick zoomed in). Obsidian's
+  * styled bar (`body.styled-scrollbars ::-webkit-scrollbar`, every desktop platform but macOS) is sized in the
+  * scroller's own px, so both host forms scaled it with the note: 21.5 CSS px at 1.79 and 6 at 0.5 for 12. The factor
+  * returned here is written on the host with the `handwriting-scrollbar-unscaled` token, and the stylesheet sizes the
+  * bar by it, so the bar is `scrollbar / k` local px under either form. Null at 100 percent (the theme's rules stand
+  * untouched), on mobile, and where Obsidian draws native bars (macOS), which the rule does not reach. A class read,
+  * no layout.
+  */
+ private scrollbarUnscaleAt(k:number):number|null {
+  if(Math.abs(k-1)<=SCALE_EPSILON||Platform.isMobile)return null;
+  return this.view.dom.ownerDocument?.body?.classList.contains("styled-scrollbars")?1/k:null;
+ }
+
+ /** The scrollbar in host-local px at `k`, from its 100 percent width: kept at screen size under the zoom form and under the unscaled bar, scaled with the note otherwise. */
+ private scrollbarLocalAt(bar:number,k:number):number {
+  return this.zoomFormAt(k)||this.scrollbarUnscaleAt(k)!==null?bar/k:bar;
+ }
+
+ /** Whether the host carries `handwriting-scrollbar-unscaled`, asked by the `editorAttributes` facet for the reason `noteViewportOwnLines` gives. */
+ noteScrollbarUnscaled():boolean {return this.viewportLayout!==null&&this.scrollbarUnscale!==null;}
+
+ /**
   * The five ink canvases' layer boxes, from the band box and scale already
   * cached on the overlay - the same `canvasLayerBox` the reallocation path
   * calls, with no read of its own, so it is safe on a frame that owns the
@@ -9249,12 +9979,13 @@ export class InkOverlayPlugin {
   */
  private placeCanvasLayers():void {
   if(!(this.cssWidth>0)||!(this.cssHeight>0))return;
-  const box=canvasLayerBox(this.cssWidth,this.cssHeight,this.cssScale,this.hostZoomSupported());
+  const raster=rasterScale(this.cssScale,this.pinchScaleNow,SCALE_EPSILON);
+  const box=canvasLayerBox(this.cssWidth,this.cssHeight,raster,this.zoomFormAt(this.pinchScaleNow));
   for(const c of [this.committedCanvas,this.wetCanvas,this.highlightCanvas,this.highlightWetCanvas]) {
    c?.setCssStyles({width:`${box.width}px`,height:`${box.height}px`,transform:box.transform,transformOrigin:box.transform?"0 0":""});
   }
-		this.tail?.placeInline(this.cssScale, this.hostZoomSupported());
-		this.wet?.placeWetTile?.(this.cssScale, this.hostZoomSupported());
+		this.tail?.placeInline(raster, this.zoomFormAt(this.pinchScaleNow));
+		this.wet?.placeWetTile?.(raster, this.zoomFormAt(this.pinchScaleNow));
  }
 
  private applyViewportBox(next:number,deferPaper=false):void {
@@ -9314,7 +10045,13 @@ export class InkOverlayPlugin {
   this.columnRestMargin=this.pinchPreview||!layout.sizerColumn?null:this.columnRestCentred(next,layout.externalScale*next);
   // A theme that centres its own lines (ownLines) takes the same frozen inset as a sizer column; the stylesheet
   // applies it to the LINE there (styles.css, the own-lines rule) so the column stops re-centring in the widened host.
-  if(layout.columnLocal!==null)host.style.setProperty("--handwriting-column-margin-left",`${Math.max(0,this.columnRestMargin??(layout.sizerColumn||layout.ownLines?this.columnMarginLocal(layout)!:0))}px`);
+  if(layout.columnLocal!==null){
+   const margin=`${Math.max(0,this.columnRestMargin??(layout.sizerColumn||layout.ownLines?this.columnMarginLocal(layout)!:0))}px`;
+   // A changed margin moves the sizer, so the gutters' counter translate is re-read on the next pan write. Only a
+   // change: this runs every preview frame, and the re-read costs a style and layout read.
+   if(host.style.getPropertyValue("--handwriting-column-margin-left")!==margin)this.panGuttersMode=null;
+   host.style.setProperty("--handwriting-column-margin-left",margin);
+  }
 
   // THE AUTO TERM the frozen column is clamped against, as a number: the
   // scroller's content width at this scale minus the line width, halved.
@@ -9322,11 +10059,19 @@ export class InkOverlayPlugin {
   // and written in this same batch before anything reads, so a preview frame
   // keeps its one flush. On the zoom host the host is layout.width/next local
   // px wide and the scrollbar keeps its screen size (scrollbar/next local); on
-  // the transform host the scrollbar is local like everything else. At k = 1
+  // the transform host so does Obsidian's styled bar, unscaled below, and any
+  // other bar is local like everything else (scrollbarLocalAt). At k = 1
   // both are the engine's own centring, so the freeze stays invisible at 100%.
+  // The bar's width goes on the host in the same write as the centring that subtracts it, so the column and the
+  // scroller's client box agree on every frame (scrollbarUnscaleAt).
+  const unscale=this.scrollbarUnscaleAt(next);
+  this.scrollbarUnscale=unscale;
+  const unscaleValue=unscale===null?"":String(unscale);
+  if(host.style.getPropertyValue("--handwriting-scrollbar-unscale")!==unscaleValue){if(unscale===null)host.style.removeProperty("--handwriting-scrollbar-unscale");else host.style.setProperty("--handwriting-scrollbar-unscale",unscaleValue);}
+  if(host.classList.contains("handwriting-scrollbar-unscaled")!==(unscale!==null))host.classList.toggle("handwriting-scrollbar-unscaled",unscale!==null);
   const auto=layout.columnAuto;
   const autoLeft=!(layout.sizerColumn||layout.ownLines)?0
-   :auto?Math.max(0,(layout.width/next-auto.fixed-(this.hostZoomSupported()?auto.scrollbar/next:auto.scrollbar)-auto.lineWidth)/2)
+   :auto?Math.max(0,(layout.width/next-auto.fixed-this.scrollbarLocalAt(auto.scrollbar,next)-auto.lineWidth)/2)
    :Math.max(0,this.columnMarginLocal(layout)??0);
   const autoValue=`${autoLeft}px`;
   if(host.style.getPropertyValue("--handwriting-column-auto-left")!==autoValue)host.style.setProperty("--handwriting-column-auto-left",autoValue);
@@ -9342,9 +10087,8 @@ export class InkOverlayPlugin {
   // is cleared in the same write: a scale under a zoom would shrink twice.
   // The clear runs BOTH ways - the fallback clears a zoom the same way - so
   // neither branch can inherit the other's shrink and land at k squared. The
-  // cached gate means production never crosses between them; only code that
-  // changes the feature query's answer at runtime could, and a host shrunk
-  // twice then reports a coordinate fault that code caused, not the overlay.
+  // host crosses between them at k = 1 (zoomFormAt), and the crossing frame
+  // is written whole by one branch, never by both.
   // The PRODUCT, not `next`: the host's own factor is part of the scale the
   // camera measured, and a bare `next` would drop it. With no zoom of its own
   // the factor is 1 and the written string is what it always was.
@@ -9358,12 +10102,14 @@ export class InkOverlayPlugin {
   // only when there was one: a host with no inline zoom is left with the
   // property removed, which is what the clear already did.
   const fallback=():void=>{
-   host.setCssStyles({width:`${layout.width/next}px`,height:`${layout.height/next}px`,zoom:"",transform:`${layout.baseTransform!=="none"?layout.baseTransform+" ":""}scale(${next})`,transformOrigin:"0 0"});
+   this.hostTransformScale=next;
+   host.setCssStyles({width:`${layout.width/next}px`,height:`${layout.height/next}px`,zoom:"",transform:this.hostTransform(next),transformOrigin:"0 0"});
    const saved=layout.styles.get("zoom");
    if(saved?.value)host.style.setProperty("zoom",saved.value,saved.priority);
   };
-  if(this.hostZoomSupported()) {
+  if(this.zoomFormAt(next)) {
    const want=layout.baseZoom*next;
+   this.hostTransformScale=null;this.scrollResidual={x:0,y:0,left:0,top:0};
    host.setCssStyles({width:`${layout.width/next}px`,height:`${layout.height/next}px`,zoom:String(want),transform:base,transformOrigin:base?"0 0":""});
    // THE PRIORITY THE HOST'S OWN DECLARATION HAD. The bulk write above is a
    // camelCase assignment, which cannot carry `!important`: on a host whose
@@ -9397,7 +10143,13 @@ export class InkOverlayPlugin {
    if(layout.zoomVerified!==true&&Math.abs(next-1)>SCALE_EPSILON) {
     layout.zoomVerified=true;
     const got=Number.parseFloat(this.winRef.getComputedStyle(host).zoom);
-    if(Number.isFinite(got)&&Math.abs(got-want)>1e-6){
+    // RELATIVE, and wider than the engine's spelling. Chromium serialises the
+    // computed zoom to six significant digits, at most 5e-6 of the value off:
+    // the first factor of a pinch to 2.5 is sqrt(2.5) = 1.5811388, read back
+    // as "1.58114", 1.2e-6 off. An absolute 1e-6 called that a write that did
+    // not take and moved the note to the transform form for the life of the
+    // overlay. A sheet that holds another factor is off by far more than 1e-5.
+    if(Number.isFinite(got)&&Math.abs(got-want)>1e-5*Math.abs(want)){
      this.hostZoomSupport=false;fallback();
      // The five canvases were placed for the zoom form - the plain band box,
      // no transform - and the host has just moved to the other one, where the
@@ -9410,12 +10162,19 @@ export class InkOverlayPlugin {
    }
   }
   else fallback();
+  // A CROSSING OF k = 1 moves the host to the other form, and the five canvases were placed for the one it left (the
+  // layer box under a transform below 1, the grids' host flag). Re-placed from the cached box and scale, no DOM read,
+  // as the read-back's own fallback does. The first write only records the form.
+  const zoomNow=this.zoomFormAt(next);
+  if(this.hostZoomWritten!==null&&this.hostZoomWritten!==undefined&&this.hostZoomWritten!==zoomNow)this.placeCanvasLayers();
+  this.hostZoomWritten=zoomNow;
   // The pan is stored in PAINTED px and written in the children's own units, so
   // the scale it is divided by has just changed underneath it. Re-stamping here
   // costs two style writes and no read, and is what stops a frame being painted
-  // with the previous scale's quotient. The host's own transform above is scale
-  // only: the pan is never written here, because this element contains the
-  // scroller and moving it takes the hit surface off the pane.
+  // with the previous scale's quotient. The host's own transform above is the
+  // scale and, in the transform form, the scroll residual under a host px: the
+  // pan is never written here, because this element contains the scroller and
+  // moving it takes the hit surface off the pane.
   if(this.panX()!==0||this.panY()!==0)this.writeViewportPan(deferPaper);
   // With no pan, a preview frame still carries the snap's residual out of the paper.
   else if(this.pinchPreview&&(this.paperSnapResidual.x!==0||this.paperSnapResidual.y!==0)){if(deferPaper)this.previewPaperBoxDirty=true;else this.writePaperPan();}
@@ -9564,11 +10323,15 @@ export class InkOverlayPlugin {
   const path=this.filePath();
   const on=canvasForNote(path,scrollExpansionEnabled);
   const was=this.canvasMode;
+  // A zoom gesture in flight ends while the canvas is still on: once it is off, pinch() drops every phase, the end
+  // included, and a preview left up then stays up with the note reading busy. The ctrl+wheel run ends on its own
+  // anchor; a two-finger pinch, or a lift's give still easing back, ends here where it stands. The global setter
+  // ends every wheel run before it calls this; the per-note path (a frontmatter change) did not.
+  if(!on) this.endZoomGestureInFlight();
   this.canvasMode=on;
   this.router?.setCanvasMomentumDisabled(on);
   this.canvasOffResetPending=false;
   if(!on){
-   this.endWheelZoomRun();
    // The room the canvas granted sideways is no longer asked for: owe the shrink for THIS note, the way
    // the global setter owes it for every note.
    if(was&&path) surfaceExtents.oweShrinkX(path);
@@ -9579,6 +10342,15 @@ export class InkOverlayPlugin {
    this.retryCanvasOffReset();
   }
   if(was!==on) this.scheduleRepaint("canvas-mode");
+ }
+ /** End a wheel run, a two-finger pinch or an easing give where it stands; see applyCanvasMode. */
+ private endZoomGestureInFlight():void {
+  // Read through `?.` and `??`: a unit rig built with Object.create never runs the initialisers.
+  if(this.wheelZoomRun?.isLive){this.endWheelZoomRun();return;}
+  if((this.pinchRefScale??null)===null&&!this.pinchGive) return;
+  const anchor=this.pinchAnchor,constraint=anchor?.constraint;
+  const at={x:constraint?.clientX??anchor?.targetX??anchor?.focalX??Number.NaN,y:constraint?.clientY??anchor?.targetY??anchor?.focalY??Number.NaN};
+  this.pinch("end",1,at);
  }
  /** A canvas-off reset to 100 percent that could not run yet; see applyCanvasMode. */
  private canvasOffResetPending=false;
@@ -9722,7 +10494,10 @@ export class InkOverlayPlugin {
   const finish=()=>{settled();if(hold&&hold.generation===generation){if(hold.outcome==="pending")hold.outcome="cancelled";if(this.panAnchorHold===hold)this.retirePanSettle("its settle measure lost ownership or the scroll moved");}};
   // The first commit on a fresh editor has no resting margin to measure the debt from: the baseline is the margin the
   // page is showing now, at the scale it is leaving.
-  if(this.restingColumnMargin===null&&layout.columnLocal!==null&&!this.pinchPreview)this.restingColumnMargin=this.appliedColumnMargin(previous);
+  // What the page is showing is read off the painted column, before this commit writes anything; the law at the scale
+  // being left stands in where nothing can be read.
+  const shownMargin=layout.columnLocal!==null&&!this.pinchPreview?this.paintedColumnMargin():null;
+  if(this.restingColumnMargin===null&&layout.columnLocal!==null&&!this.pinchPreview)this.restingColumnMargin=shownMargin??this.appliedColumnMargin(previous);
   this.pinchScaleNow=next;this.cssScale=effective;this.scale=effective*this.fontZoom;
   // At the new zoom the pitch plans the same; the thickness can change and the phase moves onto the new device px grid.
   this.updatePaperSpacing();
@@ -9746,7 +10521,7 @@ export class InkOverlayPlugin {
   // Recomputed here against the grant this commit just made, BEFORE the frame is presented, so no stale margin is ever
   // carried out of a commit and there is usually nothing left to pay. What the page was actually showing - the last
   // commit's final margin - is what the debt below is measured against.
-  this.restColumnAgainstCurrentGrant(next,effective);
+  this.restColumnAgainstCurrentGrant(next,effective,shownMargin);
   // THE PAGE BOX INSIDE THE PANE, folded into this commit's own scroll target once the box and the extent are
   // written, because it is read off both. Written back onto `target` deliberately: this commit has four scroll
   // writes (here, the settle measure's re-anchor, and the two convergence retries) and they all write the same
@@ -9765,7 +10540,9 @@ export class InkOverlayPlugin {
   // already closed elsewhere, and the rest belongs in the margin, which now holds it.
   // The fit predicate itself, now that there is no centred rest to stand in for it.
   if (this.columnFitsPane(next, effective)) target.left = 0;
-  this.setViewportScroll(target.left,target.top);this.reanchorPan();
+  // ONE SYNC, AFTER THE PAN WRITE. reanchorPan decides the settle's ease and starts it; the sync below then re-pins
+  // the band to the committed scroll and widens it by the ease on the side the ease uncovers (syncBand), one bake.
+  this.setViewportScroll(target.left,target.top);if(diagnosticsEnabled())scrollProbeExtent(`settle scroll target ${target.left.toFixed(2)},${target.top.toFixed(2)} actual ${this.view.scrollDOM.scrollLeft.toFixed(2)},${this.view.scrollDOM.scrollTop.toFixed(2)}`);this.reanchorPan();if(hold&&diagnosticsEnabled())this.traceSettlePaper("measure commit");
   // The target scroll can leave the old raster band, especially on zoom-out.
   // Finish its coverage before the router can map and lock the next pen down.
   if(this.syncBand()!=="none")this.handleResize();
@@ -9791,7 +10568,7 @@ export class InkOverlayPlugin {
     // too. Load-bearing: this write runs inside CodeMirror's measure (its update
     // phase), where a carried commit's dispatch would throw; do not remove.
     this.commitDepth=(this.commitDepth||0)+1;
-    try{this.handleResize();this.updateExtent(true,hold?.expansion??undefined);this.setViewportScroll(target.left,target.top);this.reanchorPan();
+    try{this.handleResize();this.updateExtent(true,hold?.expansion??undefined);this.setViewportScroll(target.left,target.top);if(diagnosticsEnabled())scrollProbeExtent(`settle scroll target ${target.left.toFixed(2)},${target.top.toFixed(2)} actual ${this.view.scrollDOM.scrollLeft.toFixed(2)},${this.view.scrollDOM.scrollTop.toFixed(2)}`);this.reanchorPan();if(diagnosticsEnabled())this.traceSettlePaper(`measure attempt ${hold.attempts+1}`);
     if(this.syncBand()!=="none")this.handleResize();}finally{this.commitDepth--;}
     this.scheduleRepaint();
     const after=geometry();
@@ -10025,6 +10802,10 @@ export class InkOverlayPlugin {
 		// exceptions live on the transient canvas, independently of this mark.
 		if (tipMode() === "space") {
 			const half = visualToNote(7, cursorScale);
+			// The pan rule follows the space rule in styles.css at the same
+			// specificity, so a pan class left from a pan hover wins: solid
+			// border and ring shadow instead of the dashed seam.
+			this.penCursorEl.classList.remove(PAN_CURSOR_CLASS);
 			this.penCursorEl.classList.add(SPACE_CURSOR_CLASS);
 			this.penCursorEl.setCssStyles({
 				width: `${half * 2}px`,
@@ -10443,6 +11224,11 @@ export class InkOverlayPlugin {
 	}
 
 	private selectionBounds(): BBox | null {
+		const frozen = this.dragBox;
+		if (frozen && this.dragTotal && this.selection.size === frozen.size) {
+			const { box } = frozen;
+			return { x: box.x + this.dragTotal.dx, y: box.y + this.dragTotal.dy, width: box.width, height: box.height };
+		}
 		return this.selection.bounds(this.strokesHere(), () => null, () => null);
 	}
 
@@ -10464,6 +11250,7 @@ export class InkOverlayPlugin {
 		) {
 			this.dragFrom = { x: w.x, y: w.y };
 			this.dragTotal = { dx: 0, dy: 0 };
+			this.dragBox = { box: { ...bounds }, size: this.selection.size };
 			this.dragIds = [...this.selection.strokeIds];
 			const here = this.filePath();
 			this.dragHistoryIdentity = here ? inlineInk.captureHistoryIdentity(here) : null;
@@ -10504,15 +11291,23 @@ export class InkOverlayPlugin {
 			if (this.selection.isEmpty) return;
 			const w = this.camera.screenToWorld(last.x, last.y);
 			const dx = w.x - this.dragFrom.x;
-			const dy = w.y - this.dragFrom.y;
 			// Live drag only translates coordinates in the store; the history
 			// op is pushed once at release, naming the ids frozen at pen-down,
 			// which are also the ids moved here.
 			const before = this.selectionBounds();
+			// THE TOP IS A WALL. No scroll room exists above the note's top, so
+			// ink dragged past it could not be seen, lassoed or fitted again
+			// (Alan: no infinite space up and left; the left edge is not walled
+			// here). The selection stops with its box at the top; ink already
+			// above it may go down, never further up.
+			const dy = Math.max(w.y - this.dragFrom.y, topWallRoom(before));
 			this.moveLive(path, this.dragIds, dx, dy);
 			this.dragTotal.dx += dx;
 			this.dragTotal.dy += dy;
-			this.dragFrom = w;
+			// The pen's return is not a jump: the grab point follows only the
+			// distance the ink moved, so the ink resumes once the pen is back
+			// at the point where it stopped.
+			this.dragFrom = { x: w.x, y: this.dragFrom.y + dy };
 			let moved: BBox[] | undefined;
 			if (before) {
 				moved = [before, { x: before.x + dx, y: before.y + dy, width: before.width, height: before.height }];
@@ -10557,6 +11352,7 @@ export class InkOverlayPlugin {
 		const strokeIds = this.dragIds;
 		this.dragFrom = null;
 		this.dragTotal = null;
+		this.dragBox = null;
 		this.dragIds = [];
 		this.dragHistoryIdentity = null;
 		const path = this.filePath();
@@ -10684,9 +11480,15 @@ export class InkOverlayPlugin {
 		return nearestSpaceBoundary(y,(at,direction)=>this.spaceTextBoundary(at,direction));
 	}
 
-	private previewSpace(plan:SpaceBoundary):NonNullable<InkOverlayPlugin["spacePreview"]> {
+	private previewSpace(plan:SpaceBoundary,known?:ReturnType<InsertSpaceRows["get"]>):NonNullable<InkOverlayPlugin["spacePreview"]> {
 		const strokes=this.strokesHere();
-		const rows=(this.spaceRowsCache??=new InsertSpaceRows()).get(strokes);
+		const rows=known??(this.spaceRowsCache??=new InsertSpaceRows()).get(strokes);
+		// Below the text every hover sample is a new plan. While the rows are the same (the cache keeps its array while the
+		// strokes and their revisions do) and none changes side of the seam, the lists are the last preview's; rebuilding them
+		// filters every stroke.
+		const prior=this.spacePreview;
+		if(prior&&prior.rows===rows&&sameRowSides(rows,prior.plan.y,plan.y))
+			return {plan,doc:this.view.state.doc,moving:prior.moving,staying:prior.staying,rows};
 		const moving=strokeIdsBelow(strokes,plan.y,rows),ids=new Set(moving);
 		const staying=rows.filter(row=>row.top<plan.y&&row.bottom>plan.y)
 			.flatMap(row=>row.ids).filter(id=>!ids.has(id));
@@ -10706,6 +11508,11 @@ export class InkOverlayPlugin {
 			// is gone by then.
 			if(!this.container)return;
 			if(this.spaceHoverY===null||tipMode()!=="space")return;
+			// A live drag keeps the set it froze at pen-down, so the frame has
+			// nothing to read, plan or draw: spaceMove draws once per sample.
+			if(this.spacePlan&&this.spaceLineY!==null)return;
+			// One ask of the rows cache per frame, handed to everything below.
+			const rows=(this.spaceRowsCache??=new InsertSpaceRows()).get(this.strokesHere());
 			// A frame that would draw what the last one drew is skipped: the
 			// pen sliding along a line re-planned the seam and re-stroked every
 			// previewed stroke at hover rate. Same hover y skips the plan too;
@@ -10715,7 +11522,7 @@ export class InkOverlayPlugin {
 			const last=this.spaceFeedbackKey;
 			const cam=this.camera.snapshot;
 			const same=(k:NonNullable<typeof last>)=>k.doc===this.view.state.doc&&k.mode===this.mode&&
-				k.rows===this.spaceRowsCache?.get(this.strokesHere())&&k.x===cam.x&&k.y===cam.y&&k.zoom===cam.zoom&&
+				k.rows===rows&&k.x===cam.x&&k.y===cam.y&&k.zoom===cam.zoom&&
 				k.w===this.cssWidth&&k.h===this.cssHeight&&k.preview===this.spacePreview;
 			if(last&&last.hoverY===this.spaceHoverY&&same(last))return;
 			if(this.mode!=="space"){
@@ -10725,23 +11532,24 @@ export class InkOverlayPlugin {
 					last.hoverY=this.spaceHoverY;
 					return;
 				}
-				this.spacePreview=plan?this.previewSpace(plan):null;
+				this.spacePreview=plan?this.previewSpace(plan,rows):null;
 			}
-			this.redrawSelectionUI();
+			this.redrawSelectionUI(rows);
 			this.spaceFeedbackKey={hoverY:this.spaceHoverY,doc:this.view.state.doc,mode:this.mode,
-				rows:this.spaceRowsCache?.get(this.strokesHere()),x:cam.x,y:cam.y,zoom:cam.zoom,
+				rows,x:cam.x,y:cam.y,zoom:cam.zoom,
 				w:this.cssWidth,h:this.cssHeight,preview:this.spacePreview};
 		});
 	}
 
-	private clearSpaceFeedback():void {
+	/** Drop the hover feedback. `redraw` false: the caller draws the selection layer itself before it returns. */
+	private clearSpaceFeedback(redraw=true):void {
 		if(this.spaceFeedbackRaf!=null)this.winRef.cancelAnimationFrame(this.spaceFeedbackRaf);
 		this.spaceFeedbackRaf=null;
 		this.spaceFeedbackKey=null;
 		this.spaceHoverY=null;
 		const hadPreview=!!this.spacePreview;
 		this.spacePreview=null;
-		if(hadPreview)this.redrawSelectionUI();
+		if(hadPreview&&redraw)this.redrawSelectionUI();
 	}
 
 	private spaceDown(sample: PenSample, _ev: PointerEvent): void {
@@ -10768,6 +11576,8 @@ export class InkOverlayPlugin {
 		// membership cannot change mid-drag, so the damage region is just
 		// that box swept by the distance travelled.
 		this.spaceIds = [...this.spacePreview.moving];
+		this.spaceRows = this.spacePreview.rows;
+		this.spaceSteps = [];
 		this.spaceBounds = boundsOf(here, this.spaceIds);
 		if (this.spaceIds.length === 0 && !this.view.state.doc.sliceString(plan.from).trim()) {
 			new Notice("Handwriting: no content below the line");
@@ -10782,14 +11592,20 @@ export class InkOverlayPlugin {
 		const path = this.filePath();
 		if (!path) return;
 		const w = this.camera.screenToWorld(last.x, last.y);
-		const dy = w.y - this.spaceFromY;
+		// The same wall as the lasso drag, for the ink below the seam; the
+		// release closes the text by the distance the ink actually moved.
+		const dy = Math.max(w.y - this.spaceFromY, topWallRoom(this.spaceBounds));
 		if (dy === 0) return;
 		// Live drag only translates coordinates in the store; the history op
 		// is pushed once at release with the total (the lasso drag's shape).
 		// Vertical only: the divider is a seam, not a joystick.
 		this.moveLive(path, this.spaceIds, 0, dy);
+		// The optional chain serves only the test harnesses that build an overlay
+		// off the prototype without this field; in the app it is always set.
+		// A missing step only makes the commit's shift refuse.
+		this.spaceSteps?.push(dy);
 		this.spaceTotalDy += dy;
-		this.spaceFromY = w.y;
+		this.spaceFromY += dy;
 		// The live seam follows raw displacement. The origin and rounded
 		// release destination are drawn separately from the frozen plan.
 		if (this.spaceLineY !== null) this.spaceLineY += dy;
@@ -10807,7 +11623,12 @@ export class InkOverlayPlugin {
 		}
 		this.scheduleRepaint("partial");
 		this.repaintPath(path, swept);
-		this.redrawSelectionUI();
+		// The queued repaint redraws the seam and preview with the ink it
+		// moves (repaint's selection chrome step), so drawing them here too
+		// stroked every previewed stroke twice a frame. Draw here only when
+		// no repaint is queued, or when a pinch holds the raster and that
+		// frame returns before the chrome.
+		if (!this.repaintQueued || this.pinchPreview) this.redrawSelectionUI();
 	}
 
 	private spaceUp(): void {
@@ -10815,6 +11636,10 @@ export class InkOverlayPlugin {
 		const applied = this.spaceTotalDy;
 		const strokeIds = this.spaceIds;
 		const plan = this.spacePlan;
+		const rows = this.spaceRows ?? null, steps = this.spaceSteps ?? [];
+		const bounds = this.spaceBounds;
+		this.spaceRows = null;
+		this.spaceSteps = [];
 		// This is the normal commit path (also native cancel/blur). Teardown
 		// must never undo its movement again after the paired transaction.
 		this.spaceHistoryIdentity = null;
@@ -10840,19 +11665,50 @@ export class InkOverlayPlugin {
 		const change = this.spaceTextChange(plan, applied);
 		const dy = change.dy;
 		const correction = dy - applied;
-		if (correction !== 0) inlineInk.moveStrokes(path, strokeIds, 0, correction);
+		// The drag already painted the ink where the pen left it, and the text
+		// edit below cannot move ink (updateInner repaints it as "scroll"), so
+		// the release repaints only the snap correction's sweep, as a drag move
+		// does. A whole repaint here stroked every stroke on the canvas (18 ms
+		// on a heavy note) to show the ink where it already was.
+		let swept: BBox[] = [];
+		if (correction !== 0) {
+			this.moveLive(path, strokeIds, 0, correction);
+			steps.push(correction);
+			if (bounds) {
+				swept = [sweptRect(bounds, correction)];
+				this.damage.addRect(swept[0]!);
+			} else {
+				this.damage.addAll();
+			}
+		}
+		const repaintMoved = () => {
+			this.extentArmAsked = true;
+			this.scheduleRepaint("partial");
+			if (swept.length) this.repaintPath(path, swept);
+			else if (correction !== 0) this.repaintPath(path);
+		};
 		if (dy === 0) {
 			// Nothing moved in the end, and the correction above already put
 			// the live drag back: no op worth recording. But a save queued
 			// mid-drag may have serialised the shifted strokes, so the restored
 			// state has to reach the disk too, the way rollbackSpaceMove does.
 			if (correction !== 0 && strokeIds.length) inlineInk.save(path);
-			this.scheduleRepaint();
-			this.repaintPath(path);
+			repaintMoved();
 			this.redrawSelectionUI();
 			return;
 		}
 		if(strokeIds.length)inlineInk.save(path);
+		// Space opened: the moved rows shift in the cache by the same steps,
+		// so the next hover does not regroup every point in the note. The
+		// shift runs in a task after the release paint (a frame, then a
+		// timeout), so the release frame paints the landed ink and nothing
+		// else; a hover that comes first runs it in its own ask. A failed
+		// dispatch below moves the ink back, and that move's revision makes
+		// the shift refuse and the next ask rebuild.
+		if (dy > 0 && rows) {
+			this.spaceRowsCache.queueShift(rows, strokeIds, steps);
+			this.winRef.requestAnimationFrame(() => this.winRef.setTimeout(() => this.spaceRowsCache.runQueued(this.strokesHere()), 0));
+		}
 		const op = strokeIds.length?this.stampInkIdentity({ type: "move", path, strokeIds, dx: 0, dy }):null;
 		try {
 			this.view.dispatch({
@@ -10862,9 +11718,20 @@ export class InkOverlayPlugin {
 			});
 		} catch (err) {
 			console.error("[handwriting] insert-space dispatch failed", err);
+			// The text did not change, so the ink goes back where the drag began,
+			// and the restored state reaches the disk as rollbackSpaceMove does.
+			if (strokeIds.length) {
+				inlineInk.moveStrokes(path, strokeIds, 0, -dy);
+				inlineInk.save(path);
+				this.frontierCache.invalidate(path);
+			}
+			new Notice("Handwriting: could not open the space, so the ink is back where it was.");
+			this.scheduleRepaint();
+			this.repaintPath(path);
+			this.redrawSelectionUI();
+			return;
 		}
-		this.scheduleRepaint();
-		this.repaintPath(path);
+		repaintMoved();
 		this.redrawSelectionUI();
 	}
 
@@ -10972,11 +11839,60 @@ export class InkOverlayPlugin {
 		this.tailCanvas?.setCssStyles({ opacity: highlighter ? String(HIGHLIGHTER_ALPHA) : "1" });
 	}
 
-	private redrawSelectionUI(): void {
+	/**
+	 * Shrink the tail from the whole band to the empty backing in a task after the frame (a frame, then a timeout), not in the
+	 * frame that dropped the chrome: the shrink reallocates the canvas, about 4 ms at an insert space release on the test rig
+	 * whatever the note. Skipped when a stroke is live or chrome is back by then; the next redraw without either asks again.
+	 */
+	private queueTailShrink(): void {
+		if (this.tailShrinkQueued) return;
+		this.tailShrinkQueued = true;
+		this.winRef.requestAnimationFrame(() => this.winRef.setTimeout(() => this.shrinkTailNow(), 0));
+	}
+
+	/** The queued tail shrink (queueTailShrink). */
+	private shrinkTailNow(): void {
+		this.tailShrinkQueued = false;
+		if (!this.tail || !this.container || this.builder) return;
+		const preview = this.spacePreview;
+		if ((this.lassoActive && this.lassoPts.length > 1) || (preview !== null && preview.doc === this.view.state.doc) ||
+			this.selectionBounds() !== null || this.tail.inlineGrid?.mode !== "full") return;
+		this.tail.prepareLive(null, null);
+	}
+
+	/**
+	 * The preview's strokes to draw: on hover, the last list while the preview's lists and rows (the rows cache keeps its array
+	 * while the strokes and their revisions do), the camera and the size hold, so a hover frame skips the walk of every stroke.
+	 * A live drag moves strokes under a frozen preview, so it builds every time.
+	 */
+	private spaceDrawItems(preview:NonNullable<InkOverlayPlugin["spacePreview"]>,cam:CameraState):{stroke:InkStroke;color:string}[] {
+		const l=this.spaceDrawList;
+		if(!this.spacePlan&&l&&l.moving===preview.moving&&l.staying===preview.staying&&l.rows===preview.rows&&l.x===cam.x&&l.y===cam.y&&
+			l.zoom===cam.zoom&&l.w===this.cssWidth&&l.h===this.cssHeight&&l.scale===this.cssScale)return l.items;
+		return this.buildSpaceDrawItems(preview,cam);
+	}
+
+	/** Walk the store once for the preview's strokes on screen (spaceDrawItems). */
+	private buildSpaceDrawItems(preview:NonNullable<InkOverlayPlugin["spacePreview"]>,cam:CameraState):{stroke:InkStroke;color:string}[] {
+		const moving=new Set(preview.moving),staying=new Set(preview.staying),items:{stroke:InkStroke;color:string}[]=[];
+		for(const stroke of this.strokesHere()){
+			const moves=moving.has(stroke.id);
+			if((moves||staying.has(stroke.id))&&this.tail.spaceStrokeOnScreen(cam,stroke,this.cssWidth,this.cssHeight,this.cssScale))
+				items.push({stroke,color:moves?SELECTION_COLOR:"#d98b00"});
+		}
+		this.spaceDrawList={moving:preview.moving,staying:preview.staying,rows:preview.rows,x:cam.x,y:cam.y,zoom:cam.zoom,
+			w:this.cssWidth,h:this.cssHeight,scale:this.cssScale,items};
+		return items;
+	}
+
+	private redrawSelectionUI(rows?: ReturnType<InsertSpaceRows["get"]>): void {
 		if (!this.tail) return;
 		// A repaint with no selection still needs a compact live head; an idle
 		// repaint releases the bitmap instead of restoring the whole band.
-		if(this.spacePreview&&!this.spacePlan&&this.spaceRowsCache.get(this.strokesHere())!==this.spacePreview.rows)this.spacePreview=null;
+		// The hover frame hands over the rows it just read; every other caller
+		// asks the cache itself, so a reload or erase under a hover still drops
+		// a preview of ink that is gone.
+		if(this.spacePreview&&!this.spacePlan&&(rows??this.spaceRowsCache.get(this.strokesHere()))!==this.spacePreview.rows)this.spacePreview=null;
 		const preview=this.spacePreview;
 		const bounds = this.selectionBounds();
 		const head = this.builder ? this.activeWet.head() : undefined;
@@ -10986,7 +11902,10 @@ export class InkOverlayPlugin {
 		this.tail.clearAll(this.cssWidth, this.cssHeight);
 		this.dressTail(this.builder !== null && this.activeWet === this.highlightWet);
 		const cam = this.camera.snapshot;
-		if (!fullUI) this.tail.prepareLive(head ? {
+		// With no head and the tail at its full size (the chrome just went), the shrink to the empty backing reallocates the canvas;
+		// it runs in a task after this frame, and the cleared full tail stands in until then.
+		if (!fullUI && !head && this.tail.inlineGrid?.mode === "full") this.queueTailShrink();
+		else if (!fullUI) this.tail.prepareLive(head ? {
 			cam, style: this.activeStyle, from: head.from, to: head.to,
 			pressure: head.pressure,
 			hwWorld: this.activeWet.liveHalfWidth(this.activeStyle, head.pressure),
@@ -10997,14 +11916,11 @@ export class InkOverlayPlugin {
 		// A reload/erase while hovering invalidates the affected-set promise.
 		// A live drag intentionally keeps its frozen set despite translations.
 		if (preview && preview.doc===this.view.state.doc) {
-			const moving=new Set(preview.moving),staying=new Set(preview.staying);
-			for(const stroke of this.strokesHere()){
-				if(moving.has(stroke.id)||staying.has(stroke.id))this.tail.drawSpaceStroke(
-					cam,stroke,moving.has(stroke.id)?SELECTION_COLOR:"#d98b00",this.cssWidth,this.cssHeight,this.cssScale);
-			}
+			for(const {stroke,color} of this.spaceDrawItems(preview,cam))
+				this.tail.drawSpaceStroke(cam,stroke,color,this.cssWidth,this.cssHeight,this.cssScale);
 			this.tail.drawSpaceDivider(cam,preview.plan.y,SELECTION_COLOR,this.cssWidth);
 			const label=preview.plan.blockFallback?"Block boundary":preview.plan.text===false?"Ink gap":"Text boundary";
-			this.tail.drawSpaceLabel(cam,preview.plan.y,label+(moving.size?" · blue ink moves":"")+(staying.size?" · amber ink stays":""),SELECTION_COLOR,this.cssScale);
+			this.tail.drawSpaceLabel(cam,preview.plan.y,label+(preview.moving.length?" · blue ink moves":"")+(preview.staying.length?" · amber ink stays":""),SELECTION_COLOR,this.cssScale);
 			if(this.spacePlan && this.spaceLineY!==null){
 				const {dy,lines}=this.spaceTextChange(this.spacePlan,this.spaceTotalDy);
 				const landing=this.spacePlan.y+dy;
@@ -11079,8 +11995,26 @@ export class InkOverlayPlugin {
 		const replayBand = this.bandSyncDeferred;
 		stripPenUp(this.mobileTools, this.noteZoomControls);
 		this.resetGestureState();
+		this.contactEndedWithoutLift(replayBand);
+	}
+
+	/**
+	 * The one tail for a contact that ends without a lift: a window blur, finger
+	 * ink turned into a pinch (both through strokeAbandoned) and undo with the
+	 * pen down (endLiveGestureForHistory). What the contact deferred runs now,
+	 * as the lift would have run it: the band update and the pane resize the
+	 * frozen frame skipped, and a zoom ease paused for the pen eases on to the
+	 * cap instead of standing past it until the watchdog. A pinch that starts on
+	 * the same fingers drops that ease itself (pinch, "start"), so the two do
+	 * not fight. Not in resetGestureState: a note switch and an unmount run that
+	 * too, and neither owes a replay.
+	 *
+	 * `replayBand` is read by the caller before resetGestureState clears it.
+	 */
+	private contactEndedWithoutLift(replayBand: boolean): void {
 		if (replayBand) this.scheduleRepaint("scroll");
 		this.replayDeferredResize();
+		if (this.pinchGive?.paused) this.resumePinchGive();
 		this.wet.clear(this.cssWidth, this.cssHeight);
 		this.highlightWet.clear(this.cssWidth, this.cssHeight);
 		// A teardown mid-handoff would otherwise strand the wet highlighter
@@ -11089,6 +12023,32 @@ export class InkOverlayPlugin {
 		this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
 		this.tail.clearAll(this.cssWidth, this.cssHeight);
 		this.tail.prepareLive(null, null);
+	}
+
+	/**
+	 * Undo or redo arrived with an erase, a selection drag or an insert-space
+	 * drag in flight (Ctrl+Z with the pen still down). Each changes the store
+	 * live and records its own step only at the lift, against a snapshot taken
+	 * at pen-down that the op is about to make stale. So the gesture is put
+	 * back and ended first, with the teardown a note switch uses for a gesture
+	 * torn down with the pen still down (update()'s path-change branch):
+	 * resetGestureState rolls the live change back and clears the gesture's
+	 * state (the selection too), and the router drops the rest of the contact.
+	 * The op then meets the strokes as history recorded them, and the lift has
+	 * nothing to record, so the redo stack survives. An ink stroke in flight
+	 * and a pan are left as they are: neither has changed the store.
+	 */
+	private endLiveGestureForHistory(): void {
+		if (this.mode !== "erase" && this.mode !== "lasso" && this.mode !== "space") return;
+		const replayBand = this.bandSyncDeferred;
+		this.resetGestureState();
+		this.stopFrameTicker();
+		// abandonActiveStroke never calls onPenUp (the router's contract), so the
+		// overlay's own state is reset above, before the router lets go.
+		if (this.router?.abandonActiveStroke()) {
+			stripPenUp(this.mobileTools, this.noteZoomControls);
+		}
+		this.contactEndedWithoutLift(replayBand);
 	}
 
 	/**
@@ -11159,6 +12119,12 @@ export class InkOverlayPlugin {
 		// leaving the lock held froze the NEXT note's camera and repaints
 		// until its first pen-down. A cancelled frame never leaks forward.
 		this.frame.cancel();
+		// A font reference adoption held for this contact runs now, after the
+		// cancel: while the frame is locked adoptStoredFontRef would hold it
+		// again. The stroke in flight is dropped here, so nothing is reframed;
+		// the note's ink takes its stored frame when the contact ends rather
+		// than jumping at some later lift.
+		this.releaseHeldFontRef();
 		this.bandSyncDeferred = false;
 		// A standing snap offer belongs to the note and the stroke it was made
 		// about, and this method is every way both of those go away: a file
@@ -11192,11 +12158,14 @@ export class InkOverlayPlugin {
 		this.lassoActive = false;
 		this.dragFrom = null;
 		this.dragTotal = null;
+		this.dragBox = null;
 		this.spaceLineY = null;
 		this.spaceIds = [];
 		this.spaceBounds = null;
 		this.spacePlan = null;
 		this.spaceTotalDy = 0;
+		this.spaceRows = null;
+		this.spaceSteps = [];
 		this.panLast = null;
 		// The gesture is over, so the device that started it stops answering
 		// for the wrappers. Reset here rather than at pen-up for the reason
@@ -11247,6 +12216,9 @@ export class InkOverlayPlugin {
 	 */
 	clearAllInk(path: string): number | null {
 		if (this.filePath() !== path) return null;
+		// An erase, selection drag or insert-space drag in flight records its step at the lift, after this one, and
+		// its teardown would put erased ink back: end it first, put back as undo does, so the wipe is the last step.
+		this.endLiveGestureForHistory();
 		const strokes = [...inlineInk.strokes(path)];
 		if (strokes.length === 0) return 0;
 		const indices = strokes.map((_, i) => i);
@@ -11335,7 +12307,7 @@ export class InkOverlayPlugin {
 		if (!path || this.selection.isEmpty) return 0;
 		const ids = new Set(this.selection.strokeIds);
 		const strokes = this.strokesHere().filter((s) => ids.has(s.id));
-		const n = copyInk(strokes, path);
+		const n = copyInk(strokes, path, inlineInk.fontRefPx(path));
 		if (n > 0) publishInkMarker(this.winRef);
 		return n;
 	}
@@ -11371,7 +12343,7 @@ export class InkOverlayPlugin {
 				: "Handwriting: click in the note to paste ink.");
 			return 0;
 		}
-		const strokes = pasteInk(path);
+		const strokes = pasteInk(path, inlineInk.fontRefPx(path));
 		if (strokes.length === 0) return 0;
 		inlineInk.applyAdd(path, strokes);
 		inlineInk.save(path);
@@ -11490,6 +12462,29 @@ export class InkOverlayPlugin {
 			const id = inlineInk.pageIdOf(op.path);
 			if (id) op = { ...op, pageId: id };
 		}
+		// Where the strokes stood, read now: both recorders publish after the
+		// store already holds the gesture's result.
+		if (op.type === "move" && op.from === undefined) {
+			const byId = new Map(inlineInk.strokes(op.path).map((s) => [s.id, s] as const));
+			const at = op.strokeIds.map((id) => byId.get(id)?.points[0]);
+			if (at.every((p) => p !== undefined)) {
+				const { dx, dy } = op;
+				op = { ...op, from: at.map((p) => ({ x: p.x - dx, y: p.y - dy })) };
+			}
+		} else if (op.type === "remove" && op.next === undefined && Array.isArray(op.indices) && op.indices.length === op.strokes.length) {
+			// A remove with no index list (an earlier shape) is left unstamped.
+			// The list before the removal, rebuilt from what stayed and where
+			// each removed stroke was; each stroke's neighbours are read from it.
+			const before: string[] = inlineInk.recordIds(op.path);
+			const indices = op.indices;
+			const order = op.strokes.map((s, i) => ({ id: s.id, at: indices[i]! })).sort((a, b) => a.at - b.at);
+			for (const { id, at } of order) before.splice(Math.min(Math.max(at, 0), before.length), 0, id);
+			// One pass for the positions: Delete all removes every stroke here.
+			const pos = new Map(before.map((id, i) => [id, i] as const));
+			const next = op.strokes.map((s) => before[pos.get(s.id)! + 1] ?? null);
+			const prev = op.strokes.map((s) => before[pos.get(s.id)! - 1] ?? null);
+			op = { ...op, next, prev };
+		}
 		return op;
 	}
 
@@ -11529,24 +12524,45 @@ export class InkOverlayPlugin {
 
 	/** Undo/redo handed us an op: apply it to the store and persist. */
 	private applyInkOp(op: InkOp): void {
+		this.endLiveGestureForHistory();
 		const path = this.opPath(op);
 		if (path === null) return;
 		if (path !== op.path) op = { ...op, path };
 		switch (op.type) {
-			case "add":
-				inlineInk.applyAdd(op.path, op.strokes, op.indices);
+			case "add": {
+				const strokes = op.strokes, took = removedByHistory.get(strokes);
+				const pick = (_: unknown, i: number): boolean => !took || took.has(strokes[i]!.id);
+				inlineInk.applyAdd(op.path, strokes.filter(pick), op.indices?.filter(pick), {
+					next: op.next?.filter(pick),
+					prev: op.prev?.filter(pick),
+				});
 				// applyAdd is silent by design (erase hot path); an undone
 				// remove is a gesture boundary, so the embeds hear it here.
 				notifyInkChanged(op.path);
 				break;
-			case "remove":
-				inlineInk.applyRemove(op.path, op.strokes.map((s) => s.id));
+			}
+			case "remove": {
+				const gone = inlineInk.applyRemove(op.path, op.strokes.map((s) => s.id));
+				removedByHistory.set(op.strokes, new Set(gone.map((g) => g.stroke.id)));
 				break;
+			}
 			case "move":
+				// Whole or not at all, and only where the step left them. Another
+				// pane may have taken a stroke out (its undo of the stroke) or
+				// already moved these strokes (its redo of a split puts back the
+				// same, already moved, pieces): applying anyway moves a part, or
+				// moves the same ink twice. The step is spent either way.
+				if (!inlineInk.holdsAll(op.path, op.strokeIds)) return;
+				if (op.from && !inlineInk.standsAt(op.path, op.strokeIds, op.from)) return;
 				inlineInk.moveStrokes(op.path, op.strokeIds, op.dx, op.dy);
 				inlineInk.save(op.path);
 				break;
-			case "replace":
+			case "replace": {
+				// Whole or not at all. A stroke this replace would take out is
+				// gone (another device erased or split it, and the sync poll
+				// adopted that): taking only the rest loses them, and putting
+				// the inserted strokes back lays them over what is there now.
+				if (!inlineInk.holdsAll(op.path, op.removed.map((st) => st.id))) return;
 				// Order matters: take the old ones out before putting the new
 				// ones back at their recorded positions, or the indices the op
 				// carries describe a list that no longer exists.
@@ -11555,6 +12571,7 @@ export class InkOverlayPlugin {
 				// Persist and notify only the complete replacement, never its removal half.
 				inlineInk.save(op.path);
 				break;
+			}
 		}
 		const current = this.filePath();
 		if (current === op.path) {
@@ -11650,6 +12667,7 @@ export class InkOverlayPlugin {
 			this.damage.addAll();
 			this.indexDirty = true;
 		}
+		if (via === "scroll") this.lastScrollAskAt = performance.now();
 		if (this.repaintQueued) {
 			// A second request folded into the frame already queued. The
 			// purged-canvas probe only fires on a frame that NOTHING but
@@ -11664,7 +12682,12 @@ export class InkOverlayPlugin {
 		scrollProbeSchedule(via);
 		this.winRef.requestAnimationFrame(() => {
 			this.repaintQueued = false;
-			this.repaint();
+			this.inQueuedFrame = true;
+			try {
+				this.repaint();
+			} finally {
+				this.inQueuedFrame = false;
+			}
 		});
 	}
 
@@ -11686,14 +12709,50 @@ export class InkOverlayPlugin {
 		// one, or ink would visibly change width between a damage frame and
 		// the next full one. See fillRibbon/WidthFloor.ts.
 		const floor = committedFloorFor(this.committedBacking, this.dpr);
+		const mayBuild = this.extentMayBuild;
+		this.extentMayBuild = false;
+		// An insert space release asks one arm: the drag let the raster go (the store changed under it), and the release no longer
+		// repaints whole, which was the frame that armed the next build. Taken once here, never per drag frame: an arm on every drag
+		// frame would rescan every stroke's box per frame, and the next drag frame lets the raster go again.
+		const armAsked = this.extentArmAsked;
+		this.extentArmAsked = false;
+		if (armAsked && work !== "all" && mayBuild && !this.usableExtent(cam, strokes)) this.armExtentBuild(cam, strokes, floor);
 		if (work === "all") {
+			// Read before the paint marks below clear it.
+			const mark = this.standIn?.mark ?? null;
 			// A note holding a highlighter stroke needs the pair; one without it
 			// leaves the pair at 0x0 and skips its draw.
 			if (this.highlightPairDeferred && strokes.some(stroke => stroke.tool === "highlighter")) this.allocateHighlightPair();
 			this.markCommittedPaint("highlighter");
 			this.markCommittedPaint("pen");
-			if (!this.highlightPairDeferred) drawCommitted(this.highlightCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "highlighter", undefined, floor);
-			drawCommitted(this.committedCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "pen", probeArmed, floor);
+			const ext = this.usableExtent(cam, strokes);
+			// No raster at this scale: the frame shows the stand-in if one holds, else paints by path; the raster is built after it, in pieces.
+			if (!ext && mayBuild) this.armExtentBuild(cam, strokes, floor);
+			// A stand-in no build will replace is let go here (the build did not fit, or there is nothing to build).
+			if (this.standIn && (ext || (mayBuild && !this.extentBuild))) this.dropStandIn();
+			// A whole repaint that may not build (a bounce playing, a stroke being built, a pan's own frame) keeps the stand-in and starts
+			// nothing, and once that ends nothing else asks: the stand-in would stay on screen, cut where its picture ends, until the next zoom.
+			if (this.standIn && !ext && !mayBuild && !this.extentBuild) this.retryStandInLater();
+			const stand = !ext && this.standIn ? this.usableStandIn(strokes, true, cam) : null;
+			if (ext && this.copyFromExtent(ext, cam, null)) {
+				if (probeArmed) paintPurgeSentinel(this.committedCtx);
+			} else if (stand && !this.inQueuedFrame) {
+				// A whole repaint outside the queued frame (a zoom commit runs two to four, each after a backing write, in its own task)
+				// draws nothing: the whole layer goes back on the damage and the queued frame copies the stand-in once, before that
+				// frame paints, so no blank frame is shown and the commit's repaints coalesce into one copy.
+				this.standInDeferrals++;
+				this.damage.addAll();
+				this.scheduleRepaint("partial");
+			} else if (stand && this.inQueuedFrame && mark && this.standInMarkHolds(mark, cam, strokes)) {
+				// The layers still hold this stand-in's last whole copy at this camera, backing, size and stroke set (a zoom commit asks
+				// a second whole repaint a frame after its copy, with nothing changed): paint nothing, keep the mark.
+				stand.mark = mark;
+			} else if (stand && this.copyFromStandIn(stand, cam, null, strokes, floor)) {
+				if (probeArmed) paintPurgeSentinel(this.committedCtx);
+			} else {
+				if (!this.highlightPairDeferred) drawCommitted(this.highlightCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "highlighter", undefined, floor);
+				drawCommitted(this.committedCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "pen", probeArmed, floor);
+			}
 			this.highlightBlank = !strokes.some(stroke => stroke.tool === "highlighter");
 			this.committedBlank = !probeArmed && !strokes.some(stroke => stroke.tool !== "highlighter");
 		} else if (work.length > 0) {
@@ -11705,8 +12764,27 @@ export class InkOverlayPlugin {
 				this.strokeIndex.rebuild(strokes);
 				this.indexDirty = false;
 			}
+			const ext = this.usableExtent(cam, strokes);
+			const stand = !ext && this.standIn ? this.usableStandIn(strokes, false, cam) : null;
 			for (const rect of work) {
-				const hit = this.strokeIndex.query(rect);
+				if (ext && this.copyFromExtent(ext, cam, rect)) continue;
+				if (stand && this.copyFromStandIn(stand, cam, rect, strokes, floor)) continue;
+				// Only the part of the rect the canvas covers. An insert space drag damages the whole moving band, from the seam to
+				// the note's end; on a heavy note the index returned every stroke in it (about 22000 of 28555) and each one was
+				// stroked under a clip that showed none of them. Off the canvas nothing can paint, so the pixels are the same.
+				const left = Math.max(rect.x, cam.x), top = Math.max(rect.y, cam.y);
+				const right = Math.min(rect.x + rect.width, cam.x + this.cssWidth / cam.zoom), bottom = Math.min(rect.y + rect.height, cam.y + this.cssHeight / cam.zoom);
+				if (!(right > left && bottom > top)) continue;
+				// The clip on whole device pixels, outward. A clip edge between device pixels (page zoom 91.3 percent is a device pixel
+				// ratio of 1.8257) drew every stroke under it with fainter edges than a whole repaint draws, so a partial repaint left
+				// the ink lighter than the next whole one, which the insert space release's whole repaint was hiding. Outward only
+				// adds pixels that are redrawn as they were.
+				const k = cam.zoom * (this.committedCanvas.width / this.cssWidth);
+				const out = (v: number, o: number, f: (n: number) => number) => (k > 0 && Number.isFinite(k) ? o + f((v - o) * k) / k : v);
+				const sl = out(left, cam.x, Math.floor), st = out(top, cam.y, Math.floor);
+				const sr = out(right, cam.x, Math.ceil), sb = out(bottom, cam.y, Math.ceil);
+				const onCanvas = { x: sl, y: st, width: sr - sl, height: sb - st };
+				const hit = this.strokeIndex.query(onCanvas);
 				// A highlighter stroke reaching a deferred layer (undo, paste, sync)
 				// gets a fresh blank backing: paint the whole highlight layer once.
 				if (this.highlightPairDeferred && hit.some(stroke => stroke.tool === "highlighter")) {
@@ -11714,8 +12792,8 @@ export class InkOverlayPlugin {
 					this.markCommittedPaint("highlighter");
 					drawCommitted(this.highlightCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "highlighter", undefined, floor);
 				}
-				if (!this.highlightPairDeferred) drawRegion(this.highlightCtx, cam, hit, rect, true, "highlighter", floor);
-				drawRegion(this.committedCtx, cam, hit, rect, true, "pen", floor);
+				if (!this.highlightPairDeferred) drawRegion(this.highlightCtx, cam, hit, onCanvas, true, "highlighter", floor);
+				drawRegion(this.committedCtx, cam, hit, onCanvas, true, "pen", floor);
 			}
 			// A damage rect covering the band corner clears the marker, and
 			// `drawRegion` has no reason to know about it. Repainting is
@@ -11725,6 +12803,436 @@ export class InkOverlayPlugin {
 		// Only a whole-world paint puts every stroke of the store on the raster; a partial one draws the strokes in its rects.
 		if (work === "all") this.paintedStrokeCount = strokes.length;
 		return probeArmed;
+	}
+
+	/** Whether this repaint may build the extent raster: below 100 percent, and on no pan, stroke or bounce frame. */
+	private extentBuildAllowed(): boolean {
+		// Built only where the whole layer is redrawn anyway, never on the frames whose lag it exists to remove. A frame that may not
+		// build paints by path while the raster is stale, and the next whole repaint that may, builds it.
+		return this.cssScale < 1 && !this.repaintScrollOnly && !this.frame.locked && this.builder === null && !this.bounceState;
+	}
+
+	/**
+	 * Start building the extent raster for the note's whole ink at the camera `cam` (see `extentBuild`), unless a build for the same
+	 * content is already under way, or leave none when it would not fit. Nothing is drawn here; the first piece runs on a later task.
+	 */
+	private armExtentBuild(cam: RasterCamera, strokes: readonly InkStroke[], floor: ReturnType<typeof committedFloorFor>): void {
+		const path = this.filePath(), backing = this.committedBacking ?? 0;
+		const b = this.extentBuild;
+		if (b && b.path === path && b.cam0.zoom === cam.zoom && b.backing === backing && b.dpr === this.dpr && b.look === inkLookKey() &&
+			b.strokes === strokes && b.count === strokes.length && path !== null && b.generation === inlineInk.generation(path)) return;
+		this.dropExtentBuild();
+		this.extentRaster = null;
+		if (!path || !(backing > 0) || !Number.isFinite(backing) || !(cam.zoom > 0) || strokes.length === 0) return;
+		let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+		for (const s of strokes) {
+			const b = s.bbox;
+			if (b.x < x0) x0 = b.x;
+			if (b.y < y0) y0 = b.y;
+			if (b.x + b.width > x1) x1 = b.x + b.width;
+			if (b.y + b.height > y1) y1 = b.y + b.height;
+		}
+		if (!Number.isFinite(x0 + y0 + x1 + y1)) return;
+		const k = cam.zoom * backing;
+		// The origin sits on the committed raster's device grid, so a copy between the two moves whole pixels.
+		const kx = Math.floor((x0 - cam.x) * k) - 2, ky = Math.floor((y0 - cam.y) * k) - 2;
+		const w = Math.ceil((x1 - cam.x) * k) + 2 - kx, h = Math.ceil((y1 - cam.y) * k) + 2 - ky;
+		if (!extentRasterFits(w, h)) return;
+		// Both pictures are held until the build is whole: the pair must fit the pair cap, or the stand-in goes and the frame paints by path.
+		const held = this.standIn ? this.standIn.pen.width * this.standIn.pen.height * (this.standIn.hl ? 2 : 1) : 0;
+		if (held > 0 && !extentPairFits(w * h * (strokes.some(s => s.tool === "highlighter") ? 2 : 1), held)) return;
+		const at = { x: cam.x + kx / k, y: cam.y + ky / k, zoom: cam.zoom };
+		this.extentBuild = {
+			path, cam0: { ...cam }, at, kx, ky, w, h, world: { x0: at.x, y0: at.y, x1: at.x + w / k, y1: at.y + h / k }, backing, dpr: this.dpr,
+			look: inkLookKey(), floor, strokes, count: strokes.length, generation: inlineInk.generation(path),
+			hasHl: strokes.some(s => s.tool === "highlighter"), pen: null, hl: null, next: 0, timer: 0,
+		};
+		this.scheduleExtentPiece(0, true);
+	}
+
+	/**
+	 * Ask for the next piece. A wait (the gate said no) is a timer; otherwise the piece runs as the next task, posted on a message
+	 * channel, since a chain of zero timers is clamped to 4 ms each and the gaps between pieces were most of the time to sharp. The
+	 * first piece of a build waits for the next frame, so the settle's own frame is painted before any piece runs. timer is -1 while
+	 * a post or a frame is pending; a dropped build is no longer this.extentBuild, and its callback does nothing.
+	 */
+	private scheduleExtentPiece(ms: number, first = false): void {
+		const b = this.extentBuild;
+		if (!b || b.timer !== 0) return;
+		const run = () => {
+			if (this.extentBuild !== b) return;
+			b.timer = 0;
+			this.runExtentPiece();
+		};
+		if (ms > 0) {
+			b.timer = this.winRef.setTimeout(run, ms);
+			return;
+		}
+		b.timer = -1;
+		const post = () => {
+			if (this.extentBuild !== b) return;
+			const MC = (this.winRef as Window & { MessageChannel?: typeof MessageChannel }).MessageChannel ?? MessageChannel;
+			const ch = new MC();
+			ch.port1.onmessage = () => { ch.port1.close(); run(); };
+			ch.port2.postMessage(0);
+		};
+		if (first) this.winRef.requestAnimationFrame(post);
+		else post();
+	}
+
+	/**
+	 * Whether a piece may run now: no contact holding the frame, no stroke being built or routed, no touch, pinch, assist pointer or
+	 * fling, no pinch scale held, no bounce, no repaint queued, and no scroll repaint asked for in the last EXTENT_SCROLL_QUIET_MS.
+	 */
+	private extentPieceAllowed(): boolean {
+		return !this.frame.locked && this.builder === null && !(this.router?.isStroking ?? false) && !(this.router?.hasActiveNavigation ?? false) &&
+			this.pinchRefScale === null && !this.bounceState && !this.repaintQueued && performance.now() - this.lastScrollAskAt >= EXTENT_SCROLL_QUIET_MS;
+	}
+
+	/**
+	 * Whether the build still holds for the note as it is now. A pen commit's strokes added at the end of the same store array, inside
+	 * the raster's world rect, with a highlighter layer where one is needed (the test drawIntoExtent applies), extend its target and
+	 * the pieces reach them in store order; any other change to the note, the zoom, the backing, the device ratio or the ink look fails.
+	 */
+	private extentBuildHolds(b: NonNullable<InkOverlayPlugin["extentBuild"]>): boolean {
+		const path = this.filePath(), cam = this.lastPaintCam;
+		if (path !== b.path || !cam || cam.zoom !== b.cam0.zoom || this.committedBacking !== b.backing || this.dpr !== b.dpr || inkLookKey() !== b.look) return false;
+		const now = inlineInk.strokes(path), generation = inlineInk.generation(path);
+		if (now !== b.strokes) return false;
+		if (now.length === b.count) return generation === b.generation;
+		if (now.length < b.count) return false;
+		const w = b.world;
+		for (let i = b.count; i < now.length; i++) {
+			const s = now[i]!, bb = s.bbox;
+			if (!(bb.x >= w.x0 && bb.y >= w.y0 && bb.x + bb.width <= w.x1 && bb.y + bb.height <= w.y1)) return false;
+			if (s.tool === "highlighter" && !b.hasHl) return false;
+		}
+		b.count = now.length;
+		b.generation = generation;
+		return true;
+	}
+
+	/**
+	 * One piece of the build: strokes from `next` on, each to its own layer with the paint drawCommitted gives it (same camera, same
+	 * floor, store order), until EXTENT_PIECE_MS has passed. The last piece hands the whole raster over; until then nothing reads it.
+	 */
+	private runExtentPiece(): void {
+		const b = this.extentBuild;
+		if (!b || this.retiring) return;
+		if (!this.extentBuildHolds(b)) { this.dropExtentBuild(); this.repaintOverStandIn(); return; }
+		if (!this.extentPieceAllowed()) { this.scheduleExtentPiece(EXTENT_PIECE_RETRY_MS); return; }
+		const t0 = performance.now();
+		if (!b.pen) {
+			const layer = (): HTMLCanvasElement | null => {
+				// A detached canvas in the layer's own document (a popout's, in a popout).
+				const c = this.committedCanvas.cloneNode(false) as HTMLCanvasElement;
+				c.width = b.w; c.height = b.h;
+				const ctx = c.getContext("2d");
+				if (!ctx) return null;
+				ctx.setTransform(b.backing, 0, 0, b.backing, 0, 0);
+				return c;
+			};
+			b.pen = layer();
+			b.hl = b.hasHl ? layer() : null;
+			if (!b.pen || (b.hasHl && !b.hl)) { this.dropExtentBuild(); this.repaintOverStandIn(); return; }
+		}
+		const pen = b.pen.getContext("2d")!, hl = b.hl?.getContext("2d") ?? null;
+		while (b.next < b.count) {
+			const s = b.strokes[b.next++]!;
+			const ctx = s.tool === "pen" ? pen : s.tool === "highlighter" ? hl : null;
+			if (ctx) drawStroke(ctx, b.at, s, undefined, true, undefined, b.floor);
+			if (performance.now() - t0 >= EXTENT_PIECE_MS) break;
+		}
+		if (b.next < b.count) { this.scheduleExtentPiece(0); return; }
+		this.extentBuild = null;
+		this.extentRaster = {
+			path: b.path, pen: b.pen, hl: b.hl, kx: b.kx, ky: b.ky, cam0: b.cam0, at: b.at, world: b.world, backing: b.backing, dpr: b.dpr,
+			look: b.look, strokes: b.strokes, generation: b.generation, count: b.count,
+		};
+		// The sharp raster is whole: the next whole repaint copies it in and lets the stand-in go in the same step.
+		this.repaintOverStandIn();
+	}
+
+	/** Stop an unfinished build and release its canvases now, as releaseBackings does for the ink canvases. */
+	private dropExtentBuild(): void {
+		const b = this.extentBuild;
+		if (!b) return;
+		this.extentBuild = null;
+		if (b.timer > 0) this.winRef.clearTimeout(b.timer);
+		for (const c of [b.pen, b.hl]) {
+			if (!c) continue;
+			c.width = 0;
+			c.height = 0;
+		}
+	}
+
+	/**
+	 * The extent raster when its content still holds for this note at this camera's zoom (see `extentRaster`), else null. A stale
+	 * raster is let go here: whatever made it stale, the next build draws a new one.
+	 */
+	private usableExtent(cam: RasterCamera, strokes: readonly InkStroke[]): NonNullable<InkOverlayPlugin["extentRaster"]> | null {
+		const ext = this.extentRaster;
+		if (!ext) return null;
+		const path = this.filePath();
+		if (path && ext.path === path && ext.cam0.zoom === cam.zoom && ext.backing === this.committedBacking && ext.dpr === this.dpr && ext.look === inkLookKey() &&
+			ext.strokes === strokes && ext.count === strokes.length && ext.generation === inlineInk.generation(path) &&
+			!(ext.hl && this.highlightPairDeferred)) return ext;
+		this.extentToStandIn(strokes);
+		this.extentRaster = null;
+		return null;
+	}
+
+	/**
+	 * Keep the extent raster as the stand-in when only its zoom or backing no longer match: same note, device ratio, ink look, and the
+	 * store as it was or with strokes added at the end. A stand-in already held stays (never a copy of a copy).
+	 */
+	private extentToStandIn(strokes: readonly InkStroke[]): void {
+		if (!ZOOM_STAND_IN_ENABLED) return;
+		const ext = this.extentRaster, path = this.filePath();
+		if (!ext || this.standIn || !path || ext.path !== path || ext.dpr !== this.dpr || ext.look !== inkLookKey() || ext.strokes !== strokes ||
+			strokes.length < ext.count || (strokes.length === ext.count && ext.generation !== inlineInk.generation(path)) || this.cssScale >= 1) return;
+		this.standIn = {
+			path, pen: ext.pen, hl: ext.hl, at: ext.at, backing: ext.backing, dpr: ext.dpr, look: ext.look, strokes: ext.strokes,
+			count: ext.count, generation: ext.generation, mark: null,
+		};
+		this.extentRaster = null;
+	}
+
+	/**
+	 * Just before a resize clears the layers: when no stand-in is held, keep the old whole raster as one (extentToStandIn), or else copy
+	 * the committed layers' own pixels, painted at lastPaintCam and the old backing, as one. Below 100 percent only, with no stroke
+	 * owning the frame, the whole store painted, and the device ratio unchanged.
+	 */
+	private takeStandIn(paintedDpr: number, backing: number): void {
+		if (!ZOOM_STAND_IN_ENABLED) return;
+		// A held pinch paints its pause commits by path: a stand-in shown there would be scaled up by the preview.
+		if (this.standIn || this.cssScale >= 1 || this.frame.locked || paintedDpr !== this.dpr || this.pinchHeld()) return;
+		const path = this.filePath();
+		if (!path) return;
+		const strokes = inlineInk.strokes(path);
+		const cam = this.lastPaintCam, from = this.committedBacking ?? 0;
+		// The copy factor the next paint would use at the painted zoom; a stand-in below the bar would only be let go unshown.
+		const fits = (at: { zoom: number }, atBacking: number) => standInFactorFits(((cam ?? at).zoom * backing) / (at.zoom * atBacking));
+		const ext = this.extentRaster;
+		if (ext) {
+			if (!fits(ext.at, ext.backing)) return;
+			this.extentToStandIn(strokes);
+			if (this.standIn) return;
+		}
+		if (!cam || !fits(cam, from)) return;
+		if (this.committedBlank || !(from > 0) || this.committedCanvas.width === 0 || strokes.length === 0 || this.paintedStrokeCount !== strokes.length) return;
+		const copy = (src: HTMLCanvasElement): HTMLCanvasElement | null => {
+			// A detached canvas in the layer's own document (a popout's, in a popout).
+			const c = this.committedCanvas.cloneNode(false) as HTMLCanvasElement;
+			c.width = src.width;
+			c.height = src.height;
+			const ctx = c.getContext("2d");
+			if (!ctx) return null;
+			ctx.drawImage(src, 0, 0);
+			return c;
+		};
+		const wantHl = !this.highlightPairDeferred && !this.highlightBlank;
+		const pen = copy(this.committedCanvas), hl = wantHl ? copy(this.highlightCanvas) : null;
+		if (!pen || (wantHl && !hl)) {
+			for (const c of [pen, hl]) if (c) { c.width = 0; c.height = 0; }
+			return;
+		}
+		this.standIn = {
+			path, pen, hl, at: { ...cam }, backing: from, dpr: paintedDpr, look: inkLookKey(), strokes, count: strokes.length,
+			generation: inlineInk.generation(path), mark: null,
+		};
+		this.standInSnapshots++;
+	}
+
+	/**
+	 * The stand-in while it still pictures this note's ink below 100 percent at a copy factor of STAND_IN_MIN_FACTOR or more at `cam`,
+	 * else null, and it is let go. Let go from a frame that repaints only rects, the rest of the layer still shows it, so a whole
+	 * repaint is asked for.
+	 */
+	private usableStandIn(strokes: readonly InkStroke[], wholeFrame: boolean, cam: RasterCamera): NonNullable<InkOverlayPlugin["standIn"]> | null {
+		const st = this.standIn;
+		if (!st) return null;
+		const path = this.filePath();
+		if (path === st.path && st.dpr === this.dpr && st.look === inkLookKey() && st.strokes === strokes && strokes.length >= st.count &&
+			(strokes.length > st.count || inlineInk.generation(path) === st.generation) && this.cssScale < 1 && !(st.hl && this.highlightPairDeferred) && !this.pinchHeld() &&
+			standInFactorFits((cam.zoom * (this.committedBacking ?? 0)) / (st.at.zoom * st.backing))) return st;
+		this.dropStandIn();
+		if (!wholeFrame && !this.retiring) {
+			this.damage.addAll();
+			this.scheduleRepaint("other");
+		}
+		return null;
+	}
+
+	private dropStandIn(): void {
+		// Its retry has nothing left to replace; teardown comes through here too. A timer id is never 0, and an instance built without
+		// its initializers has no timer at all.
+		if (this.standInRetryTimer) {
+			this.winRef.clearTimeout(this.standInRetryTimer);
+			this.standInRetryTimer = 0;
+		}
+		const st = this.standIn;
+		if (!st) return;
+		this.standIn = null;
+		for (const c of [st.pen, st.hl]) {
+			if (!c) continue;
+			c.width = 0;
+			c.height = 0;
+		}
+	}
+
+	/**
+	 * Once a piece could run (extentPieceAllowed: nothing live, no scroll in the quiet time) and no zoom preview is held, ask for the
+	 * whole repaint that starts the build or lets the stand-in go; until then wait and look again. Nothing is asked on a pan, stroke or
+	 * bounce frame, nor in a held zoom's pause, where a whole repaint would take the preview's offset off the ink.
+	 */
+	private retryStandInLater(): void {
+		if (this.standInRetryTimer !== 0) return;
+		this.standInRetryTimer = this.winRef.setTimeout(() => {
+			this.standInRetryTimer = 0;
+			if (!this.standIn || this.extentBuild || this.retiring) return;
+			if (!this.extentPieceAllowed() || this.pinchPreview) { this.retryStandInLater(); return; }
+			this.repaintOverStandIn();
+		}, EXTENT_PIECE_RETRY_MS);
+	}
+
+	/** While a stand-in is on screen, ask for a whole repaint: it copies a finished raster in, or shows the stand-in or path again. */
+	private repaintOverStandIn(): void {
+		if (!this.standIn || this.retiring) return;
+		this.damage.addAll();
+		this.scheduleRepaint("other");
+	}
+
+	/**
+	 * Fill `rect` (world units, out to whole device px), or the whole layer with null, from the stand-in: one scaled copy per layer, then
+	 * the strokes the store gained since the stand-in was taken, drawn by path on top so they are sharp at once.
+	 */
+	private copyFromStandIn(st: NonNullable<InkOverlayPlugin["standIn"]>, cam: RasterCamera, rect: BBox | null, strokes: readonly InkStroke[],
+		floor: ReturnType<typeof committedFloorFor>): boolean {
+		const backing = this.committedBacking ?? 0;
+		const kn = cam.zoom * backing, ko = st.at.zoom * st.backing;
+		if (!(kn > 0) || !(ko > 0) || !Number.isFinite(kn / ko)) return false;
+		const f = kn / ko, ox = (st.at.x - cam.x) * kn, oy = (st.at.y - cam.y) * kn;
+		const cw = this.committedCanvas.width, ch = this.committedCanvas.height;
+		let dx = 0, dy = 0, dw = cw, dh = ch;
+		if (rect) {
+			const x0 = Math.max(0, Math.floor((rect.x - cam.x) * kn + 1e-6)), y0 = Math.max(0, Math.floor((rect.y - cam.y) * kn + 1e-6));
+			const x1 = Math.min(cw, Math.ceil((rect.x + rect.width - cam.x) * kn - 1e-6)), y1 = Math.min(ch, Math.ceil((rect.y + rect.height - cam.y) * kn - 1e-6));
+			if (!(x1 > x0) || !(y1 > y0)) return true;
+			dx = x0; dy = y0; dw = x1 - x0; dh = y1 - y0;
+		}
+		const added = strokes.length > st.count ? strokes.slice(st.count) : [];
+		const layers: [CanvasRenderingContext2D, HTMLCanvasElement | null, InkStroke["tool"]][] = [[this.committedCtx, st.pen, "pen"]];
+		if (!this.highlightPairDeferred) layers.push([this.highlightCtx, st.hl, "highlighter"]);
+		for (const [ctx, src, tool] of layers) {
+			ctx.save();
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.clearRect(dx, dy, dw, dh);
+			ctx.beginPath();
+			ctx.rect(dx, dy, dw, dh);
+			ctx.clip();
+			if (src) {
+				// Placed by the transform, not by a scaled destination rect (whose edges the canvas snaps to whole pixels, which moved the
+				// ink by up to half a pixel); a reduction filtered at high quality, so thin strokes do not drop out between samples.
+				ctx.imageSmoothingEnabled = true;
+				ctx.imageSmoothingQuality = f < 1 ? "high" : "low";
+				ctx.setTransform(f, 0, 0, f, ox, oy);
+				ctx.drawImage(src, 0, 0);
+			}
+			if (added.length > 0) {
+				ctx.setTransform(backing, 0, 0, backing, 0, 0);
+				for (const s of added) if (s.tool === tool) drawStroke(ctx, cam, s, undefined, true, undefined, floor);
+			}
+			ctx.restore();
+		}
+		if (!rect) st.mark = this.standInMarkNow(cam, strokes);
+		return true;
+	}
+
+	/** What the committed layers hold after a whole stand-in copy at `cam` with `strokes`, for standInMarkHolds. */
+	private standInMarkNow(cam: RasterCamera, strokes: readonly InkStroke[]): StandInMark {
+		const path = this.filePath();
+		return { x: cam.x, y: cam.y, zoom: cam.zoom, backing: this.committedBacking ?? 0, dpr: this.dpr, w: this.committedCanvas.width,
+			h: this.committedCanvas.height, hlDeferred: this.highlightPairDeferred, strokes, count: strokes.length,
+			generation: path ? inlineInk.generation(path) : -1 };
+	}
+
+	/** Whether the layers' stand-in copy, as `mark` records it, is what a whole copy at `cam` with `strokes` would paint now. */
+	private standInMarkHolds(mark: StandInMark, cam: RasterCamera, strokes: readonly InkStroke[]): boolean {
+		const now = this.standInMarkNow(cam, strokes);
+		return mark.x === now.x && mark.y === now.y && mark.zoom === now.zoom && mark.backing === now.backing && mark.dpr === now.dpr &&
+			mark.w === now.w && mark.h === now.h && mark.hlDeferred === now.hlDeferred && mark.strokes === now.strokes &&
+			mark.count === now.count && mark.generation === now.generation;
+	}
+
+	/** Whether the extent raster holds the note's store exactly as it is now, read just before a pen commit changes it. */
+	private extentHoldsStore(path: string): boolean {
+		const ext = this.extentRaster;
+		if (!ext || ext.path !== path) return false;
+		const now = inlineInk.strokes(path);
+		return ext.strokes === now && ext.count === now.length && ext.generation === inlineInk.generation(path) && ext.look === inkLookKey();
+	}
+
+	/**
+	 * A pen commit's strokes drawn into the extent raster, which held the store as it was just before (extentHoldsStore): the same
+	 * paint the committed layer gets, at the raster's camera, on top in store order, so the raster stays what a whole redraw gives
+	 * and a pan after writing still fills by copy. Anything else leaves the raster stale: a commit that replaced a stroke rather
+	 * than adding one, a stroke reaching past the raster's edge, a highlighter stroke with no highlighter layer.
+	 */
+	private drawIntoExtent(path: string, added: readonly InkStroke[]): void {
+		const ext = this.extentRaster, now = inlineInk.strokes(path);
+		if (!ext || ext.path !== path || now !== ext.strokes || now.length !== ext.count + added.length) return;
+		for (let i = 0; i < added.length; i++) {
+			const s = added[i]!, b = s.bbox, w = ext.world;
+			if (now[ext.count + i] !== s) return;
+			if (!(b.x >= w.x0 && b.y >= w.y0 && b.x + b.width <= w.x1 && b.y + b.height <= w.y1)) return;
+			if (s.tool === "highlighter" && !ext.hl) return;
+		}
+		const floor = committedFloorFor(ext.backing, ext.dpr);
+		for (const s of added) {
+			const ctx = (s.tool === "highlighter" ? ext.hl : ext.pen)?.getContext("2d");
+			if (!ctx) {
+				this.extentRaster = null;
+				return;
+			}
+			ctx.setTransform(ext.backing, 0, 0, ext.backing, 0, 0);
+			drawStroke(ctx, ext.at, s, undefined, true, undefined, floor);
+		}
+		ext.count = now.length;
+		ext.generation = inlineInk.generation(path);
+	}
+
+	/**
+	 * Fill `rect` (world units, widened to whole device px), or the whole raster with null, from the extent raster: a copy by whole
+	 * device pixels onto cleared pixels, byte for byte what drawing every stroke there gives. False, and nothing touched, when the
+	 * camera's move since the build is not whole device pixels; the caller paints by path as before.
+	 */
+	private copyFromExtent(ext: NonNullable<InkOverlayPlugin["extentRaster"]>, cam: RasterCamera, rect: BBox | null): boolean {
+		const k = cam.zoom * ext.backing;
+		const whole = (v: number) => Number.isFinite(v) && Math.abs(v - Math.round(v)) < 1e-3;
+		const mx = (cam.x - ext.cam0.x) * k, my = (cam.y - ext.cam0.y) * k;
+		if (!whole(mx) || !whole(my)) return false;
+		const offX = Math.round(mx) - ext.kx, offY = Math.round(my) - ext.ky;
+		const cw = this.committedCanvas.width, ch = this.committedCanvas.height;
+		let dx = 0, dy = 0, dw = cw, dh = ch;
+		if (rect) {
+			// Out to whole device px: the copy holds every stroke's true pixels, so a pixel the rect only grazes gets its whole
+			// value, the one a whole-layer redraw gives it.
+			const x0 = Math.max(0, Math.floor((rect.x - cam.x) * k + 1e-6)), y0 = Math.max(0, Math.floor((rect.y - cam.y) * k + 1e-6));
+			const x1 = Math.min(cw, Math.ceil((rect.x + rect.width - cam.x) * k - 1e-6)), y1 = Math.min(ch, Math.ceil((rect.y + rect.height - cam.y) * k - 1e-6));
+			if (!(x1 > x0) || !(y1 > y0)) return true;
+			dx = x0; dy = y0; dw = x1 - x0; dh = y1 - y0;
+		}
+		const layers: [CanvasRenderingContext2D, HTMLCanvasElement | null][] = [[this.committedCtx, ext.pen]];
+		if (!this.highlightPairDeferred) layers.push([this.highlightCtx, ext.hl]);
+		for (const [ctx, src] of layers) {
+			ctx.save();
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.clearRect(dx, dy, dw, dh);
+			if (src) ctx.drawImage(src, dx + offX, dy + offY, dw, dh, dx, dy, dw, dh);
+			ctx.restore();
+		}
+		return true;
 	}
 
 	private repaint(): void {
@@ -11794,17 +13302,20 @@ export class InkOverlayPlugin {
 		if (panBaked) {
 			// A settled pan must move ink within the bounded raster, not move
 			// every canvas away from part of the writable editor. Change the
-			// camera and input origin together, then redraw all affected layers.
+			// camera and input origin together. The bake adds no damage of its
+			// own: the repaint plan below redraws the whole layer when the camera
+			// moved past the sub-pixel bar, and a bake that leaves the camera
+			// inside the bar moved no ink, so it paints nothing (at 34 percent
+			// a still bake redrew 28,358 strokes in 192 ms).
 			// The rest, not a bounce passing through: the ink layer's translate carries the bounce, and baking each of its
 			// frames would re-raster the world a dozen times for an animation that ends where it began.
-			this.rasterPan = { x: this.restPanX() / this.cssScale, y: this.restPanY() / this.cssScale };
+			this.rasterPan = this.rasterPanTarget();
 			this.writeInkLayerTransform();
 			this.wet.clear(this.cssWidth, this.cssHeight);
 			this.highlightWet.clear(this.cssWidth, this.cssHeight);
 			this.tail.clearAll(this.cssWidth, this.cssHeight);
 			this.tail.prepareLive(null, null);
 			this.spaceFeedbackKey = null;
-			this.damage.addAll();
 			this.router?.refreshRect();
 		}
 		const syncAt = diag ? performance.now() : 0;
@@ -11813,6 +13324,7 @@ export class InkOverlayPlugin {
 		const path = this.filePath();
 		const strokes = path ? inlineInk.strokes(path) : [];
 		const cam = this.camera.snapshot;
+		if (panBaked && this.cssScale < 1) this.carryBakedPan(cam, strokes.length);
 		const last = this.lastPaintCam;
 		// A successful carry already moved the overlap by whole backing pixels
 		// and recorded the camera those pixels sit at; its frame gets the same
@@ -11843,6 +13355,7 @@ export class InkOverlayPlugin {
 		// this is a mobile surface with diagnostics recording (PurgeSentinel.ts
 		// says why it is not on for everyone yet). Desktop pays one boolean.
 		const paintAt = diag ? performance.now() : 0;
+		this.extentMayBuild = this.extentBuildAllowed();
 		const probeArmed = this.paintCommittedWork(cam, work, strokes);
 		const paintMs = diag ? performance.now() - paintAt : 0;
 		// ---- the purge heal (1.4.12-design.md §14, cause B) -----------------
@@ -11954,11 +13467,22 @@ export class InkOverlayPlugin {
 		// divided by a cssScale read back from the band's own rect, which each resize moves by a few millionths - a new
 		// width, another resize, measured 1821 of them in one ease at 7% before the renderer died. Nothing lies left of
 		// scroll zero, so the widening stops there: an ease on a page with no scroll to its left moves no band.
+		// FOUR SIDES, NOT ONE. An ease from left of the edge (a negative start offset) shows room right of the scroll,
+		// and one from above or below shows room under or over it, the same way: a settle that landed the page 192 px
+		// left of where the preview showed it at outer scale 1.25 refused its ease against a band 111 px past the pane's
+		// right, and the page jumped at the lift. Each side is widened by its own start offset, stopped at the scroll
+		// range on that side as the left one stops at zero, so the band never adds scroll range (bandFor). The right and
+		// bottom sides also stop at one maximal band margin, the bound the settle eases within (travelledEaseRoom).
 		const bounce = this.bounceState;
-		if (!bounce || !(bounce.fromX > 0) || !(this.cssScale > 0)) this.bandEase = null;
-		else if (this.bandEase?.bounce !== bounce) this.bandEase = { bounce, px: Math.ceil(bounce.fromX / this.cssScale) };
-		const easeFrom = this.bandEase ? Math.min(this.bandEase.px, viewport.scrollLeft) : 0;
-		if (easeFrom > 0) { viewport.scrollLeft -= easeFrom; viewport.clientWidth += easeFrom; }
+		if (!bounce || (!bounce.fromX && !bounce.fromY) || !(this.cssScale > 0)) this.bandEase = null;
+		else if (this.bandEase?.bounce !== bounce) this.bandEase = {
+			bounce, x: Math.sign(bounce.fromX) * Math.ceil(Math.abs(bounce.fromX) / this.cssScale), y: Math.sign(bounce.fromY) * Math.ceil(Math.abs(bounce.fromY) / this.cssScale),
+		};
+		const ease = this.bandEase, room = ease && (ease.x < 0 || ease.y < 0) ? travelledEaseRoom(viewport) : null;
+		if (ease && ease.x > 0) { const e = Math.min(ease.x, viewport.scrollLeft); viewport.scrollLeft -= e; viewport.clientWidth += e; }
+		else if (ease && ease.x < 0 && room) viewport.clientWidth += Math.min(-ease.x, room.x);
+		if (ease && ease.y > 0) { const e = Math.min(ease.y, viewport.scrollTop); viewport.scrollTop -= e; viewport.clientHeight += e; }
+		else if (ease && ease.y < 0 && room) viewport.clientHeight += Math.min(-ease.y, room.y);
 		if (this.frame.locked) {
 			// A stroke owns the frame. The band may stay where it is ONLY while
 			// every pixel the viewport shows is inside it: deferring past that
@@ -12018,8 +13542,7 @@ export class InkOverlayPlugin {
 		}
 		this.band = band;
 		this.container.setCssStyles({
-			left: `${band.left}px`,
-			top: `${band.top}px`,
+			...this.bandPlacement(band.left, band.top),
 			width: `${band.width}px`,
 			height: `${band.height}px`,
 		});
@@ -12034,6 +13557,51 @@ export class InkOverlayPlugin {
 		return resized ? "resized" : "moved";
 	}
 
+
+	/**
+	 * A BAKE AT THE SAME ZOOM CARRIES ITS PIXELS, as a band move does. The bake moved the camera by the snapped raster
+	 * pan (rasterPanTarget), a whole number of backing px, so the painted pixels slide by that much, exactly, and only
+	 * the strips the slide uncovers are owed. Orion at 34 percent: every whole-layer bake redrew 28,358 strokes in 130
+	 * to 270 ms, at the start of every edge bounce among them; a band move that carries costs 2.5 to 16 ms.
+	 *
+	 * The guard is syncBand's: a raster of the zoom now held, painted while the store held this many strokes.
+	 * Otherwise, or when the slide is wider than the layer, nothing is carried and the repaint plan redraws the whole
+	 * layer as before. The record is the camera the slid pixels sit at; the plan compares the camera now against it
+	 * with the usual sub-pixel bar, so a re-measure a hair off the snapped move still reads as still.
+	 */
+	private carryBakedPan(cam: RasterCamera, strokeCount: number): void {
+		const last = this.lastPaintCam, backing = this.committedBacking ?? 0;
+		if (!last || last.zoom !== cam.zoom || !(cam.zoom > 0) || !(backing > 0) || !Number.isFinite(backing)) return;
+		if (this.paintedStrokeCount !== strokeCount) return;
+		const moveX = (last.x - cam.x) * cam.zoom * backing, moveY = (last.y - cam.y) * cam.zoom * backing;
+		// The move is carried when it is whole backing px within the plan's own sub-pixel bar (committedRepaintPlan): the
+		// painted camera may already stand a tolerated part of a pixel off the camera, and that part rides along as it did.
+		// A move further off a whole pixel leaves the plan to redraw at the camera now.
+		const bar = CAMERA_STILL_BACKING_PX;
+		if (Math.abs(moveX - Math.round(moveX)) >= bar || Math.abs(moveY - Math.round(moveY)) >= bar) return;
+		const shiftX = Math.round(moveX) / backing, shiftY = Math.round(moveY) / backing;
+		if (shiftX === 0 && shiftY === 0) return;
+		const dx = -shiftX / cam.zoom, dy = -shiftY / cam.zoom;
+		const at = { x: last.x + dx, y: last.y + dy, zoom: cam.zoom };
+		const plan = shiftPlan(dx, dy, cam.zoom, at.x, at.y, this.cssWidth, this.cssHeight);
+		if (plan === null) return;
+		this.slideCommittedPixels(plan.shiftX, plan.shiftY, backing);
+		this.lastPaintCam = at;
+		for (const rect of plan.exposed) this.damage.addRect(rect);
+	}
+
+	/** Slide the committed and highlight layers by (shiftX, shiftY) css px, a whole number of backing px. */
+	private slideCommittedPixels(shiftX: number, shiftY: number, backing: number): void {
+		for (const [ctx, canvas] of [[this.committedCtx, this.committedCanvas], [this.highlightCtx, this.highlightCanvas]] as const) {
+			// drawImage throws on a 0x0 source; a deferred layer has nothing to carry.
+			if (canvas === this.highlightCanvas && this.highlightPairDeferred) continue;
+			ctx.save();
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.globalCompositeOperation = "copy";
+			ctx.drawImage(canvas, Math.round(shiftX * backing), Math.round(shiftY * backing));
+			ctx.restore();
+		}
+	}
 
 	/**
 	 * Move the band under a live stroke without moving anything the reader
@@ -12078,17 +13646,9 @@ export class InkOverlayPlugin {
 		const plan = shiftPlan(dx / f, dy / f, cam.zoom, camX, camY, this.cssWidth, this.cssHeight);
 		if (plan === null) { this.bandSyncDeferred = true; return "none"; }
 		this.band = { left: current.left + dx, top: current.top + dy, width: current.width, height: current.height };
-		container.setCssStyles({ left: `${this.band.left}px`, top: `${this.band.top}px` });
+		container.setCssStyles(this.bandPlacement(this.band.left, this.band.top));
 		this.camera.setState(camX, camY, cam.zoom);
-		for (const [ctx, canvas] of [[this.committedCtx, this.committedCanvas], [this.highlightCtx, this.highlightCanvas]] as const) {
-			// drawImage throws on a 0x0 source; a deferred layer has nothing to carry.
-			if (canvas === this.highlightCanvas && this.highlightPairDeferred) continue;
-			ctx.save();
-			ctx.setTransform(1, 0, 0, 1, 0, 0);
-			ctx.globalCompositeOperation = "copy";
-			ctx.drawImage(canvas, Math.round(plan.shiftX * backing), Math.round(plan.shiftY * backing));
-			ctx.restore();
-		}
+		this.slideCommittedPixels(plan.shiftX, plan.shiftY, backing);
 		this.wet.carry(plan.shiftX, plan.shiftY);
 		if (!this.highlightPairDeferred) this.highlightWet.carry(plan.shiftX, plan.shiftY);
 		this.tail.carry(plan.shiftX, plan.shiftY);
@@ -12421,6 +13981,20 @@ export class InkOverlayPlugin {
 	}
 
 	/**
+	 * THE BAND'S POSITION ON THE CONTAINER: whole px in left and top, the fraction in a translate. The band sits on the
+	 * backing grid (syncBand), so its left and top carry quarter and half px. Under the transform form the compositor
+	 * places the container at a whole px of the scaled host's own space and drops that fraction, and the host's scale
+	 * and the device ratio multiply it: measured 0.25 host-local px, the painted ink up to 1.9 device px right of
+	 * where its own rect says at k 2 under an external 0.8. A translate keeps its fraction. The getBoundingClientRect the input reads includes the translate,
+	 * so the pen maps exactly as before. The only writer of the container's transform, and it writes one on every band
+	 * write, translate(0px, 0px) when the band is whole, so the container's stacking context does not come and go.
+	 */
+	private bandPlacement(left: number, top: number): { left: string; top: string; transform: string } {
+		const l = Math.floor(left), t = Math.floor(top);
+		return { left: `${l}px`, top: `${t}px`, transform: `translate(${left - l}px, ${top - t}px)` };
+	}
+
+	/**
 	 * The band is an absolutely positioned child of the scroller too, and while
 	 * the range was wider it took a sideways margin (bandFor) reaching past where
 	 * the spacer now stands. After a shrink that margin alone holds the range at
@@ -12449,9 +14023,9 @@ export class InkOverlayPlugin {
 		const band = this.band, container = this.container;
 		if (!band || !container || band.left + band.width <= Math.max(scroller.clientWidth, spacerRight)) return;
 		if (Math.max(scroller.clientWidth, spacerRight) < scroller.scrollLeft + scroller.clientWidth) return;
-		container.setCssStyles({ left: `${spacerRight - band.width}px` });
+		container.setCssStyles(this.bandPlacement(spacerRight - band.width, band.top));
 		const free = scroller.scrollWidth;
-		container.setCssStyles({ left: `${band.left}px` });
+		container.setCssStyles(this.bandPlacement(band.left, band.top));
 		this.bandFreeScrollWidth = free;
 		scrollProbeExtent(`band margin released: range without the band ${free}`);
 		this.scheduleRepaint("extent-shrink");
@@ -12478,9 +14052,11 @@ export class InkOverlayPlugin {
 		if (typeof seen !== "number" || !(contentHeight < seen)) return null;
 		const band = this.band, container = this.container;
 		if (!band || !container || band.top + band.height < reported - 1) return null;
-		container.setCssStyles({ top: `${-band.height}px` });
+		// Both writes through bandPlacement: a raw top keeps the last band write's translate and puts the box at the
+		// top plus that fraction a second time until the next band write.
+		container.setCssStyles(this.bandPlacement(band.left, -band.height));
 		const free = scroller.scrollHeight;
-		container.setCssStyles({ top: `${band.top}px` });
+		container.setCssStyles(this.bandPlacement(band.left, band.top));
 		scrollProbeExtent(`band bottom released: height without the band ${free}`);
 		return free < band.top + band.height ? free : null;
 	}
@@ -12588,7 +14164,7 @@ const inkOverlayPlugin = ViewPlugin.fromClass(InkOverlayPlugin, {
 		if (!overlay?.ownsNoteViewport()) return null;
 		// BOTH tokens, because this facet is the host's class attribute: CodeMirror writes it whole on every update and
 		// anything not named here is dropped. See `noteViewportOwnLines`.
-		return { class: overlay.noteViewportOwnLines() ? "handwriting-note-viewport handwriting-note-viewport-own-lines" : "handwriting-note-viewport" };
+		return { class: "handwriting-note-viewport" + (overlay.noteViewportOwnLines() ? " handwriting-note-viewport-own-lines" : "") + (overlay.noteScrollbarUnscaled() ? " handwriting-scrollbar-unscaled" : "") };
 	}),
 });
 

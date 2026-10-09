@@ -33,6 +33,28 @@ export interface ForkRecord {
 	/** The revision that arrived and became the live page. */
 	readonly incomingPath: string;
 	readonly at: number;
+	/**
+	 * A copy the store's save guard kept rather than an adoption pair: the
+	 * other revision is `incomingPath`, a `<id>.conflict-<mtime>.json` the
+	 * guard moved aside before writing this device's page, and `outgoingPath`
+	 * is the live page itself. The other revision is then the one NOT on
+	 * screen, so the question is the other way round, and a decision never
+	 * renames the live page. See `scanForForks`.
+	 *
+	 * A kept copy records no writer either. On the device whose save guard
+	 * kept it the live page is this device's, but a copy kept when the other
+	 * device gave the note a new id holds THIS device's ink, and either file
+	 * reads the other way round on the other device. So a kept copy is never
+	 * labelled by device: Version A is the page as it is now, Version B the
+	 * copy (see `cannotPlace`).
+	 */
+	readonly kept?: true;
+	/**
+	 * A scanned pair this device cannot place: no install is recorded as its
+	 * writer, or this install has no device id. Which side is this device's
+	 * cannot be told, so the screen names the sides Version A and Version B.
+	 */
+	readonly writerUnknown?: true;
 }
 
 /** What one side of a fork holds, or why it cannot be read. */
@@ -71,15 +93,28 @@ export interface ForkAccount {
 	 * a stroke the other lacks is a fork a person needs to answer.
 	 *
 	 * False when either side is unreadable: nothing can be claimed about a
-	 * count that could not be taken.
+	 * count that could not be taken. The one exception is `undecidable`.
 	 */
 	readonly needsDecision: boolean;
+	/**
+	 * A kept copy whose bytes this build cannot read: damaged (a newer build's
+	 * stroke) or a newer schema. It is listed so the ink in it is not hidden,
+	 * its side reads as unreadable, and no decision here retires or restores
+	 * it (`applyForkDecision` refuses both). It does not take its page's one
+	 * place in the list (`ForkResolutionModal`).
+	 */
+	readonly undecidable?: true;
 }
 
 export type ForkDecision = "keep-mine" | "take-theirs" | "keep-both";
 
 export interface ForkOutcome {
-	readonly kind: "applied" | "refused";
+	/**
+	 * `ignored`: another changing decision on the same page was running, or
+	 * the pair was no longer listed. Nothing was read or written, and the
+	 * surface says nothing.
+	 */
+	readonly kind: "applied" | "refused" | "ignored";
 	/** True only when the decision actually wrote the live page. */
 	readonly wrote: boolean;
 	/** True when the fork stays listed afterwards, so it can be reached again. */
@@ -189,6 +224,24 @@ export function forkHostFor(src: ForkHostSources): ForkHost {
 const ARTIFACT = /^(.+)\.conflict-external-(.+)-(outgoing|incoming)\.json$/;
 
 /**
+ * `<pageId>.conflict-<mtime>.json`, or `-<n>` before `.json` when that name
+ * was taken: what the save guard (`PageStore.freeConflictPath`) moves another
+ * revision to before it writes this device's page. Digits right after
+ * `.conflict-`, so an adoption pair, a resolved name and a tagged name never
+ * match.
+ */
+const KEPT_COPY = /^(.+)\.conflict-(\d+(?:-\d+)?)\.json$/;
+
+/**
+ * `<pageId>.conflict-migration-<ms>.json`, or `-<n>` before `.json`: what
+ * moving the ink folder (`InkFolder.ts`, at start-up) renames a file to when
+ * the same page already has a file in the new folder. It holds that page's
+ * ink from the old folder, beside the live page in the new one, so it is a
+ * kept copy like any other.
+ */
+const MOVE_COPY = /^(.+)\.conflict-migration-(\d+(?:-\d+)?)\.json$/;
+
+/**
  * Find preserved pairs by looking, because nothing else can find them.
  *
  * THE REGISTER ABOVE IS PER-SESSION and a fork outlives the session that made
@@ -201,6 +254,14 @@ const ARTIFACT = /^(.+)\.conflict-external-(.+)-(outgoing|incoming)\.json$/;
  *
  * Read-only: it lists and pairs, and writes nothing. Pairs missing a leg are
  * skipped - one artifact alone is not a decision anyone can be offered.
+ *
+ * A COPY THE SAVE GUARD KEPT IS A FORK TOO. When a revision this device never
+ * read is at the live path as a save lands - the other device's ink file
+ * arriving after this device drew in the gap, or a newer build's file synced
+ * in while the note is open - the guard keeps it byte for byte as
+ * `<id>.conflict-<mtime>.json` and writes this device's page. Both revisions
+ * are then on disk, and the other one is in a file nothing in Obsidian can
+ * reach. Each such copy is listed against the live page beside it.
  */
 export async function scanForForks(host: ForkHost, folder: string): Promise<ForkRecord[]> {
 	if (!host.list) return [];
@@ -223,18 +284,34 @@ export async function scanForForks(host: ForkHost, folder: string): Promise<Fork
 		pairs.set(key, entry);
 	}
 	const out: ForkRecord[] = [];
+	for (const name of names) {
+		const base = name.slice(name.lastIndexOf("/") + 1);
+		const m = KEPT_COPY.exec(base) ?? MOVE_COPY.exec(base);
+		if (!m) continue;
+		const incoming = `${folder}/${base}`;
+		const st = await host.stat(incoming).catch(() => null);
+		out.push({
+			pageId: m[1]!,
+			path: m[1]!,
+			outgoingPath: `${folder}/${m[1]!}.json`,
+			incomingPath: incoming,
+			at: st?.mtime ?? 0,
+			kept: true,
+		});
+	}
 	for (const e of pairs.values()) {
 		if (!e.outgoing || !e.incoming) continue;
 		const st = await host.stat(e.outgoing).catch(() => null);
 		// A pair another install wrote: its "outgoing" leg is THAT device's
 		// revision and its "incoming" leg is this one's, so this device reads
 		// them the other way round. A pair with no writer recorded (written
-		// before this existed) reads as it always has.
-		if (host.deviceId) {
-			const writer = await writerOf(host, e.outgoing);
-			if (writer !== null && writer !== host.deviceId) [e.outgoing, e.incoming] = [e.incoming, e.outgoing];
-		}
+		// before this existed), or one read on an install with no device id,
+		// keeps its legs as they lie on disk and is marked as one this device
+		// cannot place.
+		const writer = await writerOf(host, e.outgoing);
+		if (host.deviceId && writer !== null && writer !== host.deviceId) [e.outgoing, e.incoming] = [e.incoming, e.outgoing];
 		out.push({
+			...(writer === null || !host.deviceId ? { writerUnknown: true as const } : {}),
 			pageId: e.pageId,
 			// THE NOTE PATH IS NOT RECOVERABLE FROM THE FILENAME - the artifact
 			// is named for the page id and nothing else. A fork registered live
@@ -272,7 +349,12 @@ async function writerOf(host: ForkHost, outgoingPath: string): Promise<string | 
 export async function refreshForks(host: ForkHost, folder: string): Promise<void> {
 	for (const found of await scanForForks(host, folder)) {
 		const key = pairKey(found);
-		if (!forks.has(key)) forks.set(key, found);
+		if (!forks.has(key)) {
+			// Listed again (a decided pair whose rename failed is still on disk
+			// under its fork name): a decision on it is a decision again.
+			retired.delete(key);
+			forks.set(key, found);
+		}
 	}
 }
 
@@ -304,9 +386,20 @@ function pairKey(rec: ForkRecord): string {
 	return `${rec.pageId}|${a}|${b}`;
 }
 
+/**
+ * Pairs this session has taken off the list (decided, or forgotten): a
+ * decision that still reaches one, from a modal opened before, does nothing.
+ */
+const retired = new Set<string>();
+
+/** Page ids with a keep-mine or take-the-other running now. */
+const deciding = new Set<string>();
+
 /** Record a fork the store just preserved. The same pair again replaces its entry. */
 export function recordFork(rec: ForkRecord): void {
-	forks.set(pairKey(rec), rec);
+	const key = pairKey(rec);
+	retired.delete(key);
+	forks.set(key, rec);
 }
 
 /** Every unresolved fork, newest first. */
@@ -316,17 +409,24 @@ export function listForks(): ForkRecord[] {
 
 /** Drop one pair, once the user has decided about it. */
 export function forgetPair(rec: ForkRecord): void {
-	forks.delete(pairKey(rec));
+	const key = pairKey(rec);
+	forks.delete(key);
+	retired.add(key);
 }
 
 /** Drop every pair of one page. */
 export function forgetFork(pageId: string): void {
-	for (const [key, rec] of forks) if (rec.pageId === pageId) forks.delete(key);
+	for (const [key, rec] of forks) {
+		if (rec.pageId !== pageId) continue;
+		forks.delete(key);
+		retired.add(key);
+	}
 }
 
 /** Test seam, and the teardown path. */
 export function resetForks(): void {
 	forks.clear();
+	retired.clear();
 }
 
 // ---- describing -------------------------------------------------------------
@@ -394,7 +494,8 @@ export async function describeFork(host: ForkHost, rec: ForkRecord): Promise<For
 		pageAt(host, rec.pageId, rec.outgoingPath),
 		pageAt(host, rec.pageId, rec.incomingPath),
 	]);
-	const both = minePage !== null && theirsPage !== null;
+	const undecidable = await keptCopyUnreadable(host, rec);
+	const both = !undecidable && minePage !== null && theirsPage !== null;
 	const mineIds = new Set(minePage?.strokes.map((s) => s.id));
 	const theirsIds = new Set(theirsPage?.strokes.map((s) => s.id));
 	const mineOnly = both ? [...mineIds].filter((id) => !theirsIds.has(id)).length : 0;
@@ -404,17 +505,42 @@ export async function describeFork(host: ForkHost, rec: ForkRecord): Promise<For
 		path,
 		at: rec.at,
 		mine,
-		theirs,
+		theirs: undecidable ? { ...theirs, strokes: 0, readable: false } : theirs,
 		mineOnly,
 		theirsOnly,
+		...(undecidable ? { undecidable: true as const } : {}),
 		// The question preservation asked when it kept the pair: does this
 		// device's revision hold anything the other lacks, by id or under the
 		// same id in another form? A stroke the other device moved keeps its
 		// id, so counting missing ids alone hid that pair from the list. The
 		// legs are compared as parsed; the nested exact capture on the
 		// outgoing leg is not a stroke and is not compared.
-		needsDecision: both && outgoingDiverges(minePage, theirsPage),
+		// A kept copy asks the other way round: the live page stays as it is,
+		// and what could be lost is ink only the copy holds.
+		needsDecision:
+			undecidable ||
+			(both && (rec.kept ? outgoingDiverges(theirsPage, minePage) : outgoingDiverges(minePage, theirsPage))),
 	};
+}
+
+/**
+ * A kept copy that is on disk and that this build cannot read: it parses as
+ * damaged (a newer build's stroke this build drops) or declares a newer
+ * schema. Restoring it here would write less than the file holds, and
+ * retiring it would hide the only copy of that ink. A copy that is gone is
+ * not this: there is nothing left to keep.
+ */
+async function keptCopyUnreadable(host: ForkHost, rec: ForkRecord): Promise<boolean> {
+	if (!rec.kept) return false;
+	let text: string | null = null;
+	try {
+		text = await host.read(rec.incomingPath);
+	} catch {
+		return false;
+	}
+	if (text === null) return false;
+	const parsed = parsePage(text, rec.pageId);
+	return parsed.damaged === true || parsed.futureVersion !== undefined;
 }
 
 // ---- deciding ---------------------------------------------------------------
@@ -448,6 +574,33 @@ export async function applyForkDecision(
 	if (decision === "keep-both") {
 		return { kind: "applied", wrote: false, stillListed: true };
 	}
+	// ONE CHANGING DECISION AT A TIME PER PAGE, held here so it binds every
+	// modal and every pair on that page. A change asked for while one runs on
+	// the same page, or on a pair no longer listed, does nothing: no read, no
+	// write, no rename, no notice, and it is not queued.
+	if (retired.has(pairKey(rec))) return { kind: "ignored", wrote: false, stillListed: false };
+	if (deciding.has(rec.pageId)) {
+		return { kind: "ignored", wrote: false, stillListed: forks.has(pairKey(rec)) };
+	}
+	deciding.add(rec.pageId);
+	try {
+		return await applyChangingDecision(host, rec, decision);
+	} finally {
+		deciding.delete(rec.pageId);
+	}
+}
+
+/** Keep mine or take the other, once the page is this decision's alone. */
+async function applyChangingDecision(
+	host: ForkHost,
+	rec: ForkRecord,
+	decision: "keep-mine" | "take-theirs"
+): Promise<ForkOutcome> {
+	// A kept copy this build cannot read is never retired or restored here,
+	// and the live page is not read for it: refused before anything else.
+	if (await keptCopyUnreadable(host, rec)) {
+		return { kind: "refused", wrote: false, stillListed: true, why: "cannot be read" };
+	}
 	const leg = decision === "keep-mine" ? rec.outgoingPath : rec.incomingPath;
 	let text: string | null = null;
 	try {
@@ -479,9 +632,16 @@ export async function applyForkDecision(
 	// store wrote for exactly this: it returns the nested capture when there is
 	// one and the ordinary page otherwise, and the capture does not carry the
 	// key itself.
-	const restored = recoverExactPage(parsed.data);
+	// A kept copy can come from another id (a note whose id the other device
+	// changed keeps this device's ink under the old one): the page restored
+	// here is this page, whatever id its bytes declare.
+	const restored = { ...recoverExactPage(parsed.data), pageId: rec.pageId };
 	// Take the other with the other revision already live: nothing to write.
-	const write = decision === "keep-mine" || !(await livePageHolds(host, rec, restored));
+	// Keep mine on a kept copy (Keep Version A): the live page is the side
+	// kept, so nothing is written and only the copy is retired.
+	const write = rec.kept
+		? decision === "take-theirs" && !(await livePageHolds(host, rec, restored))
+		: decision === "keep-mine" || !(await livePageHolds(host, rec, restored));
 	if (write) {
 		try {
 			if (host.restore) await host.restore(rec.pageId, restored);
@@ -508,13 +668,21 @@ export async function applyForkDecision(
 /**
  * `<id>.conflict-external-<token>-<leg>.json` becomes
  * `<id>.conflict-resolved-<token>-<leg>.json`: the same file, under a name the
- * scan does not match. A failed rename keeps the decision for this session
- * only; the next run lists the fork again, which is safe.
+ * scan does not match. A kept copy `<id>.conflict-<mtime>.json` becomes
+ * `<id>.conflict-resolved-<mtime>.json`, and a copy the folder move kept,
+ * `<id>.conflict-migration-<ms>.json`, becomes
+ * `<id>.conflict-resolved-migration-<ms>.json`; the other leg of either is the
+ * live page and is never renamed. A failed rename keeps the decision for this session only; the
+ * next run lists the fork again, which is safe.
  */
 async function markResolved(host: ForkHost, rec: ForkRecord): Promise<void> {
 	if (!host.rename) return;
-	for (const leg of [rec.outgoingPath, rec.incomingPath]) {
-		const to = leg.replace(".conflict-external-", ".conflict-resolved-");
+	for (const leg of rec.kept ? [rec.incomingPath] : [rec.outgoingPath, rec.incomingPath]) {
+		const to = rec.kept
+			? leg
+					.replace(/\.conflict-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-")
+					.replace(/\.conflict-migration-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-migration-")
+			: leg.replace(".conflict-external-", ".conflict-resolved-");
 		if (to === leg) continue;
 		try {
 			await host.rename(leg, to);
@@ -650,3 +818,59 @@ export const FORK_COPY_PLACEHOLDER = {
 	/** After a refused keep-mine. */
 	refused: "Could not keep this device's ink",
 } as const;
+
+/**
+ * Words the fork screen needs where the ten above cannot be true or do not
+ * fit. Alan was asked for each on 2026-10-04 and had no words for them, so
+ * these are DEFAULTS, not his: each is shown to him on screen and he changes
+ * any on sight. `ForkCopyApproved.test.ts` pins them as a second list, apart
+ * from his ten.
+ *
+ * Version A and Version B name the two sides of a pair this device cannot
+ * place - no install recorded as its writer (pairs written by 1.4.19 to
+ * 1.4.21), no device id on this install, or any kept copy - where "This
+ * device" could be false. A is the outgoing leg as it lies on disk, never
+ * swapped, so the same file is Version A on every device that looks at it;
+ * for a kept copy that is the page as it is now, and B is the copy.
+ */
+export const FORK_COPY_DEFAULTS = {
+	/** After a refused take-the-other. */
+	takeTheirsRefused: "Could not take the other device's ink",
+	/** Side labels for a pair this device cannot place. */
+	versionA: "Version A",
+	versionB: "Version B",
+	/** Its first two buttons; the third is his "Keep both". */
+	keepVersionA: "Keep Version A",
+	keepVersionB: "Keep Version B",
+	/** After a refused keep on such a pair. */
+	keepVersionARefused: "Could not keep Version A",
+	keepVersionBRefused: "Could not keep Version B",
+} as const;
+
+/** A pair whose sides cannot be named by device: see `FORK_COPY_DEFAULTS`. */
+function cannotPlace(rec: ForkRecord): boolean {
+	return rec.writerUnknown === true || rec.kept === true;
+}
+
+/** The two side labels and three button texts the fork screen shows for a pair. */
+export function forkLabels(rec: ForkRecord): {
+	mine: string;
+	theirs: string;
+	keepMine: string;
+	takeTheirs: string;
+	keepBoth: string;
+} {
+	const copy = FORK_COPY_PLACEHOLDER;
+	if (!cannotPlace(rec)) {
+		return { mine: copy.mine, theirs: copy.theirs, keepMine: copy.keepMine, takeTheirs: copy.takeTheirs, keepBoth: copy.keepBoth };
+	}
+	const d = FORK_COPY_DEFAULTS;
+	return { mine: d.versionA, theirs: d.versionB, keepMine: d.keepVersionA, takeTheirs: d.keepVersionB, keepBoth: copy.keepBoth };
+}
+
+/** The notice after a refused decision on a pair. */
+export function refusalFor(rec: ForkRecord, decision: ForkDecision): string {
+	const d = FORK_COPY_DEFAULTS;
+	if (cannotPlace(rec)) return decision === "take-theirs" ? d.keepVersionBRefused : d.keepVersionARefused;
+	return decision === "take-theirs" ? d.takeTheirsRefused : FORK_COPY_PLACEHOLDER.refused;
+}

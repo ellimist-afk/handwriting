@@ -40,6 +40,9 @@ import { PageData, emptyPage, parsePage, serializePage } from "../model/PageData
 import { InkStroke } from "../ink/Stroke";
 import { installLiveReloadPoll } from "../testUtils/LiveReloadTestHarness";
 
+/** What a note says once its live ink file has stayed missing past the quiet period. */
+const INK_FILE_MISSING_WORDS =
+	"this note's ink file is missing.\n\nyour ink is still on screen. your next stroke saves it again.";
 const DEBOUNCE_MS = 700;
 const PATH = "note.md";
 const PAGE_ID = "p1";
@@ -356,7 +359,10 @@ function persistentlyMissingAtPrepare(base: FakeAdapter): {
 	return {
 		adapter: hooked(base, {
 			exists: async (path) => {
-				if (!active || path !== LIVE || ++liveExists % 3 !== 0) return undefined;
+				// Counted only while the live file is present: the save sequence also asks
+				// for the live path after moving it aside (R5, move then judge), where an
+				// absent answer is the truth and there is nothing to hide.
+				if (!active || path !== LIVE || !base.files.has(path) || ++liveExists % 3 !== 0) return undefined;
 				const text = base.files.get(path);
 				const mtime = base.mtimes.get(path);
 				if (text === undefined || mtime === undefined) {
@@ -689,7 +695,7 @@ describe("UNAVAILABLE PRESERVATION NEVER FALLS THROUGH TO PLAIN RELOAD", () => {
 
 			vi.setSystemTime(Date.now() + ADOPTION_QUIET_MS + 1);
 			await pollBridge(a).tick();
-			expect(a.notices).not.toContain(ADOPTION_STILL_FAILING);
+			expect(a.notices).toEqual([ADOPTION_STILL_FAILING]);
 
 			a.ink.commit(PATH, stroke("after-held"));
 			await a.store.flush();
@@ -781,13 +787,13 @@ describe("UNAVAILABLE PRESERVATION NEVER FALLS THROUGH TO PLAIN RELOAD", () => {
 
 		await vi.advanceTimersByTimeAsync(ADOPTION_QUIET_MS + 1_000);
 		await poll.tick();
-		expect(a.notices).toEqual([ADOPTION_STILL_FAILING]);
+		expect(a.notices).toEqual([INK_FILE_MISSING_WORDS]);
 		expect(artifacts()).toEqual([]);
 		expect(a.accepts).toBe(0);
 
 		await vi.advanceTimersByTimeAsync(ADOPTION_QUIET_MS + 1_000);
 		await poll.tick();
-		expect(a.notices).toEqual([ADOPTION_STILL_FAILING]);
+		expect(a.notices).toEqual([INK_FILE_MISSING_WORDS]);
 
 		// The notice is not an adoption, a lock or a save. Editing remains live,
 		// and the real write guard still preserves the exact incoming bytes.
@@ -819,7 +825,7 @@ describe("UNAVAILABLE PRESERVATION NEVER FALLS THROUGH TO PLAIN RELOAD", () => {
 
 		await vi.advanceTimersByTimeAsync(ADOPTION_QUIET_MS + 1_000);
 		await poll.tick();
-		expect(a.notices).toEqual([ADOPTION_STILL_FAILING]);
+		expect(a.notices).toEqual([INK_FILE_MISSING_WORDS]);
 		expect(a.ink.captureHistoryIdentity(PATH)).toBe(identity);
 		expect(a.ink.strokes(PATH).map((s) => s.id)).toEqual(["a", "local"]);
 		expect(a.accepts).toBe(0);
@@ -827,7 +833,7 @@ describe("UNAVAILABLE PRESERVATION NEVER FALLS THROUGH TO PLAIN RELOAD", () => {
 
 		await vi.advanceTimersByTimeAsync(ADOPTION_QUIET_MS + 1_000);
 		await poll.tick();
-		expect(a.notices).toEqual([ADOPTION_STILL_FAILING]);
+		expect(a.notices).toEqual([INK_FILE_MISSING_WORDS]);
 		expect(fake.files.has(LIVE)).toBe(false);
 
 		// The hold retained the settled base as well as the visible strokes:

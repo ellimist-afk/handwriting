@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { codeOnly } from "../CodeOnly";
-import { FORK_COPY_PLACEHOLDER } from "./ForkResolution";
+import { FORK_COPY_DEFAULTS, FORK_COPY_PLACEHOLDER } from "./ForkResolution";
+import { INK_FILE_MISSING } from "../inline/InlineInkStore";
 
 /**
  * THE GATE THAT WAS PROMISED IN A COMMENT AND DID NOT EXIST.
@@ -101,6 +102,46 @@ describe("the fork screen ships Alan's approved words and nothing else", () => {
 
 	it("carries no marker on any of them", () => {
 		for (const [key, value] of Object.entries(FORK_COPY_PLACEHOLDER)) {
+			expect(value, `${key} still carries the unapproved-copy marker`).not.toContain(MARKER);
+		}
+	});
+});
+
+/**
+ * THE SECOND LIST: DEFAULTS, NOT HIS. Words the screen needs where his ten
+ * cannot be true or do not fit - a pair this device cannot place, a refused
+ * take-the-other, a note whose ink file is missing. He was asked for each on
+ * 2026-10-04 and had no words, so these were picked for him, shown to him on
+ * screen, and are his to change on sight. Pinned here so a change is still a
+ * visible decision, and kept apart from his ten so nobody reads them as his.
+ */
+const DEFAULTS: [key: keyof typeof FORK_COPY_DEFAULTS, text: string][] = [
+	["takeTheirsRefused", "Could not take the other device's ink"],
+	["versionA", "Version A"],
+	["versionB", "Version B"],
+	["keepVersionA", "Keep Version A"],
+	["keepVersionB", "Keep Version B"],
+	["keepVersionARefused", "Could not keep Version A"],
+	["keepVersionBRefused", "Could not keep Version B"],
+];
+
+describe("the fork screen's defaults, which are not his words", () => {
+	it.each(DEFAULTS)("%s is the default picked for him, verbatim", (key, text) => {
+		expect(FORK_COPY_DEFAULTS[key]).toBe(text);
+	});
+
+	it("covers every key on the defaults object", () => {
+		expect(Object.keys(FORK_COPY_DEFAULTS).sort()).toEqual(DEFAULTS.map(([k]) => k).sort());
+	});
+
+	it("the missing-ink-file notice is the default picked for him, verbatim", () => {
+		expect(INK_FILE_MISSING).toBe(
+			"this note's ink file is missing.\n\nyour ink is still on screen. your next stroke saves it again."
+		);
+	});
+
+	it("carries no marker on any of them", () => {
+		for (const [key, value] of [...Object.entries(FORK_COPY_DEFAULTS), ["INK_FILE_MISSING", INK_FILE_MISSING]]) {
 			expect(value, `${key} still carries the unapproved-copy marker`).not.toContain(MARKER);
 		}
 	});

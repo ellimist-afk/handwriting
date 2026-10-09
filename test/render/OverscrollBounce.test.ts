@@ -37,16 +37,40 @@
 import { beforeAll, afterAll, it, expect } from "vitest";
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import css from "../../styles.css?raw";
 import REAL_OBSIDIAN_CSS from "./obsidianReadableWidth";
 
 declare const process: { env: Record<string, string | undefined> };
 
+for (const flag of ["HW_GUTTER_LEFT_PLANT", "HW_GUTTER_PIXEL_PLANT"]) {
+	if (process.env[flag] !== undefined) throw new Error("Excluded glyph plant requested: " + flag);
+}
+
+async function sha256(value: string | Uint8Array) {
+	const bytes = typeof value === "string" ? new TextEncoder().encode(value) : Uint8Array.from(value);
+	return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Optional saved inputs are read at runtime; no private fixture bytes enter the repository.
+const actualInkPath = process.env.HW_GUTTER_INK;
+const actualTextPath = process.env.HW_GUTTER_TEXT;
+let actualGutter: { ink: string; text: string; pageId: string; strokes: number; inkHash: string; textHash: string } | null = null;
+if (actualInkPath || actualTextPath) {
+	if (!actualInkPath || !actualTextPath) throw new Error("both gutter fixture paths are required");
+	const ink = readFileSync(actualInkPath, "utf8"), text = readFileSync(actualTextPath, "utf8");
+	const inkHash = await sha256(ink), textHash = await sha256(text), page = JSON.parse(ink);
+	if (inkHash !== process.env.HW_GUTTER_INK_SHA256 || textHash !== process.env.HW_GUTTER_TEXT_SHA256)
+		throw new Error("gutter fixture hash mismatch");
+	if (!text.includes("handwriting-page-id: " + page.pageId) || page.strokes.length !== 1621)
+		throw new Error("gutter fixture identity or stroke count mismatch");
+	actualGutter = { ink, text, pageId: page.pageId, strokes: page.strokes.length, inkHash, textHash };
+}
+
 const PAGE = `
 import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorView, lineNumbers } from "@codemirror/view";
 import { history } from "@codemirror/commands";
 import { inlineInk, inkOverlayExtension, overlayForPath, setScrollExpansionEnabled, setInlineTool, setInkSizeMult } from "../../src/inline/InkOverlay";
 import { setInkColorHex } from "../../src/ink/InkColor";
@@ -129,41 +153,63 @@ function sample(phase, withInk) {
 		inkLeft: ink && ink.n ? ink.left : null, inkCy: ink && ink.n ? ink.cy : null };
 }
 
-async function pinchAbout(to, steps, cx, cy, framesAfter, withInk, travel) {
+async function pinchAbout(to, steps, cx, cy, framesAfter, withInk, travel, travelY = 0) {
 	const { overlay } = rig, router = overlay.router, from = overlay.pinchScaleNow;
 	const spread0 = 300, spread1 = 300 * to / from, drift = travel || 0;
 	// The centroid may TRAVEL across the gesture, which is how a real two-finger drag makes
 	// blank beside the page. Rounding alone leaves 19 px here, too small for the pen plant to
 	// discriminate; a 60 px drag makes the correction by construction.
-	const touch = (s, f) => { const c = cx + drift * (f === undefined ? 0 : f); router.touchPos.set(911, { x: c - s / 2, y: cy }); router.touchPos.set(912, { x: c + s / 2, y: cy }); };
+	const touch = (s, f) => { const c = cx + drift * (f === undefined ? 0 : f); const py = cy + travelY * (f === undefined ? 0 : f); router.touchPos.set(911, { x: c - s / 2, y: py }); router.touchPos.set(912, { x: c + s / 2, y: py }); };
 	const ev = type => new PointerEvent(type, { pointerId: 912, pointerType: "touch" });
 	touch(spread0); router.beginPinch(ev("pointerdown"));
 	let last = null;
 	for (let i = 1; i <= steps; i++) { touch(spread0 + (spread1 - spread0) * i / steps, i / steps); router.updatePinch(ev("pointermove")); await rendered(); if (i === steps) last = sample("last-preview"); }
-	router.endPinch(ev("pointerup"), { x: cx + drift, y: cy }); router.touchPos.clear();
+	router.endPinch(ev("pointerup"), { x: cx + drift, y: cy + travelY }); router.touchPos.clear();
 	const rows = [];
 	for (let j = 1; j <= framesAfter; j++) { await rendered(); rows.push(sample("settle-" + j, withInk)); }
 	return { last, rows };
 }
 
 window.bounce = {
-	async mount(infinite, tag) {
+	async mount(infinite, tag, numbered = false, fixture = null, nested = false, minimal = false) {
 		setPenInk(true); setScrollExpansionEnabled(!!infinite);
 		setInlineTool("pen"); setInkColorHex("pen", "#ff00ff"); setInkSizeMult("pen", 4);
 		document.body.classList.add("handwriting-paper-lines");
 		const path = "bounce-" + (tag || "gesture") + ".md";
-		const pane = document.body.appendChild(document.createElement("div"));
+		const host = minimal ? document.body.appendChild(document.createElement("div")) : document.body;
+		if (minimal) { host.className = "workspace-leaf-content"; host.setAttribute("data-type", "markdown"); }
+		const contentHost = minimal ? host.appendChild(document.createElement("div")) : host;
+		if (minimal) contentHost.className = "view-content";
+		const pane = contentHost.appendChild(document.createElement("div"));
 		pane.className = "markdown-source-view mod-cm6";
 		pane.style.cssText = "position:relative;margin-left:" + HOST_LEFT + "px;width:" + PANE_W + "px;height:" + PANE_H + "px;overflow:hidden";
-		const doc = Array.from({ length: 400 }, (_, i) => "line " + i + " alpha beta gamma delta epsilon zeta").join("\\n");
-		const view = new EditorView({ parent: pane, state: EditorState.create({ doc, extensions: [history(), EditorView.lineWrapping,
+		if (fixture) { ids.set(path, fixture.pageId); sidecars.set(fixture.pageId, fixture.ink); }
+		const doc = fixture ? fixture.text : Array.from({ length: 400 }, (_, i) => "line " + i + " alpha beta gamma delta epsilon zeta").join("\\n");
+		const view = new EditorView({ parent: pane, state: EditorState.create({ doc, extensions: [history(), EditorView.lineWrapping, ...(numbered ? [lineNumbers()] : []),
 			editorInfoField.init(() => ({ app: { commands: { executeCommandById: () => false } }, file: { path }, editor: {} })), inkOverlayExtension(),
 			EditorView.theme({ "&": { width: PANE_W + "px", height: PANE_H + "px" }, ".cm-scroller": { overflowY: "auto", overflowX: "hidden" }, ".cm-content": { fontFamily: "monospace", fontSize: "16px", lineHeight: "24px" } })] }) });
 		const sizer = installSizer(view);
+		if (nested) {
+			const gutters = view.scrollDOM.querySelector(":scope > .cm-gutters");
+			if (!gutters) throw new Error("missing stock gutters before nested mount");
+			const container = view.contentDOM.parentElement;
+			// Stock CM detaches/reinserts gutters during viewport refresh. Obsidian hosts
+			// them in its content container; adapt that insertion point in this fixture only.
+			const insert = view.scrollDOM.insertBefore.bind(view.scrollDOM);
+			view.scrollDOM.insertBefore = (node, before) => node === gutters
+				? container.insertBefore(node, before?.parentNode === container ? before : view.contentDOM)
+				: insert(node, before);
+			container.insertBefore(gutters, view.contentDOM);
+		}
 		await settle(12);
 		const overlay = overlayForPath(path);
 		if (!overlay) throw new Error("no overlay for " + path);
 		rig = { pane, view, overlay, sizer, path };
+		if (fixture) {
+			for (let i = 0; i < 120 && inlineInk.strokes(path).length !== fixture.strokes; i++) await rendered();
+			return { strokes: inlineInk.strokes(path).length, pageId: fixture.pageId, textLines: view.state.doc.lines,
+				inkHash: fixture.inkHash, textHash: fixture.textHash };
+		}
 		const t = textBox(view), x = t.left + 80, y = t.cy;
 		rig.pen = (type, px, py, buttons) => document.elementFromPoint(px, py)?.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "pen", pointerId: 901, isPrimary: true, clientX: px, clientY: py, buttons, pressure: buttons ? 0.5 : 0 }));
 		rig.pen("pointerdown", x, y, 1); for (let i = 1; i <= 6; i++) rig.pen("pointermove", x + 30 * i, y, 1); rig.pen("pointerup", x + 180, y, 0);
@@ -186,6 +232,166 @@ window.bounce = {
 	 * about the ink, then out about a point 40 px below it, and the page ends with blank above its own top, which
 	 * the settle owes back. This is the TOP drive, measured 26.33 px on that rig.
 	 */
+	async gutterPixelsPrepare(scale) {
+		const { view, overlay } = rig, sd = view.scrollDOM;
+		setPenInk(false);
+		const box = sd.getBoundingClientRect(), x = box.left + box.width / 2, y = box.top + 80;
+		if (scale !== 1) await pinchAbout(scale, 30, x, y, 60, false);
+		sd.scrollTop = 0; view.requestMeasure(); await settle(12);
+		const lines = Array.from(view.contentDOM.querySelectorAll(".cm-line"));
+		const line = lines.slice(TEXT_LINE).find(el => el.textContent.trim().length >= 3 && el.getBoundingClientRect().bottom < box.bottom - 160);
+		if (!line) throw new Error("no visible nonempty glyph line");
+		const number = view.state.doc.lineAt(view.posAtDOM(line)).number;
+		const gutter = Array.from(sd.querySelectorAll(".cm-lineNumbers .cm-gutterElement")).find(el => el.textContent.trim() === String(number));
+		if (!gutter) throw new Error("no matching number glyph " + JSON.stringify({number,lines:lines.length,gutters:Array.from(sd.querySelectorAll(".cm-lineNumbers .cm-gutterElement")).map(el=>({number:el.textContent.trim(),height:el.getBoundingClientRect().height})),nested:sd.querySelectorAll(".cm-sizer > .cm-contentContainer > .cm-gutters").length}));
+		rig.pixel = { line, gutter, number, x, y, original: gutter.innerHTML };
+		return window.bounce.gutterPixelsRead();
+	},
+	gutterPixelsRead() {
+		const { view, overlay, pixel } = rig, { line, gutter, number } = pixel, sd = view.scrollDOM;
+		const rect = el => { const r = el.getBoundingClientRect(); return { x:r.x,y:r.y,width:r.width,height:r.height,top:r.top,bottom:r.bottom }; };
+		const glyphRect = el => {
+			const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT); let node;
+			while ((node = walker.nextNode()) && !node.textContent.trim()) {}
+			if (!node) throw new Error("missing glyph text node");
+			// Include the property/value prefix, not just a repeated "handwriting-" prefix.
+			// This fixed range is chosen before rest capture and never tuned per bounce frame.
+			const range = document.createRange(); range.setStart(node,0); range.setEnd(node,Math.min(node.textContent.length,48));
+			return rect(range);
+		};
+		const gutters = sd.querySelector(".cm-gutters"), cs = getComputedStyle(gutters), bounce = overlay.overscrollBounceReadout();
+		return { t:performance.now(), epoch:performance.timeOrigin+performance.now(), number, scale:overlay.pinchScaleNow,
+			line:rect(line), gutter:rect(gutter), textGlyph:glyphRect(line), numberGlyph:glyphRect(gutter),
+			offset:rect(gutter).top-rect(line).top, active:bounce.active, bounceY:bounce.y,
+			nested:sd.querySelectorAll(".cm-sizer > .cm-contentContainer > .cm-gutters").length,
+			direct:sd.querySelectorAll(":scope > .cm-gutters").length,
+			computed:{position:cs.position,zoom:cs.zoom,transform:cs.transform,sizerTransform:getComputedStyle(rig.sizer).transform},
+			viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},visibility:document.visibilityState };
+	},
+	async gutterPixelsStart() {
+		const { overlay, pixel } = rig, router=overlay.router, {x,y}=pixel;
+		const ev=type=>new PointerEvent(type,{pointerId:912,pointerType:"touch"});
+		const put=(cy,spread=300)=>{router.touchPos.set(911,{x:x-spread/2,y:cy});router.touchPos.set(912,{x:x+spread/2,y:cy});};
+		put(y);router.beginPinch(ev("pointerdown"));put(y,312);router.updatePinch(ev("pointermove"));await rendered();
+		put(y);router.updatePinch(ev("pointermove"));await rendered();
+		const travel=Math.max(160,3*router.cb.overscrollAllowancePx());
+		for(let i=1;i<=12;i++){put(y+travel*i/12);router.updatePinch(ev("pointermove"));await rendered();}
+		router.endPinch(ev("pointerup"),{x,y:y+travel});router.touchPos.clear();
+		rig.pixel.rows=[];
+		const tick=()=>{const row=window.bounce.gutterPixelsRead();rig.pixel.rows.push(row);if(row.active)requestAnimationFrame(tick);};
+		requestAnimationFrame(tick);
+		return window.bounce.gutterPixelsRead();
+	},
+	gutterPixelsRows(){return rig.pixel.rows || [];},
+	async gutterLeftPrepare(scale) {
+		await window.bounce.gutterPixelsPrepare(scale);
+		const {view,overlay,pixel}=rig, sd=view.scrollDOM;
+		sd.scrollLeft=0; view.requestMeasure(); await settle(12);
+		pixel.events=[]; pixel.contacts=new Map(); pixel.leftRows=[]; pixel.recording=true;
+		for(const type of ["pointerdown","pointermove","pointerup","pointercancel"]) {
+			sd.addEventListener(type,e=>{
+				if(e.pointerType!=="touch")return;
+				if(type==="pointerup"||type==="pointercancel")pixel.contacts.delete(e.pointerId);
+				else pixel.contacts.set(e.pointerId,{x:e.clientX,y:e.clientY});
+				pixel.events.push({type,t:performance.now(),pointerId:e.pointerId,pointerType:e.pointerType,
+					isTrusted:e.isTrusted,x:e.clientX,y:e.clientY,contacts:pixel.contacts.size});
+			},true);
+		}
+		const tick=()=>{if(!pixel.recording)return;pixel.leftRows.push(window.bounce.gutterLeftRead());requestAnimationFrame(tick);};
+		requestAnimationFrame(tick);
+		return window.bounce.gutterLeftRead();
+	},
+	gutterLeftRead() {
+		const row=window.bounce.gutterPixelsRead(), {view,overlay,pixel,sizer}=rig, sd=view.scrollDOM;
+		const gutters=sd.querySelector(".cm-gutters"), cs=getComputedStyle(gutters), sr=sd.getBoundingClientRect(), zr=sizer.getBoundingClientRect();
+		const scs=getComputedStyle(sd), zcs=getComputedStyle(sizer), container=gutters.parentElement;
+		const transform=new DOMMatrixReadOnly(zcs.transform);
+		const geometry=el=>{const r=el.getBoundingClientRect(),c=getComputedStyle(el);return {
+			x:r.x,y:r.y,width:r.width,height:r.height,position:c.position,transform:c.transform,
+			padding:[c.paddingTop,c.paddingRight,c.paddingBottom,c.paddingLeft],zoom:c.zoom};};
+		return {...row, scrollLeft:sd.scrollLeft, logicalPanX:overlay.viewportPan.x,
+			bounceX:overlay.overscrollBounceReadout().x,sizerX:zr.left,scrollerX:sr.left,
+			layoutBoundaryX:sr.left+(sd.clientLeft+Number.parseFloat(scs.paddingLeft||"0")+(Number.parseFloat(zcs.marginLeft)||0))*(sr.width/sd.offsetWidth),
+			transformX:transform.m41,position:cs.position,left:cs.left,insetInlineStart:cs.insetInlineStart,
+			sizerTransform:sizer.style.transform,sizerComputedTransform:zcs.transform,sizerMarginLeft:zcs.marginLeft,sizerOffsetLeft:sizer.offsetLeft,sizerOffsetTop:sizer.offsetTop,
+			typedTop:gutters.computedStyleMap?String(gutters.computedStyleMap().get("top")):null,resolvedTop:cs.top,guttersTransform:gutters.style.transform,
+			containerPosition:getComputedStyle(container).position,sizerPosition:zcs.position,scrollerPosition:scs.position,
+			bodyClasses:Array.from(document.body.classList),logicalPanY:overlay.viewportPan.y,
+			geometry:{scroller:geometry(sd),sizer:geometry(sizer),container:geometry(container),gutters:geometry(gutters)},
+			glyphDomRestored:pixel.gutter.innerHTML===pixel.original,
+			contacts:pixel.contacts.size,eventCount:pixel.events.length,events:pixel.events.slice(-1),
+			horizontalOffset:row.numberGlyph.x-row.textGlyph.x};
+	},
+	gutterLeftReset() {
+		const {gutter,original}=rig.pixel;gutter.innerHTML=original;
+		return window.bounce.gutterLeftRead();
+	},
+	gutterLeftFinish(){rig.pixel.recording=false;return {rows:rig.pixel.leftRows,events:rig.pixel.events};},
+	async gutterTopPull(scale) {
+		const { view, overlay } = rig, router = overlay.router, sd = view.scrollDOM;
+		setPenInk(false);
+		const box = sd.getBoundingClientRect(), x = box.left + box.width / 2, y = box.top + 80;
+		if (scale !== 1) await pinchAbout(scale, 30, x, y, 60, false);
+		sd.scrollTop = 0;
+		view.requestMeasure();
+		await settle(12);
+		const read = phase => {
+			const line = lineEl(view);
+			const number = view.state.doc.lineAt(view.posAtDOM(line)).number;
+			const gutter = Array.from(sd.querySelectorAll(".cm-lineNumbers .cm-gutterElement"))
+				.find(el => el.textContent.trim() === String(number) && el.getBoundingClientRect().height > 0);
+			if (!gutter) throw new Error("missing visible gutter for line " + number);
+			const lr = line.getBoundingClientRect(), gr = gutter.getBoundingClientRect();
+			const viewport = sd.getBoundingClientRect(), gutters = sd.querySelector(":scope > .cm-gutters");
+			const elements = Array.from(sd.querySelectorAll(".cm-lineNumbers .cm-gutterElement"));
+			const pairs = Array.from(view.contentDOM.querySelectorAll(".cm-line")).map(el => {
+				const number = view.state.doc.lineAt(view.posAtDOM(el)).number;
+				const ge = elements.find(g => g.textContent.trim() === String(number) && g.getBoundingClientRect().height > 0);
+				const r = el.getBoundingClientRect(), g = ge?.getBoundingClientRect();
+				return { number, visible: r.bottom > viewport.top && r.top < viewport.bottom,
+					lineTop: r.top, gutterTop: g?.top ?? null, offset: g ? g.top - r.top : null };
+			});
+			const bounce = overlay.overscrollBounceReadout();
+			return { phase, t: performance.now(), number, scale: overlay.pinchScaleNow, pairs,
+				gutterNumbers: elements.map(el => ({ number: el.textContent.trim(), height: el.getBoundingClientRect().height })),
+				gutterCount: elements.length, gutterParentIsScroller: gutters?.parentElement === sd,
+				pan: { x: overlay.viewportPan.x, y: overlay.viewportPan.y },
+				lineTop: lr.top, gutterTop: gr.top, offset: gr.top - lr.top,
+				active: bounce.active, bounceY: bounce.y, fromY: bounce.fromY,
+				gutterTransform: gutter.parentElement.style.transform,
+				sizerTransform: rig.sizer.style.transform };
+		};
+		const rest = read("rest");
+		const ev = type => new PointerEvent(type, { pointerId: 912, pointerType: "touch" });
+		const put = (cy, spread = 300) => {
+			router.touchPos.set(911, { x: x - spread / 2, y: cy });
+			router.touchPos.set(912, { x: x + spread / 2, y: cy });
+		};
+		// Engage the existing pinch route, restore its spread, then pull only past the top.
+		put(y); router.beginPinch(ev("pointerdown"));
+		put(y, 312); router.updatePinch(ev("pointermove")); await rendered();
+		put(y); router.updatePinch(ev("pointermove")); await rendered();
+		const travel = Math.max(160, 3 * router.cb.overscrollAllowancePx());
+		for (let i = 1; i <= 12; i++) {
+			put(y + travel * i / 12); router.updatePinch(ev("pointermove")); await rendered();
+		}
+		const held = read("held");
+		router.endPinch(ev("pointerup"), { x, y: y + travel }); router.touchPos.clear();
+		const frames = [read("lift")];
+		// Read every animation frame, including the final frame that clears the translate.
+		await new Promise((resolve, reject) => {
+			let count = 0;
+			const tick = () => {
+				try {
+					const row = read("frame"); frames.push(row);
+					if (++count >= 120 || (!row.active && count >= 4)) resolve();
+					else requestAnimationFrame(tick);
+				} catch (error) { reject(error); }
+			};
+			requestAnimationFrame(tick);
+		});
+		return { rest, held, frames, final: read("final"), travel };
+	},
 	async originEdgeOvershoot(inkMiddleX, cy) {
 		await pinchAbout(3, 30, inkMiddleX, cy, 16, false);
 		return pinchAbout(1, 30, inkMiddleX, cy + 40, 48, true);
@@ -420,6 +626,59 @@ window.bounce = {
 		for (let j = 0; j < 90; j++) { await rendered(); if (!overlay.overscrollBounceReadout().active) break; }
 		await settle(4);
 		return { cycles, atRest: total(), allowance: router.cb.overscrollAllowancePx() };
+	},
+	/**
+	 * THE TWO-FINGER RATCHET. Infinite Canvas on, page at its top-left. Two fingers 300 px apart (spread 12 px for one frame to
+	 * engage, then back, so the scale ends where it began), drag right and down well past the allowance, lift, and grab again while the spring still has at least
+	 * half its way to go; sixty times over. A grab folds what the spring still owed into the standing pan (so nothing
+	 * jumps under the fingers); the drag that follows must then carry the page no further past its bound than the one
+	 * allowance. Each cycle reports, on both axes, how far past the bound the page stands: as the fingers land (pan plus
+	 * the spring's offset, before the grab), on the first drag frame (engaging moves nothing), and at the end of the drag.
+	 */
+	async pinchRatchet(cycles) {
+		const { view, overlay } = rig, router = overlay.router, sd = view.scrollDOM;
+		sd.scrollTop = 0; sd.scrollLeft = 0;
+		setPenInk(false);
+		await settle(8);
+		await new Promise(res => setTimeout(res, 1200));
+		await settle(4);
+		const box = sd.getBoundingClientRect(), x0 = box.left + box.width / 2, y0 = box.top + box.height / 2;
+		const ev = type => new PointerEvent(type, { pointerId: 912, pointerType: "touch" });
+		const put = (x, y, w) => { const h = (w || 300) / 2; router.touchPos.set(911, { x: x - h, y }); router.touchPos.set(912, { x: x + h, y }); };
+		const allowance = router.cb.overscrollAllowancePx();
+		// Past the bound, painted px: the page's pan plus the spring's offset, less the column's own rest on x
+		// (the drag band's ceiling side; 0 where the column has no centred rest).
+		const past = () => {
+			const p = overlay.viewportPan, b = overlay.overscrollBounceReadout(), rest = overlay.boundReadout.restCeilX || 0;
+			return { x: +((p.x + b.x) - rest).toFixed(3), y: +(p.y + b.y).toFixed(3) };
+		};
+		const steps = 12, travel = 3 * allowance;
+		const out = [];
+		for (let n = 0; n < cycles; n++) {
+			const atLand = past();
+			// The pinch engages only past the router's slop (12 px of spread): one frame spread 12 px, then back to
+			// 300 for the rest of the gesture, so the scale ends where it began and every frame is a drag frame.
+			put(x0, y0); router.beginPinch(ev("pointerdown"));
+			put(x0, y0, 312); router.updatePinch(ev("pointermove")); await rendered();
+			put(x0 + 2, y0 + 2); router.updatePinch(ev("pointermove")); await rendered();
+			const engaged = past();
+			for (let i = 1; i <= steps; i++) { put(x0 + 2 + travel * i / steps, y0 + 2 + travel * i / steps); router.updatePinch(ev("pointermove")); await rendered(); }
+			const held = past(), drag = !!overlay.boundReadout.dragFrame, scale = overlay.pinchScaleNow;
+			router.endPinch(ev("pointerup"), { x: x0 + 2 + travel, y: y0 + 2 + travel }); router.touchPos.clear();
+			let regrab = null;
+			for (let j = 0; j < 40; j++) {
+				await rendered();
+				const b = overlay.overscrollBounceReadout();
+				const owed = Math.hypot(b.x, b.y), from = Math.hypot(b.fromX, b.fromY);
+				if (b.active && from > 0 && owed >= 0.5 * from) { regrab = { frame: j, owed: +owed.toFixed(2), from: +from.toFixed(2) }; break; }
+				if (!b.active && j > 2) break;
+			}
+			out.push({ atLand, engaged, held, drag, scale, regrab });
+			if (!regrab) break;
+		}
+		for (let j = 0; j < 120; j++) { await rendered(); if (!overlay.overscrollBounceReadout().active) break; }
+		await settle(4);
+		return { cycles: out, atRest: past(), allowance };
 	},
 	/**
 	 * A FLICK INTO AN END (Alan, device, 2026-09-20: "it takes too long for the bounce to happen, when i
@@ -669,16 +928,21 @@ afterAll(async () => {
 });
 
 const call = (p: Page, method: string, ...args: unknown[]) => p.evaluate(([m, a]) => (window as any).bounce[m](...a), [method, args] as const);
-async function open(tag: string, infinite = false) {
+async function open(tag: string, infinite = false, numbered = false, nested = false, minimal?: { app: string; theme: string }) {
 	const page = await browser.newPage({ viewport: { width: 1800, height: 900 }, deviceScaleFactor: 2, hasTouch: true });
 	const errors: string[] = [];
 	page.on("pageerror", e => errors.push(String(e.message).slice(0, 200)));
 	// The rule colour, without which the paper's gradients are invalid and the scroller paints no paper at all: this page
 	// asserted the pan PROPERTIES, which are written either way, so it never needed it until the paper became an element.
 	await page.setContent('<!doctype html><body style="margin:0; --background-modifier-border:#777777"></body>');
-	await page.addStyleTag({ content: css + REAL_OBSIDIAN_CSS });
+	if (minimal) {
+		await page.evaluate(() => document.body.classList.add("theme-light", "minimal-line-nums"));
+		await page.addStyleTag({ content: minimal.app });
+		await page.addStyleTag({ content: minimal.theme });
+		await page.addStyleTag({ content: css });
+	} else await page.addStyleTag({ content: css + REAL_OBSIDIAN_CSS });
 	await page.addScriptTag({ content: script });
-	const mounted = await call(page, "mount", infinite, tag) as any;
+	const mounted = await call(page, "mount", infinite, tag, numbered, numbered ? actualGutter : null, nested, !!minimal) as any;
 	return { page, errors, mounted };
 }
 const BOUNCE_MS = 500;
@@ -957,6 +1221,37 @@ it("INFINITE CANVAS ON: the give measures from the rest - grabbed mid-spring and
 	} finally { await page.close(); }
 }, 240_000);
 
+it("INFINITE CANVAS ON: two fingers grabbed mid-spring and dragged out again, sixty times, never carry the page further past its top or left than the one allowance, and it comes home", async () => {
+	const { page, errors } = await open("pinch-ratchet", true);
+	try {
+		const r = await call(page, "pinchRatchet", 60) as any;
+		record.push({ cell: "pinch-ratchet", ...r });
+		expect(errors).toEqual([]);
+		const at = (i: number) => JSON.stringify(r.cycles[i]);
+		// THE INPUTS ARE RIGHT: sixty grabs, each a drag at the gesture's own scale, each pulled past the allowance on
+		// both axes on the first grab, and every grab but the last landed while the spring still owed half its way.
+		expect(r.allowance, "the host offers its allowance").toBe(96);
+		expect(r.cycles.length, `sixty grabs (${JSON.stringify(r.cycles.slice(-2))})`).toBe(60);
+		expect(r.cycles[0].held.x, `the first drag reaches the allowance on x (${at(0)})`).toBeGreaterThanOrEqual(r.allowance - 1);
+		expect(r.cycles[0].held.y, `the first drag reaches the allowance on y (${at(0)})`).toBeGreaterThanOrEqual(r.allowance - 1);
+		for (let i = 0; i < r.cycles.length; i++) {
+			const c = r.cycles[i];
+			expect(c.drag, `grab ${i + 1}: a drag frame (${at(i)})`).toBe(true);
+			if (i > 0) expect(c.atLand.x > 0 || c.atLand.y > 0, `grab ${i + 1}: landed with the page still past its bound (${at(i)})`).toBe(true);
+		}
+		// THE CLAIM, both axes, every grab: never further past the bound than the allowance; engaging moves nothing.
+		const worst = { x: Math.max(...r.cycles.map((c: any) => c.held.x)), y: Math.max(...r.cycles.map((c: any) => c.held.y)) };
+		expect(r.cycles.map((c: any, i: number) => `grab ${i + 1}: x ${c.held.x <= r.allowance + 1 ? "within" : "past"}, y ${c.held.y <= r.allowance + 1 ? "within" : "past"}`),
+			`held no further past the bound than the allowance (worst x ${worst.x}, y ${worst.y})`)
+			.toEqual(r.cycles.map((_: any, i: number) => `grab ${i + 1}: x within, y within`));
+		for (let i = 0; i < r.cycles.length; i++) {
+			const c = r.cycles[i];
+			expect(Math.abs(c.engaged.x - c.atLand.x) <= 3 && Math.abs(c.engaged.y - c.atLand.y) <= 3, `grab ${i + 1}: engaging moved the page no more than the fingers' 2 px (${at(i)})`).toBe(true);
+		}
+		expect(Math.max(Math.abs(r.atRest.x), Math.abs(r.atRest.y)), `the page comes home after the last lift (${JSON.stringify(r.atRest)})`).toBeLessThanOrEqual(0.5);
+	} finally { await page.close(); }
+}, 240_000);
+
 it("INFINITE CANVAS ON: a flick into the page's own left edge - the glide ends at the end it hits and the spring starts at once, whatever residual the flick carried across it (Alan, device, 2026-09-20; the ruling moves this into canvas mode)", async () => {
 	const { page, errors } = await open("flick-into-end", true);
 	try {
@@ -1123,3 +1418,290 @@ it("TIMED: the glide lasts half a second on the frame clock, within one frame, a
 		for (const f of active) expect(Math.sign(f.x) === 0 || Math.sign(f.x) === Math.sign(active[0].fromX), "and never crosses the rest").toBe(true);
 	} finally { await page.close(); }
 }, 240_000);
+
+
+it("GUTTER TOP BOUNCE: line numbers track their line every frame at 55 and 100 percent", async () => {
+	const arms: any[] = [];
+	for (const scale of [0.55, 1]) {
+		const { page, errors, mounted } = await open("gutter-" + scale, true, true);
+		try {
+			const result = await call(page, "gutterTopPull", scale) as any;
+			const active = result.frames.filter((row: any) => row.active && Math.abs(row.bounceY) > 0.5);
+			const arm = { cell: "gutter-top-bounce", scale, bounceFired: active.length > 0, mounted, errors, ...result };
+			arms.push(arm); record.push(arm);
+		} finally { await page.close(); }
+	}
+	// Collect both arms before asserting, so a red 55% arm still reports the 100% premise.
+	console.log("GUTTER TOP BOUNCE", show(arms.map(arm => ({ scale: arm.scale, bounceFired: arm.bounceFired,
+		frames: arm.frames.length, maxDrift: Math.max(...arm.frames.map((row: any) => Math.abs(row.offset - arm.rest.offset))) }))));
+	for (const arm of arms) {
+		expect(arm.errors, show(arm)).toEqual([]);
+		if (actualGutter) {
+			expect(arm.mounted.strokes, "all saved strokes loaded").toBe(actualGutter.strokes);
+			expect(arm.mounted.pageId).toBe(actualGutter.pageId);
+		}
+		const restPairs = new Map<number, any>(arm.rest.pairs.map((pair: any) => [pair.number, pair]));
+		expect(arm.frames.length, "nonempty frame evidence").toBeGreaterThan(1);
+		expect(arm.rest.scale, "premise: requested zoom").toBeCloseTo(arm.scale, 6);
+		if (arm.scale === 0.55) expect(arm.bounceFired, "premise: 55% top pull really bounces").toBe(true);
+		expect(arm.final.active, "bounce must finish").toBe(false);
+		for (const row of arm.frames) {
+			expect(row.number, "same document line throughout").toBe(arm.rest.number);
+			expect(row.gutterParentIsScroller, "gutters are direct scroller children").toBe(true);
+			const visible = row.pairs.filter((pair: any) => pair.visible);
+			expect(visible.length, "visible matching lines each frame").toBeGreaterThan(0);
+			for (const pair of visible) {
+				const rest = restPairs.get(pair.number);
+				expect(rest, "rest geometry for line " + pair.number).toBeDefined();
+				expect(pair.offset, "visible gutter for line " + pair.number).not.toBeNull();
+				expect(rest.offset, "rest gutter for line " + pair.number).not.toBeNull();
+				expect(Math.abs(pair.offset - rest.offset), show({ scale: arm.scale, phase: row.phase, rest, pair })).toBeLessThanOrEqual(0.5);
+			}
+			expect(Math.abs(row.offset - arm.rest.offset), show({ scale: arm.scale, rest: arm.rest, row })).toBeLessThanOrEqual(0.5);
+		}
+	}
+});
+
+// Image analysis runs only after capture. The browser decodes lossless PNGs without resampling;
+// each foreground mask, crop x range and search margin is frozen from the unplanted rest image.
+async function glyphPixels(page: Page, png: string, brackets: any[], frozen?: any) {
+	return page.evaluate(async ({ png, brackets, frozen }) => {
+		const bitmap = await createImageBitmap(await (await fetch("data:image/png;base64," + png)).blob());
+		const canvas = new OffscreenCanvas(bitmap.width, bitmap.height), ctx = canvas.getContext("2d")!;
+		ctx.drawImage(bitmap, 0, 0);
+		const { data } = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+		const s = bitmap.width / brackets[0].viewport.width;
+		if (bitmap.height / brackets[0].viewport.height !== s || s < 2) throw new Error("insufficient PNG precision for fixed 0.5 CSS px oracle");
+		if (frozen && (frozen.s !== s || frozen.width !== bitmap.width || frozen.height !== bitmap.height)) throw new Error("PNG mapping changed");
+		const gray = (x: number, y: number) => {
+			if (x < 0 || y < 0 || x >= bitmap.width || y >= bitmap.height) throw new Error("glyph ROI outside viewport");
+			const i = (y * bitmap.width + x) * 4; return Math.min(data[i]!, data[i + 1]!, data[i + 2]!);
+		};
+		const results: any = {}, templates: any = {};
+		for (const key of ["numberGlyph", "textGlyph"]) {
+			const box = brackets[0][key]; let template = frozen?.templates[key];
+			if (!template) {
+				const x = Math.floor(box.x * s), right = Math.ceil((box.x + box.width) * s);
+				const y = Math.floor(box.y * s), bottom = Math.ceil((box.y + box.height) * s), width = right - x;
+				const values: number[] = [];
+				for (let py = y; py < bottom; py++) for (let px = x; px < right; px++) values.push(gray(px, py));
+				values.sort((a, b) => a - b);
+				const low = values[0]!, background = values[Math.floor(values.length * 0.8)]!;
+				if (background - low < 50) throw new Error("ambiguous rest glyph foreground");
+				const threshold = low + (background - low) * 0.3;
+				const rows: number[][] = [];
+				for (let py = y; py < bottom; py++) rows.push(Array.from({ length: width }, (_, dx) => gray(x + dx, py) < threshold ? 1 : 0));
+				const first = rows.findIndex(row => row.reduce((a, b) => a + b, 0) >= 2);
+				let last = rows.length - 1; while (last >= 0 && rows[last]!.reduce((a, b) => a + b, 0) < 2) last--;
+				if (first < 0 || last - first < 2) throw new Error("missing rest glyph rows");
+				template = { x, width, height: last - first + 1, threshold, mask: rows.slice(first, last + 1).flat(), restTop: y + first, marginCSS: 2.5 };
+			}
+			templates[key] = template;
+			const left = Math.floor(box.x * s);
+			if (Math.abs(left - template.x) > 1 || brackets.some(row => row.number !== brackets[0].number)) throw new Error("glyph identity or horizontal ROI changed");
+			let top = template.restTop, score = 1, ambiguity = 1;
+			let searchTop = top, searchBottom = top + template.height;
+			if (frozen) {
+				searchTop = Math.floor((Math.min(...brackets.map(row => row[key].y)) - template.marginCSS) * s);
+				searchBottom = Math.ceil((Math.max(...brackets.map(row => row[key].y + row[key].height)) + template.marginCSS) * s);
+				const candidates: { y: number; score: number }[] = [];
+				for (let y = searchTop; y <= searchBottom - template.height; y++) {
+					let intersection = 0, union = 0;
+					for (let dy = 0; dy < template.height; dy++) for (let dx = 0; dx < template.width; dx++) {
+						const actual = gray(template.x + dx, y + dy) < template.threshold ? 1 : 0, expected = template.mask[dy * template.width + dx];
+						intersection += actual && expected ? 1 : 0; union += actual || expected ? 1 : 0;
+					}
+					candidates.push({ y, score: union ? intersection / union : 0 });
+				}
+				candidates.sort((a, b) => b.score - a.score);
+				if (!candidates.length) throw new Error("empty glyph search");
+				({ y: top, score } = candidates[0]!);
+				ambiguity = score - (candidates.find(c => Math.abs(c.y - top) >= 2 * s)?.score ?? 0);
+			}
+			const crop = new OffscreenCanvas(template.width + 8, searchBottom - searchTop + 8), cc = crop.getContext("2d")!;
+			cc.drawImage(bitmap, template.x, searchTop, template.width, searchBottom - searchTop, 4, 4, template.width, searchBottom - searchTop);
+			cc.strokeStyle = "red"; cc.strokeRect(3.5, top - searchTop + 3.5, template.width + 1, template.height + 1);
+			const blob = await crop.convertToBlob({ type: "image/png" });
+			const annotated = await new Promise<string>(resolve => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]!); reader.readAsDataURL(blob); });
+			results[key] = { top, score, ambiguity, valid: score >= 0.45 && ambiguity >= 0.06, searchTop, searchBottom, annotated };
+		}
+		bitmap.close();
+		return { s, width: canvas.width, height: canvas.height, templates, results, p: (results.numberGlyph.top - results.textGlyph.top) / s };
+	}, { png, brackets, frozen });
+}
+
+// Separate horizontal oracle: frozen foreground masks move over the bracketed glyph
+// rectangles. Both coordinates come from one PNG; rect reads only bound the search.
+async function leftGlyphPixels(page: Page, png: string, bracket: any[], frozen?: any) {
+	return page.evaluate(async ({png,bracket,frozen}) => {
+		const bitmap=await createImageBitmap(await(await fetch("data:image/png;base64,"+png)).blob());
+		const canvas=new OffscreenCanvas(bitmap.width,bitmap.height),ctx=canvas.getContext("2d")!;
+		ctx.drawImage(bitmap,0,0);const data=ctx.getImageData(0,0,bitmap.width,bitmap.height).data;
+		const s=bitmap.width/bracket[0].viewport.width;
+		if(s<2||bitmap.height/bracket[0].viewport.height!==s||(frozen&&frozen.s!==s))throw new Error("invalid horizontal PNG mapping");
+		const gray=(x:number,y:number)=>{if(x<0||y<0||x>=bitmap.width||y>=bitmap.height)throw new Error("horizontal ROI outside PNG");
+			const i=(y*bitmap.width+x)*4;return Math.min(data[i]!,data[i+1]!,data[i+2]!);};
+		const templates:any={},glyphs:any={};
+		for(const key of ["numberGlyph","textGlyph"]){
+			const box=bracket[0][key];let template=frozen?.templates[key];
+			if(!template){
+				const x=Math.floor(box.x*s),y=Math.floor(box.y*s),w=Math.ceil(box.width*s),h=Math.ceil(box.height*s);
+				const values=[];for(let dy=0;dy<h;dy++)for(let dx=0;dx<w;dx++)values.push(gray(x+dx,y+dy));
+				const sorted=[...values].sort((a,b)=>a-b),low=sorted[0]!,bg=sorted[Math.floor(sorted.length*.8)]!;
+				if(bg-low<50)throw new Error("indistinct horizontal rest glyph");
+				const threshold=low+(bg-low)*.3;let minX=w,maxX=-1,minY=h,maxY=-1;
+				for(let dy=0;dy<h;dy++)for(let dx=0;dx<w;dx++)if(values[dy*w+dx]!<threshold){minX=Math.min(minX,dx);maxX=Math.max(maxX,dx);minY=Math.min(minY,dy);maxY=Math.max(maxY,dy);}
+				if(maxX-minX<2||maxY-minY<2)throw new Error("missing horizontal rest glyph");
+				const mask=[];for(let dy=minY;dy<=maxY;dy++)for(let dx=minX;dx<=maxX;dx++)mask.push(gray(x+dx,y+dy)<threshold?1:0);
+				template={threshold,mask,width:maxX-minX+1,height:maxY-minY+1,restX:x+minX,restY:y+minY,marginCSS:2.5};
+			}
+			templates[key]=template;
+			let result={x:template.restX,y:template.restY,score:1,ambiguity:1};
+			if(frozen){
+				const x0=Math.floor((Math.min(...bracket.map(r=>r[key].x))-template.marginCSS)*s);
+				const x1=Math.ceil((Math.max(...bracket.map(r=>r[key].x+r[key].width))+template.marginCSS)*s)-template.width;
+				const y0=Math.floor((Math.min(...bracket.map(r=>r[key].y))-template.marginCSS)*s);
+				const y1=Math.ceil((Math.max(...bracket.map(r=>r[key].y+r[key].height))+template.marginCSS)*s)-template.height;
+				const candidates=[];
+				for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
+					let intersection=0,union=0;
+					for(let dy=0;dy<template.height;dy++)for(let dx=0;dx<template.width;dx++){
+						const actual=gray(x+dx,y+dy)<template.threshold,expected=!!template.mask[dy*template.width+dx];
+						if(actual&&expected)intersection++;if(actual||expected)union++;
+					}
+					candidates.push({x,y,score:union?intersection/union:0});
+				}
+				candidates.sort((a,b)=>b.score-a.score);const best=candidates[0];if(!best)throw new Error("empty horizontal search");
+				result={...best,ambiguity:best.score-(candidates.find(c=>Math.abs(c.x-best.x)>=2*s||Math.abs(c.y-best.y)>=2*s)?.score??0)};
+			}
+			glyphs[key]={...result,valid:result.score>=.45&&result.ambiguity>=.06};
+		}
+		bitmap.close();return {s,templates,glyphs,offset:(glyphs.numberGlyph.x-glyphs.textGlyph.x)/s};
+	},{png,bracket,frozen});
+}
+
+for (const cell of [
+	{key:"left",name:"GUTTER LEFT FINGER ONSET: nested Minimal absolute gutters retain horizontal placement through contact and endpoint",sticky:false,top:false},
+	{key:"top",name:"GUTTER TOP BOUNCE OBSIDIAN DOM PIXELS: paired painted glyphs follow nested Minimal gutters at 100 percent",sticky:false,top:true},
+	{key:"sticky",name:"GUTTER STICKY GUARD: nested sticky gutters retain both offsets through left pull",sticky:true,top:false},
+]) it.skipIf(!actualGutter)(cell.name, async()=>{
+	if(!process.env.HW_BOUNCE_OUT)throw new Error("artifact output required for left finger cell");
+	const output=process.env.HW_BOUNCE_OUT+"."+cell.key+"-pixels",arms:any[]=[];
+	mkdirSync(output,{recursive:true});
+	// Use sealed real app/theme files. No fixture rule replaces the inherited gutter positioning.
+	const styles:any={};
+	for(const [key,variable] of [["app","HW_GUTTER_APP_CSS"],["theme","HW_GUTTER_MINIMAL_CSS"]] as const){
+		const path=process.env[variable],expected=process.env[variable+"_SHA256"];
+		if(!path||!expected)throw new Error("sealed stylesheet required: "+variable);
+		const bytes=readFileSync(path,"utf8"),hash=await sha256(bytes);
+		if(hash!==expected)throw new Error("stylesheet hash mismatch: "+variable);
+		styles[key]={path,sha256:hash,bytes:new TextEncoder().encode(bytes).length,content:bytes};
+		writeFileSync(output+"/"+key+".css",bytes);
+	}
+	const theme=cell.sticky?styles.theme.content.replace("position: absolute !important;\n  z-index: 0;\n  margin-inline-end: 0;", "position: sticky !important;\n  z-index: 0;\n  margin-inline-end: 0;"):styles.theme.content;
+	if(cell.sticky&&theme===styles.theme.content)throw new Error("Minimal gutter rule not uniquely replaced for sticky guard");
+	const minimal={app:styles.app.content,theme};
+	writeFileSync(output+"/plugin.css",css);
+	const styleSeal={app:{...styles.app,content:undefined},theme:{...styles.theme,content:undefined},pluginSha256:await sha256(css)};
+	writeFileSync(output+"/styles.json",JSON.stringify(styleSeal,null,2));
+	for(const scale of [1]){
+		const {page,errors,mounted}=await open("left-finger-"+scale,true,true,true,minimal),cdp=await page.context().newCDPSession(page);
+		const arm:any={scale,errors,mounted,styleSeal,reportedBoundary:"LEFT boundary (report); not a finger-direction claim",drivenDirection:"positive-x/rightward finger",captures:[],invalid:[],trajectory:[]};arms.push(arm);record.push(arm);
+		try{
+			arm.rest=await call(page,"gutterLeftPrepare",scale);
+			// Logical zero alone is insufficient: the rendered sizer must coincide with
+			// the layout edge from scroller padding and settled column margin before input.
+			if(arm.rest.active||Math.abs(arm.rest.logicalPanY)>.5||Math.abs(arm.rest.scrollLeft)>.5||Math.abs(arm.rest.logicalPanX)>.5||Math.abs(arm.rest.transformX)>.5||
+				Math.abs(arm.rest.sizerX-arm.rest.layoutBoundaryX)>.5)throw new Error("unproved logical/rendered left boundary");
+			if(arm.rest.position!==(cell.sticky?"sticky":"absolute")||arm.rest.left!=="0px"||arm.rest.insetInlineStart!=="0px"||
+				arm.rest.containerPosition!=="static"||arm.rest.sizerPosition!=="static"||arm.rest.scrollerPosition!=="relative"||
+				!arm.rest.bodyClasses.includes("minimal-line-nums")||arm.rest.geometry.scroller.padding[3]==="0px")
+				throw new Error("inherited Minimal absolute gutter/ancestor/padding premise missing");
+			if(arm.rest.sizerComputedTransform!=="none")throw new Error("sizer containing block already transformed before contact");
+			arm.styleRules=await page.evaluate(()=>Array.from(document.styleSheets).flatMap(sheet=>{
+				try{return Array.from(sheet.cssRules).map(rule=>rule.cssText).filter(text=>/cm-gutters|cm-sizer|cm-contentContainer|cm-scroller|minimal-line-nums/.test(text));}
+				catch{return ["unreadable stylesheet: "+sheet.href];}
+			}));
+			const images:any[]=[];
+			const capture=async(phase:string)=>{
+				const before:any=await call(page,"gutterLeftRead"),png=await page.screenshot({type:"png",scale:"device",fullPage:false}),after:any=await call(page,"gutterLeftRead");
+				const path=output+"/"+scale+"-"+phase+".png";writeFileSync(path,png);
+				const image={phase,before,after,path,sha256:await sha256(png),latencyMs:after.t-before.t,png:png.toString("base64")};images.push(image);return image;
+			};
+			const rest=await capture("before-contact"),frozen=await leftGlyphPixels(page,rest.png,[rest.before,rest.after]);
+			arm.frozen=frozen;
+			// Independent endpoint is the verified pre-contact left boundary, never a
+			// value read from the production bounce target or its final position.
+			arm.expectedEndpoint={sizerX:arm.rest.layoutBoundaryX,numberX:frozen.glyphs.numberGlyph.x/frozen.s,textX:frozen.glyphs.textGlyph.x/frozen.s,logicalPanX:0,scrollLeft:0};
+			const x=Math.min(arm.rest.scrollerX+500,arm.rest.viewport.width-300),y=Math.max(arm.rest.line.y+40,150);
+			const send=async(type:"touchStart"|"touchMove"|"touchEnd",delta:number)=>{const px=x+(cell.top?0:delta),py=y+(cell.top?delta:0);
+				arm.trajectory.push({type,x:px,y:py,contacts:type==="touchEnd"?0:1});
+				await cdp.send("Input.dispatchTouchEvent",{type,touchPoints:type==="touchEnd"?[]:[{x:px,y:py,id:71,radiusX:8,radiusY:8,force:1}]});
+			};
+			await send("touchStart",0);await capture("contact-before-movement");
+			for(let i=1;i<=24;i++){await send("touchMove",10*i);await capture("contact-move-"+i);}
+			await page.waitForTimeout(150);await capture("held-before-release");await send("touchEnd",240);await capture("release");
+			for(let i=0;i<30;i++)await capture("settle-"+i);
+			arm.final=await call(page,"gutterLeftRead");arm.input=await call(page,"gutterLeftFinish");
+			for(const image of images){
+				const sample:any={...image,png:undefined};
+				try{const result=await leftGlyphPixels(page,image.png,[image.before,image.after],frozen);sample.glyphs=result.glyphs;
+					sample.offset=result.offset;sample.drift=Math.abs(result.offset-frozen.offset);
+					sample.verticalDrift=Math.abs((result.glyphs.numberGlyph.y-result.glyphs.textGlyph.y)/result.s-
+						(frozen.glyphs.numberGlyph.y-frozen.glyphs.textGlyph.y)/frozen.s);
+					sample.valid=Object.values(result.glyphs).every((g:any)=>g.valid)&&image.latencyMs<=250;
+					if(!sample.valid)arm.invalid.push({phase:image.phase,reason:"ambiguous horizontal capture",glyphs:sample.glyphs});
+				}catch(error){sample.valid=false;arm.invalid.push({phase:image.phase,reason:String(error)});}
+				arm.captures.push(sample);
+			}
+			arm.domRestored=await call(page,"gutterLeftReset");
+			const restored=await capture("restored-dom"),restoredPixels=await leftGlyphPixels(page,restored.png,[restored.before,restored.after],frozen);
+			arm.restoredPixels=restoredPixels;
+		}catch(error){arm.invalid.push({reason:String(error)});}
+		finally{await cdp.detach();await page.close();}
+	}
+	for(const arm of arms){
+		arm.rectFindings=(arm.input?.rows||[]).map((row:any)=>({t:row.t,x:Math.abs((row.gutter.x-row.line.x)-(arm.rest.gutter.x-arm.rest.line.x)),y:Math.abs(row.offset-arm.rest.offset)}));
+		arm.rectFailures=arm.rectFindings.filter((row:any)=>row.x>.5||row.y>.5);
+	}
+	writeFileSync(output+"/readout.json",JSON.stringify(arms,null,2));
+	for(const arm of arms){
+		expect(arm.errors).toEqual([]);expect(arm.invalid,show(arm.invalid)).toEqual([]);
+		expect(arm.mounted.strokes).toBe(actualGutter!.strokes);expect(arm.mounted.pageId).toBe(actualGutter!.pageId);expect(arm.mounted.textLines).toBe(61);
+		expect(arm.rest.scale).toBeCloseTo(arm.scale,6);expect(arm.rest.typedTop,"specified top auto").toBe("auto");
+		const events=arm.input.events,down=events.find((e:any)=>e.type==="pointerdown"),moves=events.filter((e:any)=>e.type==="pointermove"),up=events.find((e:any)=>e.type==="pointerup");
+		expect(down,"DOM touch down delivered").toBeDefined();expect(up,"DOM touch release delivered").toBeDefined();expect(moves.length).toBe(24);
+		expect(events.every((e:any)=>e.isTrusted&&e.pointerType==="touch"&&e.contacts<=1&&e.type!=="pointercancel"),"one browser-dispatched touch, no cancellation").toBe(true);
+		const pre=arm.captures.find((s:any)=>s.phase==="contact-before-movement"),first=arm.captures.find((s:any)=>s.phase==="contact-move-1");
+		expect(pre.after.t).toBeLessThan(moves[0].t);expect(first.before.t).toBeLessThan(up.t);
+		expect(pre.before.contacts).toBe(1);expect(first.before.contacts).toBe(1);expect(first.after.contacts).toBe(1);
+		expect(moves[moves.length-1][cell.top?"y":"x"]).toBeGreaterThan(down[cell.top?"y":"x"]+200);
+		expect(arm.input.rows.some((r:any)=>r.active&&Math.abs(cell.top?r.bounceY:r.bounceX)>.5),"horizontal bounce actually occurred").toBe(true);
+		for(const row of arm.input.rows){expect(row.nested).toBe(1);expect(row.direct).toBe(0);expect(row.position).toBe(cell.sticky?"sticky":"absolute");expect(row.left).toBe("0px");expect(row.insetInlineStart).toBe("0px");
+			expect(row.containerPosition).toBe("static");expect(row.sizerPosition).toBe("static");expect(row.scrollerPosition).toBe("relative");
+			expect(Math.abs(row.offset-arm.rest.offset),"retained vertical rect alignment").toBeLessThanOrEqual(.5);
+			expect(Math.abs((row.gutter.x-row.line.x)-(arm.rest.gutter.x-arm.rest.line.x)),"outer gutter/text horizontal layout").toBeLessThanOrEqual(.5);}
+		expect(first.before.sizerTransform,"sizer transform written on first movement").not.toBe("");
+		for(const sample of arm.captures.filter((s:any)=>s.phase.startsWith("contact-move-")||s.phase==="held-before-release"))
+			expect(sample.before.sizerComputedTransform,"containing block during held pull").not.toBe("none");
+		expect(arm.final.sizerTransform,"inline transform cleared after bounce").toBe("");
+		expect(arm.final.sizerComputedTransform).toBe("none");
+		expect(arm.final.active).toBe(false);expect(arm.final.contacts).toBe(0);
+		expect(Math.abs(arm.final.sizerX-arm.expectedEndpoint.sizerX),"independent rendered left endpoint").toBeLessThanOrEqual(.5);
+		expect(Math.abs(arm.final.logicalPanX-arm.expectedEndpoint.logicalPanX),"logical left endpoint").toBeLessThanOrEqual(.5);
+		expect(Math.abs(arm.final.scrollLeft-arm.expectedEndpoint.scrollLeft)).toBeLessThanOrEqual(.5);
+		expect(Object.values(arm.restoredPixels.glyphs).every((g:any)=>g.valid),"restoration glyphs unambiguous").toBe(true);
+		expect(arm.domRestored.glyphDomRestored,"exact original glyph DOM restored").toBe(true);
+		expect(Math.abs(arm.restoredPixels.offset-arm.frozen.offset),"exact glyph DOM restoration").toBeLessThanOrEqual(.5);
+	}
+	// Validate input/capture premises before the horizontal oracle.
+	for(const arm of arms){
+		for(const sample of arm.captures){
+			expect(sample.drift,"horizontal glyph placement "+show({scale:arm.scale,phase:sample.phase})).toBeLessThanOrEqual(.5);
+			expect(sample.verticalDrift,"retained painted vertical placement").toBeLessThanOrEqual(.5);
+		}
+		const settled=arm.captures.find((s:any)=>s.phase==="settle-29");
+		for(const key of ["numberGlyph","textGlyph"]){const expected=key==="numberGlyph"?arm.expectedEndpoint.numberX:arm.expectedEndpoint.textX;
+			expect(Math.abs(settled.glyphs[key].x/arm.frozen.s-expected),"independent painted endpoint "+key).toBeLessThanOrEqual(.5);}
+	}
+},180_000);

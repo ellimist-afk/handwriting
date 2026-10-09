@@ -7,6 +7,7 @@ import { notifyInkChanged } from "../../src/inline/InkEvents";
 import { PageStore } from "../../src/persistence/PageStore";
 import { FakeAdapter, gate } from "../../src/persistence/FakeAdapter";
 import { surfaceExtents } from "../../src/inline/SurfaceExtent";
+import HandwritingPlugin from "../../src/main";
 import { setPenInk } from "../../src/inline/PenInk";
 import { installObsidianDom } from "./obsidianDom";
 import { editorInfoField, setBrowserEditorInfo } from "./iphoneObsidianStub";
@@ -290,14 +291,27 @@ async function switchPath(id:string,path:string) {const r=rigs.get(id)!;const in
 // configuration (its instance is destroyed) and joins it again as a new
 // instance on the same editor DOM. Every other extension is the same object.
 // `fontPxWhileAway` sets the text size between the two, as a font change made
-// while the plugin is disabled would.
+// while the plugin is disabled would. While away the rig runs the plugin's own
+// onunload, which clears each note's remembered zoom and scroll (issue 9). A
+// real reload also evaluates a fresh module; the rig keeps one module, so the
+// onunload clear is the only thing that empties it here.
 // A text-size change as the app makes one: Obsidian's line height is 1.5 times
 // the font, so the lines reflow with it. This rig's theme pins a 24 px line
 // height, under which a note with no text would not reflow at all and nothing
 // would observe the change.
+// The plugin's own onunload, on a prototype instance given every class field the
+// method reads (Object.create runs no field initializer). The rig's store is its
+// own, so the instance's store and PDF store only record the flush. onunload
+// takes the paper and page classes off the body; the next onload puts them back,
+// and the rig has no onload, so it puts them back itself. Throws if the route did
+// not run, so a stubbed-out unload fails loudly instead of passing silently.
+async function unloadPlugin(){const body=document.body.className;let flushed=false;const p=Object.assign(Object.create(HandwritingPlugin.prototype),{app:{workspace:{iterateAllLeaves:()=>{}}},settings:{},pendingRecycle:new Map(),declaimTimers:new Map(),settingsTimer:null,settingsDirty:false,pdfStore:{cancelPendingDeletes:()=>{},settle:async()=>{}},store:{flush:async()=>{flushed=true;},hasAnyQueuedWrite:()=>false}});p.onunload();await settle();document.body.className=body;if(p.unloaded!==true||!flushed)throw new Error(`plugin onunload did not run: unloaded ${p.unloaded} flushed ${flushed}`);}
 function setTextPx(view:EditorView,px:number){view.contentDOM.style.fontSize=`${px}px`;view.contentDOM.style.lineHeight=`${px*1.5}px`;}
-async function reloadOverlay(id:string,fontPxWhileAway?:number) {const r=rigs.get(id)!;const before=r.overlay;r.view.dispatch({effects:StateEffect.reconfigure.of(r.extensions.filter(e=>e!==r.overlayExtension))});await settle();if(fontPxWhileAway!==undefined){setTextPx(r.view,fontPxWhileAway);r.view.requestMeasure();await settle();}r.view.dispatch({effects:StateEffect.reconfigure.of(r.extensions)});await settle();const info=r.view.state.field(editorInfoField)!;r.overlay=overlayForActiveEditor(info.editor as never,info.file as never)!;return {newInstance:!!r.overlay&&r.overlay!==before,...snap(id)};}
-function penEvent(type:string,x:number,y:number,pointerId=120){document.elementFromPoint(x,y)?.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:"pen",pointerId,isPrimary:true,clientX:x,clientY:y,buttons:type==="pointerup"?0:1,pressure:.5}));}
+async function reloadOverlay(id:string,fontPxWhileAway?:number) {const r=rigs.get(id)!;const before=r.overlay;r.view.dispatch({effects:StateEffect.reconfigure.of(r.extensions.filter(e=>e!==r.overlayExtension))});await settle();await unloadPlugin();if(fontPxWhileAway!==undefined){setTextPx(r.view,fontPxWhileAway);r.view.requestMeasure();await settle();}r.view.dispatch({effects:StateEffect.reconfigure.of(r.extensions)});await settle();const info=r.view.state.field(editorInfoField)!;r.overlay=overlayForActiveEditor(info.editor as never,info.file as never)!;return {newInstance:!!r.overlay&&r.overlay!==before,...snap(id)};}
+// The input feed drops a sample whose timeStamp is not past the previous event's (InkFeed.ts feed(): a duplicate delivery),
+// and Chromium stamps events to 0.1 ms. Events dispatched back to back can share a stamp, which silently lost a lasso vertex
+// (a triangle selects nothing) in about 4 of 10 runs. Wait out the clock step so every event is stamped after the one before.
+function penEvent(type:string,x:number,y:number,pointerId=120){document.elementFromPoint(x,y)?.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:"pen",pointerId,isPrimary:true,clientX:x,clientY:y,buttons:type==="pointerup"?0:1,pressure:.5}));const t=performance.now();while(performance.now()-t<1);}
 async function gesture(id:string,kind:string) {
  const r=rigs.get(id)!;const s=snap(id),b=s.ink[0]!;
  setPenInk(true);setInlineEraserMode(kind==="erase");setInlineLassoMode(kind==="lasso");
@@ -357,6 +371,11 @@ async function growTo(id:string,x:number,y:number){surfaceExtents.grow(rigs.get(
  previewPaper:(id:string)=>previewPaperState(id),
  // The rig's overlay itself, for a cell that must drive one of its paths directly (a thrown settle, a standing pan).
  overlay:(id:string)=>rigs.get(id)!.overlay,
+ // The live overlay showing a path, read while a rig is being rebuilt (its entry still names the old overlay then).
+ overlayAt:(path:string)=>overlayForPath(path),
+ // Holds every ink read a note's open asks for (on a device a reopen reads the sidecar from disk) until releaseRead.
+ holdRead:()=>{let open!:()=>void;const held=new Promise<void>(r=>{open=r;});const real=inlineInk.ensureLoaded.bind(inlineInk);(inlineInk as any).ensureLoaded=async(p:string)=>{await held;return real(p);};(window as any).__releaseRead=()=>{delete (inlineInk as any).ensureLoaded;open();};},
+ releaseRead:async()=>{(window as any).__releaseRead?.();await settle();},
  // Where the paper's lattice origin is on screen this frame (client px), from whichever element draws the paper.
  paperOrigin:(id:string)=>paperOriginNow(id),
  hiddenFit:async(id:string)=>{const r=rigs.get(id)!;r.host.style.display="none";r.view.requestMeasure();await settle();const valid=r.overlay.scaleGeometryValid,result=r.overlay.fitHandwriting();return {valid,result,writes,strokes:JSON.parse(JSON.stringify(inlineInk.strokes(r.path)))};},
@@ -614,7 +633,7 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
 
 // Reuse the real store, editor, camera and hit-tested router to compare the
 // Insert Space contact/preview boundary with the eventual text/ink operation.
-(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string;context?:string;contactY?:number;tall?:boolean;sweep?:number[];moves?:number[];invalidTarget?:boolean;localColumns?:boolean;clickOnly?:boolean;verifySaved?:boolean}={})=>{
+(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string;context?:string;contactY?:number;tall?:boolean;sweep?:number[];moves?:number[];invalidTarget?:boolean;localColumns?:boolean;clickOnly?:boolean;verifySaved?:boolean;releasePixels?:boolean}={})=>{
  const id="space-precision",path=`fit-${id}.md`,pageId=`fit-page-${id}`;
  const data=emptyPage(pageId);data.surface="inline";
  data.strokes=[90,210].map((y,i)=>({id:`row-${i}`,tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:30,y,pressure:.5,t:0},{x:40,y:y+20,pressure:.5,t:10}],bbox:{x:28,y:y-2,width:14,height:24}}));
@@ -652,6 +671,7 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  const coords=()=>Array.from({length:r.view.state.doc.lines},(_,i)=>{const l=r.view.state.doc.line(i+1),c=r.view.coordsAtPos(l.from);return {text:l.text,top:c?.top,bottom:c?.bottom};});
  const capture=()=>({doc:r.view.state.doc.toString(),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),text:coords(),rects:Array.from({length:r.view.state.doc.length+1},(_,i)=>r.view.coordsAtPos(i,1)),zoom:r.overlay.getNoteViewportState().zoom,history:undoDepth(r.view.state),scroll:{left:r.view.scrollDOM.scrollLeft,top:r.view.scrollDOM.scrollTop}});
  const before=capture();
+ let releasePixels:any=null;
  const otherPath="space-switch-other.md",otherId="space-switch-other";
  let otherBefore:any=null,otherAfter:any=null;
  if(options.end==="switch"){
@@ -687,7 +707,19 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
   info.file={path:otherPath};r.view.dispatch({});await settle();
   otherAfter=structuredClone(inlineInk.strokes(otherPath));
   info.file=own;r.view.dispatch({});
- }else penEvent(options.end??"pointerup",contact.x,contact.y+dy*scale,921);
+ }else{
+  // releasePixels: count the whole-note repaints the lift asks (any via but "scroll" or "partial"), then hash the committed
+  // canvas and compare it with a whole repaint of the same state (the truth).
+  const ask=r.overlay.scheduleRepaint;let wholeAsks=0;
+  if(options.releasePixels)r.overlay.scheduleRepaint=function(this:any,...a:any[]){if(a[0]!=="scroll"&&a[0]!=="partial")wholeAsks++;return ask.apply(this,a);};
+  try{penEvent(options.end??"pointerup",contact.x,contact.y+dy*scale,921);await settle();}finally{if(options.releasePixels)r.overlay.scheduleRepaint=ask;}
+  if(options.releasePixels){
+   const cc=r.overlay.committedCanvas as HTMLCanvasElement,g=cc.getContext("2d")!;
+   const hash=()=>{const d=g.getImageData(0,0,cc.width,cc.height).data;let h=0x811c9dc5,ink=0;for(let i=0;i<d.length;i++)h=Math.imul(h^d[i]!,16777619);for(let i=3;i<d.length;i+=4)if(d[i])ink++;return {hash:h>>>0,ink};};
+   const own=hash();r.overlay.scheduleRepaint();await settle();
+   releasePixels={wholeAsks,own,truth:hash()};
+  }
+ }
  await settle();
  const after=capture();
  const ended=feedback();
@@ -695,5 +727,5 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  let undoResult:boolean|null=null,persisted:any=null;
  if(after.history>before.history||options.verifySaved){undoResult=undo(r.view);await settle();undone=capture();if(undoResult){redo(r.view);await settle();redone=capture();}}
  if(options.verifySaved){inlineInk.save(path);await settle();persisted=parsePage(pages.get(pageId)!,pageId)!.data.strokes;}
- return {zoom,font,scroll,wrapped,scale,origin,contact,hover,hoverFeedback,sweep,moves,down,live,ended,before,after,undone,redone,undoResult,persisted,otherBefore,otherAfter};
+ return {releasePixels,zoom,font,scroll,wrapped,scale,origin,contact,hover,hoverFeedback,sweep,moves,down,live,ended,before,after,undone,redone,undoResult,persisted,otherBefore,otherAfter};
 };

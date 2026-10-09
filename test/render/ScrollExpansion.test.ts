@@ -55,13 +55,20 @@ it.each([[true,true,1],[true,false,1.5],[true,false,2],[false,false,1]] as const
 			// The zoom host is the form under test: the harness engine has css zoom and the overlay's gate agrees with it (file header).
 			expect(c.zoomTravel.engineZoom, "the harness engine supports css zoom").toBe(true);
 			expect(c.zoomTravel.hostZoom, "the overlay's host-form gate agrees with the engine").toBe(c.zoomTravel.engineZoom);
-			// Zoom host: the transform is left empty (this page sets none of its own) and the scale is the host's inline `zoom`.
-			expect(c.zoomTravel.transform, "zoom host: no scale transform").toBe("");
-			if (scale !== 1) {
-				// Production writes the host's own zoom times the scale. This page sets no zoom on the host, so the base is 1 and the
-				// written zoom is the scale; the base is asserted rather than assumed.
-				expect(c.zoomTravel.baseZoom, "this page sets no zoom of its own on the host").toBe("1");
-				expect(Number(c.zoomTravel.inlineZoom), "zoom host: the host's zoom is its base zoom times the pinched scale").toBeCloseTo(Number(c.zoomTravel.baseZoom) * scale, 9);
+			// THE FORM PER k (zoomFormAt): above 1 the transform form, where the host carries the scale (after any sub-px
+			// scroll residual) and no zoom; at or below 1 the zoom form, where the transform is left empty (this page sets
+			// none of its own) and the scale is the host's inline `zoom`.
+			if (scale > 1) {
+				expect(c.zoomTravel.transform.endsWith(`scale(${scale})`), `above 1: the transform form carries the scale (${c.zoomTravel.transform})`).toBe(true);
+				expect(c.zoomTravel.inlineZoom, "above 1: no zoom on the host").toBe("");
+			} else {
+				expect(c.zoomTravel.transform, "zoom host: no scale transform").toBe("");
+				if (scale !== 1) {
+					// Production writes the host's own zoom times the scale. This page sets no zoom on the host, so the base is 1 and the
+					// written zoom is the scale; the base is asserted rather than assumed.
+					expect(c.zoomTravel.baseZoom, "this page sets no zoom of its own on the host").toBe("1");
+					expect(Number(c.zoomTravel.inlineZoom), "zoom host: the host's zoom is its base zoom times the pinched scale").toBeCloseTo(Number(c.zoomTravel.baseZoom) * scale, 9);
+				}
 			}
 			for (const step of c.zoomTravel.steps) expect(step.after.grant[step.axis]).toBeGreaterThan(step.before.grant[step.axis]);
 			expect(c.oldGrantAfterSwitch).toEqual(c.savedGrant);

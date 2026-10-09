@@ -1424,7 +1424,8 @@ function normaliseSectionText(text: string, limit: number = NOTE_CHECK_CHARS): s
  * in a sentence stays text); math, a `$$` block or inline `$...$`, is
  * typeset and its source letters never reach the slide's text. Inline math follows
  * Obsidian's rule - no space just inside either `$` - so "$5 and $6" stays
- * text.
+ * text. An ordered list's numbers (`1.`, `2)`) and a block id (`^abc`) at the
+ * end of a block are not text of the slide either.
  */
 function renderedNoteText(text: string): string {
 	// Code shows its text literally, so it is set aside before the tag and math
@@ -1445,6 +1446,12 @@ function renderedNoteText(text: string): string {
 		.replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
 		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
 		.replace(/^(\s*(?:[-*+]|\d+[.)])\s+)\[[ xX]\]\s/gm, "$1")
+		// An ordered list shows its items and never their numbers (the browser
+		// draws those), also inside a callout or a quote; a block id at the end
+		// of a block is not shown either. Both run after the task-box strip,
+		// which needs the marker, and before the code put-back below.
+		.replace(/^([ \t]*(?:>[ \t]*)*)\d{1,9}[.)][ \t]+/gm, "$1")
+		.replace(/(?:^|[ \t])\^[A-Za-z0-9-]+[ \t\r]*$/gm, "")
 		// eslint-disable-next-line no-control-regex -- U+0001 is the set-aside marker setAside writes above; note text never carries it.
 		.replace(/\u0001(\d+)\u0001/g, (_m, i: string) => code[Number(i)] ?? "");
 }
@@ -1741,6 +1748,24 @@ export function silentLift(pressure: number, buttons: number): boolean {
  * torn off `<body>` (S1) and a projector can take the window with it.
  */
 export const SILENT_LIFT_QUIET_MS = STROKE_HOLD_MS;
+
+/**
+ * The contact the silence deadline ended, remembered so that a later sample from
+ * the same pointer can write again. The deadline still
+ * commits what was drawn and frees the session; this is only what the surface
+ * needs to tell "the nib never left" from "a new contact", which always sends a
+ * pointerdown.
+ */
+interface RestedContact {
+	readonly pointerId: number;
+	/** The contact's own tool: an eraser contact that rests goes on erasing. */
+	readonly erasing: boolean;
+	readonly nib: SlideNib | null;
+	/** Where and when the contact started, kept for a held dot that the deadline did not save. */
+	readonly start: { x: number; y: number; t: number; pressure: number } | null;
+	/** The contact had already become a stroke (or an erase) when the deadline ended it. */
+	readonly promoted: boolean;
+}
 
 export interface StrokeSession {
 	readonly phase: "idle" | "drawing";
@@ -2122,7 +2147,16 @@ export class SlidesDeck implements SlidesActions {
 	 * arrow its click - and true from the moment the contact becomes a stroke.
 	 */
 	private capturedContact = false;
-	private contactStart: { x: number; y: number; t: number } | null = null;
+	private contactStart: { x: number; y: number; t: number; pressure: number } | null = null;
+	/** The nib the live ink contact opened with, kept so a rest can hand it to the contact's next stroke. */
+	private contactNib: SlideNib | null = null;
+	/**
+	 * The pointer whose contact the silence deadline ended, until it is heard from
+	 * in a way that proves the nib left: its pointerup, a hover sample, a cancel, a
+	 * pointerdown that starts a new contact (a palm's touch does not), a slide
+	 * change, the end of a gesture, or dispose. Null otherwise.
+	 */
+	private restedContact: RestedContact | null = null;
 	private penGuardRelease: number | null = null;
 	/**
 	 * The fallback release for a stroke that ended without a `pointerup`.
@@ -2219,6 +2253,8 @@ export class SlidesDeck implements SlidesActions {
 	 * reader.
 	 */
 	private loadInFlight: Promise<void> | null = null;
+	/** Only an outer rejection before completion permits a user-triggered retry. */
+	private initialLoadFailed = false;
 	/**
 	 * Disposed, but a parked claim or load is still being drained: the deck's
 	 * state (`strokes`, `sidecarId`, `basePage`) must survive until that write
@@ -2326,14 +2362,7 @@ export class SlidesDeck implements SlidesActions {
 		// Held, not fired and forgotten: a stroke drawn in the load window
 		// parks its write behind this promise, and teardown has to be able to
 		// wait for it rather than dropping the ink (`settle`, `dispose`).
-		this.loadInFlight = this.loadSidecar()
-			.catch((err) => {
-				log(`sidecar load failed: ${String(err)}`);
-			})
-			.finally(() => {
-				this.loadInFlight = null;
-				this.actionsChanged();
-			});
+		void this.startInitialLoad();
 		// Take the keyboard once, at mount, without waiting for a first contact.
 		// Obsidian dispatches its own synthetic `pointerdown` to set Reveal's
 		// `focused` flag as part of building the presenter, but never moves DOM
@@ -2356,6 +2385,26 @@ export class SlidesDeck implements SlidesActions {
 	}
 
 	// ---- load ------------------------------------------------------------
+
+	/** Track one initial-load attempt, retaining failures for a later public retry. */
+	private startInitialLoad(): Promise<void> {
+		if (this.loadInFlight) return this.loadInFlight;
+		this.initialLoadFailed = false;
+		const loading = this.loadSidecar()
+			.catch((err) => {
+				log(`sidecar load failed: ${String(err)}`);
+				if (!this.loaded) {
+					this.initialLoadFailed = true;
+					if (this.saveAfterLoad || this.dirty) this.noticeSaveFailure();
+				}
+			})
+			.finally(() => {
+				if (this.loadInFlight === loading) this.loadInFlight = null;
+				this.actionsChanged();
+			});
+		this.loadInFlight = loading;
+		return loading;
+	}
 
 	/**
 	 * Section hashes first, then the sidecar, then the remap.
@@ -3090,6 +3139,7 @@ export class SlidesDeck implements SlidesActions {
 	 * cannot reach here during a teardown drain at all.
 	 */
 	private endStrokeForSlideChange(): void {
+		this.restedContact = null;
 		const before = this.session;
 		if (before.phase !== "drawing") return;
 		const step = strokeSessionReducer(before, { kind: "slide-change", t: now() });
@@ -3837,7 +3887,8 @@ export class SlidesDeck implements SlidesActions {
 		// TAP_MS clock at the end) it is only a candidate erase and touches
 		// nothing.
 		this.penStroke = false;
-		this.contactStart = { x: ev.clientX, y: ev.clientY, t: ev.timeStamp };
+		this.contactStart = { x: ev.clientX, y: ev.clientY, t: ev.timeStamp, pressure: ev.pressure };
+		this.contactNib = null;
 		this.ensureDeckFocused();
 		// A3: capture is NOT taken here unless the contact is already a stroke.
 		// `setPointerCapture` retargets every later event for this pointer to
@@ -3850,6 +3901,8 @@ export class SlidesDeck implements SlidesActions {
 		// of being a tap and stays uncaptured until then.
 		this.capturedContact = false;
 		if (this.penStroke) this.capture(ev.pointerId);
+		// A new contact on the surface: whatever a rest remembered is over.
+		this.restedContact = null;
 		this.session = strokeSessionReducer(this.session, {
 			kind: "down",
 			pointerId: ev.pointerId,
@@ -3877,11 +3930,26 @@ export class SlidesDeck implements SlidesActions {
 			return;
 		}
 		const nib = this.host.nib();
+		this.contactNib = nib;
+		this.beginInkAt(l, nib, ev, ev.pointerType === "mouse");
+	}
+
+	/**
+	 * Start the live ink for a contact at one sample: dress the wet layer, open the
+	 * builder, begin the wet stroke and put the contact dot on screen. The tail of
+	 * `onPointerDown`, taken out so a contact that the silence deadline ended can
+	 * start its next stroke the same way, at the sample that proved the nib never left.
+	 */
+	private beginInkAt(
+		l: Layers,
+		nib: SlideNib,
+		sample: { clientX: number; clientY: number; pressure: number; timeStamp: number },
+		fromMouse: boolean
+	): void {
 		this.dressWet(l, nib.tool);
 		this.activeStyle = this.style(nib);
 		const { rect, layoutWidth, camera: cam } = this.geometry();
-		const p = mapScreenToSlide(ev.clientX, ev.clientY, rect, layoutWidth, this.samplePoint);
-		const fromMouse = ev.pointerType === "mouse";
+		const p = mapScreenToSlide(sample.clientX, sample.clientY, rect, layoutWidth, this.samplePoint);
 		// The wet layer's shaping follows the DEVICE, per stroke, exactly as
 		// the editor sets it at pen-down (`this.wet.shape = !fromMouse`,
 		// InkOverlay.ts): a mouse stroke draws flat live, the same way it will
@@ -3905,10 +3973,10 @@ export class SlidesDeck implements SlidesActions {
 			undefined,
 			fromMouse ? "mouse" : undefined
 		);
-		this.builder.start(ev.timeStamp);
-		this.builder.add(p.x, p.y, ev.pressure, ev.timeStamp);
+		this.builder.start(sample.timeStamp);
+		this.builder.add(p.x, p.y, sample.pressure, sample.timeStamp);
 		l.wet.beginStroke(
-			{ x: p.x, y: p.y, pressure: ev.pressure, t: ev.timeStamp },
+			{ x: p.x, y: p.y, pressure: sample.pressure, t: sample.timeStamp },
 			this.activeStyle,
 			nib.tool === "highlighter",
 			this.builder.resolvedPressureProfile
@@ -3929,8 +3997,8 @@ export class SlidesDeck implements SlidesActions {
 			this.activeStyle,
 			{ x: p.x, y: p.y },
 			{ x: p.x, y: p.y },
-			ev.pressure,
-			l.wet.contactHalfWidth(this.activeStyle, ev.pressure)
+			sample.pressure,
+			l.wet.contactHalfWidth(this.activeStyle, sample.pressure)
 		);
 	}
 
@@ -4070,6 +4138,80 @@ export class SlidesDeck implements SlidesActions {
 	}
 
 	/**
+	 * A contact that the silence deadline ended starts writing again.
+	 *
+	 * The deadline committed what was drawn and freed the session. Silence alone
+	 * proves nothing more: a still nib sends nothing. A new contact always sends a
+	 * pointerdown, so a pointermove from the pointer the deadline ended that is not
+	 * a hover proves the nib never left, and `resumeAfterRest` starts a NEW stroke
+	 * (or erase) at that sample with the contact's own tool, already promoted. Two
+	 * strokes and two undo steps for a pause in the middle, no point invented
+	 * across the gap. The first stroke keeps the end shape the deadline gave it.
+	 */
+	private startRestedContact(
+		ev: PointerEvent,
+		rest: RestedContact,
+		at: { x: number; y: number; t: number; pressure: number },
+		promoted: boolean
+	): boolean {
+		const l = this.layers;
+		if (!l) return false;
+		if (!rest.erasing && !rest.nib) return false;
+		this.restedContact = null;
+		this.erasing = rest.erasing;
+		this.gestureBefore = { index: l.index, strokes: (this.strokes.get(l.index) ?? []).slice() };
+		this.measureGeometry();
+		this.armPenGuard(ev.pointerId);
+		this.penStroke = promoted;
+		this.contactStart = { x: at.x, y: at.y, t: at.t, pressure: at.pressure };
+		this.contactNib = rest.nib;
+		this.capturedContact = false;
+		if (this.penStroke) this.promoteToStroke(ev.pointerId);
+		this.session = strokeSessionReducer(this.session, {
+			kind: "down",
+			pointerId: ev.pointerId,
+			t: at.t,
+			captured: this.capturedContact,
+		}).state;
+		this.armQuietTimer(SILENT_LIFT_QUIET_MS);
+		if (diagnosticsEnabled()) {
+			log(
+				`contact resumed after a rest on slide ${l.index}: pointer ${ev.pointerId}, ` +
+					`${rest.erasing ? "erase" : "ink"}, ${promoted ? "new stroke" : "held contact"}`
+			);
+		}
+		if (rest.erasing) {
+			this.erasedCount = 0;
+			if (promoted && this.eraseAt(at.x, at.y)) this.markErased();
+			return true;
+		}
+		const nib = rest.nib;
+		if (!nib) return false;
+		this.beginInkAt(l, nib, { clientX: at.x, clientY: at.y, pressure: at.pressure, timeStamp: at.t }, false);
+		return true;
+	}
+
+	/**
+	 * The pointerup of a pointer the deadline ended (memory ends here).
+	 *
+	 * Ink or an erase the deadline already saved: its lift presses no arrow, so the
+	 * navigation guard is raised again for exactly this lift (`holdPenGuard` let it
+	 * go at the deadline, and the click rides just behind this event). A contact
+	 * that had not become a stroke yet saves nothing at the deadline; here it is
+	 * given back its session so the ordinary lift below takes its tap-or-dot test
+	 * (`contactBecameStroke`) and saves the held dot, or erases under a held eraser.
+	 */
+	private liftAfterRest(ev: PointerEvent, rest: RestedContact): void {
+		this.restedContact = null;
+		if (rest.promoted) {
+			this.armPenGuard(ev.pointerId);
+			this.penStroke = true;
+			return;
+		}
+		if (rest.start) this.startRestedContact(ev, rest, rest.start, false);
+	}
+
+	/**
 	 * The timed wrapper around the move handler.
 	 *
 	 * Separated from the body so the measurement brackets the WHOLE handler -
@@ -4100,7 +4242,28 @@ export class SlidesDeck implements SlidesActions {
 
 	private onPointerMoveBody(ev: PointerEvent): void {
 		if (this.guardPointerId === ev.pointerId) this.lastPointerAt = now();
+		const rest = this.restedContact;
+		if (rest !== null && rest.pointerId === ev.pointerId && this.session.phase === "idle") {
+			// A hover sample: the nib is off the glass, so the memory ends here.
+			if (ev.pointerType === "pen" && silentLift(ev.pressure, ev.buttons)) {
+				this.restedContact = null;
+				return;
+			}
+			this.startRestedContact(
+				ev,
+				rest,
+				{ x: ev.clientX, y: ev.clientY, t: ev.timeStamp, pressure: ev.pressure },
+				true
+			);
+			ev.preventDefault();
+			return;
+		}
 		if (this.session.pointerId !== ev.pointerId) return;
+		// A mouse move with the primary button up: the release went to something
+		// other than `.reveal` (the pen strip, the rest of Obsidian), so this
+		// surface never heard it. A held mouse always reports the button, so this
+		// sample is a hover and the stroke it would extend is over.
+		const mouseButtonUp = ev.pointerType === "mouse" && (ev.buttons & 1) === 0;
 		// The lift that delivered no `pointerup` (`silentLift`), read before a
 		// single thing is done with the sample - it is a hover sample, and the
 		// builder, the wet ribbon and the head must never see one. Here rather
@@ -4109,7 +4272,7 @@ export class SlidesDeck implements SlidesActions {
 		// so by the time it saw the hover the nib's flight would already be
 		// inked. The hover KEY stays where it is, fed once from the raw stream
 		// it needs, because it answers about a pointer that owns no session.
-		if (ev.pointerType === "pen" && silentLift(ev.pressure, ev.buttons)) {
+		if ((ev.pointerType === "pen" && silentLift(ev.pressure, ev.buttons)) || mouseButtonUp) {
 			this.endSilentLift(ev.pointerId, ev.timeStamp);
 			return;
 		}
@@ -4227,6 +4390,13 @@ export class SlidesDeck implements SlidesActions {
 		// read - but a stale `true` outliving its pen would swallow the next
 		// finger's gesture, and that is not a failure worth leaving available.
 		if (ev.pointerType === "pen") this.penContactPending = false;
+		// The pointer the deadline ended. Only its pointerup or a cancel say the nib
+		// left; `lostpointercapture` is the surface's own release at the deadline.
+		const rested = this.restedContact;
+		if (rested !== null && rested.pointerId === ev.pointerId && this.session.phase === "idle") {
+			if (kind === "up") this.liftAfterRest(ev, rested);
+			else if (kind === "cancel") this.restedContact = null;
+		}
 		if (this.guardPointerId === ev.pointerId) {
 			this.lastPointerAt = now();
 			// The lift, whatever the stroke did. It is checked BEFORE the
@@ -4373,7 +4543,17 @@ export class SlidesDeck implements SlidesActions {
 			this.armQuietTimer(SILENT_LIFT_QUIET_MS - since);
 			return;
 		}
+		const start = this.contactStart;
+		const rest: RestedContact = {
+			pointerId: before.pointerId,
+			erasing: this.erasing,
+			nib: this.contactNib,
+			start: start ? { ...start } : null,
+			promoted: this.penStroke,
+		};
 		this.endSilentLift(before.pointerId, now());
+		// The silence ended the contact; the pointer may still be down and still writing.
+		if (this.session.phase === "idle") this.restedContact = rest;
 	}
 
 	/**
@@ -4627,6 +4807,7 @@ export class SlidesDeck implements SlidesActions {
 		if (this.coldReadPending) this.noticeTransient();
 		if (!this.loaded || this.reloadDamaged) {
 			this.saveAfterLoad = true;
+			if (this.initialLoadFailed && !this.loadInFlight && !this.disposed) void this.startInitialLoad();
 			return;
 		}
 		const path = this.path;
@@ -4894,6 +5075,7 @@ export class SlidesDeck implements SlidesActions {
 		}
 		this.flushErase();
 		this.disposed = true;
+		this.restedContact = null;
 		this.actionsChanged();
 		this.session = IDLE_SESSION;
 		this.syncHoldTimer();
@@ -4928,7 +5110,12 @@ export class SlidesDeck implements SlidesActions {
 		// reading of `dirty` logged "nothing changed, no write" and threw the
 		// first mark on a never-inked note away. The gate stands; what counts
 		// as dirty is what widens.
-		const parked = this.claimInFlight ?? ((this.saveAfterLoad || this.dirty) ? this.loadInFlight : null);
+		let parked = this.claimInFlight ?? ((this.saveAfterLoad || this.dirty) ? this.loadInFlight : null);
+		if (!parked && this.initialLoadFailed && (this.saveAfterLoad || this.dirty)) {
+			// The retry must see a draining deck, never a stale disposed one.
+			this.draining = true;
+			parked = this.startInitialLoad();
+		}
 		if (parked) this.dirty = true;
 		if (this.dirty && parked) {
 			// The deck's state is kept alive until the parked work lands: the
@@ -4942,7 +5129,7 @@ export class SlidesDeck implements SlidesActions {
 					`${this.loaded ? "" : " (load never finished)"}`
 			);
 			this.draining = true;
-			const drain = this.drainParkedWrite(parked);
+			const drain = this.drainParkedWrite(parked, !this.loaded && !this.sidecarId && !this.claimInFlight);
 			this.teardownDrain = drain;
 			drains.add(drain);
 			void drain.finally(() => drains.delete(drain));
@@ -4995,7 +5182,7 @@ export class SlidesDeck implements SlidesActions {
 	 * is merged. `save()` refuses once `disposed` is set, so nothing else can
 	 * have written in the meantime and this is the single flush.
 	 */
-	private async drainParkedWrite(parked: Promise<unknown>): Promise<void> {
+	private async drainParkedWrite(parked: Promise<unknown>, initialLoad = false): Promise<void> {
 		try {
 			await parked;
 			// A claim can end by parking a load (the merge), and a load can end
@@ -5003,6 +5190,11 @@ export class SlidesDeck implements SlidesActions {
 			// covers that hand-off; beyond it the reader has gone.
 			const second = this.claimInFlight ?? this.loadInFlight;
 			if (second && second !== parked) await second;
+			// A caught rejection is settlement, not permission to write.
+			if (!this.loaded) {
+				if (this.initialLoadFailed) this.noticeSaveFailure();
+				return;
+			}
 			const page = this.snapshot();
 			const id = this.sidecarId;
 			if (page && id) {
@@ -5018,6 +5210,7 @@ export class SlidesDeck implements SlidesActions {
 			}
 		} catch (err) {
 			log(`save failed at teardown: ${String(err)}`);
+			if (initialLoad) this.noticeSaveFailure();
 		} finally {
 			this.draining = false;
 			this.teardownDrain = null;

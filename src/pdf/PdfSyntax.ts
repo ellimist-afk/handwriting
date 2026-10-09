@@ -285,9 +285,16 @@ export function asRef(value: string | undefined): number | null {
 	return m ? Number(m[1]) : null;
 }
 
-/** Every number in an array's text, which is all a box or a matrix is. */
+/**
+ * Every number in an array's text, which is all a box or a matrix is.
+ *
+ * PDF writes a real with an optional sign and the point anywhere, leading and
+ * trailing included: `.5`, `-.5`, `+1`, `4.`. A pattern that needed a digit
+ * before the point read `.5` as 5, which moved flattened ink by the size of
+ * the error on any page whose box was written that way.
+ */
 export function numbersIn(value: string): number[] {
-	return (value.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+	return (value.match(/[+-]?(?:\d+\.?\d*|\.\d+)/g) ?? []).map(Number);
 }
 
 /** An object living inside an object stream rather than at a byte offset. */
@@ -789,6 +796,18 @@ export function pdfPages(doc: PdfDoc): PdfRead<PdfPageInfo[]> {
 	const seen = new Set<number>();
 	let failure: string | null = null;
 
+	// A page value may be written as a reference to the object holding it (an array, a number): follow it, a few hops at most, and
+	// take the value as written when it is not one.
+	const direct = (value: string | undefined): string | undefined => {
+		let v = value;
+		for (let hops = 0; v !== undefined && hops < 8; hops++) {
+			const num = asRef(v);
+			if (num === null) return v;
+			v = objectBody(doc, num) ?? undefined;
+		}
+		return undefined;
+	};
+
 	const walk = (num: number, from: Inherited, depth: number): void => {
 		if (failure !== null) return;
 		if (depth > 64) {
@@ -807,14 +826,14 @@ export function pdfPages(doc: PdfDoc): PdfRead<PdfPageInfo[]> {
 		}
 		const d = dictEntries(body);
 		const here: Inherited = {
-			box: d.get("/MediaBox") ?? from.box,
-			crop: d.get("/CropBox") ?? from.crop,
-			rotate: d.has("/Rotate") ? (numbersIn(d.get("/Rotate")!)[0] ?? 0) : from.rotate,
+			box: direct(d.get("/MediaBox")) ?? from.box,
+			crop: direct(d.get("/CropBox")) ?? from.crop,
+			rotate: d.has("/Rotate") ? (numbersIn(direct(d.get("/Rotate")) ?? "")[0] ?? 0) : from.rotate,
 			resources: d.get("/Resources") ?? from.resources,
 		};
-		const kids = d.get("/Kids");
-		if (kids !== undefined) {
-			for (const ref of kids.match(/\d+\s+\d+\s+R/g) ?? []) walk(asRef(ref)!, here, depth + 1);
+		const kidsEntry = d.get("/Kids");
+		if (kidsEntry !== undefined) {
+			for (const ref of (direct(kidsEntry) ?? "").match(/\d+\s+\d+\s+R/g) ?? []) walk(asRef(ref)!, here, depth + 1);
 			return;
 		}
 		if (here.box === null) {

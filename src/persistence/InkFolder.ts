@@ -223,8 +223,9 @@ export interface MigrationAdapter {
  * a user's own unrelated `.json` file sitting in the same folder - is not
  * ours to move. Damage usually keeps the `.damaged-<mtime>` marker (checked by name
  * before this is ever asked). Unparseable text also answers false here, but
- * `migrateInkFolder` does NOT read that as "not ours": a truncated page keeps
- * its bare name until a later save renames it, so it moves with the rest.
+ * `migrateInkFolder` does NOT read that alone as "not ours": a truncated page
+ * keeps its bare name until a later save renames it, so it moves with the rest
+ * when its name or its text shows it is ours (isMintedIdName, holdsPageKeys).
  */
 export function looksLikeOurPage(text: string): boolean {
 	let raw: unknown;
@@ -241,6 +242,37 @@ export function looksLikeOurPage(text: string): boolean {
 		return typeof inner.schemaVersion === "number" && typeof inner.pageId === "string";
 	}
 	return false;
+}
+
+/**
+ * The id shapes this plugin mints, and nothing else: `crypto.randomUUID`,
+ * the fallback `page-<ms>-<base36>` (PageData.newPageId), and the PDF
+ * instance names `pdf-<hex>` and `pdf-<hex>-<n>` (PdfIdentity). A user's own
+ * id that is merely safe to put in a path is not one of them.
+ */
+const MINTED_ID = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|page-\d+-[0-9a-z]+|pdf-[0-9a-f]+(?:-\d+)?)$/;
+
+/** A minted id, or a slides deck's `<minted id>.slides`, as a `.json` name. */
+function isMintedIdName(name: string): boolean {
+	if (!name.endsWith(".json")) return false;
+	const id = name.slice(0, -".json".length);
+	return MINTED_ID.test(id.endsWith(".slides") ? id.slice(0, -".slides".length) : id);
+}
+
+/**
+ * Text evidence that cut-off bytes are a page of ours: it opens as an object
+ * (one optional byte-order mark, any leading JSON whitespace, then `{"`, with
+ * no space after the brace, as JSON.stringify writes it) and holds both page
+ * keys exactly as JSON.stringify writes them, in any order and after any other
+ * key: a preserved foreign top key, or `fontRefPx` first in a page an older
+ * build re-saved, still precede them.
+ */
+const PAGE_OPENING = /^\uFEFF?[ \t\r\n]*\{"/;
+const SCHEMA_KEY = /"schemaVersion":\d+[,}]/;
+const PAGE_ID_KEY = /"pageId":"/;
+
+function holdsPageKeys(text: string): boolean {
+	return PAGE_OPENING.test(text) && SCHEMA_KEY.test(text) && PAGE_ID_KEY.test(text);
 }
 
 function parsesAsJson(text: string): boolean {
@@ -324,10 +356,18 @@ export async function migrateInkFolder(
 				continue; // unreadable: not ours to move, either way
 			}
 			// A user's own JSON parses, so page SHAPE decides. Text that does
-			// not parse is a truncated page of ours: PageStore leaves it at
-			// its bare name (locking the note) until a save renames it, and
-			// leaving it here would strand the only copy in the old folder.
-			if (!looksLikeOurPage(text) && parsesAsJson(text)) continue;
+			// not parse moves only on positive evidence that it is ours: a
+			// name this plugin mints, or both page keys as the serializer
+			// writes them inside text that opens as an object. Then it
+			// is a truncated page of ours (PageStore leaves it at its bare
+			// name, locking the note, until a save renames it) and leaving it
+			// would strand the only copy in the old folder. Anything else is a
+			// foreign file and stays where it is, unrenamed and uncounted.
+			if (parsesAsJson(text)) {
+				if (!looksLikeOurPage(text)) continue;
+			} else if (!isMintedIdName(name) && !holdsPageKeys(text)) {
+				continue;
+			}
 		}
 		sidecars.push(f);
 	}

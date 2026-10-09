@@ -99,8 +99,32 @@ export function setPressureSensitivity(on: boolean): void {
 	pressureSensitive = on;
 }
 
+/**
+ * The pressure setting of the stroke being drawn or exported right now, when
+ * that stroke carries one; undefined otherwise, and then the switch decides.
+ * Set by enterStrokePressure and put back by leaveStrokePressure in a finally,
+ * around one stroke's draw or flatten.
+ */
+let strokePressure: boolean | undefined;
+
+/**
+ * Enters one stroke's own pressure setting, if it carries one; returns what to
+ * hand back to leaveStrokePressure. A stroke with no mark changes nothing.
+ */
+export function enterStrokePressure(mark: "on" | "off" | undefined): boolean | undefined {
+	const previous = strokePressure;
+	if (mark === "on") strokePressure = true;
+	else if (mark === "off") strokePressure = false;
+	return previous;
+}
+
+export function leaveStrokePressure(previous: boolean | undefined): void {
+	strokePressure = previous;
+}
+
+/** Whether pressure moves width: the stroke's own setting while one is entered, else the switch. */
 export function pressureSensitivityEnabled(): boolean {
-	return pressureSensitive;
+	return strokePressure ?? pressureSensitive;
 }
 
 /**
@@ -108,7 +132,7 @@ export function pressureSensitivityEnabled(): boolean {
  * Devices that report no pressure send 0.5 (normalized upstream).
  */
 export function widthForPressure(style: PenStyle, pressure: number): number {
-	if (!pressureSensitive) return style.baseWidth * style.pressureOffWidthFactor;
+	if (!pressureSensitivityEnabled()) return style.baseWidth * style.pressureOffWidthFactor;
 	const p = Math.min(1, Math.max(0, pressure));
 	const effective = Math.pow(p, style.gamma);
 	const factor =

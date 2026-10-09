@@ -390,8 +390,10 @@ export class StrokeMetrics {
 
 	recordPresent(age: number): void {
 		// May arrive one frame after pen-up; accept it anyway so the last
-		// draw's presentation is counted.
+		// draw's presentation is counted - in the report end() already handed out.
 		this.presentAge.add(age);
+		const last = this.summaries[this.summaries.length - 1];
+		if (!this.active && last) last.ageAtPresentMs = this.presentAge.summary();
 	}
 
 	recordFrame(ts: number): void {

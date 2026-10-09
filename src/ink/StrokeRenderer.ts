@@ -1,6 +1,8 @@
 import { CameraState } from "../camera/coordinates";
 import {
 	PenStyle,
+	enterStrokePressure,
+	leaveStrokePressure,
 	pressureSensitivityEnabled,
 	shapeFor,
 	widthForPressure,
@@ -204,6 +206,9 @@ export function drawSmoothSegment(
  * centerline - was the one with no switch at all. The centerline decision is
  * now read from `centerlineSmoothed` and nowhere else, so a caller cannot
  * override the user's setting with a literal.
+ *
+ * A stroke that carries its own pressure setting is drawn under it, whatever
+ * the switch says; the setting is put back even if the draw throws.
  */
 export function drawStroke(
 	ctx: CanvasRenderingContext2D,
@@ -214,6 +219,23 @@ export function drawStroke(
 	cacheRibbon = true,
 	/** Committed-paint sites only. See fillRibbon/WidthFloor.ts. */
 	floor?: { backing: number; dpr: number }
+): void {
+	const previous = enterStrokePressure(stroke.pressureSensitivity);
+	try {
+		drawStrokeUnderItsPressure(ctx, cam, stroke, styleOverride, ribbon, cacheRibbon, floor);
+	} finally {
+		leaveStrokePressure(previous);
+	}
+}
+
+function drawStrokeUnderItsPressure(
+	ctx: CanvasRenderingContext2D,
+	cam: CameraState,
+	stroke: InkStroke,
+	styleOverride: Partial<PenStyle> | undefined,
+	ribbon: boolean,
+	cacheRibbon: boolean,
+	floor: { backing: number; dpr: number } | undefined
 ): void {
 	const pts = stroke.points;
 	if (pts.length < 2) return;

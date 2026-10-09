@@ -1,9 +1,11 @@
 import { UnreadableFrontmatterError } from "./InlineClaim";
 import { InkStroke } from "../ink/Stroke";
-import { PageData, emptyPage, newPageId, parsePage, serializePage } from "../model/PageData";
+import { PageData, emptyPage, newPageId, parsePage, serializePage, type NotePaperKind } from "../model/PageData";
+import type { NoteChoiceKind, NoteChoices } from "./NoteChoiceHint";
 import type { ExternalAdoptionPrep, LoadResult, PreparedExternalAdoption } from "../persistence/PageStore";
 import { forkFromAdoption, recordFork } from "../persistence/ForkResolution";
-import { translateStroke } from "../objects/Selection";
+import { scaleStroke, translateStroke } from "../objects/Selection";
+import { bumpInkRevision } from "../ink/StrokeRev";
 import { runDetached } from "../util/Detached";
 import { notifyInkChanged } from "./InkEvents";
 
@@ -73,6 +75,19 @@ export interface InlineInkHost {
 	 * session copy as it always has.
 	 */
 	sidecarChanged?(pageId: string): Promise<boolean>;
+	/**
+	 * Is a save for this page waiting to be written? A reopen does not adopt
+	 * another device's revision over one: the queued page was built before the
+	 * adoption, and once the adoption lands it would replace the other device's
+	 * file with no copy kept. Optional, as the sync poll's own check is.
+	 */
+	hasQueuedWrite?(pageId: string): boolean;
+	/**
+	 * Is every pane bound to this note quiet (no pen, eraser, lasso or gesture
+	 * in flight)? A reopen adopts only then, as the sync poll does. Optional: a
+	 * host without it has no panes to ask.
+	 */
+	panesQuiet?(path: string): boolean;
 	notify(message: string): void;
 }
 
@@ -200,6 +215,17 @@ export const ADOPTION_STILL_FAILING =
 	"ink not appearing on this device?\n\nyour ink is safe. still trying to load from your other device...";
 
 /**
+ * In place of the words above when the note's own ink file is not on disk.
+ * It claims no device and no restore: the ink is on screen and the next save
+ * writes the file again (`PageStore.resolveFor`, found nowhere). A default:
+ * Alan was asked for these words on 2026-10-04 and had none, so they are his
+ * to change on sight; `ForkCopyApproved.test.ts` pins them with the fork
+ * screen's other defaults.
+ */
+export const INK_FILE_MISSING =
+	"this note's ink file is missing.\n\nyour ink is still on screen. your next stroke saves it again.";
+
+/**
  * An immutable copy of a page, for preservation across an await.
  *
  * The record's strokes are LIVE objects - `moveStrokes` translates them in
@@ -263,32 +289,27 @@ export interface InlineDeleteCapture {
  * Stroke fields `parsePage` INVENTS when the file omits them, rather than
  * reading them.
  *
- * Today that is `createdAt` alone: `PageData.ts:813` is
- * `createdAt: num(s.createdAt) ?? Date.now()`, so two parses of identical
- * bytes at different moments disagree about it. A field like that cannot be
- * compared between memory and an artifact, because neither value came from the
- * user's data.
+ * Today that is NONE. `createdAt` used to be the one: the parser stamped a
+ * stroke that had none with `Date.now()`, so two parses of identical bytes at
+ * different moments disagreed about it. The fallback is a fixed 0 now, so memory and a byte copy of the file agree about a missing `createdAt`
+ * and nothing needs skipping.
  *
- * THIS LIST IS THE STALE-PRONE PART AND IT IS POLICED BY A TEST, not by care.
- * `InlineDeleteAllRouting.test.ts` parses one sidecar under two clocks and
- * requires the set of fields that differ to be exactly this set - so a second
- * clock-defaulted field added to the parser fails that case and names itself,
- * instead of quietly reopening the refuse-forever bug this closes. It cannot
- * catch a default that is non-deterministic in some other way; nothing here
- * pretends otherwise.
+ * THE LIST STAYS, EMPTY, BECAUSE THE ALARM ON IT STAYS. A field like this
+ * cannot be compared between memory and an artifact, because neither value
+ * came from the user's data, and a second clock-defaulted field added to the
+ * parser would reopen the refuse-forever bug. `InlineDeleteAllRouting.test.ts`
+ * parses one sidecar under two clocks and requires the set of fields that
+ * differ to be exactly this set - so such a field fails that case and names
+ * itself. It cannot catch a default that is non-deterministic in some other
+ * way; nothing here pretends otherwise.
+ *
+ * To declare a field here, key the predicate on what the parser would invent,
+ * not on whether the key is present: the parser invents whenever it cannot READ
+ * the value, so `null`, a numeric string or NaN is invented like an absent one.
  */
 export const PARSER_INVENTED_STROKE_FIELDS: Readonly<
 	Record<string, (raw: unknown) => boolean>
-> = {
-	// KEYED ON WHAT THE PARSER WOULD INVENT, NOT ON WHETHER THE KEY IS THERE.
-	// The first version of this asked `!(f in stroke)`, which is a different
-	// question and a narrower one: `PageData.ts` invents whenever `num()`
-	// cannot READ the value, so `createdAt: null`, `"1700000000000"` or NaN is
-	// stamped with `Date.now()` exactly like an absent one. Keying on absence
-	// left those refusing forever - the same refuse-forever bug this exists to
-	// close, one condition away.
-	createdAt: (raw) => typeof raw !== "number" || !Number.isFinite(raw),
-};
+> = {};
 
 /**
  * Per stroke id, which fields the parser would have INVENTED for this artifact.
@@ -415,6 +436,33 @@ interface NoteRecord {
 	lastAdoptFound: boolean;
 	/** A font reference set this session, before any sidecar carried one (audit 46). */
 	fontRefPx?: number;
+	/**
+	 * This note's paper and canvas choices as set this session, over the
+	 * file's: undefined keeps the file's value, null clears it (the note
+	 * follows the setting), a value replaces it.
+	 */
+	choices?: { canvas?: boolean | null; paper?: NotePaperKind | null };
+}
+
+/** A record's paper and canvas choices: the session's over the file's. */
+function choicesOf(rec: NoteRecord): NoteChoices {
+	const base = rec.basePage;
+	const canvas = rec.choices?.canvas === undefined ? base?.noteCanvas : rec.choices.canvas ?? undefined;
+	const paper = rec.choices?.paper === undefined ? base?.notePaper : rec.choices.paper ?? undefined;
+	return {
+		known: rec.load === "yes" || rec.basePage !== null || rec.choices !== undefined,
+		...(canvas !== undefined ? { canvas } : {}),
+		...(paper !== undefined ? { paper } : {}),
+	};
+}
+
+function choicesKeyOf(rec: NoteRecord): string {
+	const c = choicesOf(rec);
+	return `${String(c.known)}|${String(c.canvas)}|${String(c.paper)}`;
+}
+
+function hasChoice(rec: NoteRecord): boolean {
+	return (rec.choices?.canvas ?? null) !== null || (rec.choices?.paper ?? null) !== null;
 }
 
 function freshRecord(): NoteRecord {
@@ -474,6 +522,11 @@ export class InlineInkStore {
 		return this.host !== null;
 	}
 
+	/** How many times this note's strokes have changed in this session: a raster drawn at one count is stale at another. -1 with no record. */
+	generation(path: string): number {
+		return this.byPath.get(path)?.mutationGeneration ?? -1;
+	}
+
 	strokes(path: string): readonly InkStroke[] {
 		const rec = this.byPath.get(path);
 		if (!rec) return EMPTY;
@@ -503,6 +556,64 @@ export class InlineInkStore {
 		if (!rec || this.fontRefPx(path) !== null) return false;
 		rec.fontRefPx = px;
 		return true;
+	}
+
+	/**
+	 * The note's own paper and canvas choices, from its ink file and anything
+	 * set this session. `known` is false while the file has not been read:
+	 * the caller then answers from what it already knows, and hears again
+	 * through onNoteChoicesChanged once the file is read.
+	 */
+	noteChoices(path: string): NoteChoices {
+		const rec = this.byPath.get(path);
+		return rec ? choicesOf(rec) : { known: false };
+	}
+
+	/**
+	 * Set or clear one choice, in the note's ink file. Waits for the note's
+	 * file to be read, then saves through the ordinary path: a note with no
+	 * page id is claimed first, the same one line the first stroke writes.
+	 * Clearing a choice on a note with no page id writes nothing. False when
+	 * nothing could be set (no host, or the note cannot be written).
+	 */
+	async setNoteChoice(path: string, kind: NoteChoiceKind, value: boolean | NotePaperKind | "default"): Promise<boolean> {
+		if (!this.host) return false;
+		await this.ensureLoaded(path);
+		const rec = this.record(path);
+		if (rec.legacyLocked || rec.futureLocked || rec.damagedLocked || rec.duplicateLocked) return false;
+		if (value === "default" && !rec.pageId) return true;
+		const before = this.choicesKey(path);
+		const choices = { ...(rec.choices ?? {}) };
+		if (kind === "canvas") choices.canvas = value === "default" ? null : (value as boolean);
+		else choices.paper = value === "default" ? null : (value as NotePaperKind);
+		rec.choices = choices;
+		rec.mutationGeneration++;
+		this.persist(path, rec);
+		if (rec.claimInFlight) await rec.claimInFlight.catch(() => undefined);
+		if (this.choicesKey(path) !== before) this.emitChoices(path);
+		return true;
+	}
+
+	private readonly choiceListeners = new Set<(path: string) => void>();
+
+	/** Fires with a note's path when its paper or canvas choice may have changed. */
+	onNoteChoicesChanged(listener: (path: string) => void): () => void {
+		this.choiceListeners.add(listener);
+		return () => this.choiceListeners.delete(listener);
+	}
+
+	private choicesKey(path: string): string {
+		const rec = this.byPath.get(path);
+		return rec ? choicesKeyOf(rec) : "";
+	}
+
+	/** The read path holds the record, not its path: find the path to announce. */
+	private emitChoicesOf(rec: NoteRecord): void {
+		for (const [path, r] of this.byPath) if (r === rec) this.emitChoices(path);
+	}
+
+	private emitChoices(path: string): void {
+		for (const listener of [...this.choiceListeners]) listener(path);
 	}
 
 	hasInk(path: string): boolean {
@@ -621,7 +732,13 @@ export class InlineInkStore {
 		// Every viewer waiting on this read needs its completion result. Returning
 		// false while loading leaves a joining editor blank until another repaint.
 		if (rec.load === "loading") return rec.loadInFlight ?? false;
-		if (rec.load === "yes" && rec.damagedLocked) return this.retryDamaged(rec);
+		if (rec.load === "yes" && rec.damagedLocked) {
+			const changed = await this.retryDamaged(rec);
+			// A repaired file read back on reopen: embeds of the note are not the
+			// editor that asked, so tell them as the reopen path does.
+			if (changed) notifyInkChanged(path);
+			return changed;
+		}
 		if (rec.load === "yes") return this.refreshOnReopen(path, rec);
 		if (rec.load !== "no") return false;
 		return this.loadRecord(path, rec);
@@ -651,9 +768,18 @@ export class InlineInkStore {
 		} catch {
 			return false;
 		}
-		if (!changed || this.byPath.get(path) !== rec || rec.mutationGeneration !== generation) return false;
-		const adopted = await this.adoptExternal(path, () => rec.mutationGeneration === generation);
-		return adopted.outcome === "adopted" && adopted.changed;
+		// The same admission the sync poll uses: the ink did not change while the
+		// answer was awaited, the note still has its page id, no save is queued and
+		// every pane on the note is quiet, now and at the adoption's last step.
+		const admitted = (): boolean => rec.mutationGeneration === generation && this.pageIdOf(path) === id &&
+			!host.hasQueuedWrite?.(id) && (host.panesQuiet?.(path) ?? true);
+		if (!changed || this.byPath.get(path) !== rec || !admitted()) return false;
+		const adopted = await this.adoptExternal(path, admitted);
+		if (adopted.outcome !== "adopted" || !adopted.changed) return false;
+		// Embeds and reading views of this note are not the editor that asked;
+		// the caller repaints its own pane from the result, so tell the rest.
+		notifyInkChanged(path);
+		return true;
 	}
 
 	/** Complete adoption or fallback restoration before releasing waiting viewers. */
@@ -677,7 +803,21 @@ export class InlineInkStore {
 		const id = this.host?.readPageId(path);
 		if (!id) return Promise.resolve(finish(false));
 		rec.pageId = id;
-		return this.trackLoad(rec, async () => finish(await this.adoptSidecar(rec, id)));
+		return this.trackLoad(rec, async () => {
+			try {
+				return finish(await this.adoptSidecar(rec, id));
+			} catch (err) {
+				// A rejected load leaves no base page: a save now would write the
+				// session's strokes alone over a file that may hold the rest. Held
+				// like a read that threw; the poll and a reopen read it again.
+				console.error("[handwriting] ink file load rejected", err);
+				this.holdUnreadQuietly(rec);
+				finish(false);
+				// The caller still sees the failure, as before; the note no longer
+				// waits on a read that is over.
+				throw err;
+			}
+		});
 	}
 
 	/**
@@ -745,6 +885,21 @@ export class InlineInkStore {
 		return changed;
 	}
 
+	/**
+	 * Lock a note whose ink file could not be read, without telling the user a
+	 * good file is broken: the same hold for a read that threw (answered
+	 * transient) and for a load that rejected.
+	 */
+	private holdUnreadQuietly(rec: NoteRecord): void {
+		rec.damagedLocked = true;
+		const now = Date.now();
+		if (rec.transientSince === null) rec.transientSince = now;
+		if (!rec.transientNoticed) {
+			rec.damageSilent = true;
+			if (now - rec.transientSince >= TRANSIENT_SILENCE_MS) this.noticeTransient(rec);
+		}
+	}
+
 	/** Load a sidecar into the record, merging ahead of any session strokes. */
 	private async adoptSidecar(rec: NoteRecord, id: string): Promise<boolean> {
 		if (!this.host) return false;
@@ -759,13 +914,7 @@ export class InlineInkStore {
 			// defect. The poll re-reads it. Silence is bounded: a stroke on the
 			// note (persist) or 60 s of reads that keep throwing gives one plain
 			// notice.
-			rec.damagedLocked = true;
-			const now = Date.now();
-			if (rec.transientSince === null) rec.transientSince = now;
-			if (!rec.transientNoticed) {
-				rec.damageSilent = true;
-				if (now - rec.transientSince >= TRANSIENT_SILENCE_MS) this.noticeTransient(rec);
-			}
+			this.holdUnreadQuietly(rec);
 			return false;
 		}
 		if (result.damaged) {
@@ -812,7 +961,28 @@ export class InlineInkStore {
 			// whatever is already on screen stays.
 			if (result.data.strokes.length === 0) return false;
 		}
+		const choicesBefore = choicesKeyOf(rec);
 		rec.basePage = result.data;
+		if (choicesKeyOf(rec) !== choicesBefore) this.emitChoicesOf(rec);
+		// Ink drawn while this read was in flight is in the frame of the size the
+		// editor latched then (`rec.fontRefPx`, through setFontRefPx). From here
+		// on the size stored with the note wins (fontRefPx), so that ink moves
+		// into it, in place, once: the latch then names the stored size, and a
+		// later adoption of the same record finds nothing left to move. Without
+		// this the stroke jumped by stored/latched after it landed and was saved
+		// at the wrong place.
+		const stored = result.data.fontRefPx;
+		const latched = rec.fontRefPx;
+		let reframed = false;
+		if (stored !== undefined && latched !== undefined && stored > 0 && latched > 0 && stored !== latched) {
+			const savedIds = new Set(result.data.strokes.map((stroke) => stroke.id));
+			for (const stroke of rec.strokes) {
+				if (!rec.localStrokeIds.has(stroke.id) || savedIds.has(stroke.id)) continue;
+				scaleStroke(stroke, stored / latched);
+				reframed = true;
+			}
+			rec.fontRefPx = stored;
+		}
 		// The remote page owns saved order and unchanged cached IDs. Only an
 		// actual session operation may override its copy of an ID; a missing
 		// locally changed ID is a deletion. Cached strokes absent remotely do
@@ -833,7 +1003,7 @@ export class InlineInkStore {
 			}
 		}
 		rec.strokes = merged;
-		return result.data.strokes.length > 0;
+		return result.data.strokes.length > 0 || reframed;
 	}
 
 	/** Capture only an in-memory identity; this never claims or loads a note. */
@@ -1025,11 +1195,11 @@ export class InlineInkStore {
 	 *
 	 * `raw` IS THE ARTIFACT'S OWN JSON, and it is what stops this refusing
 	 * correct backups forever. `preserve` copies the sidecar's BYTES, while the
-	 * capture is memory - and memory came from a parser that invents values for
-	 * fields the file omits (`PageData.ts:813` stamps a missing `createdAt`
-	 * with `Date.now()`). Memory therefore holds the value stamped when the
-	 * note opened, the readback holds the value stamped at delete time, and no
-	 * amount of round-tripping brings those together: the difference is WHEN
+	 * capture is memory - and memory came from a parser that could invent values
+	 * for fields the file omits (it stamped a missing `createdAt` with
+	 * `Date.now()` before the fallback became a fixed 0). Memory then held the value stamped when the
+	 * note opened, the readback held the value stamped at delete time, and no
+	 * amount of round-tripping brought those together: the difference was WHEN
 	 * each was invented, not how many times it was encoded. Measured, not
 	 * assumed - putting both sides through one more codec pass leaves the case
 	 * failing exactly as it did.
@@ -1120,6 +1290,7 @@ export class InlineInkStore {
 			else rec.strokes[at] = stroke;
 			rec.localStrokeIds.add(stroke.id);
 		}
+		bumpInkRevision();
 		rec.mutationGeneration++;
 		this.persist(path, rec);
 		// Once per pen gesture: the most common mutation of all was the one
@@ -1133,10 +1304,21 @@ export class InlineInkStore {
 	// strokes or frozen id lists), never live UI state, and every one persists.
 	// An undone erase that only changed the screen would resurrect on reload.
 
-	/** Insert strokes (idempotent by id; indices restore z-order on un-erase). */
-	applyAdd(path: string, strokes: readonly InkStroke[], indices?: readonly number[]): void {
+	/**
+	 * Insert strokes (idempotent by id; indices restore z-order on un-erase).
+	 * `neighbours`, when given, puts each stroke back just before the stroke
+	 * that followed it, else just after the one that preceded it, and by its
+	 * index only when neither is in the note any more: another pane may have
+	 * taken or added strokes since, and the index counts the list as it was.
+	 */
+	applyAdd(
+		path: string,
+		strokes: readonly InkStroke[],
+		indices?: readonly number[],
+		neighbours?: { next?: readonly (string | null)[]; prev?: readonly (string | null)[] }
+	): void {
 		const rec = this.record(path);
-		this.insert(rec, strokes, indices);
+		this.insert(rec, strokes, indices, neighbours);
 		this.persist(path, rec);
 	}
 
@@ -1192,7 +1374,8 @@ export class InlineInkStore {
 	private insert(
 		rec: NoteRecord,
 		strokes: readonly InkStroke[],
-		indices?: readonly number[]
+		indices?: readonly number[],
+		neighbours?: { next?: readonly (string | null)[]; prev?: readonly (string | null)[] }
 	): void {
 		// Only the incoming ids can clash, so only they are looked up. A Set of
 		// every id in the note was built here on each call, and the partial
@@ -1202,11 +1385,16 @@ export class InlineInkStore {
 		for (const s of strokes) incoming.add(s.id);
 		const present = new Set<string>();
 		for (const s of rec.strokes) if (incoming.has(s.id)) present.add(s.id);
-		const insertions: Array<{ stroke: InkStroke; at: number | undefined }> = [];
+		const insertions: Array<{
+			stroke: InkStroke;
+			at: number | undefined;
+			next: string | null | undefined;
+			prev: string | null | undefined;
+		}> = [];
 		strokes.forEach((stroke, i) => {
 			if (present.has(stroke.id)) return;
 			present.add(stroke.id);
-			insertions.push({ stroke, at: indices?.[i] });
+			insertions.push({ stroke, at: indices?.[i], next: neighbours?.next?.[i], prev: neighbours?.prev?.[i] });
 		});
 		// Captured indices share the pre-erase list, regardless of scrub order.
 		// Deduplicate first so sorting cannot replace the first original operand.
@@ -1217,9 +1405,18 @@ export class InlineInkStore {
 			strokes.every((_, i) => Number.isInteger(indices[i]) && indices[i]! >= 0)) {
 			insertions.sort((a, b) => a.at! - b.at!);
 		}
-		insertions.forEach(({ stroke, at }) => {
+		insertions.forEach(({ stroke, at, next, prev }) => {
 			rec.localStrokeIds.add(stroke.id);
-			if (at !== undefined && at >= 0 && at <= rec.strokes.length) {
+			// Ascending order above puts a stroke taken out with its neighbour
+			// back after that neighbour, so a neighbour from the same step is
+			// found here once it is in again.
+			const before = next ? rec.strokes.findIndex((s) => s.id === next) : -1;
+			const after = before < 0 && prev ? rec.strokes.findIndex((s) => s.id === prev) : -1;
+			if (before >= 0) {
+				rec.strokes.splice(before, 0, stroke);
+			} else if (after >= 0) {
+				rec.strokes.splice(after + 1, 0, stroke);
+			} else if (at !== undefined && at >= 0 && at <= rec.strokes.length) {
 				rec.strokes.splice(at, 0, stroke);
 			} else {
 				rec.strokes.push(stroke);
@@ -1228,7 +1425,10 @@ export class InlineInkStore {
 		// Only a real insertion counts. The live eraser hands over strokes that
 		// are already present at input rate, and a generation that moved
 		// without the page changing would refuse adoptions for no reason.
-		if (insertions.length > 0) rec.mutationGeneration++;
+		if (insertions.length > 0) {
+			bumpInkRevision();
+			rec.mutationGeneration++;
+		}
 	}
 
 	/** Remove strokes by id. Returns what was removed, with original indices. */
@@ -1259,6 +1459,44 @@ export class InlineInkStore {
 		return this.take(path, ids);
 	}
 
+	/**
+	 * Does each listed stroke's first point stand at the given place, within
+	 * float rounding? History asks this before a move: one undone and redone
+	 * subtracts what it added, so exact equality would refuse a clean step.
+	 */
+	standsAt(path: string, ids: readonly string[], from: ReadonlyArray<{ x: number; y: number }>): boolean {
+		const rec = this.byPath.get(path);
+		if (!rec || from.length !== ids.length) return false;
+		const byId = new Map(rec.strokes.map((s) => [s.id, s] as const));
+		return ids.every((id, i) => {
+			const p = byId.get(id)?.points[0];
+			const want = from[i]!;
+			return p !== undefined && Math.abs(p.x - want.x) <= 1e-6 && Math.abs(p.y - want.y) <= 1e-6;
+		});
+	}
+
+	/**
+	 * Does the note's record hold every one of these ids? Reads the record
+	 * itself, not `strokes()`, which hides cached strokes while a reload is
+	 * pending: the same list `take` takes from. History asks this before a
+	 * replace, which applies whole or not at all.
+	 */
+	holdsAll(path: string, ids: readonly string[]): boolean {
+		const rec = this.byPath.get(path);
+		if (!rec) return ids.length === 0;
+		const held = new Set(rec.strokes.map((s) => s.id));
+		return ids.every((id) => held.has(id));
+	}
+
+	/**
+	 * Every stroke id in the note's record, in order. Reads the record itself,
+	 * as holdsAll does: `strokes()` hides the other device's strokes while a
+	 * reload is pending, and `take` counts its indices in this whole list.
+	 */
+	recordIds(path: string): string[] {
+		return this.byPath.get(path)?.strokes.map((s) => s.id) ?? [];
+	}
+
 	private take(
 		path: string,
 		ids: readonly string[]
@@ -1273,7 +1511,10 @@ export class InlineInkStore {
 			rec.localStrokeIds.add(s.id);
 			rec.strokes.splice(i, 1);
 		}
-		if (removed.length > 0) rec.mutationGeneration++;
+		if (removed.length > 0) {
+			bumpInkRevision();
+			rec.mutationGeneration++;
+		}
 		removed.reverse(); // ascending original indices
 		return removed;
 	}
@@ -1477,7 +1718,10 @@ export class InlineInkStore {
 			// rename. Hold it like every preservation refusal, but use the typed
 			// diagnostic to start the existing quiet-period/once-only notice. The
 			// prose `why` is deliberately not control flow.
-			if (prep.reason === "no-live-sidecar") this.noteAdoptionFailure(rec);
+			// An incoming file this note cannot use (damaged, a newer schema,
+			// another surface) is held too; held for long, it says so.
+			if (prep.reason === "no-live-sidecar") this.noteAdoptionFailure(rec, true);
+			else if (prep.reason === "incoming-unusable") this.noteAdoptionFailure(rec);
 			return adoptionHeld("preservation-unavailable");
 		}
 		// Stale is the benign race, not a fault: a newer revision landed while
@@ -1535,9 +1779,19 @@ export class InlineInkStore {
 		// the base and the visible ink. No union of missing ids - that is the
 		// deliberate non-solution, and the outgoing ids stay recoverable from
 		// the artifact instead.
+		const choicesBefore = this.choicesKey(path);
 		rec.basePage = prep.prepared.data;
 		rec.strokes = prep.prepared.data.strokes.slice();
 		rec.localStrokeIds.clear();
+		// The other device's choices come with its file, as its strokes do:
+		// the last device to save wins.
+		rec.choices = undefined;
+		if (this.choicesKey(path) !== choicesBefore) this.emitChoices(path);
+		// The incoming file's reference is the frame its ink is in. The record's
+		// own latch follows it, so a later read of this record does not move ink
+		// drawn after the adoption by the old ratio.
+		const incomingRef = prep.prepared.data.fontRefPx;
+		if (incomingRef !== undefined && incomingRef > 0) rec.fontRefPx = incomingRef;
 		rec.adoptionNoticed = false;
 		rec.adoptionFailingSince = null;
 		// NO NOTICE ON SUCCESS (alan, 1.4.13: "kill the second message
@@ -1578,9 +1832,11 @@ export class InlineInkStore {
 	 * The external-adoption failure notice, once per record. The poll runs
 	 * every second and a failing disk keeps failing, so an unlatched notice
 	 * would bury the screen. Cleared by a successful adoption, so a later,
-	 * different failure can still speak.
+	 * different failure can still speak. `fileMissing`: the note's live ink
+	 * file is not on disk, which has its own words; a read failure keeps the
+	 * slow-load ones.
 	 */
-	private noteAdoptionFailure(rec: NoteRecord): void {
+	private noteAdoptionFailure(rec: NoteRecord, fileMissing = false): void {
 		if (rec.adoptionNoticed) return;
 		const now = Date.now();
 		// The clock starts on the FIRST failure of this run, not on the notice.
@@ -1601,7 +1857,7 @@ export class InlineInkStore {
 		}
 		if (now - rec.adoptionFailingSince < ADOPTION_QUIET_MS) return;
 		rec.adoptionNoticed = true;
-		this.host?.notify(ADOPTION_STILL_FAILING);
+		this.host?.notify(fileMissing ? INK_FILE_MISSING : ADOPTION_STILL_FAILING);
 	}
 
 	/** Diagnostics: what the session cache holds (it never evicts). */
@@ -1666,7 +1922,7 @@ export class InlineInkStore {
 		// (draw + erase, or draw + undo). An untouched-in-the-end note stays
 		// untouched. A CLAIMED note skips this and persists emptiness: the id
 		// line stays, and erasing your last stroke never un-claims a note.
-		if (!rec.pageId && rec.strokes.length === 0 && !rec.basePage) return;
+		if (!rec.pageId && rec.strokes.length === 0 && !rec.basePage && !hasChoice(rec)) return;
 		if (rec.legacyLocked) {
 			this.noteOnce(
 				rec,
@@ -1779,13 +2035,30 @@ export class InlineInkStore {
 		if (rec.duplicateLocked) return null;
 		const base = rec.basePage ?? emptyPage(rec.pageId);
 		const fontRefPx = base.fontRefPx ?? rec.fontRefPx;
-		return {
+		const page: PageData = {
 			...base,
 			pageId: rec.pageId,
 			surface: "inline",
 			strokes: rec.strokes,
 			...(fontRefPx !== undefined ? { fontRefPx } : {}),
 		};
+		// A choice set this session replaces the file's, including a value
+		// this build could not read (kept in unknownTop until now).
+		const c = rec.choices;
+		if (c && (c.canvas !== undefined || c.paper !== undefined)) {
+			page.unknownTop = { ...base.unknownTop };
+			if (c.canvas !== undefined) {
+				delete page.unknownTop.noteCanvas;
+				if (c.canvas === null) delete page.noteCanvas;
+				else page.noteCanvas = c.canvas;
+			}
+			if (c.paper !== undefined) {
+				delete page.unknownTop.notePaper;
+				if (c.paper === null) delete page.notePaper;
+				else page.notePaper = c.paper;
+			}
+		}
+		return page;
 	}
 
 	private schedule(rec: NoteRecord): void {
@@ -1905,8 +2178,10 @@ export class InlineInkStore {
 
 	/** The note is gone; a future note reusing its path starts clean. */
 	handleDelete(path: string): void {
-		this.byPath.delete(path);
+		const had = this.byPath.delete(path);
 		this.dropRenamesTouching(path);
+		// Embed layers of a note that held ink must stop drawing it.
+		if (had) notifyInkChanged(path);
 	}
 
 	// ---- duplicate page ids -------------------------------------------------
@@ -1934,8 +2209,10 @@ export class InlineInkStore {
 		rec.noticed = false;
 		this.host?.notify("Handwriting: duplicate resolved. Ink on this note saves again.");
 		// Strokes drawn while locked were refused at the snapshot and are in
-		// memory only. Save them now, or they are gone at restart.
-		if (rec.strokes.length > 0) this.persist(path, rec);
+		// memory only. Save them now, or they are gone at restart. An erase
+		// down to nothing leaves no strokes but still differs from disk: the
+		// changed ids say so.
+		if (rec.strokes.length > 0 || rec.localStrokeIds.size > 0) this.persist(path, rec);
 	}
 
 	isDuplicateLocked(path: string): boolean {
@@ -1949,11 +2226,43 @@ export class InlineInkStore {
 	 * no longer references. Drop it; the note starts over as unclaimed, and
 	 * its on-screen ink (which belongs to the id's real owner) clears on the
 	 * next repaint.
+	 *
+	 * Also called when a duplicate-locked copy was fixed by editing its id
+	 * value: the record still names the shared id the note no longer carries.
+	 *
+	 * A duplicate lock refused every write, so ink drawn on THIS note while
+	 * locked is in memory only, and dropping the record lost it. That ink is
+	 * carried into a fresh record, which reads the note's id afresh (the
+	 * edited value, or a fresh claim when the line is gone) and saves it
+	 * there. Ink that came from the shared sidecar is not carried: it is the
+	 * other note's. A record is left for this path only when ink was carried.
 	 */
 	handleDeclaimed(path: string): void {
 		const rec = this.byPath.get(path);
 		if (!rec || !rec.pageId) return;
 		this.byPath.delete(path);
+		if (rec.duplicateLocked) this.carryOwnInk(path, rec);
+		// Last, once any carried ink is on the new record: embed layers of this
+		// note repaint from what `strokes()` answers now.
+		notifyInkChanged(path);
+	}
+
+	/** The ink a duplicate copy drew itself moves to a fresh record under its own id. */
+	private carryOwnInk(path: string, rec: NoteRecord): void {
+		const shared = new Set((rec.basePage?.strokes ?? []).map((s) => s.id));
+		const own = rec.strokes.filter((s) => rec.localStrokeIds.has(s.id) && !shared.has(s.id));
+		if (own.length === 0) return;
+		const fresh = this.record(path);
+		fresh.strokes = own;
+		for (const s of own) fresh.localStrokeIds.add(s.id);
+		fresh.mutationGeneration++;
+		// Read first, then persist: the write waits on the read (persist), so
+		// the carried ink merges in after whatever the new id's sidecar holds.
+		this.trackPersist(
+			this.ensureLoaded(path).then(() => undefined),
+			`load ${path} for the ink carried off its shared page id`
+		);
+		this.persist(path, fresh);
 	}
 
 	/**

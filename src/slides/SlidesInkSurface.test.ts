@@ -3631,7 +3631,7 @@ describe("live shaping follows the device, per stroke (mouse ink draws flat)", (
 		// `WetInkRenderer.beginStroke` reads `this.shape` into
 		// `shapingThisStroke` and never looks at it again for that stroke, so
 		// an assignment after the call would be a whole stroke too late.
-		const down = slice("const fromMouse = ev.pointerType === \"mouse\";", "\n\t}\n");
+		const down = slice("private beginInkAt(", "\n\t}\n");
 		expect(down).toContain("l.wet.shape = !fromMouse;");
 		expect(down.indexOf("l.wet.shape = !fromMouse;")).toBeLessThan(
 			down.indexOf("l.wet.beginStroke(")
@@ -6353,6 +6353,100 @@ describe("a first ink read that throws is held, not reported as damage", () => {
 		expect(rig.deck.reloadCandidateSidecarId()).toBeNull();
 		drawStrokeOn(rig);
 		expect(rig.scheduled).toEqual([]);
+		rig.deck.dispose();
+	});
+});
+
+describe("a mouse release the deck never hears", () => {
+	// A mouse press is not captured until it moves past TAP_SLOP_PX or outlasts
+	// TAP_MS, and the surface listens on `.reveal` only. A release that lands
+	// outside `.reveal` (the pen strip is a sibling of it, so is the rest of
+	// Obsidian) is never heard, and the session stays "drawing". Every later
+	// button-up hover over the deck then inks, and the next click is dropped and
+	// commits that ink.
+	afterEach(() => setMouseInk(false));
+
+	it("control: a mouse stroke whose release IS heard commits one stroke", () => {
+		setMouseInk(true);
+		const rig = makeRig();
+		rig.down({ pointerType: "mouse" });
+		rig.move(260, 260, { pointerType: "mouse" });
+		rig.move(300, 300, { pointerType: "mouse" });
+		rig.end("pointerup", { pointerType: "mouse", buttons: 0 });
+		expect(strokesOn(rig, 0)).toHaveLength(1);
+		rig.deck.dispose();
+	});
+
+	it("a button-up mouse hover after a lost release draws nothing, and the next click saves no stroke", () => {
+		setMouseInk(true);
+		const rig = makeRig();
+		rig.down({ pointerType: "mouse" });
+		// The pointerup fires on the strip or outside the deck: `.reveal` never sees it.
+		rig.move(260, 260, { pointerType: "mouse", buttons: 0, pressure: 0 });
+		rig.move(320, 300, { pointerType: "mouse", buttons: 0, pressure: 0 });
+		const session = (rig.deck as unknown as { session: { phase: string } }).session;
+		expect(session.phase).not.toBe("drawing");
+		// The next click, far away and quick: a tap, which inks nothing.
+		rig.down({ pointerType: "mouse", clientX: 600, clientY: 500 });
+		rig.end("pointerup", { pointerType: "mouse", clientX: 600, clientY: 500, buttons: 0 });
+		// Screen x 200 (the press) maps to slide x 360 at k = 0.5; the hover
+		// starts at screen x 260, slide x 480. Whatever the lost press leaves
+		// behind, no saved point may lie on the button-up hover path.
+		const xs = strokesOn(rig, 0).flatMap((st) => st.points.map((p) => p.x));
+		expect(xs.filter((x) => x >= 400)).toEqual([]);
+		rig.deck.dispose();
+	});
+	it("a stroke that was already ink is saved as drawn when its release is lost, at the last point drawn with the button down", () => {
+		setMouseInk(true);
+		const rig = makeRig();
+		rig.down({ pointerType: "mouse" });
+		rig.move(260, 260, { pointerType: "mouse" });
+		rig.move(300, 300, { pointerType: "mouse" });
+		// The release lands on the strip; the pointer then hovers over the deck.
+		rig.move(400, 400, { pointerType: "mouse", buttons: 0, pressure: 0 });
+		rig.move(450, 450, { pointerType: "mouse", buttons: 0, pressure: 0 });
+		const session = (rig.deck as unknown as { session: { phase: string } }).session;
+		expect(session.phase).not.toBe("drawing");
+		expect(strokesOn(rig, 0)).toHaveLength(1);
+		// The stroke ends as a lift at the last point drawn with the button down
+		// (screen 300,300 = slide 560,550 at k = 0.5). The hover started at slide 760.
+		const pts = strokesOn(rig, 0)[0]!.points.map((p) => [p.x, p.y]);
+		expect(pts).toEqual([
+			[360, 350],
+			[480, 470],
+			[560, 550],
+		]);
+		rig.deck.dispose();
+	});
+
+	it("a move with the left button up and the right button held also ends the stroke at the last point drawn with the left down", () => {
+		setMouseInk(true);
+		const rig = makeRig();
+		rig.down({ pointerType: "mouse" });
+		rig.move(260, 260, { pointerType: "mouse" });
+		rig.move(300, 300, { pointerType: "mouse" });
+		rig.move(400, 400, { pointerType: "mouse", buttons: 2 });
+		const session = (rig.deck as unknown as { session: { phase: string } }).session;
+		expect(session.phase).not.toBe("drawing");
+		expect(strokesOn(rig, 0)).toHaveLength(1);
+		expect(strokesOn(rig, 0)[0]!.points.map((p) => [p.x, p.y])).toEqual([
+			[360, 350],
+			[480, 470],
+			[560, 550],
+		]);
+		rig.deck.dispose();
+	});
+
+	it("control: a move with the left button still down and a second button added keeps the stroke going", () => {
+		setMouseInk(true);
+		const rig = makeRig();
+		rig.down({ pointerType: "mouse" });
+		rig.move(260, 260, { pointerType: "mouse" });
+		rig.move(300, 300, { pointerType: "mouse", buttons: 3 });
+		const session = (rig.deck as unknown as { session: { phase: string } }).session;
+		expect(session.phase).toBe("drawing");
+		rig.end("pointerup", { pointerType: "mouse", buttons: 0 });
+		expect(strokesOn(rig, 0)).toHaveLength(1);
 		rig.deck.dispose();
 	});
 });

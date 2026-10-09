@@ -91,6 +91,7 @@ async function rig() {
 		clearAll() { count.clearAll++; },
 		drawLasso() {},
 		drawSpaceStroke() { count.drawSpaceStroke++; return true; },
+		spaceStrokeOnScreen: () => true,
 		drawSpaceDivider() {},
 		drawSpaceLabel() {},
 		drawSelectionBox() {},

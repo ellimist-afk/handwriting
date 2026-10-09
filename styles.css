@@ -2269,6 +2269,33 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
 }
 
 /*
+ * The note's scrollbar keeps its 100% width at every note zoom (Alan, 2026-10-02).
+ * The host scales the scroller with the note, under the transform form above 1 and
+ * the zoom form at or below it, and Obsidian's styled bar
+ * (`body.styled-scrollbars ::-webkit-scrollbar`, width var(--scrollbar-width), every
+ * desktop platform but macOS) scaled with it: 21.5 CSS px at 1.79 and 36 at 3 for 12.
+ * Away from 100% applyViewportBox writes the inverse of the note zoom on the host, with
+ * the class below, at every box write; these rules size the bar, its thumb border and its
+ * thumb minimum by it, the bar from the theme's own variables. At 100% the class is off
+ * and the theme's rules stand untouched. Desktop only; macOS keeps its native bars,
+ * which these rules do not reach.
+ */
+body.styled-scrollbars:not(.is-mobile) .cm-editor.handwriting-note-viewport.handwriting-scrollbar-unscaled > .cm-scroller::-webkit-scrollbar {
+	width: calc(var(--scrollbar-width) * var(--handwriting-scrollbar-unscale, 1));
+	height: calc(var(--scrollbar-height) * var(--handwriting-scrollbar-unscale, 1));
+}
+body.styled-scrollbars:not(.is-mobile) .cm-editor.handwriting-note-viewport.handwriting-scrollbar-unscaled > .cm-scroller.handwriting-hscroll::-webkit-scrollbar:horizontal {
+	height: calc(10px * var(--handwriting-scrollbar-unscale, 1));
+}
+body.styled-scrollbars:not(.is-mobile) .cm-editor.handwriting-note-viewport.handwriting-scrollbar-unscaled > .cm-scroller::-webkit-scrollbar-thumb {
+	border-width: calc(3px * var(--handwriting-scrollbar-unscale, 1)) calc(3px * var(--handwriting-scrollbar-unscale, 1)) calc(3px * var(--handwriting-scrollbar-unscale, 1)) calc(2px * var(--handwriting-scrollbar-unscale, 1));
+	min-height: calc(45px * var(--handwriting-scrollbar-unscale, 1));
+}
+body.styled-scrollbars:not(.is-mobile) .cm-editor.handwriting-note-viewport.handwriting-scrollbar-unscaled > .cm-scroller.handwriting-hscroll::-webkit-scrollbar-thumb:horizontal {
+	border-width: calc(2px * var(--handwriting-scrollbar-unscale, 1));
+}
+
+/*
  * On Handwriting pages the spatial note should flow into Obsidian's own
  * backlinks area, not end at a boxed-off rule. Obsidian draws a top border
  * on the embedded backlinks section ("Linked mentions"); remove exactly
@@ -3218,5 +3245,6 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
 /* Only Infinite Canvas note routers opt in; wheel input remains native. */
 .handwriting-no-momentum { touch-action: none; }
 .view-action.handwriting-canvas-action.is-active {
-	color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	background-color: var(--interactive-accent);
 }

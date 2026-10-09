@@ -166,9 +166,15 @@ export function snapChipOrigin(
 	pane: { left?: number; top?: number; width: number; height: number }
 ): { left: number; top: number } {
 	const left0 = pane.left ?? 0, top0 = pane.top ?? 0;
+	// Squeezed into the pane's bottom-right corner the clamp on both axes would put the chip on the
+	// stroke's end. Fitting neither below nor to the right of the point, it goes above it instead.
+	const fits = y + SNAP_CHIP_OFFSET + SNAP_CHIP_H <= top0 + pane.height ||
+		x + SNAP_CHIP_OFFSET + SNAP_CHIP_W <= left0 + pane.width;
 	return {
 		left: Math.max(left0, Math.min(x + SNAP_CHIP_OFFSET, left0 + pane.width - SNAP_CHIP_W)),
-		top: Math.max(top0, Math.min(y + SNAP_CHIP_OFFSET, top0 + pane.height - SNAP_CHIP_H)),
+		top: Math.max(top0, fits
+			? Math.min(y + SNAP_CHIP_OFFSET, top0 + pane.height - SNAP_CHIP_H)
+			: y - SNAP_CHIP_OFFSET - SNAP_CHIP_H),
 	};
 }
 

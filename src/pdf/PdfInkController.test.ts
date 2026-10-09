@@ -31,6 +31,9 @@ function cursorChildren(createCursor: () => any): (options?: { cls?: string }) =
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InkOp } from "../inline/InkHistory";
+import { FakeAdapter } from "../persistence/FakeAdapter";
+import { PageStore } from "../persistence/PageStore";
+import { parsePage } from "../model/PageData";
 import { InkStroke, computeBBox } from "../ink/Stroke";
 import { PenSample } from "../input/PointerRouter";
 import { resetTipModeForTest, setTipMode, setTipModeListener, tipMode } from "../inline/TipMode";
@@ -2818,11 +2821,13 @@ describe("PdfInkController keyboard: Escape hands the tip back, Ctrl/Cmd+C and +
 			alt?: boolean;
 			shift?: boolean;
 			target?: unknown;
+			code?: string;
 		} = {}
 	): boolean {
 		let prevented = false;
 		const ev = {
 			key,
+			code: mods.code ?? "",
 			ctrlKey: mods.ctrl ?? false,
 			metaKey: mods.meta ?? false,
 			altKey: mods.alt ?? false,
@@ -2952,6 +2957,60 @@ describe("PdfInkController keyboard: Escape hands the tip back, Ctrl/Cmd+C and +
 		expect(press("z", { ctrl: true })).toBe(true);
 		expect(ops.map((o) => o.type)).toEqual(["remove", "add"]);
 		expect(clipboardSize()).toBe(0);
+	});
+
+	// A keyboard layout that types another script (Russian, Greek) reports a letter that is not Latin in `key` while `code` still
+	// names the physical key. Undo and redo are the physical keys Z and Y, so they must act under such a layout.
+	describe("undo and redo under a layout whose letters are not Latin", () => {
+		/** One removed stroke, so there is something to undo and then redo. */
+		function deleted(): void {
+			select();
+			controller.deleteSelection();
+			expect(ops.map((o) => o.type), "premise: the delete is in history").toEqual(["remove"]);
+		}
+
+		it("the control: Latin Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo", () => {
+			deleted();
+			expect(press("z", { ctrl: true, code: "KeyZ" })).toBe(true);
+			expect(ops.map((o) => o.type)).toEqual(["remove", "add"]);
+			expect(press("Z", { ctrl: true, shift: true, code: "KeyZ" })).toBe(true);
+			expect(ops.map((o) => o.type)).toEqual(["remove", "add", "remove"]);
+		});
+
+		it("a Latin layout that moves Z and Y keeps what the key types: QWERTZ Ctrl+Z undoes, Ctrl+Y redoes", () => {
+			deleted();
+			// QWERTZ: the key that types Z sits where QWERTY has Y, and the reverse.
+			expect(press("z", { ctrl: true, code: "KeyY" })).toBe(true);
+			expect(ops.map((o) => o.type)).toEqual(["remove", "add"]);
+			expect(press("y", { ctrl: true, code: "KeyZ" })).toBe(true);
+			expect(ops.map((o) => o.type)).toEqual(["remove", "add", "remove"]);
+		});
+
+		it("Ctrl+Z with a Russian layout letter on the Z key undoes and is consumed", () => {
+			deleted();
+			expect(press("я", { ctrl: true, code: "KeyZ" }), "the key press is consumed").toBe(true);
+			expect(ops.map((o) => o.type)).toEqual(["remove", "add"]);
+		});
+
+		it("Cmd+Z with a Greek layout letter on the Z key undoes and is consumed", () => {
+			deleted();
+			expect(press("ζ", { meta: true, code: "KeyZ" })).toBe(true);
+			expect(ops.map((o) => o.type)).toEqual(["remove", "add"]);
+		});
+
+		it("Ctrl+Y with a Russian layout letter on the Y key redoes and is consumed", () => {
+			deleted();
+			expect(press("z", { ctrl: true, code: "KeyZ" })).toBe(true);
+			expect(press("н", { ctrl: true, code: "KeyY" }), "the key press is consumed").toBe(true);
+			expect(ops.map((o) => o.type)).toEqual(["remove", "add", "remove"]);
+		});
+
+		it("Ctrl+Shift+Z with a Russian layout letter on the Z key redoes", () => {
+			deleted();
+			expect(press("z", { ctrl: true, code: "KeyZ" })).toBe(true);
+			expect(press("Я", { ctrl: true, shift: true, code: "KeyZ" })).toBe(true);
+			expect(ops.map((o) => o.type)).toEqual(["remove", "add", "remove"]);
+		});
 	});
 
 	it("Delete with a live selection still deletes, and a bare Backspace still says nothing", () => {
@@ -3719,6 +3778,83 @@ describe("PdfInkController: a stroke torn down with no pointerup stands the surf
 		expect(tools.refreshes).toBe(1);
 	});
 
+	// Every pen-down
+	// runs `stripPenDown` (PdfInkController.ts:2911), whatever the gesture.
+	// The rebuild branch of `sync()` reaches `penUp()` (and so `stripPenUp`)
+	// only when a stroke or an erase is live; a pan, lasso or space contact is
+	// reset with no lift, on a router that is then disposed, so its real
+	// pointerup never arrives and the strip stays `is-inking` (opacity 0,
+	// visibility hidden). The stub is handed over after the pen-down, as in
+	// the tests above, so `inking` records what the rebuild did and nothing else.
+	it.each(["pan", "lasso", "space"] as const)(
+		"cancel class: a viewer rebuilt under a %s contact puts the strip chrome back down",
+		(mode) => {
+			setTipMode(mode);
+			const h = scroller.handlers.get("pointerdown");
+			if (!h) throw new Error("the router registered no pointerdown handler");
+			h(penEvent("pointerdown", 100) as unknown as Event);
+			expect(
+				(controller as unknown as { router: { isStroking: boolean } }).router.isStroking,
+				"the contact never took"
+			).toBe(true);
+			const tools = toolsStub();
+			// `sync()` runs for a mounted pane only, and a mounted pane asks its
+			// strip whether it is stale; the stub answers as a live strip does.
+			Object.assign(tools, { stale: () => false, destroy: () => {} });
+			priv.tools = tools;
+			const rebuilt = fakeEl() as ReturnType<typeof fakeEl> & Record<string, unknown>;
+			rebuilt.querySelector = () => null;
+			rebuilt.createDiv = (scroller as unknown as Record<string, unknown>).createDiv;
+			probe.current = { ...(probe.current as Record<string, unknown>), scroller: rebuilt };
+			(controller as unknown as { mounted: boolean }).mounted = true;
+			// The mutation observer does this when the viewer's subtree is replaced.
+			(controller as unknown as { invalidateProbe(): void }).invalidateProbe();
+			(controller as unknown as { sync(): void }).sync();
+			expect(
+				(controller as unknown as { boundScroller: unknown }).boundScroller,
+				"the rebuild branch never ran"
+			).toBe(rebuilt);
+			expect(tools.inking, "the rebuild left `is-inking` on the strip").toEqual([false]);
+		}
+	);
+
+	// What the rest of the contact does once a rebuild has closed it. The old
+	// router is disposed and the new one never saw this pen land, so its
+	// moves read as hover (InlinePenRouter.pointerMove, activePenId null) and
+	// its lift ends nothing (endPenStroke returns): the contact is dead. No new
+	// gesture starts, the strip is not hidden again, nothing is committed.
+	it.each(["pan", "lasso", "space"] as const)(
+		"cancel class: the rest of a %s contact after a rebuild is dead: no new gesture, no ink, strip stays up",
+		(mode) => {
+			setTipMode(mode);
+			const h = scroller.handlers.get("pointerdown");
+			if (!h) throw new Error("the router registered no pointerdown handler");
+			h(penEvent("pointerdown", 100) as unknown as Event);
+			const tools = toolsStub();
+			Object.assign(tools, { stale: () => false, destroy: () => {} });
+			priv.tools = tools;
+			const rebuilt = fakeEl() as ReturnType<typeof fakeEl> & Record<string, unknown>;
+			rebuilt.querySelector = () => null;
+			rebuilt.createDiv = (scroller as unknown as Record<string, unknown>).createDiv;
+			probe.current = { ...(probe.current as Record<string, unknown>), scroller: rebuilt };
+			(controller as unknown as { mounted: boolean }).mounted = true;
+			(controller as unknown as { invalidateProbe(): void }).invalidateProbe();
+			(controller as unknown as { sync(): void }).sync();
+			const opsAtRebuild = ops.length;
+			const move = rebuilt.handlers.get("pointermove");
+			const up = rebuilt.handlers.get("pointerup");
+			if (!move || !up) throw new Error("the new router registered no move or up handler");
+			move(penEvent("pointermove", 110, { x: 140, y: 160 }) as unknown as Event);
+			move(penEvent("pointermove", 120, { x: 180, y: 220 }) as unknown as Event);
+			const router = (controller as unknown as { router: { isStroking: boolean } }).router;
+			expect(router.isStroking, "the new router took the old contact as a new gesture").toBe(false);
+			up(penEvent("pointerup", 130, { x: 180, y: 220, pressure: 0, buttons: 0 }) as unknown as Event);
+			expect(tools.inking, "the rest of the contact hid the strip again").toEqual([false]);
+			expect(ops.length, "the rest of the contact committed something").toBe(opsAtRebuild);
+			expect((controller as unknown as { idle: boolean }).idle, "the pane is left holding a gesture").toBe(true);
+		}
+	);
+
 	it("and a blur stands the gesture down, so the pane can still be reloaded", () => {
 		// `idle` is what main.ts asks before swapping another device's ink in
 		// (main.ts, the reload poll and the same-document refresh). A blur
@@ -3805,6 +3941,68 @@ describe("PdfInkController: a stroke torn down with no pointerup stands the surf
 		// And the gesture is over even though the ink is not lost: `idle` is
 		// what main.ts asks before swapping another device's ink in.
 		expect(controller.idle).toBe(true);
+	});
+
+	it("and a pane closed mid-stroke (unmount) COMMITS the stroke drawn so far, as the blur does", () => {
+		// The pdf half of the note's close mid-stroke cell (InlineFingerLifecycle):
+		// a pane or pop-out closed with the pen down tears the controller down with
+		// no pointerup. The 2026-09-04 ruling (blur above) makes a stroke in flight
+		// land; a close is the same loss by another route, so it lands too.
+		inkContact();
+		priv.tools = Object.assign(toolsStub(), { destroy: () => {} });
+		const wet = wetStub();
+		// unmount takes the pair's canvases off the page; the stub's need a remove.
+		Object.assign(wet.pair.wetCanvas, { remove: () => {} });
+		Object.assign(wet.pair.headCanvas, { remove: () => {} });
+		priv.pair = wet.pair;
+		priv.wetHostPage = 1;
+		expect(priv.strokePageNumber, "the ink contact never took").toBe(1);
+
+		controller.unmount();
+
+		expect(ops.length, "the stroke in flight at the close vanished instead of committing").toBe(1);
+		const op = ops[0] as Extract<InkOp, { type: "add" }>;
+		expect(op.type).toBe("add");
+		expect(op.path).toBe("doc-1");
+		expect(op.strokes.length).toBe(1);
+		expect(op.strokes[0]?.page, "the commit lost the page the stroke was drawn on").toBe(1);
+	});
+
+	it("and the stroke committed at the close reaches the PDF store's sidecar write", async () => {
+		// The save half of the close: the commit op goes through the same sink
+		// main.ts wires (applyOp, then replaceAll on a commit), and the store's
+		// host writes a page holding the stroke after the controller is gone.
+		const id = "doc-1";
+		const sidecar = `.handwriting/${id}.json`;
+		const adapter = new FakeAdapter();
+		const store = new PageStore({ vault: { adapter } });
+		const pdf = new PdfInkStore();
+		pdf.attachHost({ load: (key) => store.load(key), schedule: (key, data) => store.schedule(key, data), notice() {} });
+		await pdf.ensureLoaded(id);
+		Object.assign(controller, {
+			allStrokes: () => pdf.strokes(id),
+			onOp: (op: InkOp, mode: string) => {
+				ops.push(op);
+				const next = applyOp(pdf.strokes(id), op);
+				if (mode === "live") pdf.replaceAllLive(id, next); else pdf.replaceAll(id, next);
+			},
+		});
+		inkContact();
+		priv.tools = Object.assign(toolsStub(), { destroy: () => {} });
+		const wet = wetStub();
+		Object.assign(wet.pair.wetCanvas, { remove: () => {} });
+		Object.assign(wet.pair.headCanvas, { remove: () => {} });
+		priv.pair = wet.pair;
+		priv.wetHostPage = 1;
+
+		controller.unmount();
+		await store.flush();
+
+		const written = adapter.files.get(sidecar);
+		expect(written, "nothing was written for the document after the close").toBeDefined();
+		const persisted = parsePage(written!, id).data.strokes;
+		expect(persisted.length, "the written page does not hold the stroke drawn before the close").toBe(1);
+		expect(persisted[0]?.page).toBe(1);
 	});
 
 	/**
@@ -4968,5 +5166,97 @@ describe("PdfInkController band", () => {
 		(controller as unknown as { invalidateProbe(): void }).invalidateProbe();
 		priv.sync();
 		expect(committed().parentElement, "an off-screen page kept its backing store").toBeNull();
+	});
+});
+
+describe("PdfInkController: a viewer rebuilt under a space move or a lasso drag saves the move as a lift does", () => {
+	let uninstallWindow: () => void = () => {};
+	beforeAll(() => {
+		uninstallWindow = installFakeWindow();
+	});
+	afterAll(() => uninstallWindow());
+	afterEach(() => resetTipModeForTest());
+
+	const at = (x: number, y: number): PenSample => ({ x, y, pressure: 0.5, timestamp: 0, tiltX: 0, tiltY: 0 });
+
+	function rig() {
+		resetTipModeForTest();
+		const points = Array.from({ length: 50 }, (_, i) => ({ x: 100 + (i % 11), y: 100 + (i % 11), pressure: 0.5, t: i }));
+		const original: InkStroke = { id: "picked", points, bbox: computeBBox(points, 2), tool: "pen", color: "#000000", width: 2, createdAt: 0, page: 1 };
+		let ink: InkStroke[] = [original];
+		const el = fakeEl() as ReturnType<typeof fakeEl> & Record<string, unknown>;
+		el.querySelector = () => null;
+		el.createDiv = () => ({ setAttribute() {}, remove() {}, classList: { add() {}, remove() {}, toggle() {} }, setCssStyles() {}, parentElement: el });
+		probe.current = { scroller: el, scaleFactor: 2, scaleSource: "test", pages: [{ pageNumber: 1, leftPx: 0, topPx: 0, widthPx: 600, heightPx: 800, hasCanvas: true }] };
+		const frames = new Map<number, () => void>();
+		let next = 0;
+		const win = {
+			devicePixelRatio: 1, navigator: { userAgent: "", platform: "", maxTouchPoints: 0 },
+			setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
+			clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
+			requestAnimationFrame: (fn: () => void) => { frames.set(++next, fn); return next; },
+			cancelAnimationFrame: (id: number) => frames.delete(id),
+			getComputedStyle: () => ({ position: "relative" }),
+		};
+		const persist = vi.fn();
+		const controller = new PdfInkController({} as HTMLElement, win as unknown as Window,
+			(page) => ink.filter((s) => s.page === page), () => "doc-1", () => ink,
+			(op) => { ink = applyOp(ink, op); }, () => {}, () => {}, persist);
+		const pen = controller as unknown as {
+			bindTo(el: unknown): void; wetOn(page: number): unknown; cameraFor(box: unknown): unknown;
+			penDown(s: PenSample, ev?: PointerEvent): void; penRaw(s: PenSample[]): void; penUp(ev?: PointerEvent): void;
+			historyStep(redo: boolean): boolean; history: { depth: { done: number; undone: number } };
+			mounted: boolean; invalidateProbe(): void; sync(): void; boundScroller: unknown;
+		};
+		pen.bindTo(el);
+		const context = { clearRect() {}, save() {}, restore() {}, setLineDash() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, strokeRect() {} };
+		pen.wetOn = () => ({ wetCanvas: { getContext: () => context }, wet: { clear() {} }, tail: { clear() {} } });
+		pen.cameraFor = () => ({ x: 0, y: 0, zoom: 2 });
+		const flush = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach((fn) => fn()); };
+		const rebuild = () => {
+			const rebuilt = fakeEl() as ReturnType<typeof fakeEl> & Record<string, unknown>;
+			rebuilt.querySelector = () => null;
+			rebuilt.createDiv = el.createDiv;
+			probe.current = { ...(probe.current as Record<string, unknown>), scroller: rebuilt };
+			pen.mounted = true;
+			pen.invalidateProbe();
+			pen.sync();
+			expect(pen.boundScroller, "the rebuild branch never ran").toBe(rebuilt);
+		};
+		const picked = () => ink.find((s) => s.id === "picked")!;
+		return { controller, pen, persist, flush, rebuild, picked, original };
+	}
+
+	function expectMovedThenUndone(r: ReturnType<typeof rig>, dx: number, dy: number, writesBefore: number): void {
+		expect(r.pen.history.depth, "the rebuild recorded no move, or more than one").toEqual({ done: 1, undone: 0 });
+		expect(r.picked().points[0], "the saved move is not the whole delta").toEqual({ ...r.original.points[0]!, x: r.original.points[0]!.x + dx, y: r.original.points[0]!.y + dy });
+		expect(r.persist.mock.calls.length - writesBefore, "the move was not written once").toBe(1);
+		expect(r.pen.historyStep(false), "undo found nothing to undo").toBe(true);
+		expect(r.picked().points, "undo did not put the ink back").toEqual(r.original.points);
+	}
+
+	it("a space move: one move op of the whole delta, one write, and undo puts the ink back", () => {
+		const r = rig();
+		setTipMode("space");
+		const writesBefore = r.persist.mock.calls.length;
+		r.pen.penDown(at(300, 100));
+		r.pen.penRaw([at(300, 120), at(300, 140)]);
+		r.flush();
+		r.rebuild();
+		expectMovedThenUndone(r, 0, 20, writesBefore);
+	});
+
+	it("a lasso drag: one move op of the whole delta, one write, and undo puts the ink back", () => {
+		const r = rig();
+		r.pen.penDown(at(150, 150), { buttons: 2, button: 2, pointerType: "pen" } as PointerEvent);
+		r.pen.penRaw([at(250, 150), at(250, 250), at(150, 250), at(150, 150)]);
+		r.pen.penUp();
+		expect(r.controller.hasSelection, "precondition: the lasso selected the stroke").toBe(true);
+		const writesBefore = r.persist.mock.calls.length;
+		r.pen.penDown(at(205, 205));
+		r.pen.penRaw([at(225, 235)]);
+		r.flush();
+		r.rebuild();
+		expectMovedThenUndone(r, 10, 15, writesBefore);
 	});
 });

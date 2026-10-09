@@ -71,17 +71,33 @@ describe("real mounted ordinary-note iPhone finger lifecycle", () => {
 		});
 	});
 
-	it("drops an unfinished finger stroke at real EditorView teardown and removes its listeners", () => {
+	it("commits an unfinished finger stroke at real EditorView teardown, as the pen's is, and removes its listeners", () => {
 		expect(trace.teardown).toEqual({
 			mounted: true,
 			downPrevented: true,
 			storeBeforeDestroy: 0,
 			routerDownsBeforeDestroy: 1,
 			overlayAfterDestroy: false,
-			storeAfterDestroy: 0,
+			storeAfterDestroy: 1,
 			lateDownPrevented: false,
-			storeAfterLateEvents: 0,
+			storeAfterLateEvents: 1,
 		});
+	});
+
+	it("commits a pen stroke in flight when its editor view is destroyed (a pane closed mid-stroke), and the late lift adds nothing", () => {
+		expect(trace.penTeardown).toEqual({
+			mounted: true,
+			downPrevented: true,
+			storeBeforeDestroy: 0,
+			movesBeforeDestroy: 12,
+			overlayAfterDestroy: false,
+			storeAfterDestroy: 1,
+			pointsAfterDestroy: trace.penTeardown.pointsAfterDestroy,
+			storeAfterLateEvents: 1,
+			savedStrokesAfterDestroy: 1,
+			savedPointsAfterDestroy: trace.penTeardown.pointsAfterDestroy,
+		});
+		expect(trace.penTeardown.pointsAfterDestroy, "the points drawn before the close are in the store").toBeGreaterThan(1);
 	});
 
 	it("commits once through the actual Keyboard control, then restores native touch", () => {

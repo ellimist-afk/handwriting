@@ -341,6 +341,7 @@ async function rig(options: { lock: Lock; host: boolean }): Promise<Rig> {
 		clearSelection() {},
 		syntheticSources: () => false,
 		documentId: () => ID,
+		allStrokes: () => pdf.strokes(ID),
 		persist: (pageId: string) => pdf.save(pageId),
 		// Host op wiring exactly as main binds it: real applyOp -> real store.
 		onOp: (op: any, how: string) => {
@@ -1014,7 +1015,7 @@ describe("calibration: this harness can see a complete undo when one exists", ()
 });
 
 describe("explicitly NOT a proven user reproduction", () => {
-	it("records the unfinished-lasso ordering as an API-level lead only", async () => {
+	it("an unfinished lasso drag that no copy holds makes the wipe refuse", async () => {
 		// Calling the confirmed deletion BEFORE a gesture completes is
 		// reachable through the API, and the guards treat it like any other
 		// state. Whether ordinary input and the confirmation modal can produce
@@ -1039,33 +1040,48 @@ describe("explicitly NOT a proven user reproduction", () => {
 		await r.deleteAll();
 		await r.store.flush();
 
-		// WHAT ACTUALLY HAPPENS, recorded rather than blessed. Nothing changes
-		// during the await, so both guards pass and the wipe proceeds - which
-		// is the guards behaving exactly as specified. The backup therefore
-		// holds the stroke at its PRE-DRAG position, and the un-saved drag is
-		// not in any copy.
+		// The copy holds the stroke at its PRE-DRAG position, which is not
+		// the ink on screen, so the wipe now refuses and leaves the live ink
+		// alone: nothing is missing from the copies plus the live ink.
 		const survived = [...r.recoverable(), ...clone(r.live())];
 		const missing = beforeClear.filter(
 			(s) => !survived.some((t) => persisted(t) === persisted(s))
 		);
-
-		// The stroke itself is in a recovery copy - its identity and its
-		// last SAVED state both survive.
-		expect(r.recoverable().some((s) => s.id === "old")).toBe(true);
-
-		// And this is the honest limit, asserted as the lead it is rather
-		// than as a safety claim. The un-committed live drag is absent from
-		// every copy. This slice does NOT repair that and does not pretend
-		// to: reaching a confirmed deletion before a gesture completes is an
-		// API-level ordering only, with no supported host-routing evidence
-		// that ordinary input and the confirmation modal can produce it. It
-		// is unchanged by this repair - the same outcome on the base commit -
-		// and it stays outside the proven user-facing fix, pending that
-		// evidence. Promoting it to an expected pass here would be inventing
-		// a reproduction.
+		expect(r.live().map((s) => s.id)).toEqual(["old"]);
 		expect(
 			missing.map((s) => s.id),
-			"recorded lead: the unsaved live drag is in no copy; reachability unproved"
-		).toEqual(["old"]);
+			"the copy did not hold the on-screen ink, so the wipe refused"
+		).toEqual([]);
+	});
+});
+
+describe("no backup file: a wipe the store could not copy is refused, as the note surface refuses it", () => {
+	it("the ink file is gone from disk while strokes are on screen: nothing is deleted and no copy is claimed", async () => {
+		const r = await rig({ lock: "none", host: true });
+		await r.store.flush();
+		// Sync removed the sidecar under the open pane; nothing is queued to write.
+		await r.adapter.remove(SIDECAR);
+		expect(r.store.hasQueuedWrite(ID)).toBe(false);
+		expect(r.pdf.canPersist(ID)).toBe(true);
+		const before = clone(r.live());
+		expect(before.map((s) => s.id)).toEqual(["old"]);
+
+		await r.deleteAll();
+
+		expect(r.live().map((s) => s.id), "the wipe went on with no copy of the ink").toEqual(["old"]);
+		expect(signals.notices.some((n) => n.startsWith("Handwriting: removed")), "the user was told ink was removed").toBe(false);
+		expect(signals.notices.length, "the refusal said nothing").toBeGreaterThan(0);
+		expect(r.files().filter(([p]) => p.includes("/trash/")), "a copy appeared from nowhere").toEqual([]);
+	});
+
+	it("the ink file is there: the wipe still copies it and goes on", async () => {
+		const r = await rig({ lock: "none", host: true });
+		await r.store.flush();
+		expect(await r.adapter.exists(SIDECAR)).toBe(true);
+
+		await r.deleteAll();
+
+		expect(r.live()).toEqual([]);
+		expect(signals.notices.some((n) => n.includes("A copy is kept in "))).toBe(true);
 	});
 });

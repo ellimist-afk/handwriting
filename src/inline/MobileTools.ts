@@ -327,6 +327,17 @@ const fingerDrawsHere = (h: MobileToolsHost): boolean =>
 	(h.fingerInkAvailable?.() ?? false) && toolIsLit(h.penInksHere());
 
 /**
+ * The colour a nib's icon is painted in: the pen's own ink blended toward the
+ * theme's readable text colour rather than the raw hex. A pen this close to the
+ * background (black in dark mode, white in light mode) would nearly disappear
+ * while unlit. The blend still reads as "that colour" - it is mostly the pen's
+ * own hue - it just never goes all the way to invisible against the page. The
+ * strip and the always-shown row of the Fold Order preview both paint through
+ * this, so the preview shows what the toolbar shows.
+ */
+export const nibInkColor = (hex: string): string => `color-mix(in srgb, ${hex} 70%, var(--text-normal))`;
+
+/**
  * Whether a nib button's LIGHT (and the collapsed pill) should show it lit:
  * the tip must nominally hold this tool AND the tip must actually ink with
  * it - true once a real PEN has been seen this session, or for a mouse user
@@ -1031,6 +1042,11 @@ export interface MobileToolsOptions {
  */
 let foldOrder: readonly string[] = DEFAULT_FOLD_ORDER;
 const liveStrips = new Set<MobileTools>();
+/** The strip whose own Eraser button is behind the current eraser switch, if any. The eraser
+ * mode is global and every pane's strip sees its OFF-to-ON edge, but only the pane the user
+ * tapped should drop its size pop; a hotkey or the palette has no owner and opens it in every
+ * strip, as before. Cleared when the eraser goes off or its strip is destroyed. */
+const eraserEdge: { owner: MobileTools | null } = { owner: null };
 const liveNoteZoomControls = new Set<NoteZoomControls>();
 
 export function setStripFoldOrder(order: readonly string[]): void {
@@ -1374,6 +1390,9 @@ export class MobileTools {
 	 * preset chip also deletes its neighbour"). This flag lives on the strip,
 	 * not on a chip closure, so it survives the rebuild the closure does not. */
 	private suppressNextPresetContextMenu = false;
+	/** The same hold, the release's CLICK: it lands on the rebuilt chip (or the star) under the
+	 * finger, whose own `held` is false, so the strip remembers the hold for it. */
+	private suppressNextPresetClick = false;
 	private recordingDot!: HTMLElement;
 	/** Whether the dot was last drawn lit, so a flip can re-plan the fold. */
 	private recordingShown = false;
@@ -1517,7 +1536,11 @@ export class MobileTools {
 		// makes, and Escape's consume-or-ignore verdict is computed from
 		// whether a POP was open - folding a row into that would have Escape
 		// swallowed by a strip whose only open thing is a menu.
-		this.setMoreOpen(false);
+		//
+		// Not in the settings preview: its More row is opened on purpose by the
+		// fold-order control to show what folds there, and any tap elsewhere in
+		// Settings (the scroll that reaches the preview, say) used to close it.
+		if (!this.isPreview) this.setMoreOpen(false);
 		// On glass there is no pen-down-over-the-page moment to hide behind:
 		// a slider opened with a finger just STAYED, over whatever the next
 		// tap was about, until another tool was pressed (ipad, 2026-08-30).
@@ -1618,12 +1641,15 @@ export class MobileTools {
 	};
 
 	private viewportControls: NoteZoomControls | null = null;
+	/** The settings "Toolbar buttons" preview, not a live strip. */
+	private readonly isPreview: boolean;
 
 	constructor(parent: HTMLElement, private host: MobileToolsHost, opts: MobileToolsOptions = {}) {
 		// Read once into a local: the flag is consulted from the resize
 		// observer's callback, which outlives this call, and a closure over one
 		// boolean is cheaper to reason about than a field nothing else reads.
 		const preview = opts.preview === true;
+		this.isPreview = preview;
 		this.pane = parent;
   if (host.noteViewport && !preview) this.viewportControls = new NoteZoomControls(parent, host);
 
@@ -1676,8 +1702,13 @@ export class MobileTools {
 			// browser synthesizes a click for it - which would expand the
 			// strip at the far end of a gesture that was only ever about
 			// moving it. `armDrag` leaves the flag up for exactly this check
-			// and clears it on the next contact.
-			if (this.consumeDragClick()) return;
+			// and clears it on the next contact. A click with no press behind
+			// it (`detail` 0: Enter, Space, a screen reader) is not the drop's
+			// click: after an Escape mid-drag, or a finger drag, no click ever
+			// reaches the pill, and the flag would eat the first keyboard
+			// activation instead. The flag is consumed either way.
+			const dropClick = this.consumeDragClick();
+			if (dropClick && ev.detail !== 0) return;
 			this.setCollapsed(false);
 		});
 		// The pill IS the handle while the strip is folded away: it is the
@@ -1910,6 +1941,7 @@ export class MobileTools {
 					this.refresh();
 					return;
 				}
+				if (spec.commandId === "handwriting:inline-tool-eraser") eraserEdge.owner = this;
 				// The GoodNotes pattern: tapping the tool you are already
 				// holding opens its options instead of re-picking it.
 				const nib =
@@ -2421,16 +2453,19 @@ export class MobileTools {
 			(v, c) => this.host.setInkSizeMult("pen", pxToMult(v, DEFAULT_PEN.baseWidth), c),
 			"pen"
 		);
-		// The highlighter runs a narrower range: its base is already wide,
-		// and past 1.5x it stops being a highlighter and starts being paint.
-		// Its OWN multiplier bounds (0.25-1.5), not the pen's (0.3-3) - each
-		// nib's pixel range is its own base times its own existing range,
-		// not one shared range. Step 1px, same grain as the eraser's own
-		// integer-px slider, over a 4-24px span wide enough to want it.
+		// The highlighter runs a narrower range: its base is already wide.
+		// Its OWN bounds (0.25x to 29px), not the pen's (0.3-3x) - each
+		// nib's pixel range is its own base times its own range, not one
+		// shared range. The top is the whole pixel above the "Ink size: bold"
+		// step (1.8 x 16 = 28.8px): a lower top made the pop read 24px for a
+		// line drawn 28.8px wide, and a touch on the slider then shrank it
+		// (Alan, 2026-10-04: the slider reaches 29px, the size is not capped).
+		// Step 1px, same grain as the eraser's own integer-px slider, over
+		// a 4-29px span wide enough to want it.
 		this.hlSlider = dropSlider(
 			"Highlighter size",
 			String(multToPx(0.25, HIGHLIGHTER_PEN.baseWidth)),
-			String(multToPx(1.5, HIGHLIGHTER_PEN.baseWidth)),
+			String(Math.ceil(multToPx(1.8, HIGHLIGHTER_PEN.baseWidth))),
 			"1",
 			(v, c) => this.host.setInkSizeMult("highlighter", pxToMult(v, HIGHLIGHTER_PEN.baseWidth), c),
 			"highlighter"
@@ -2821,13 +2856,7 @@ export class MobileTools {
 			// for exactly one button.
 			if (spec.inkTool !== undefined) {
 				const hex = this.host.toolColor(spec.inkTool);
-				// Blended toward the theme's own readable text colour rather
-				// than painted with the raw hex: a pen this close to the
-				// background (black in dark mode, white in light mode) used to
-				// nearly disappear while unlit (item 140). The blend still
-				// reads as "that colour" - it is mostly the pen's own hue - it
-				// just never goes all the way to invisible against the page.
-				el.setCssStyles({ color: `color-mix(in srgb, ${hex} 70%, var(--text-normal))` });
+				el.setCssStyles({ color: nibInkColor(hex) });
 				// The tooltip names the colour beside the tool - the tinted
 				// icon says WHICH colour and cannot say its name, and "Pen"
 				// alone told a hover nothing about the ink it is holding
@@ -2996,13 +3025,14 @@ export class MobileTools {
 		// button's own click just gets there first.
 		const eraserOn = this.host.eraserOn();
 		if (eraserOn && !this.wasEraserOn) {
-			this.eraserPopClosed = false;
+			this.eraserPopClosed = eraserEdge.owner !== null && eraserEdge.owner !== this;
 			// A fresh activation opened this, not a hover in flight - a stale
 			// `true` here would let a leave timer from a previous session
 			// wrongly close the pop this edge just opened.
 			this.eraserPopFromHover = false;
 		}
 		this.wasEraserOn = eraserOn;
+		if (!eraserOn) eraserEdge.owner = null;
 		hangUnder(
 			this.slider,
 			"handwriting:inline-tool-eraser",
@@ -3090,6 +3120,7 @@ export class MobileTools {
 				ev.preventDefault();
 				held = false;
 				this.suppressNextPresetContextMenu = false;
+				this.suppressNextPresetClick = false;
 				cancelHold();
 				this.presetHoldTimer = window.setTimeout(() => {
 					this.presetHoldTimer = null;
@@ -3099,6 +3130,7 @@ export class MobileTools {
 					// on whatever fresh button the rebuild below puts under
 					// the finger (item 73).
 					this.suppressNextPresetContextMenu = true;
+					this.suppressNextPresetClick = true;
 					// In place: the pop stays open and the row redraws
 					// without it, so a second unwanted preset is one more
 					// hold away rather than a re-open.
@@ -3140,7 +3172,8 @@ export class MobileTools {
 			});
 			btn.addEventListener("click", (ev) => {
 				ev.preventDefault();
-				if (held) {
+				const releaseOfHold = this.consumePresetHoldClick(ev);
+				if (held || releaseOfHold) {
 					held = false;
 					return;
 				}
@@ -3169,9 +3202,13 @@ export class MobileTools {
 		// leave a nameless empty button in the row.
 		setIcon(star, "star");
 		if (!star.querySelector("svg")) star.setText("*");
-		star.addEventListener("pointerdown", (ev) => ev.preventDefault());
+		star.addEventListener("pointerdown", (ev) => {
+			ev.preventDefault();
+			this.suppressNextPresetClick = false;
+		});
 		star.addEventListener("click", (ev) => {
 			ev.preventDefault();
+			if (this.consumePresetHoldClick(ev)) return;
 			this.host.starPreset(tool);
 			// Stays open, unlike a chip tap: the new chip appearing in the
 			// row is the confirmation that the star worked.
@@ -3699,6 +3736,16 @@ export class MobileTools {
 		this.dragClickArmed = liftFollows && drag.moved && drag.handle === this.pill;
 	}
 
+	/** True once, for the click a hold-to-delete release sends to the control now under the
+	 * finger. A click with no press behind it (`detail` 0: Enter, Space, a screen reader) is a
+	 * decision of its own and is never swallowed, so the flag cannot eat a keyboard activation
+	 * on a device that sends no release click. */
+	private consumePresetHoldClick(ev: Event): boolean {
+		if (!this.suppressNextPresetClick) return false;
+		this.suppressNextPresetClick = false;
+		return (ev as MouseEvent).detail !== 0;
+	}
+
 	/** Did a drag just end on this element? Consumes the answer. */
 	private consumeDragClick(): boolean {
 		const was = this.dragClickArmed;
@@ -3882,6 +3929,7 @@ export class MobileTools {
 		// (`stale()`), so a leak here would accumulate one dead observer per
 		// pen-first-contact per pane rather than one per session.
 		liveStrips.delete(this);
+		if (eraserEdge.owner === this) eraserEdge.owner = null;
 		this.resizeWatch?.disconnect();
 		this.resizeWatch = null;
 		this.el.ownerDocument.removeEventListener("pointerdown", this.outsideTap, { capture: true });

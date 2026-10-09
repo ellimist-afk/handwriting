@@ -1,5 +1,6 @@
 import { Modal, TFile, type MarkdownView, type App, type CachedMetadata, type Plugin } from "obsidian";
 import { PAPER_STYLES, paperClass, type PaperStyle } from "./Paper";
+import { noteChoiceSource, pageIdForPath, readHint, writeHint } from "./NoteChoiceHint";
 
 export const NOTE_PAPER_KEY = "handwriting-paper";
 export const NOTE_PAPER_ATTRIBUTE = "data-handwriting-paper";
@@ -20,7 +21,21 @@ export class NotePaper {
 	private revision = 0;
 	private readonly pickers = new Set<NotePaperPicker>();
 
-	constructor(private app: App, private notify: (message: string) => void) {}
+	private readonly stopChoices: (() => void) | null;
+
+	constructor(private app: App, private notify: (message: string) => void) {
+		// The ink file is read after the note shows: when it arrives, or
+		// another device's file is adopted, the paper follows it and so does
+		// this device's hint.
+		const store = noteChoiceSource();
+		this.stopChoices = store
+			? store.onNoteChoicesChanged((path) => {
+					if (this.stopped) return;
+					writeHint(this.app, path, store.noteChoices(path));
+					this.refresh();
+			  })
+			: null;
+	}
 
 	start(owner: Plugin): void {
 		const refresh = (): void => this.refresh();
@@ -50,8 +65,26 @@ export class NotePaper {
 		});
 	}
 
+	/**
+	 * The note's paper: its ink file's choice once the file is read, this
+	 * device's hint before that, else the old property line (still read, so a
+	 * note that has one keeps its look), else the global setting.
+	 */
 	choice(file: TFile): NotePaperChoice {
-		return this.saved.get(file) ?? notePaperChoice(this.app.metadataCache.getFileCache(file)?.frontmatter?.[NOTE_PAPER_KEY]);
+		const saved = this.saved.get(file);
+		if (saved !== undefined) return saved;
+		const own = this.ownChoice(file.path);
+		if (own !== undefined) return own;
+		return notePaperChoice(this.app.metadataCache.getFileCache(file)?.frontmatter?.[NOTE_PAPER_KEY]);
+	}
+
+	private ownChoice(path: string): NotePaperChoice | undefined {
+		const known = noteChoiceSource()?.noteChoices(path);
+		if (known?.known) return known.paper;
+		const id = pageIdForPath(this.app, path);
+		const hint = id ? readHint(this.app, id) : null;
+		const choice = notePaperChoice(hint?.p);
+		return choice === "default" ? undefined : choice;
 	}
 
 	refresh(): void {
@@ -97,11 +130,34 @@ export class NotePaper {
 		this.refresh();
 	}
 
+	/**
+	 * The choice goes to the note's ink file. The old property line, when
+	 * the note has one, is removed in the same action; a note without one is
+	 * not edited. With no ink store (a suite that never loads the overlay)
+	 * the property is written as before.
+	 */
 	async save(file: TFile, choice: NotePaperChoice): Promise<void> {
 		const previous = this.writes.get(file) ?? Promise.resolve();
 		const write = previous.catch(() => {}).then(async () => {
 			if (this.stopped) return;
 			if (this.app.vault.getAbstractFileByPath(file.path) !== file) throw new Error("Paper background target no longer exists");
+			const store = noteChoiceSource();
+			if (store) {
+				if (!(await store.setNoteChoice(file.path, "paper", choice))) throw new Error("Paper background could not be saved");
+				if (this.stopped) return;
+				const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+				if (fm && Object.prototype.hasOwnProperty.call(fm, NOTE_PAPER_KEY)) {
+					await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+						delete frontmatter[NOTE_PAPER_KEY];
+					});
+				}
+				if (this.stopped) return;
+				this.revisions.delete(file);
+				this.saved.delete(file);
+				writeHint(this.app, file.path, store.noteChoices(file.path));
+				this.refresh();
+				return;
+			}
 			await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
 				if (choice === "default") delete frontmatter[NOTE_PAPER_KEY];
 				else frontmatter[NOTE_PAPER_KEY] = choice;
@@ -121,6 +177,7 @@ export class NotePaper {
 
 	destroy(): void {
 		this.stopped = true;
+		this.stopChoices?.();
 		for (const picker of this.pickers) picker.close();
 		this.pickers.clear();
 		for (const container of this.containers) container.removeAttribute(NOTE_PAPER_ATTRIBUTE);

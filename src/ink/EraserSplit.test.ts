@@ -36,16 +36,16 @@ describe("partial erase", () => {
 	it("splits a line erased through the middle into two", () => {
 		const out = splitStrokeByCircle(line([0, 10, 20, 30, 40]), 20, 0, 5, makeId);
 		expect(out).toHaveLength(2);
-		// The ends of the gap sit on the ring at 15 and 25, not at the
-		// samples either side of it.
-		expect(out[0]!.points.map((p) => p.x)).toEqual([0, 10, 15]);
-		expect(out[1]!.points.map((p) => p.x)).toEqual([25, 30, 40]);
+		// The ends of the gap sit on the ring at 14 and 26 (the 5 radius plus the
+		// line's half-width of 1), not at the samples either side of it.
+		expect(out[0]!.points.map((p) => p.x)).toEqual([0, 10, 14]);
+		expect(out[1]!.points.map((p) => p.x)).toEqual([26, 30, 40]);
 	});
 
 	it("trims an end without splitting", () => {
 		const out = splitStrokeByCircle(line([0, 10, 20, 30]), 30, 0, 5, makeId);
 		expect(out).toHaveLength(1);
-		expect(out[0]!.points.map((p) => p.x)).toEqual([0, 10, 20, 25]);
+		expect(out[0]!.points.map((p) => p.x)).toEqual([0, 10, 20, 24]);
 	});
 
 	it("gives every surviving piece its own id and keeps the nib", () => {
@@ -79,21 +79,22 @@ describe("cutting where the stroke crosses the ring", () => {
 		// the eraser passed straight through a quick line.
 		const out = splitStrokeByCircle(line([0, 40]), 20, 0, 5, makeId);
 		expect(out).toHaveLength(2);
-		expect(out[0]!.points.at(-1)!.x).toBeCloseTo(15, 6);
-		expect(out[1]!.points[0]!.x).toBeCloseTo(25, 6);
+		// The ring is the 5 radius plus the line's half-width of 1.
+		expect(out[0]!.points.at(-1)!.x).toBeCloseTo(14, 6);
+		expect(out[1]!.points[0]!.x).toBeCloseTo(26, 6);
 	});
 
 	it("cuts at the ring, not at the nearest stored sample", () => {
 		const out = splitStrokeByCircle(line([0, 10, 20, 30]), 30, 0, 8, makeId);
 		expect(out).toHaveLength(1);
-		// The survivor ends exactly on the ring at x=22, not back at x=20.
-		expect(out[0]!.points.at(-1)!.x).toBeCloseTo(22, 6);
+		// The survivor ends exactly on the ring at x=21 (8 plus the half-width 1 from x=30), not back at x=20.
+		expect(out[0]!.points.at(-1)!.x).toBeCloseTo(21, 6);
 	});
 
 	it("starts a survivor on the ring when the stroke leaves the circle", () => {
 		const out = splitStrokeByCircle(line([0, 10, 20, 30]), 0, 0, 8, makeId);
 		expect(out).toHaveLength(1);
-		expect(out[0]!.points[0]!.x).toBeCloseTo(8, 6);
+		expect(out[0]!.points[0]!.x).toBeCloseTo(9, 6);
 	});
 
 	it("blends pressure into the point born on the ring", () => {
@@ -101,12 +102,27 @@ describe("cutting where the stroke crosses the ring", () => {
 		s.points[0]!.pressure = 0;
 		s.points[1]!.pressure = 1;
 		const out = splitStrokeByCircle(s, 20, 0, 5, makeId);
-		// The cut at x=15 is 37.5% along a 0 to 1 ramp.
-		expect(out[0]!.points.at(-1)!.pressure).toBeCloseTo(0.375, 6);
+		// The cut at x=14 is 35% along a 0 to 1 ramp.
+		expect(out[0]!.points.at(-1)!.pressure).toBeCloseTo(0.35, 6);
 	});
 
 	it("still leaves a stroke alone when the ring misses it entirely", () => {
 		const s = line([0, 10, 20]);
 		expect(splitStrokeByCircle(s, 200, 200, 5, makeId)[0]).toBe(s);
+	});
+
+	it("copies no point when the circle only touches the stroke: a held eraser costs nothing per sample", () => {
+		// The last point sits exactly on the ring (centre at x=40 + radius 5 + half-width 1), so the circle touches the
+		// stroke and cuts nothing. Spreading a point reads every field, so a counted pressure shows any copy.
+		const s = line([0, 10, 20, 30, 40]);
+		let reads = 0;
+		for (const p of s.points) {
+			const pressure = p.pressure;
+			Object.defineProperty(p, "pressure", { enumerable: true, get: () => (reads++, pressure) });
+		}
+		const out = splitStrokeByCircle(s, 46, 0, 5, makeId);
+		expect(out).toHaveLength(1);
+		expect(out[0], "the touch returns the stroke itself").toBe(s);
+		expect(reads, "no point was copied").toBe(0);
 	});
 });

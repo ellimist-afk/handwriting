@@ -28,7 +28,7 @@ describe("note strip beside four header actions", () => {
 				});
 				const litColor = await leaf.page.evaluate(() =>
 					getComputedStyle(document.querySelector<HTMLElement>(".handwriting-canvas-action")!).color);
-				expect(litColor).toBe("rgb(123, 108, 217)");
+				expect(litColor).toBe("rgb(255, 255, 255)");
 				await leaf.reapply();
 				const probe = await leaf.probe();
 				expect(probe.actions.right - probe.actions.left).toBeGreaterThanOrEqual(116);

@@ -37,6 +37,23 @@ function referenceRows(strokes: readonly InkStroke[]): InkRow[] {
 		while(parents[i]!==i){parents[i]=parents[parents[i]!]!;i=parents[i]!;}
 		return i;
 	};
+	// A mark (a full stop, a comma, a colon's dots, a dash) is too short for
+	// the rule below: a tapped dot has no height, so it joined nothing and
+	// Insert space left it behind its word. A stroke is a mark beside another
+	// when its height is at most a quarter of the other's, its vertical span
+	// lies inside the other's, and its width is at most 0.34 of the other's
+	// height; it may then join across a gap of up to the larger of three of
+	// its own heights and the other's height. A mark takes ONE such join, to
+	// the nearest candidate (the first in sort order on a tie), so a full stop
+	// between its word and a tall drawing never joins the two. A stroke that
+	// joins a neighbour the ordinary way is not a mark: a letter of a word
+	// passes the mark test beside a tall drawing, and would carry its word in.
+	const markTo=items.map(()=>-1),markGap=items.map(()=>Infinity),joined=items.map(()=>false);
+	const markJoin=(m:number,o:number,gap:number)=>{
+		const mk=items[m]!,ot=items[o]!,hm=mk.bottom-mk.top,ho=ot.bottom-ot.top;
+		if(!(hm<=ho/4&&mk.top>=ot.top&&mk.bottom<=ot.bottom&&mk.right-mk.left<=ho*.34&&gap<=Math.max(3*hm,ho)))return;
+		if(gap<markGap[m]!||(gap===markGap[m]!&&o<markTo[m]!)){markGap[m]=gap;markTo[m]=o;}
+	};
 	let active:number[]=[];
 	for(let i=0;i<items.length;i++){
 		const a=items[i]!;
@@ -45,10 +62,12 @@ function referenceRows(strokes: readonly InkStroke[]): InkRow[] {
 			const b=items[j]!;
 			if(a.bottom<=b.top)continue;
 			const gap=Math.max(0,a.left-b.right,b.left-a.right);
-			if(gap<=3*Math.min(a.bottom-a.top,b.bottom-b.top))parents[root(i)]=root(j);
+			if(gap<=3*Math.min(a.bottom-a.top,b.bottom-b.top)){parents[root(i)]=root(j);joined[i]=joined[j]=true;}
+			markJoin(i,j,gap);markJoin(j,i,gap);
 		}
 		active.push(i);
 	}
+	markTo.forEach((o,m)=>{if(o>=0&&!joined[m])parents[root(m)]=root(o);});
 	const grouped=new Map<number,InkRow & {left:number;right:number}>();
 	items.forEach((s,i)=>{
 		const key=root(i),row=grouped.get(key);

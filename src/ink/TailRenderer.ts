@@ -84,6 +84,11 @@ function backingGrid(backing: number, cssScale: number, dpr: number, hostZoom: b
 		if (whole(grid * cssScale * dpr / backing) &&
 			whole(64 * grid / backing) && whole(64 * grid * k / backing)) return grid;
 	}
+	// No exact grid: the backing has no whole multiple of 1/64 px, as at a device
+	// ratio of 1.8257 (200% display, 91% page zoom). When the box is not
+	// transform-scaled and a backing px is a displayed device px, only the CSS
+	// layout rule failed, so whole backing px are a grid.
+	if ((hostZoom || cssScale >= 1) && Math.abs(cssScale * dpr / backing - 1) <= 1e-9) return 1;
 	return null;
 }
 
@@ -144,6 +149,10 @@ export class TailRenderer {
 	get resizeTotal(): number { return this.backingResizeTotal; }
 	/** Monotonic count of live envelopes that took the full surface from a tile or an empty backing. */
 	get fullFallbackTotal(): number { return this.fullFallbacks; }
+	/** The inline backing's pixel grid (null: none, so no compact tile) and the backing's current mode; null before the first configure. */
+	get inlineGrid(): { grid: number | null; mode: "full" | "compact" | "empty" } | null {
+		return this.inlineBacking ? { grid: this.inlineBacking.grid, mode: this.backingMode } : null;
+	}
 	private fallBackToFullSurface(): void {
 		if (this.backingMode !== "full") this.fullFallbacks++;
 		this.restoreFullSurface();
@@ -592,12 +601,17 @@ export class TailRenderer {
 		this.dirty = null;
 	}
 
+	/** Whether drawSpaceStroke draws the stroke: it has points and its box meets the surface, with a 4 css px pad. */
+	spaceStrokeOnScreen(cam:CameraState,stroke:InkStroke,width:number,height:number,cssScale:number):boolean {
+		const b=stroke.bbox,pad=4/cssScale;
+		return !((b.x+b.width-cam.x)*cam.zoom < -pad || (b.y+b.height-cam.y)*cam.zoom < -pad ||
+			(b.x-cam.x)*cam.zoom > width+pad || (b.y-cam.y)*cam.zoom > height+pad || !stroke.points.length);
+	}
+
 	/** Actual stroke paths, never a union box or a stored color change. Hover
 	 * reuses geometry; offscreen strokes are rejected before path construction. */
 	drawSpaceStroke(cam:CameraState,stroke:InkStroke,color:string,width:number,height:number,cssScale:number):boolean {
-		const b=stroke.bbox,pad=4/cssScale;
-		if((b.x+b.width-cam.x)*cam.zoom < -pad || (b.y+b.height-cam.y)*cam.zoom < -pad ||
-			(b.x-cam.x)*cam.zoom > width+pad || (b.y-cam.y)*cam.zoom > height+pad || !stroke.points.length)return false;
+		if(!this.spaceStrokeOnScreen(cam,stroke,width,height,cssScale))return false;
 		this.markPaint();
 		let cached=this.spacePaths.get(stroke);
 		const rev=strokeRev(stroke);

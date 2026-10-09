@@ -16,17 +16,22 @@ import { bumpStrokeRev } from "../ink/StrokeRev";
  */
 
 export function pointInPolygon(x: number, y: number, poly: readonly Point2[]): boolean {
-	let inside = false;
+	// Non-zero winding, not even-odd: a hand-drawn lasso often overshoots its
+	// start or goes round twice, and even-odd calls what is covered twice
+	// "outside".
+	let winding = 0;
 	for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-		const a = poly[i]!;
-		const b = poly[j]!;
-		// Ray cast to the right; count edge crossings.
-		if (a.y > y !== b.y > y) {
-			const t = (y - a.y) / (b.y - a.y);
-			if (x < a.x + t * (b.x - a.x)) inside = !inside;
+		const a = poly[j]!;
+		const b = poly[i]!;
+		// Ray cast to the right; sum signed edge crossings.
+		const side = (b.x - a.x) * (y - a.y) - (x - a.x) * (b.y - a.y);
+		if (a.y <= y) {
+			if (b.y > y && side > 0) winding++;
+		} else if (b.y <= y && side < 0) {
+			winding--;
 		}
 	}
-	return inside;
+	return winding !== 0;
 }
 
 export function polygonBounds(poly: readonly Point2[]): BBox {
@@ -82,12 +87,14 @@ function polygonCrossesSegment(poly: readonly Point2[], a: Point2, b: Point2): b
 }
 
 /**
- * A stroke needs a MAJORITY of its samples inside to be selected. The old
+ * A stroke needs a MAJORITY of its ink, by length, inside to be selected. The old
  * rule was any-touch: one sample inside, or the lasso line merely crossing
  * the stroke, took the whole thing - so circling a word while clipping the
  * neighbour's descender grabbed the neighbour too (orion 2026-08-26,
- * "keeps picking up other stuff"). Half is the honest threshold: what you
- * circled comes, what you grazed stays.
+ * "keeps picking up other stuff"). More than half is the honest threshold: what you
+ * circled comes, what you grazed stays. Length, not sample count: a pen
+ * writes slowly where it starts, so a long line can begin with a dense run of
+ * samples that says nothing about how much of the line was circled.
  */
 const LASSO_INSIDE_FRACTION = 0.5;
 
@@ -101,10 +108,57 @@ export function strokeInLasso(
 	const pts = stroke.points;
 	if (pts.length === 0) return false;
 	let inside = 0;
-	for (const p of pts) {
-		if (pointInPolygon(p.x, p.y, poly)) inside++;
+	let total = 0;
+	for (let i = 1; i < pts.length; i++) {
+		const a = pts[i - 1]!;
+		const b = pts[i]!;
+		const length = Math.hypot(b.x - a.x, b.y - a.y);
+		total += length;
+		// A segment whose box misses the lasso's box has no ink inside; skip
+		// the crossing pass over the lasso.
+		if (segmentMissesBounds(a, b, bounds)) continue;
+		inside += length * insideFraction(a, b, poly);
 	}
-	return inside >= pts.length * LASSO_INSIDE_FRACTION && inside > 0;
+	if (total > 0) return inside > total * LASSO_INSIDE_FRACTION;
+	// No length (a dot): fall back to counting its samples.
+	let count = 0;
+	for (const p of pts) {
+		if (pointInPolygon(p.x, p.y, poly)) count++;
+	}
+	return count >= pts.length * LASSO_INSIDE_FRACTION && count > 0;
+}
+
+function segmentMissesBounds(a: Point2, b: Point2, bounds: BBox): boolean {
+	return (
+		(a.x < bounds.x && b.x < bounds.x) ||
+		(a.x > bounds.x + bounds.width && b.x > bounds.x + bounds.width) ||
+		(a.y < bounds.y && b.y < bounds.y) ||
+		(a.y > bounds.y + bounds.height && b.y > bounds.y + bounds.height)
+	);
+}
+
+/** The part of segment ab inside the polygon, 0 to 1. */
+function insideFraction(a: Point2, b: Point2, poly: readonly Point2[]): number {
+	const cuts = [0, 1];
+	const dx = b.x - a.x;
+	const dy = b.y - a.y;
+	for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+		const c = poly[j]!;
+		const ex = poly[i]!.x - c.x;
+		const ey = poly[i]!.y - c.y;
+		const den = dx * ey - dy * ex;
+		if (den === 0) continue;
+		const t = ((c.x - a.x) * ey - (c.y - a.y) * ex) / den;
+		const u = ((c.x - a.x) * dy - (c.y - a.y) * dx) / den;
+		if (t > 0 && t < 1 && u >= 0 && u <= 1) cuts.push(t);
+	}
+	cuts.sort((p, q) => p - q);
+	let fraction = 0;
+	for (let k = 1; k < cuts.length; k++) {
+		const mid = (cuts[k - 1]! + cuts[k]!) / 2;
+		if (pointInPolygon(a.x + dx * mid, a.y + dy * mid, poly)) fraction += cuts[k]! - cuts[k - 1]!;
+	}
+	return fraction;
 }
 
 export function rectInLasso(
@@ -177,15 +231,15 @@ export function padBBox(b: BBox, pad: number): BBox {
 /**
  * Move a stroke in place, keeping its bbox consistent.
  *
- * This is the ONLY in-place mutation of a committed stroke in the codebase
- * (audited 2026-09-02: nothing else writes `.points`, `.bbox`, `.width` or
- * `.color` on a stroke a store already holds; the eraser, the shape snap and
- * every parse build new objects). Both callers - `InlineInkStore.moveStrokes`
- * for the inline surface and `ObjectOps.moveObjects` for the page view, which
- * between them carry the lasso drag, the insert-space drag and the undo/redo
- * of both - come through here, so bumping the revision at this one spot is
- * what keeps derived geometry (StrokeRenderer's ribbon cache) from rendering
- * the ink where it WAS.
+ * This and `scaleStroke` below are the ONLY in-place mutations of a committed
+ * stroke in the codebase (audited 2026-09-02: nothing else writes `.points`,
+ * `.bbox`, `.width` or `.color` on a stroke a store already holds; the eraser,
+ * the shape snap and every parse build new objects). Both callers -
+ * `InlineInkStore.moveStrokes` for the inline surface and
+ * `ObjectOps.moveObjects` for the page view, which between them carry the
+ * lasso drag, the insert-space drag and the undo/redo of both - come through
+ * here, so bumping the revision at this one spot is what keeps derived
+ * geometry (StrokeRenderer's ribbon cache) from rendering the ink where it WAS.
  */
 export function translateStroke(stroke: InkStroke, dx: number, dy: number): void {
 	for (const p of stroke.points) {
@@ -197,6 +251,33 @@ export function translateStroke(stroke: InkStroke, dx: number, dy: number): void
 		y: stroke.bbox.y + dy,
 		width: stroke.bbox.width,
 		height: stroke.bbox.height,
+	};
+	bumpStrokeRev(stroke);
+}
+
+/**
+ * Scale a stroke in place about the note origin: every point, the base width
+ * and the bbox (which already carries its width padding, so it scales with
+ * them). In place for the same reason as `translateStroke`: the history ops
+ * that recorded the stroke hold this same object, so undo and redo put back
+ * the scaled stroke, not the one from before.
+ *
+ * The in-place caller is the ink-file read (`InlineInkStore`): ink drawn while
+ * a note's file was still loading is in the frame of the editor's font size at
+ * the time, and moves into the frame stored with the note when the file lands.
+ * The overlay also uses it, on copies, for a stroke still in flight then.
+ */
+export function scaleStroke(stroke: InkStroke, k: number): void {
+	for (const p of stroke.points) {
+		p.x *= k;
+		p.y *= k;
+	}
+	stroke.width *= k;
+	stroke.bbox = {
+		x: stroke.bbox.x * k,
+		y: stroke.bbox.y * k,
+		width: stroke.bbox.width * k,
+		height: stroke.bbox.height * k,
 	};
 	bumpStrokeRev(stroke);
 }

@@ -318,11 +318,12 @@ describe("InkOverlay pinch preview holds CodeMirror's measuring", () => {
 	it("the watchdog re-anchors at the raw client centroid, so a still constrained hold does not move", () => {
 		const rig = makeRig();
 		rig.onPinch("start", 1, centroid);
-		rig.previewAt(2);
-		// A constraint that accepted the target 50 px left of the fingers.
+		// A constraint that accepted the target 50 px left of the fingers, in place before the frame paints, so the
+		// painted frame carries it (the lift lands the painted frame's target).
 		const anchor = rig.overlay.pinchAnchor as { constraint: unknown; targetX: number; targetY: number; focalX: number };
 		anchor.constraint = { clientX: centroid.x, clientY: centroid.y, offsetX: -50, offsetY: 0, geometry: null };
 		anchor.targetX = centroid.x - 50; anchor.targetY = centroid.y;
+		rig.previewAt(2);
 
 		// THE FINAL POSITION, not only the anchor (R5). "Scroll stays
 		// unchanged" is not the invariant: the rig's scroller is a plain
@@ -335,10 +336,10 @@ describe("InkOverlay pinch preview holds CodeMirror's measuring", () => {
 		// reference point.
 		const lift = makeRig();
 		lift.onPinch("start", 1, centroid);
-		lift.previewAt(2);
 		const liftAnchor = lift.overlay.pinchAnchor as { constraint: unknown; targetX: number; targetY: number };
 		liftAnchor.constraint = { clientX: centroid.x, clientY: centroid.y, offsetX: -50, offsetY: 0, geometry: null };
 		liftAnchor.targetX = centroid.x - 50; liftAnchor.targetY = centroid.y;
+		lift.previewAt(2);
 		lift.onPinch("end", 2, centroid);
 
 		const beforeTransform = rig.transform();
@@ -413,6 +414,24 @@ describe("InkOverlay pinch preview holds CodeMirror's measuring", () => {
 		expect(rig.scale()).toBeCloseTo(3, 6);
 		expect(rig.settles).toEqual([2.5, 3]);
 		expect(rig.held()).toBe(false);
+	});
+
+	it("the watchdog firing on a preview past the cap eases it back to the cap and settles there, not re-anchored past it", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1000);
+		try {
+			const rig = makeRig();
+			// A class field Object.create does not initialise; the lift's ease back runs only from null.
+			rig.overlay.pinchGive = null;
+			rig.onPinch("start", 1, centroid);
+			// Past the cap of 6 by the preview's give (up to 6.6).
+			rig.previewAt(6.4);
+			expect(rig.scale(), "premise: the preview is past the cap").toBeGreaterThan(6);
+			expect(rig.fireTimers(), "premise: the watchdog fired").toBe(1);
+			expect({ easing: rig.overlay.pinchGive !== null, settles: rig.settles }, "the watchdog's lift eases back to the cap, with nothing settled yet").toEqual({ easing: true, settles: [] });
+			now.mockReturnValue(5000);
+			rig.runFrames();
+			expect({ scale: rig.scale(), settles: rig.settles }, "the gesture settled at the cap").toEqual({ scale: 6, settles: [6] });
+		} finally { now.mockRestore(); }
 	});
 
 	it("a shadow is inert once its hold is over, and a wrapper that took the entry keeps it", () => {

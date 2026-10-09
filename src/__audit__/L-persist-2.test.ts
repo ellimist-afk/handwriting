@@ -49,6 +49,7 @@ const hostStart = source.indexOf(hostStartMarker);
 const hostEnd = source.indexOf(hostEndMarker, hostStart) + hostEndMarker.length;
 const installPdfPersistenceHost = new Function(
 	"Notice",
+	"blockNotice",
 	transformSync(source.slice(hostStart, hostEnd), { loader: "ts", target: "es2022" }).code
 );
 
@@ -154,7 +155,7 @@ async function rig() {
 	) as { resolvePdfId: (...a: unknown[]) => Promise<void>; pdfHeadSource: (f: unknown) => unknown };
 	host.pdfHeadSource = (f: unknown) => fns.pdfHeadSource.call(host, f);
 	class SilentNotice { constructor(_m: string) {} }
-	installPdfPersistenceHost.call(host, SilentNotice);
+	installPdfPersistenceHost.call(host, SilentNotice, (m: string) => new SilentNotice(m));
 	installLiveReloadPoll.call(
 		host,
 		{ setInterval(fn: () => void) { fire = fn; return 1; } },

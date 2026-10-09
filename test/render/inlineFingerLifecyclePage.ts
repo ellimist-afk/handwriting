@@ -38,6 +38,8 @@ import {
 	restorePenHardwareEverSeen,
 	shouldRaiseStripOnPenOff,
 } from "../../src/inline/PenToolsMode";
+import type { InlineInkHost } from "../../src/inline/InlineInkStore";
+import type { PageData } from "../../src/model/PageData";
 import { installObsidianDom } from "./obsidianDom";
 import {
 	type BrowserEditorInfo,
@@ -51,6 +53,7 @@ const PATH_A = "acceptance/finger-a.md";
 const PATH_A_RENAMED = "acceptance/finger-a-renamed.md";
 const PATH_B = "acceptance/finger-b.md";
 const PATH_TEARDOWN = "acceptance/finger-teardown.md";
+const PATH_PEN_TEARDOWN = "acceptance/pen-teardown.md";
 const PATH_KEYBOARD = "acceptance/finger-keyboard.md";
 const PATH_REENTRY = "acceptance/finger-reentry.md";
 const ALL_PATHS = [
@@ -103,6 +106,18 @@ export interface FingerLifecycleTrace {
 		storeAfterDestroy: number;
 		lateDownPrevented: boolean;
 		storeAfterLateEvents: number;
+	};
+	penTeardown: {
+		mounted: boolean;
+		downPrevented: boolean;
+		storeBeforeDestroy: number;
+		movesBeforeDestroy: number;
+		overlayAfterDestroy: boolean;
+		storeAfterDestroy: number;
+		pointsAfterDestroy: number;
+		storeAfterLateEvents: number;
+		savedStrokesAfterDestroy: number;
+		savedPointsAfterDestroy: number;
 	};
 	keyboard: {
 		mounted: boolean;
@@ -455,6 +470,87 @@ async function routeTrace(): Promise<FingerLifecycleTrace["route"]> {
 	}
 }
 
+/**
+ * Audit 6 item 4: a pane or pop-out closed while the pen is writing. The pen goes down and moves (a word part way), then the
+ * editor view is destroyed as a closed pane destroys it, with the pen still down. The stroke drawn so far belongs in the note's
+ * store, as a window blur mid-stroke commits it (alan, 2026-09-04: "alt tab mid stroke - sure make it consistent"). The pen's late
+ * lift, after the view is gone, must add nothing.
+ */
+// A host that records what the store would write to disk. The page otherwise runs the
+// store with no host (session memory, nothing saved), so the save half of a close
+// mid-stroke is read here: the last page the store hands its host after the close.
+interface SaveSpy {
+	host: InlineInkHost;
+	last: PageData | null;
+}
+
+function saveSpy(): SaveSpy {
+	const spy: SaveSpy = {
+		last: null,
+		host: {
+			readPageId: () => null,
+			claimId: async (_path, proposedId) => ({ pageId: proposedId }),
+			loadSidecar: async () => null,
+			scheduleSidecar: (_pageId, page) => { spy.last = page; },
+			scheduleSidecarNow: async (_pageId, page) => { spy.last = page; },
+			notify: () => {},
+		},
+	};
+	return spy;
+}
+
+function detachHost(): void {
+	(inlineInk as unknown as { host: InlineInkHost | null }).host = null;
+}
+
+async function penTeardownTrace(): Promise<FingerLifecycleTrace["penTeardown"]> {
+	const note = await mount(PATH_PEN_TEARDOWN);
+	const spy = saveSpy();
+	inlineInk.attachHost(spy.host);
+	const content = note.view.contentDOM;
+	const overlay = overlayForPath(PATH_PEN_TEARDOWN);
+	const pen = (type: string, x: number, y: number, buttons: number): PointerEvent => {
+		const event = new PointerEvent(type, {
+			bubbles: true, cancelable: true, pointerType: "pen", pointerId: 31, isPrimary: true,
+			clientX: x, clientY: y, buttons, pressure: buttons === 0 ? 0 : 0.6,
+		});
+		content.dispatchEvent(event);
+		return event;
+	};
+	try {
+		const down = pen("pointerdown", 60, 140, 1);
+		let moves = 0;
+		for (let i = 1; i <= 12; i++) { pen("pointermove", 60 + i * 8, 140 + (i % 3) * 4, 1); moves++; await settle(); }
+		const storeBeforeDestroy = inlineInk.strokes(PATH_PEN_TEARDOWN).length;
+		note.view.destroy();
+		const overlayAfterDestroy = overlayForPath(PATH_PEN_TEARDOWN) !== null;
+		const after = inlineInk.strokes(PATH_PEN_TEARDOWN);
+		const storeAfterDestroy = after.length;
+		const pointsAfterDestroy = after.reduce((n, s) => n + s.points.length, 0);
+		await inlineInk.settle();
+		const saved = spy.last?.strokes ?? [];
+		pen("pointerup", 156, 140, 0);
+		await settle();
+		return {
+			mounted: overlay !== null,
+			downPrevented: down.defaultPrevented,
+			storeBeforeDestroy,
+			movesBeforeDestroy: moves,
+			overlayAfterDestroy,
+			storeAfterDestroy,
+			pointsAfterDestroy,
+			storeAfterLateEvents: inlineInk.strokes(PATH_PEN_TEARDOWN).length,
+			savedStrokesAfterDestroy: saved.length,
+			savedPointsAfterDestroy: saved.reduce((n, s) => n + s.points.length, 0),
+		};
+	} finally {
+		detachHost();
+		note.view.destroy();
+		note.wrapper.remove();
+		inlineInk.handleDelete(PATH_PEN_TEARDOWN);
+	}
+}
+
 async function teardownTrace(): Promise<FingerLifecycleTrace["teardown"]> {
 	const note = await mount(PATH_TEARDOWN);
 	const content = note.view.contentDOM;
@@ -742,6 +838,7 @@ async function run(): Promise<FingerLifecycleTrace> {
 		return {
 			route: await routeTrace(),
 			teardown: await teardownTrace(),
+			penTeardown: await penTeardownTrace(),
 			keyboard: await keyboardTrace(),
 			reentry: await reentryTrace(),
 		};

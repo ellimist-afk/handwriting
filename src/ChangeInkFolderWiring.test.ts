@@ -157,9 +157,10 @@ async function run(
 		store,
 		app: { vault: { adapter } },
 		settings,
-		saveSettingsNow: () => {
+		settingsReadFailed: false,
+		persistSettings: async () => {
 			saved.n++;
-			order.push("saveSettingsNow");
+			order.push("persistSettings");
 		},
 	};
 	await fn.call(self, raw);
@@ -257,7 +258,7 @@ describe("each callback is wired to the thing it is supposed to reach", () => {
 		// the next load; saving without writing it saves the old value.
 		expect(h.settings.inkFolder).toBe("the-destination");
 		expect(h.saved.n).toBe(1);
-		expect(h.order).toEqual(["saveSettingsNow"]);
+		expect(h.order).toEqual(["persistSettings"]);
 	});
 });
 

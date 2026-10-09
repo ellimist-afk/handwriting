@@ -144,7 +144,11 @@ function blankLifecycle(){
 }
 async function layerVisual(action:string,zoom=.4){
  const overlay=overlayForPath(path)! as any;
- if(action==='setup'){overlay.commitCameraScale(zoom,{left:0,top:0});await settle();}
+ // The zoom stand-in (zoom settle design) is replaced by the sharp raster once its build is whole: the baseline is read after
+ // that swap, waiting at most 4 s, so a stand-in that is never released reads standInHeld true and the cell reds, never hangs.
+ let standInHeld=false;
+ if(action==='setup'){overlay.commitCameraScale(zoom,{left:0,top:0});await settle();const t0=performance.now();
+  while(overlay.standIn&&performance.now()-t0<4000)await new Promise<void>(r=>requestAnimationFrame(()=>r()));standInHeld=!!overlay.standIn;}
  if(action==='preview')overlay.hideBlankPinchLayers();
  if(action==='thin-gap-plant'){
   // Remove a middle segment only from the borrowed preview, keeping its wash.
@@ -183,7 +187,7 @@ async function layerVisual(action:string,zoom=.4){
  if(action==='background-restore'){canvases.forEach((c,i)=>c.style.visibility=overlay.visualSavedVisibility[i]);delete overlay.visualSavedVisibility;}
  const rect=overlay.committedCanvas.getBoundingClientRect(),sx=rect.width/overlay.cssWidth,sy=rect.height/overlay.cssHeight,cam=overlay.lastPaintCam;
  const thinArms=[{width:.5,y:420},{width:2,y:450}].map(arm=>({width:arm.width,x0:rect.left+(380-cam.x)*cam.zoom*sx,x1:rect.left+(540-cam.x)*cam.zoom*sx,y:rect.top+(arm.y-cam.y)*cam.zoom*sy}));
- return {thinArms,composite:overlay.pinchComposite,visible:canvases.map(c=>getComputedStyle(c).visibility),tailBacking:{w:overlay.tailCanvas.width,h:overlay.tailCanvas.height,bandW:overlay.wetCanvas.width,bandH:overlay.wetCanvas.height},pixels:canvases.map(occupiedPixels),originalHashes:action==='setup'||action==='restore'?[rasterHash(overlay.highlightCanvas),rasterHash(overlay.committedCanvas)]:null,blank:[overlay.highlightBlank,overlay.highlightWet.provenBlank,overlay.committedBlank,overlay.wet.provenBlank,overlay.tail.provenBlank],strokes:JSON.stringify(inlineInk.strokes(path))};
+ return {thinArms,composite:overlay.pinchComposite,visible:canvases.map(c=>getComputedStyle(c).visibility),tailBacking:{w:overlay.tailCanvas.width,h:overlay.tailCanvas.height,bandW:overlay.wetCanvas.width,bandH:overlay.wetCanvas.height},pixels:canvases.map(occupiedPixels),originalHashes:action==='setup'||action==='restore'?[rasterHash(overlay.highlightCanvas),rasterHash(overlay.committedCanvas)]:null,blank:[overlay.highlightBlank,overlay.highlightWet.provenBlank,overlay.committedBlank,overlay.wet.provenBlank,overlay.tail.provenBlank],strokes:JSON.stringify(inlineInk.strokes(path)),standInHeld};
 }
 async function continuousPinch(target: number, cancel: boolean, measure = false, costPlant = false, diagnostic?: { startScale: number; hover: boolean; moving: boolean }) {
  const overlay=overlayForPath(path)! as any;

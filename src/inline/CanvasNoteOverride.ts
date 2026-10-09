@@ -14,6 +14,7 @@
  * than extracted: see the note on `save` below.
  */
 import { TFile, type App, type CachedMetadata, type Plugin } from "obsidian";
+import { noteChoiceSource, pageIdForPath, readHint, writeHint } from "./NoteChoiceHint";
 
 export const NOTE_CANVAS_KEY = "handwriting-canvas";
 
@@ -65,7 +66,21 @@ export class CanvasNoteOverride {
 	private revision = 0;
 	private readonly listeners = new Set<(path: string) => void>();
 
-	constructor(private app: App) {}
+	private readonly stopChoices: (() => void) | null;
+
+	constructor(private app: App) {
+		// The ink file is read after the note shows: when it arrives, or
+		// another device's file is adopted, the mode follows once (the overlay
+		// hears `emit`) and so does this device's hint.
+		const store = noteChoiceSource();
+		this.stopChoices = store
+			? store.onNoteChoicesChanged((path) => {
+					if (this.stopped) return;
+					writeHint(this.app, path, store.noteChoices(path));
+					this.emit(path);
+			  })
+			: null;
+	}
 
 	start(owner: Plugin): void {
 		owner.registerEvent(this.app.metadataCache.on("changed", (file, data, cache) => {
@@ -75,12 +90,24 @@ export class CanvasNoteOverride {
 		setStarted(this);
 	}
 
-	/** The note's own value, or "default" when it has none. */
+	/**
+	 * The note's own value, or "default" when it has none: its ink file's
+	 * choice once the file is read, this device's hint before that (so the
+	 * first paint is already right), else the old property line.
+	 */
 	choice(path: string): NoteCanvasChoice {
 		const file = this.fileAt(path);
 		if (!file) return "default";
 		const optimistic = this.saved.get(file);
 		if (optimistic !== undefined) return optimistic;
+		const known = noteChoiceSource()?.noteChoices(path);
+		if (known?.known) {
+			if (known.canvas !== undefined) return known.canvas;
+		} else {
+			const id = pageIdForPath(this.app, path);
+			const hint = id ? readHint(this.app, id) : null;
+			if (typeof hint?.c === "boolean") return hint.c;
+		}
 		return noteCanvasChoice(this.app.metadataCache.getFileCache(file)?.frontmatter?.[NOTE_CANVAS_KEY]);
 	}
 
@@ -125,6 +152,26 @@ export class CanvasNoteOverride {
 		const write = previous.catch(() => {}).then(async () => {
 			if (this.stopped) return;
 			if (this.app.vault.getAbstractFileByPath(file.path) !== file) throw new Error("Infinite canvas override target no longer exists");
+			// The choice goes to the note's ink file; an old property line is
+			// removed in the same action, and a note without one is not edited.
+			// With no ink store the property is written as before.
+			const store = noteChoiceSource();
+			if (store) {
+				if (!(await store.setNoteChoice(file.path, "canvas", choice))) throw new Error("Infinite canvas choice could not be saved");
+				if (this.stopped) return;
+				const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+				if (fm && Object.prototype.hasOwnProperty.call(fm, NOTE_CANVAS_KEY)) {
+					await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+						delete frontmatter[NOTE_CANVAS_KEY];
+					});
+				}
+				if (this.stopped) return;
+				this.revisions.delete(file);
+				this.saved.delete(file);
+				writeHint(this.app, file.path, store.noteChoices(file.path));
+				this.emit(file.path);
+				return;
+			}
 			await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
 				if (choice === "default") delete frontmatter[NOTE_CANVAS_KEY];
 				else frontmatter[NOTE_CANVAS_KEY] = choice;
@@ -196,6 +243,7 @@ export class CanvasNoteOverride {
 
 	destroy(): void {
 		this.stopped = true;
+		this.stopChoices?.();
 		this.saved.clear();
 		this.revisions.clear();
 		this.listeners.clear();

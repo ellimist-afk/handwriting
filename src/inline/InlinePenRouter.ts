@@ -1,6 +1,8 @@
+import { sideButtonErasesEnabled } from "./TipMode";
 import { telemetry } from "../diag/Telemetry";
 import { GuardDecision, ManipulationGuard } from "../input/ManipulationGuard";
 import { PalmGate, paroleEarned } from "../input/PalmGate";
+import { isAppleTouchPlatform } from "../input/PalmShield";
 import { PenSample, silentLift } from "../input/PointerRouter";
 import { noteToVisual, visualToNote } from "./ZoomScale";
 import { hideProbeMarkers, markRawPointer } from "./PenProbe";
@@ -27,7 +29,6 @@ import { penGuardEatsEvent, penGuardReachesTarget, penGuardRoot } from "./PenGua
 import {
 	palmSizedTouches,
 	stylusOnlyTouches,
-	touchesPredateStroke,
 } from "./StylusTouch";
 import { mouseActsAsPen, mouseInkEnabled, toolIsLit } from "./MouseInk";
 import { MouseTrail } from "../input/MouseTrail";
@@ -284,7 +285,7 @@ export function bandEraserIntent(
 	mouseInk: boolean
 ): boolean {
 	const eraserEnd = (buttons & 32) !== 0 || button === 5;
-	if (pointerType === "pen") return eraserEnd || eraserMode;
+	if (pointerType === "pen") return eraserEnd || eraserMode || (sideButtonErasesEnabled() && (buttons & 2) !== 0);
 	if (pointerType === "mouse") return eraserMode && mouseInk && (buttons & 1) !== 0;
 	return false;
 }
@@ -1015,13 +1016,25 @@ export class InlinePenRouter {
 	 * are a hand, not a gesture.
 	 */
 	private touchPos = new Map<number, { x: number; y: number }>();
+	/**
+	 * The spread the pinch's ratio is measured from, and the last midpoint read
+	 * with exactly two contacts down. Both always belong to the PAIR DOWN NOW:
+	 * set when a pair forms, and set again whenever a pinch ends with two
+	 * contacts still down or a lift leaves a new pair (`rebasePinch`). A third
+	 * contact leaves both as the pair last had them, so an end sent while it is
+	 * down lands on the pinch's own focal point, never on client (0,0).
+	 */
 	private pinchStartSpread = 0;
+	private pinchFocal = { x: 0, y: 0 };
 	/**
 	 * Touch identifiers currently down, from the TOUCH stream's own numbering
 	 * - `touchPos` keys are pointer ids, which are a different sequence and
 	 * cannot be compared against `Touch.identifier`.
 	 */
 	private liveTouchIds = new Set<number>();
+	// Native identifiers are independent of PointerEvent.pointerId. Once a
+	// new native contact is rejected, keep its whole stream off the editor.
+	private blockedNativeTouchIds = new Set<number>();
 	/** Snapshot of the above taken when the current pen stroke began. */
 	private touchesAtStrokeStart = new Set<number>();
 	private pinchLive = false;
@@ -1328,6 +1341,24 @@ export class InlinePenRouter {
 				// own descendants either way.
 				const target = te.target as Node | null;
 				if (!target || !this.scrollEl.contains(target)) return;
+				const nativeGateBlocks = !this.penOff() && this.anyGateBlocksNewTouch(performance.now());
+				if (te.type === "touchstart" && nativeGateBlocks) {
+					for (let i = 0; i < te.changedTouches.length; i++) {
+						const id = te.changedTouches[i]?.identifier;
+						if (typeof id === "number" && !this.liveTouchIds.has(id)) {
+							this.blockedNativeTouchIds.add(id);
+						}
+					}
+				}
+				// Snapshot before end/cancel cleanup: the final event is still
+				// owned, even when the hover/release timer has since expired.
+				let blockedNativeContact = false;
+				for (let i = 0; i < te.changedTouches.length; i++) {
+					const id = te.changedTouches[i]?.identifier;
+					if (typeof id === "number" && this.blockedNativeTouchIds.has(id)) {
+						blockedNativeContact = true;
+					}
+				}
 				// Bookkeeping first, and for every event including the ones
 				// eaten below: the set has to reflect what the browser thinks
 				// is down, not what we let through.
@@ -1339,16 +1370,38 @@ export class InlinePenRouter {
 				} else if (te.type === "touchend" || te.type === "touchcancel") {
 					for (let i = 0; i < te.changedTouches.length; i++) {
 						const id = te.changedTouches[i]?.identifier;
-						if (typeof id === "number") this.liveTouchIds.delete(id);
+						if (typeof id === "number") {
+							this.liveTouchIds.delete(id);
+							this.blockedNativeTouchIds.delete(id);
+						}
 					}
+					if (te.touches.length === 0) this.blockedNativeTouchIds.clear();
 					// The browser's own statement that the hand is off the glass.
 					// A contact whose pointerup never arrived is still in
 					// `touchPos`, and the next single finger would make the size
 					// 2 and pinch with itself. A document switch or a capture
 					// transfer with fingers still down reports a non-empty
 					// `touches` and never takes this branch.
-					if (te.touches.length === 0 && this.touchPos.size > 0) {
+					// A touch paroled into the assist pan is in guardTouches and
+					// not touchPos, so it is checked for here too.
+					if (
+						te.touches.length === 0 &&
+						(this.touchPos.size > 0 || this.guardTouches.size > 0 || this.assistPointerId !== null)
+					) {
 						this.retireAllContactsOnNativeEnd();
+					}
+					// A palm the gate swallowed is in neither map above, and
+					// only its own pointerup removed it: lost, it read as a
+					// hand on the glass for good (the mouse ring hidden in every
+					// pane, the edge ease never given back). The browser's
+					// "no touch left" covers it too. Its pointerup, when it
+					// comes, is dispatched before this touchend, so a lift that
+					// does arrive has already taken it out.
+					if (te.touches.length === 0 && this.swallowedTouches.size > 0) {
+						this.swallowedTouches.clear();
+						this.paroleId = null;
+						this.paroleOverlapped = false;
+						this.resumeEaseIfIdle();
 					}
 					this.finishFingerInkPreparation();
 				}
@@ -1368,7 +1421,10 @@ export class InlinePenRouter {
 				// `touchesAtStrokeStart` is snapshotted from; a contact that
 				// went down while the pen was off and lifted after it came
 				// back on would otherwise leave a stale id in the set forever.
-				if (this.penOff()) return;
+				if (this.penOff()) {
+					this.blockedNativeTouchIds.clear();
+					return;
+				}
 				// The native touch stream is the same owned finger gesture. Keep
 				// it away from CodeMirror while the pointer stream feeds ink; this
 				// does not use the pen palm gate or stylus touch classification.
@@ -1393,26 +1449,16 @@ export class InlinePenRouter {
 				// travels sideways reads as Obsidian's open-the-sidebar
 				// swipe, mid-word.
 				//
-				// PalmGate already states the rule - "while a pen stroke is
-				// active, all NEW touch contacts are ignored" - it just never
-				// governed the touch stream. It does now, and it is the pen's
-				// OWN state rather than a platform sniff, so nothing here
-				// needs to know what device it is running on.
-				if (this.gate.isPenStrokeActive) {
-					// ...except the tail of a gesture that was already running
-					// when the pen landed. Killing a scroll mid-fling because
-					// someone rested the pen to write is its own bug, and an
-					// eaten touchend leaves the browser tracking a touch that
-					// never ended.
-					if (!touchesPredateStroke(te.changedTouches, this.touchesAtStrokeStart)) {
-						te.preventDefault();
-						te.stopPropagation();
-						tr(te.type, null, "touch eaten: a pen stroke owns the surface");
-						return;
-					}
-					tr(te.type, null, "touch allowed: it was down before the stroke");
+				// Use the same live-pane hover/stroke/release policy as pointer
+				// touch admission, but retain ownership by native identifier.
+				// Existing fingers are not reclassified when a pen arrives.
+				if (blockedNativeContact) {
+					te.preventDefault();
+					te.stopPropagation();
+					tr(te.type, null, "touch eaten: native contact belongs to palm gate");
 					return;
 				}
+				if (nativeGateBlocks) return;
 				// A palm resting BEFORE the pen touches down. PalmGate's
 				// "palm placed before pen" rule keys off pen hover, and
 				// Pencil hover only exists on recent iPads - on the rest the
@@ -1753,6 +1799,11 @@ export class InlinePenRouter {
 		// were a fresh mid-stroke touch.
 		this.touchPos.clear();
 		this.guardTouches.clear();
+		// And the palms the gate swallowed: the same orphan, in the set
+		// handOnGlass and resumeEaseIfIdle read beside guardTouches.
+		this.swallowedTouches.clear();
+		this.paroleId = null;
+		this.paroleOverlapped = false;
 		this.fingerInkBlockedUntilAllLift = false;
 		if (wasFinger) this.applyGuard(this.manip.penSignal(), "finger-blur");
 		this.gesturePanned = false;
@@ -1961,6 +2012,7 @@ export class InlinePenRouter {
 	}
 
 	dispose(): void {
+		this.blockedNativeTouchIds.clear();
 		this.canvasMomentumDisabled = false;
 		this.scrollEl.classList.remove("handwriting-no-momentum");
 		this.cancelFling();
@@ -2091,6 +2143,7 @@ export class InlinePenRouter {
 		// the two contacts and cancels them before the pinch does anything.
 		this.applyGuard(this.manip.pinchStart(), "pinch");
 		this.pinchStartSpread = pinchSpread(pts[0]!, pts[1]!);
+		this.pinchFocal = pinchMidpoint(pts[0]!, pts[1]!);
 		// Re-arming over a LIVE pinch (a third finger lands, or one lifts and
 		// another takes its place) used to clear the flag silently, so the
 		// listener never heard "end" for a pinch it had heard "start" for.
@@ -2105,11 +2158,30 @@ export class InlinePenRouter {
 		tr("guard", e, `pinch watched (spread ${this.pinchStartSpread.toFixed(0)}px)`);
 	}
 
-	/** Midpoint of the two live contacts, in client px. */
+	/**
+	 * Midpoint of the two live contacts, in client px. With any other count
+	 * down (a third contact, or one left) it is the last midpoint the pair had.
+	 */
 	private pinchCentroid(): { x: number; y: number } {
 		const pts = [...this.touchPos.values()];
-		if (pts.length !== 2) return { x: 0, y: 0 };
-		return pinchMidpoint(pts[0]!, pts[1]!);
+		if (pts.length === 2) this.pinchFocal = pinchMidpoint(pts[0]!, pts[1]!);
+		return { ...this.pinchFocal };
+	}
+
+	/**
+	 * Measure the next pinch from the pair down NOW. Run after a pinch ends and
+	 * after a lift; does nothing while a pinch is live (its ratio is relative to
+	 * the spread its "start" was sent at) or unless exactly two contacts are
+	 * down. Without it a pinch that re-engages measures from a spread an
+	 * earlier pair had - after a stray third contact, a pen tap, or one finger
+	 * of the pair lifting under a third - and the note zooms by that stale
+	 * ratio on the next move.
+	 */
+	private rebasePinch(): void {
+		if (this.pinchLive || this.touchPos.size !== 2) return;
+		const pts = [...this.touchPos.values()];
+		this.pinchStartSpread = pinchSpread(pts[0]!, pts[1]!);
+		this.pinchFocal = pinchMidpoint(pts[0]!, pts[1]!);
 	}
 
 	/** Returns true when the pinch owned this move. */
@@ -2133,7 +2205,8 @@ export class InlinePenRouter {
 	 * `centroid`, when given, is the release-path caller's own reading of
 	 * `pinchCentroid()` taken BEFORE it removed the lifted contact from
 	 * `touchPos` - by the time this runs that contact is already gone, so
-	 * `pinchCentroid()` here would see one touch and report {0,0}
+	 * `pinchCentroid()` here would see one touch (it reported {0,0}; it now
+	 * falls back to the pair's last midpoint)
 	 * (audit-fixes-design.md 5i I2). Callers that still have both contacts
 	 * live when they call this (none do today) can omit it.
 	 */
@@ -2512,6 +2585,49 @@ export class InlinePenRouter {
 	}
 
 	/**
+	 * PALM REJECTION IS ONE HAND'S, NOT ONE PANE'S. Each router's gate is warmed
+	 * only by its own pen, so with two panes side by side a palm landing in pane
+	 * B while the pen wrote or hovered in pane A read B's cold gate and scrolled
+	 * B. There is one writing hand, so the new-touch decision, the parole veto
+	 * for a palm that landed mid-stroke, and the stroke-active read all ask every
+	 * live router. One iteration per open ink surface, on touch events only.
+	 */
+	private anyGateBlocksNewTouch(now: number): boolean {
+		for (const r of liveRouters) if (r.gate.blocksNewTouch(now)) return true;
+		return false;
+	}
+
+	private anyPenStrokeActive(): boolean {
+		for (const r of liveRouters) if (r.gate.isPenStrokeActive) return true;
+		return false;
+	}
+
+	private anyPenDown(): boolean {
+		for (const r of liveRouters) if (r.activePenId !== null) return true;
+		return false;
+	}
+
+	/**
+	 * The pen landed in another pane while a pen stroke here is still open: no
+	 * pointerup, cancel, lost capture or blur ever reached this one, and its
+	 * gate flag would hold every pane's touch as a palm until a stroke ends
+	 * here. Ended the way a blur ends it (`finishActiveStroke`): committed,
+	 * ink kept, the gate let go. A mouse or finger stroke is not the pen's and
+	 * is left alone.
+	 */
+	private finishStrandedPenStroke(): void {
+		if (this.activePenId === null || !this.activeIsPen) return;
+		this.finishActiveStroke();
+	}
+
+	/** A pen landed in some pane: a contact on parole here is the hand that follows it, palm for life. */
+	private voidParoleOnPenDown(e: PointerEvent): void {
+		if (this.paroleId === null || this.paroleOverlapped) return;
+		this.paroleOverlapped = true;
+		tr("guard", e, `parole voided: pen landed while touch ${this.paroleId} was down (palm for life)`);
+	}
+
+	/**
 	 * IS A HAND ON THE GLASS - a finger down, a pen down, or a pen hovering?
 	 *
 	 * The read half of the 1.4.12 ruling "hide the mouse reticle when a finger
@@ -2787,7 +2903,7 @@ export class InlinePenRouter {
 			// while the pen is writing or hovering must not scroll the note or
 			// move the caret. Everything else about touch is the editor's.
 			// Palm-blocked contacts never open the guard's touch window.
-			if (this.gate.blocksNewTouch(performance.now())) {
+			if (this.anyGateBlocksNewTouch(performance.now())) {
 				this.palmsBlocked++;
 				telemetry.bump("inline.palmBlocked");
 				this.swallowedTouches.add(e.pointerId);
@@ -2797,10 +2913,20 @@ export class InlinePenRouter {
 				this.paroleDownX = e.clientX;
 				this.paroleDownY = e.clientY;
 				this.paroleDownAt = performance.now();
-				this.paroleContactPx = Math.max(e.width || 0, e.height || 0);
+				// The size veto was calibrated on Windows, where a fingertip reports a
+				// few px. iOS reports width as twice the contact radius, so an iPad
+				// fingertip lands at 62-84 px and was vetoed as a palm: a finger swipe
+				// near the Pencil never scrolled. On Apple touch platforms the size is
+				// read as unknown and the motion test alone decides (PalmShield.ts
+				// turns its own size rule off there for the same reason).
+				this.paroleContactPx =
+					typeof navigator !== "undefined" && isAppleTouchPlatform(navigator)
+						? 0
+						: Math.max(e.width || 0, e.height || 0);
 				// Landed while the pen is down: the hand that follows the pen,
 				// never a scroll finger. No parole, ever (eraser-scrub fix).
-				this.paroleOverlapped = this.activePenId !== null;
+				// The pen in ANY pane: one hand writes across a split.
+				this.paroleOverlapped = this.anyPenDown();
 				tr(
 					"pointerdown",
 					e,
@@ -2826,9 +2952,15 @@ export class InlinePenRouter {
 			if (this.touchPos.size === 1 && !(this.cb.pinchZoom?.() ?? true)) {
 				// Alan: "yes native obsidian": a first finger that is assist-panning ends its pan
 				// here, as if it had lifted, so the whole two-finger gesture is the host's. A finger that has not
-				// engaged a pan yet is left as it stands.
+				// engaged a pan yet stays tracked but stops being a pan candidate: in a real pinch both fingers
+				// land within milliseconds, before the first has travelled the slop, and left as a candidate it
+				// engaged its own pan mid-gesture and flung on lift.
 				const first = this.assistPointerId;
 				if (first !== null && this.assistEngaged && this.touchPos.has(first)) this.yieldAssistToHost(first);
+				else if (first !== null) {
+					this.assistPointerId = null;
+					this.assistSamples = [];
+				}
 				return;
 			}
 			this.guardTouches.add(e.pointerId);
@@ -2981,7 +3113,7 @@ export class InlinePenRouter {
 		// which; the router's job is only to claim the contact before the
 		// editor can turn it into selection or a context menu.
 		const kind =
-			(e.buttons & 32) !== 0 || e.button === 5
+			(e.buttons & 32) !== 0 || e.button === 5 || (sideButtonErasesEnabled() && (e.buttons & 2) !== 0)
 				? "eraser"
 				: (e.buttons & 2) !== 0
 					? "side"
@@ -3022,6 +3154,7 @@ export class InlinePenRouter {
 		if (this.pinchLive) {
 			this.pinchLive = false;
 			this.cb.onPinch("end", 1, this.pinchCentroid());
+			this.rebasePinch();
 			tr("guard", e, "pinch cancelled: pen claimed the surface");
 		}
 		// A swallowed contact still down when the pen lands is the hand that
@@ -3029,9 +3162,13 @@ export class InlinePenRouter {
 		// scrubbing lifts and re-lands the nib every few hundred ms with the
 		// hand's edge sliding in between. Judged by motion alone, that slide
 		// became an assist pan and walked the viewport (RC3).
-		if (this.paroleId !== null && !this.paroleOverlapped) {
-			this.paroleOverlapped = true;
-			tr("guard", e, `parole voided: pen landed while touch ${this.paroleId} was down (palm for life)`);
+		// In ANY pane: one hand writes across a split, so the palm resting in
+		// the other pane is the same hand. And the pen cannot be down in two
+		// panes: a stroke another pane still holds open stopped without any
+		// lift reaching it, and is ended here, ink kept.
+		for (const r of liveRouters) {
+			if (r !== this) r.finishStrandedPenStroke();
+			r.voidParoleOnPenDown(e);
 		}
 		this.gesturePanned = false;
 		this.applyGuard(this.manip.penSignal(), "pen-down");
@@ -3218,7 +3355,7 @@ export class InlinePenRouter {
 							Math.abs(e.clientX - this.paroleDownX) +
 							Math.abs(e.clientY - this.paroleDownY),
 						sinceDownMs: performance.now() - this.paroleDownAt,
-						penStrokeActive: this.gate.isPenStrokeActive,
+						penStrokeActive: this.anyPenStrokeActive(),
 						contactPx: this.paroleContactPx,
 						penContactOverlapped: this.paroleOverlapped,
 					})
@@ -3332,6 +3469,7 @@ export class InlinePenRouter {
 		}
 		if (e.pointerId !== this.activePenId) return;
 		if (silentLift(e)) {
+			this.feedBeforeSilentLift(e);
 			this.silentLiftEnds++;
 			telemetry.bump("inline.penUp.silentLift");
 			tr(e.type, e, "SILENT LIFT, TERMINATES STROKE", undefined, "lifecycle", "silent-lift");
@@ -3445,6 +3583,7 @@ export class InlinePenRouter {
 		}
 		if (e.pointerId !== this.activePenId) return;
 		if (silentLift(e)) {
+			this.feedBeforeSilentLift(e);
 			this.silentLiftEnds++;
 			telemetry.bump("inline.penUp.silentLift");
 			tr(e.type, e, "SILENT LIFT, TERMINATES STROKE", undefined, "lifecycle", "silent-lift");
@@ -3492,6 +3631,33 @@ export class InlinePenRouter {
 		if (samples.length > 0) this.cb.onPenRaw(this.smoothed(samples), e);
 	}
 
+	/** Keep earlier contact samples when a coalesced delivery ends in hover. */
+	private feedBeforeSilentLift(e: PointerEvent): void {
+		if (e.pointerType !== "pen" || typeof e.getCoalescedEvents !== "function") return;
+		const events = e.getCoalescedEvents().filter((ce) =>
+			ce.pointerType === "pen" && ce.pointerId === this.activePenId &&
+			ce.timeStamp <= e.timeStamp && !silentLift(ce)
+		);
+		// Raw and move can deliver the same batch. Use the stroke's existing
+		// timestamp floor so already-fed points never enter the builder twice.
+		const fed = this.inkFeed.feed(events.map((ce) => ce.timeStamp));
+		const samples: PenSample[] = [];
+		let lastContact: PointerEvent | undefined;
+		for (const i of fed) {
+			const ce = events[i];
+			if (ce !== undefined) {
+				samples.push(this.sampleFrom(ce));
+				lastContact = ce;
+			}
+		}
+		if (diagnosticsEnabled() && samples.length > 0) {
+			tr(e.type, e, `pre-lift INK-FED ${samples.length} sample(s)`, csOf(events), "sample");
+		}
+		// Pan consumes client coordinates from the callback event, not samples.
+		// Movement ends at contact; the caller still finalizes with the lift event.
+		if (lastContact !== undefined) this.cb.onPenRaw(samples, lastContact);
+	}
+
 	/** Mouse samples through the grid filter; a pen's untouched. */
 	private smoothed(samples: PenSample[]): PenSample[] {
 		const trail = this.mouseStrokeTrail;
@@ -3513,6 +3679,7 @@ export class InlinePenRouter {
 				e.preventDefault();
 				e.stopPropagation();
 				this.finishFingerInkPreparation();
+				this.resumeEaseIfIdle();
 				return;
 			}
 			// Read BEFORE endPinch clears it: whether this lift genuinely ended a live pinch, not merely
@@ -3526,6 +3693,8 @@ export class InlinePenRouter {
 				const centroid = this.pinchCentroid();
 				this.touchPos.delete(e.pointerId);
 				this.endPinch(e, centroid);
+				// Two left after three: a new pair, or the old one after a stray contact.
+				this.rebasePinch();
 			}
 			const wasAssistPan = this.endAssist(e);
 			const duringStroke =
@@ -3567,7 +3736,10 @@ export class InlinePenRouter {
 			}
 			return;
 		}
-		if (e.pointerType !== "pen" && !this.ownedMouseStroke(e)) return;
+		if (e.pointerType !== "pen" && !this.ownedMouseStroke(e)) {
+			this.resumeEaseIfIdle();
+			return;
+		}
 		const wasOurs = this.activePenId !== null && e.pointerId === this.activePenId;
 		tr(e.type, e, wasOurs ? "TERMINATES STROKE" : "");
 		if (wasOurs) {
@@ -3575,6 +3747,27 @@ export class InlinePenRouter {
 			e.stopPropagation();
 		}
 		this.endPenStroke(e, false);
+		if (!wasOurs) this.resumeEaseIfIdle();
+	}
+
+	/**
+	 * A contact that owned nothing has ended: give back the ease its
+	 * pointerDown cancelled (`onViewportInput`). The touch lift path already
+	 * does this for a tap; a mouse click, a pen tap with the pen off and a palm
+	 * the gate swallowed end elsewhere and left the edge ease frozen. Only when
+	 * nothing else is down, so a contact still owning a stroke or a gesture
+	 * keeps the ease off until its own end.
+	 */
+	private resumeEaseIfIdle(): void {
+		if (
+			this.activePenId !== null ||
+			this.touchPos.size > 0 ||
+			this.guardTouches.size > 0 ||
+			this.swallowedTouches.size > 0
+		) {
+			return;
+		}
+		this.cb.onAllContactsLifted?.();
 	}
 
 	/** Idempotent single funnel, same as the canvas router. */
@@ -3631,7 +3824,15 @@ export class InlinePenRouter {
 		this.assistEngaged = false;
 		this.assistSamples = [];
 		this.releaseOverscrollPull();
-		for (const id of [...this.touchPos.keys()]) this.retireEndedFingerContact(id);
+		// Every finger contact we still hold, including a paroled touch that
+		// lives in guardTouches only, and the finger of a live ink stroke. A
+		// real lift sends its pointerup before this touchend, and the stroke's
+		// end has retired that finger already; it is still here only when its
+		// lift was lost, and an entry left in touchPos then is the one-finger
+		// pinch above. Retiring an id twice changes nothing.
+		for (const id of new Set([...this.touchPos.keys(), ...this.guardTouches])) {
+			this.retireEndedFingerContact(id);
+		}
 		this.pinchStartSpread = 0;
 		this.paroleId = null;
 		this.paroleOverlapped = false;

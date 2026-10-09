@@ -35,6 +35,14 @@ export function centroidOf(a: PinchPoint, b: PinchPoint): { x: number; y: number
 	return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
 }
 
+/**
+ * The lowest scale a landing can teach a gain from. getScale reads
+ * `--scale-factor`, which is pdf.js currentScale times 96/72, so the viewer's
+ * 10% floor reads about 0.133 here; a landing at or below it is a clamp, and a
+ * clamp measures the floor, not the gain.
+ */
+const MIN_LEARNABLE = 0.1 * (96 / 72) * 1.001;
+
 export class PinchBridge {
 	private el: HTMLElement | null = null;
 	private ids: [number, number] | null = null;
@@ -309,7 +317,7 @@ export class PinchBridge {
 			if (this.el !== el) return;
 			this.settle();
 			const actual = this.getScale();
-			if (actual === null || actual <= 0.1 || actual >= 10) return;
+			if (actual === null || actual <= MIN_LEARNABLE || actual >= 10) return;
 			// The viewer caps scale at 10%/1000%; a partial landing is not gain.
 			const observed = Math.log(actual / preScale);
 			if (Math.abs(observed) > 1e-4 && Math.abs(delta) > 1) {
@@ -367,7 +375,7 @@ export class PinchBridge {
 			if (this.el !== el || this.ids !== ids || this.pending !== null) return;
 			refresh();
 			const after = this.getScale();
-			if (after === null || after <= 0.1 || after >= 10) return;
+			if (after === null || after <= MIN_LEARNABLE || after >= 10) return;
 			const moved = Math.log(after / pre);
 			// Nothing (a zoom bound), or far more than our 3% (a commit or a
 			// real wheel landed inside the window): nothing usable measured.
@@ -390,6 +398,17 @@ export class PinchBridge {
 		el.addEventListener("touchmove", this.onMove, opts);
 		el.addEventListener("touchend", this.onEnd, opts);
 		el.addEventListener("touchcancel", this.onEnd, opts);
+	}
+
+	/**
+	 * Drop a pinch in progress: the preview comes off and no wheel fires. The
+	 * pen landing on the pane calls this; a pinch the pen interrupts is not
+	 * applied under it.
+	 */
+	cancel(): void {
+		if (!this.ids) return;
+		this.ids = null;
+		this.clearPreview();
 	}
 
 	dispose(): void {

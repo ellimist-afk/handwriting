@@ -213,3 +213,17 @@ it.each(["setext-dash","setext-equals","fence","frontmatter"])("keeps the surrou
   expect(r.undone.doc).toBe(r.before.doc);expect(r.undone.strokes).toEqual(r.before.strokes);
  }finally{await page.close();}
 });
+
+// The release repaints only the ink its snap correction moved, never the whole note, and the canvas it leaves equals a whole
+// repaint of the same state. 37 snaps to 48 (correction 11); 3 and -48 roll back (corrections -3 and 48).
+it.each([{tall:true,sweep:[103],moves:[80,-5,37],dy:37,wrapped:false},{dy:3,wrapped:true},{dy:-48,wrapped:true}] as const)("the release paints only its snap correction, as a whole repaint would: %j",async o=>{
+ const page=await mounted();try{
+  const r=await page.evaluate(([w,opts])=>(window as any).insertSpaceProbe(1,1,0,w,{...opts,releasePixels:true}),[o.wrapped,{...o}] as const);
+  const moved=r.after.strokes.some((s:any,i:number)=>s.points[0].y!==r.before.strokes[i].points[0].y);
+  expect(r.live.dy,"premise: the drag moved the ink").toBe(o.dy);
+  expect(moved,"premise: the lift kept a move only when it snapped").toBe(o.dy===37);
+  expect(r.releasePixels.own.ink,"premise: ink on the committed canvas").toBeGreaterThan(0);
+  expect(r.releasePixels.wholeAsks,"the release asks no whole-note repaint").toBe(0);
+  expect(r.releasePixels.own,"the canvas after the release equals a whole repaint of the same state").toEqual(r.releasePixels.truth);
+ }finally{await page.close();}
+});

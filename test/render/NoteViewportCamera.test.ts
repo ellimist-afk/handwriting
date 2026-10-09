@@ -257,7 +257,10 @@ it("real Fit frames saved separated ink within the zoom range, ignores empty gro
   expect(again.state.zoom).toBe(fitted.state.zoom);for(let i=0;i<again.ink.length;i++)for(const axis of ["x","y","right","bottom"])expect(Math.abs(again.ink[i][axis]-fitted.ink[i][axis])).toBeLessThan(.1);
   for(let i=0;i<3;i++){await page.getByRole("button",{name:"Reset note zoom to 100%",exact:true}).click();await page.evaluate(()=>(window as any).viewportFixture.settle());await page.getByRole("button",{name:"Fit handwriting",exact:true}).click();await page.evaluate(()=>(window as any).viewportFixture.settle());}
   const repeated=await page.evaluate(()=>(window as any).viewportFixture.snap("far"));expect(repeated.extent).toEqual(grown.extent);
-  const reopened=await page.evaluate(()=>(window as any).viewportFixture.reopen("far"));expect(reopened.state.zoom).toBe(1);expect(reopened.strokes).toEqual(before.strokes);expect(reopened.writes).toBe(before.writes);
+  // Two arms (issue 9): a note never seen this session opens at 100 percent and the top (`before`,
+  // the first open); the same note reopened returns at the zoom it was left at, here the last Fit.
+  expect(before.state.zoom,"FIRST OPEN: a note never seen this session opens at 100 percent").toBe(1);expect(before.scroll.top,"FIRST OPEN: at the top").toBe(0);
+  const reopened=await page.evaluate(async()=>{const vf=(window as any).viewportFixture;await vf.reopen("far");await vf.settle();return vf.snap("far");});expect(reopened.state.zoom,"RETURN: the reopened note comes back at the zoom it was left at").toBeCloseTo(repeated.state.zoom,10);expect(reopened.strokes).toEqual(before.strokes);expect(reopened.writes).toBe(before.writes);
   const refit=await page.evaluate(()=>(window as any).viewportFixture.fit("far"));expect(refit.state.zoom).toBe(fitted.state.zoom);
   const corners=await page.evaluate(()=>(window as any).viewportFixture.corners("far"));expect(corners.added).toBe(4);for(const error of corners.errors)for(const axis of error)expect(Math.abs(axis)).toBeLessThan(1);
  }finally{await page.close();}

@@ -1,6 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { bboxVisibleInViewport, classifyScroll } from "./ScrollProbe";
+import { bboxVisibleInViewport, classifyScroll, clearScrollProbe, formatScrollProbe, scrollProbeSchedule } from "./ScrollProbe";
+import { setDiagnosticsEnabled } from "../diag/DiagSwitch";
 import { backstopMayEnd, summarizeAcquisitions } from "./InlinePenRouter";
+
+describe("scroll probe build header", () => {
+	it.each(["1.4.22", "1.4.23"])("prints supplied version %s and exact content identity with no samples", (version) => {
+		clearScrollProbe();
+		setDiagnosticsEnabled(false);
+		const build = { version, sourceTree: `content-sha256:${"a".repeat(64)}` };
+		expect(formatScrollProbe(build).split("\n")[0]).toBe(
+			`Handwriting scroll probe: version=${version} build=${build.sourceTree}`,
+		);
+		expect(formatScrollProbe(build)).toContain("no samples");
+	});
+
+	it.each(["1.4.22", "1.4.23"])("prints supplied version %s and keeps development identity unverified on a populated capture", (version) => {
+		clearScrollProbe();
+		setDiagnosticsEnabled(true);
+		try {
+			scrollProbeSchedule("header-test");
+			expect(formatScrollProbe({ version, sourceTree: "unverified" })).toContain(
+				`Handwriting scroll probe: version=${version} build=unverified\n1 event(s)`,
+			);
+		} finally {
+			setDiagnosticsEnabled(false);
+			clearScrollProbe();
+		}
+	});
+
+	it("labels missing build metadata without inventing an identity", () => {
+		clearScrollProbe();
+		expect(formatScrollProbe()).toContain("version=unknown build=unverified");
+	});
+});
 
 describe("bboxVisibleInViewport", () => {
 	const cam = { x: 0, y: 1000 };

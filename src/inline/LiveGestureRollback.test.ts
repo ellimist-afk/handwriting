@@ -251,6 +251,8 @@ describe("movement after Escape or a tool change lets go of the selection", () =
 	for (const clear of ["escape", "tool"] as const) {
 		it(`${clear}: the lift records only the move that happened, and one undo puts the ink back exactly`, async () => {
 			const r = await letGo(clear);
+			// endPenGesture puts the mode back to ink before it calls lassoUp.
+			r.o.mode = "ink";
 			r.o.lassoUp();
 			expect(r.ops).toHaveLength(1);
 			const op = r.ops[0]!;

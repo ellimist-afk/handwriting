@@ -23,7 +23,9 @@ import {
 	embedInkDiagLine,
 	embedInkIsCollapsed,
 	embedInkKeepWaiting,
+	embedInkChanged,
 	embedInkPendingWaitCount,
+	embedInkRenamed,
 	embedInkResolveRoot,
 	embedInkRetryDelay,
 	embedInkSizeWatchCount,
@@ -721,5 +723,29 @@ describe("a painted root with no size is re-measured, not abandoned at 0x0", () 
 		root.layOut(285, 24);
 		root.resize[0]?.fire();
 		expect(root.canvases).toHaveLength(1);
+	});
+});
+
+describe("attachEmbedInkOnceReady: a rename while the embed waits for its section", () => {
+	it("the late attach registers the root under the renamed note", () => {
+		const env = fakeEnv();
+		const root = fakeRoot(env.view);
+		const section = fakeSection(env.view, {});
+		const asked: string[] = [];
+		initEmbedInkRefresh((p) => {
+			asked.push(p);
+			return [];
+		});
+
+		attachEmbedInkOnceReady(asEl(section), null, "old.md", noStrokes);
+		env.advance(120);
+		embedInkRenamed("old.md", "new.md"); // the vault renamed the note while the embed waited
+		section.connectTo(parentWith(root));
+		env.mutation[0]?.fire();
+		expect(embedInkPendingWaitCount(), "premise: the wait ended with an attach").toBe(0);
+
+		asked.length = 0;
+		embedInkChanged("new.md");
+		expect(asked, "a change to the renamed note reaches the embed that waited").toEqual(["new.md"]);
 	});
 });

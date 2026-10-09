@@ -62,6 +62,7 @@ const makeProcessorRaw = new Function(
 	"readNoteText",
 	"hoverWholeNote",
 	"isMarkdownPath",
+	"overlayForPath",
 	transformSync(`return (el: any, ctx: any) => {\n${ppBody}\n};`, {
 		loader: "ts",
 		target: "es2022",
@@ -80,7 +81,7 @@ const readNoteText = async (): Promise<string | null> => {
 	return noteFileText;
 };
 const makeProcessor = (...deps: unknown[]) =>
-	makeProcessorRaw(...deps, embedInkIsLiveEditorBlock, readNoteText, new WeakMap<object, unknown>(), isMarkdownPath);
+	makeProcessorRaw(...deps, embedInkIsLiveEditorBlock, readNoteText, new WeakMap<object, unknown>(), isMarkdownPath, () => null);
 
 // ---- Obsidian Component / MarkdownRenderChild semantics --------------------
 class Component {
@@ -174,8 +175,20 @@ class MiniEl {
 	}
 	querySelector<T = MiniEl>(sel: string): T | null {
 		const scoped = /^:scope > (.+)$/.exec(sel);
-		if (!scoped) throw new Error(`MiniEl: unsupported querySelector ${sel}`);
-		return (this.children.find((k) => k.matches(scoped[1]!)) ?? null) as unknown as T | null;
+		if (scoped) return (this.children.find((k) => k.matches(scoped[1]!)) ?? null) as unknown as T | null;
+		// Any other selector is a descendant query: depth first, in document
+		// order, as the browser walks it. One these fakes cannot read still
+		// throws, in matches.
+		this.matches(sel);
+		const walk = (n: MiniEl): MiniEl | null => {
+			for (const k of n.children) {
+				if (k.matches(sel)) return k;
+				const deeper = walk(k);
+				if (deeper) return deeper;
+			}
+			return null;
+		};
+		return walk(this) as unknown as T | null;
 	}
 	appendChild(c: MiniEl): MiniEl {
 		c.parentElement?.children.splice(c.parentElement.children.indexOf(c), 1);

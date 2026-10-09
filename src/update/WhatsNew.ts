@@ -189,6 +189,15 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"esc works",
 		"inf. canvas and paper backgrounds buttons",
 	],
+	"1.4.23": [
+		"lots of ink + pen fixes",
+		"writing lag fixes",
+		"pdf fixes, ink stays when a pdf changes",
+		"line numbers stay",
+		"zoom bar setting fix",
+		"sync fixes",
+		"toolbar fixes",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

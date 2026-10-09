@@ -54,6 +54,7 @@ export interface MarkdownImage {
 export interface ParsedMarkdownPage {
 	/** Frontmatter lines between the --- fences, verbatim (no fences). */
 	frontmatter: string[];
+	/** The page id as YAML reads it (see pageIdValue), or undefined. */
 	pageId: string | undefined;
 	/** Declared `handwriting-version`, when present. Used to refuse writing a newer format. */
 	version: number | undefined;
@@ -107,6 +108,54 @@ function frontmatterValue(lines: string[], key: string): string | undefined {
 }
 
 /**
+ * Plain values YAML's core schema reads as something other than text, in the
+ * forms a safe page id can spell (no sign, no leading dot): numbers (12345,
+ * 1.5, 1e5, 0o17, 0x1f), booleans and null. A date-shaped value is not here:
+ * Obsidian hands it to the reads as text, and they accept it.
+ */
+const YAML_NOT_TEXT = [
+	/^[0-9]+(?:\.[0-9]*)?(?:[eE][-+]?[0-9]+)?$/,
+	/^0o[0-7]+$/,
+	/^0x[0-9a-fA-F]+$/,
+	/^(?:true|True|TRUE|false|False|FALSE)$/,
+	/^(?:null|Null|NULL)$/,
+];
+
+/**
+ * The page id as YAML reads it, which is what Obsidian's metadata cache (and
+ * so every id read) returns. Quotes are YAML syntax, not part of the id, and a
+ * ` #` after the value starts a comment: kept raw, a valid id written
+ * `"<uuid>"` or `<uuid> # note` failed isSafePageId and the claim replaced it,
+ * orphaning that id's sidecar. A plain value YAML types as a number, boolean
+ * or null (12345, true) reaches the reads as that type, which no read accepts;
+ * adopting it saved ink under an id nothing would ever find again, so it
+ * counts as no id.
+ */
+function pageIdValue(lines: string[]): string | undefined {
+	const raw = frontmatterValue(lines, FM_PAGE_ID);
+	if (raw === undefined) return undefined;
+	const double = /^"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$/.exec(raw);
+	if (double) return double[1];
+	const single = /^'((?:[^']|'')*)'\s*(?:#.*)?$/.exec(raw);
+	if (single) return single[1]!.replace(/''/g, "'");
+	const plain = raw.replace(/\s+#.*$/, "");
+	return YAML_NOT_TEXT.some((re) => re.test(plain)) ? undefined : plain;
+}
+
+/**
+ * A frontmatter fence is `---` at the start of its line, as YAML and Obsidian
+ * read it. An indented `---` is text: inside a block scalar it is part of the
+ * value, and as the first line it is body. Treating it as a fence ended the
+ * frontmatter early, or made frontmatter out of the user's paragraph, the
+ * first time the page id was written. A byte-order mark before the opening
+ * fence still opens it.
+ */
+function isFence(line: string | undefined, first = false): boolean {
+	if (line === undefined) return false;
+	return (first ? line.replace(/^\uFEFF/, "") : line).trimEnd() === "---";
+}
+
+/**
  * Block ids must be unique across the whole document. The sidecar keys
  * geometry by id, and it does not care whether that id came from a container
  * or an image.
@@ -146,10 +195,10 @@ export function parseMarkdownPage(md: string): ParsedMarkdownPage {
 	const frontmatter: string[] = [];
 	const uniqueId = makeIdUniquifier();
 
-	if (lines[0]?.trim() === "---") {
+	if (isFence(lines[0], true)) {
 		let close = -1;
 		for (let j = 1; j < lines.length; j++) {
-			if (lines[j]!.trim() === "---") {
+			if (isFence(lines[j])) {
 				close = j;
 				break;
 			}
@@ -227,7 +276,7 @@ export function parseMarkdownPage(md: string): ParsedMarkdownPage {
 	const version = rawVersion === undefined ? undefined : Number.parseInt(rawVersion, 10);
 	return {
 		frontmatter,
-		pageId: frontmatterValue(frontmatter, FM_PAGE_ID),
+		pageId: pageIdValue(frontmatter),
 		version: version !== undefined && Number.isFinite(version) ? version : undefined,
 		isHandwritingPage: marker === FM_MARKER_VALUE || marker === "true",
 		blocks,

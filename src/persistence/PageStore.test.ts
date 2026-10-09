@@ -1534,8 +1534,9 @@ describe("a pin made by a blind write is provisional, not a fact", () => {
 		const kept = preserved.map((p) => fake.files.get(p) ?? "").join("|");
 		expect(kept).toContain('"local"');
 		expect(kept).toContain("synced");
-		// And the user was told, once.
-		expect(conflicts.length).toBe(1);
+		// And the user was told about each kept copy, once each (R8: one save can
+		// keep two; a single slot used to name only the last).
+		expect([...conflicts].sort()).toEqual([...preserved].sort());
 	});
 
 	it("a reload confirms a provisional pin, and the extra look stops", async () => {
@@ -1829,7 +1830,7 @@ describe("no instant of a conflicted save has nothing on disk", () => {
 	// .conflict- name nobody had been told about, because the announcement
 	// waits on the final rename. The tmp is written first now, so every
 	// instant has a complete copy where load() already looks.
-	it("leaves a recoverable tmp if the process dies after the aside-rename", async () => {
+	it("leaves a recoverable tmp if the process dies after the aside-rename: the live store answers its held page, a fresh store recovers the tmp", async () => {
 		fake.files.set(".handwriting/p1.json", JSON.stringify(pageWith("p1", "mine-v1")));
 		fake.mtimes.set(".handwriting/p1.json", 42);
 		await store.load("p1");
@@ -1852,8 +1853,15 @@ describe("no instant of a conflicted save has nothing on disk", () => {
 
 		// A tmp holding this session's ink survives...
 		expect(fake.files.has(".handwriting/p1.json.tmp")).toBe(true);
-		// ...and load() recovers from it rather than reporting a blank page.
-		const back = await store.load("p1");
+		// The store that is still running holds the batch it could not land,
+		// so its load answers that page from memory and reads no disk.
+		const live = await store.load("p1");
+		expect(live?.data.strokes.map((s) => s.id)).toEqual(["mine-v2"]);
+		expect(live?.recovered).toBe(false);
+		// A real crash leaves no store: the next session starts with nothing
+		// held, and its load() recovers from the tmp rather than reporting a
+		// blank page.
+		const back = await new PageStore({ vault: { adapter: fake } }, ".handwriting", () => trashClock).load("p1");
 		expect(back?.data.strokes.map((s) => s.id)).toEqual(["mine-v2"]);
 		expect(back?.recovered).toBe(true);
 		// Their revision is still on disk under the conflict name.

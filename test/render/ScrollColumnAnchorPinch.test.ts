@@ -440,7 +440,7 @@ it("ink stays on the column through a scroll at 100%, 50% and 10% zoom", async (
  */
 const rest0Index = (r: any): number => r.frames[0].shotIndex;
 
-async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: { external?: number; riseAt?: number; risePx?: number; leg?: "held-zoom-in"; pauseAt?: number[]; pauseAction?: "stroke" | "resize" | "font" | "watchdog" | "host" } = {}) {
+async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: { external?: number; riseAt?: number; risePx?: number; leg?: "held-zoom-in"; pauseAt?: number[]; pauseAction?: "stroke" | "resize" | "font" | "watchdog" | "host"; markInset?: number; backing?: boolean } = {}) {
 	const page = await browser.newPage({ viewport: { width: 1800, height: 900 }, deviceScaleFactor: 2 });
 	try {
 		const errors: string[] = [];
@@ -466,7 +466,7 @@ async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: 
 		await page.addScriptTag({ content: script });
 		const r: any = await page.evaluate(
 			a => (window as any).scrollColumnAnchor.runPixelColumn(a.readable, a.infiniteCanvas, a.backing, a.options),
-			{ readable, infiniteCanvas, backing: !!process.env.HW_SCPX_BACKING, options: { external: options.external, riseAt: options.riseAt, risePx: options.risePx, pauseAt: options.pauseAt, pauseAction: options.pauseAction, shiftPlant: Number(process.env.HW_SCPX_SHIFT_PLANT) || undefined } }
+			{ readable, infiniteCanvas, backing: !!process.env.HW_SCPX_BACKING || !!options.backing, options: { external: options.external, riseAt: options.riseAt, risePx: options.risePx, pauseAt: options.pauseAt, pauseAction: options.pauseAction, shiftPlant: Number(process.env.HW_SCPX_SHIFT_PLANT) || undefined, markInset: options.markInset } }
 		);
 		expect(shots.length, "a screenshot behind every frame record").toBeGreaterThanOrEqual(r.frames.length);
 		const detect = (b64: string, shift = 0, pad?: number) => page.evaluate(a => (window as any).scrollColumnAnchor.detectMark(a.b64, a.shift, a.pad), { b64, shift, pad });
@@ -658,6 +658,31 @@ it("committed ink stays on the text column when the scroll rises inside a held z
 // the same factor. At 0.8 the raw delta is wrong by 20% of every scroll change.
 it("committed ink stays on the text column at an external scale of 0.8", async () => {
 	await pixelRegime(true, true, { external: 0.8 });
+}, 300_000);
+
+// THE SAME EXTERNAL SCALE, INK WHERE ITS OWN BOX SAYS AND ON ITS TEXT. Under the transform form the compositor dropped
+// the fraction of the ink container's host-local left and the host's scale multiplied it, so the painted ink sat right
+// of where the canvas's own rect maps its backing. Measured 2026-10-03 on this arm (mark 60 px into the column):
+// 1.21 to 2.41 device px at k 1.1 to 2 before the fix, 0.15 to 0.91 after; the reader's own step is 0.5 device px
+// on each of the two centres. Two reads per zoom-in frame past 1:
+// - PAINTED AGAINST ITS OWN RECT: the mark's centre in the screenshot against the backing's centre mapped through the
+//   committed canvas's getBoundingClientRect. Both are the same block, so the block's own centre residual cancels.
+// - AGAINST ITS TEXT: the mark 60 px into the column keeps the text's left edge in the image, and the ink-to-text
+//   distance on each preview frame is read against the rest frame's (textRel). The settle re-rasters the block and
+//   moves its thresholded centre, so its textRel is printed, not asserted.
+// The DOM column offset is printed with every frame and not asserted here.
+it("committed ink is painted where its own box says and stays on its text at an external scale of 0.8, zoomed in past 1", async () => {
+	const out: any = await pixelRegime(true, true, { external: 0.8, markInset: 60, backing: true });
+	const frames = out.frames.filter((f: any) => String(f.phase).startsWith("in2"));
+	expect(frames.length, "no zoom-in frame past 1").toBeGreaterThan(0);
+	for (const f of frames) {
+		const own = f.offDevice === null || f.backingOffDevice === null ? null : f.offDevice - f.backingOffDevice;
+		// eslint-disable-next-line no-console
+		console.log(`SCPX-OWN-BOX ${f.label} painted-minus-own-rect=${own === null ? "null" : own.toFixed(2)} textRel=${f.textRelOffDevice === null ? "null" : f.textRelOffDevice.toFixed(2)} column=${f.offDevice === null ? "null" : f.offDevice.toFixed(2)}`);
+		expect.soft(own === null ? Infinity : Math.abs(own), `${f.label}: ink painted ${own === null ? "unread" : own.toFixed(2)} device px from where its own rect maps it`).toBeLessThanOrEqual(1);
+		expect.soft(f.textLeftX, `${f.label}: the text's left edge is not in the image`).not.toBeNull();
+		if (f.before.preview) expect.soft(f.textRelOffDevice === null ? Infinity : Math.abs(f.textRelOffDevice), `${f.label}: ink against its text ${f.textRelOffDevice === null ? "unread" : f.textRelOffDevice.toFixed(2)} device px from the rest frame's`).toBeLessThanOrEqual(1);
+	}
 }, 300_000);
 
 // THE HELD ZOOM-IN LEG, its own arm, `fails` while the defect is open: with the
@@ -1085,14 +1110,25 @@ it("a pinch holds the note under the focal point, in all four setting combinatio
 		// THE PAN GOES ON THE SCROLLER'S CHILDREN. Stated as a property of the
 		// DOM rather than of the source, because "which element carries it" is
 		// the whole difference between an anchored zoom and a dead hit surface.
+		// The one translate the host may carry is the scroll residual of the last owned write, under one host px times the
+		// scale it sits in front of (setViewportScroll, hostTransform): the page the browser kept, put back where the
+		// commit asked. A pan is anything larger.
+		const residualOnly = (t: string) => {
+			if (!/translate/.test(t)) return true;
+			const m = /translate\((-?[\d.e-]+)px, (-?[\d.e-]+)px\) scale\(([\d.e-]+)\)$/.exec(t);
+			return !!m && Math.abs(Number(m[1])) < Number(m[3]) && Math.abs(Number(m[2])) < Number(m[3]);
+		};
 		expect(
-			r.hostTransforms.some((t: string) => /translate/.test(t)),
-			`${label}: the host itself is translated (${JSON.stringify(r.hostTransforms)}); it contains the scroller, so this is the input-death class`
-		).toBe(false);
+			r.hostTransforms.every(residualOnly),
+			`${label}: the host itself is translated past a scroll residual (${JSON.stringify(r.hostTransforms)}); it contains the scroller, so this is the input-death class`
+		).toBe(true);
+		// The band's own placement is a translate under one px (bandPlacement: whole px in left and top, the band's
+		// fraction in the translate), the same box the left and top gave before; a pan is anything else.
+		const placementOnly = (t: string) => { const m = /^translate\((-?[\d.e-]+)px, (-?[\d.e-]+)px\)$/.exec(t); return t === "" || (!!m && [m[1], m[2]].every(v => Number(v) >= 0 && Number(v) < 1)); };
 		expect(
-			r.bandTransforms.some((t: string) => /translate/.test(t)),
-			`${label}: the ink band is translated (${JSON.stringify(r.bandTransforms)}); syncCamera measures that box and would absorb it`
-		).toBe(false);
+			r.bandTransforms.every(placementOnly),
+			`${label}: the ink band is translated past its own placement (${JSON.stringify(r.bandTransforms)}); syncCamera measures that box and would absorb it`
+		).toBe(true);
 	}
 }, 600_000);
 
@@ -1513,6 +1549,16 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 			await page.setContent('<!doctype html><body style="margin:0"></body>');
 			await page.addStyleTag({ content: css + READABLE_LINE_WIDTH_CSS }); await page.addScriptTag({ content: script });
 			const r = await page.evaluate(a => (window as any).scrollColumnAnchor.runTopBoundary(a.readable, a.infiniteCanvas, a.tiny, a.external, a.axis), { readable, infiniteCanvas, tiny, external, axis }); report.push(r);
+			// A settle ease that starts with the page left of or above its rest (a negative start offset) has the
+			// ink raster reaching the pane's right or bottom edge on its first frame, so no strip of the pane shows the page
+			// without its ink while the ease plays. The band is widened by the ease for that (syncBand).
+			for (const c of r.easeCovers ?? []) {
+				if (!c.from || !c.ink) continue;
+				if (c.from[0] < 0) expect.soft(c.ink[2] - c.pane[2], `${c.phase}: the ink raster reaches the pane's right edge on the ease's first frame (start offset ${c.from[0].toFixed(2)}, offset now ${c.offset[0].toFixed(2)})`).toBeGreaterThanOrEqual(-.5);
+				if (c.from[1] < 0) expect.soft(c.ink[3] - c.pane[3], `${c.phase}: the ink raster reaches the pane's bottom edge on the ease's first frame (start offset ${c.from[1].toFixed(2)}, offset now ${c.offset[1].toFixed(2)})`).toBeGreaterThanOrEqual(-.5);
+			}
+			if (external === 1.25 && readable && infiniteCanvas && !tiny)
+				expect((r.easeCovers ?? []).some((c: any) => c.phase === 'reachable' && c.from && c.from[0] < 0), `premise: the reachable arm eases from left of its rest (${JSON.stringify((r.easeCovers ?? []).filter((c: any) => c.phase === 'reachable'))})`).toBe(true);
 			expect(r.naturalLeft).toBeGreaterThanOrEqual((tiny ? 12 : readable ? 300 : 0) * external - .1);
 			expect(r.naturalInset).toBeGreaterThanOrEqual(68 * external - .1);
 			expect(r.inkUnchanged).toBe(true);
@@ -2038,6 +2084,33 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 	}, 120000);
 }
 
+// THE LONG SLIDE BACK. A settle whose ease starts further left of or above its rest than the band's margin past the
+// pane: the band's ordinary spare cannot cover that ease, so only the widening for the ease keeps ink under the pane's
+// right or bottom edge while it plays. The drag preview holds at its bound plus the give, so the start offset cannot be
+// made larger by dragging further; the margin is a quarter of the pane's height, so a short pane puts the offset, in
+// band px, past the margin by 10 or more. 560 css px keeps the corner arm's fingers inside the pane at outer 1.25.
+const SHORT_PANE = { w: 1397.5, h: 560 };
+for (const axis of ['left', 'corner'] as const) {
+	it(`long slide back: ${axis} RLL=true IC=true outer 1.25, pane ${SHORT_PANE.h} css px tall`, async () => {
+		const page = await browser.newPage({ viewport: { width: 1800, height: 1100 }, deviceScaleFactor: 2 });
+		try {
+			await page.setContent('<!doctype html><body style="margin:0"></body>');
+			await page.addStyleTag({ content: css + READABLE_LINE_WIDTH_CSS }); await page.addScriptTag({ content: script });
+			const r = await page.evaluate(a => (window as any).scrollColumnAnchor.runTopBoundary(true, true, false, 1.25, a.axis, false, a.pane), { axis, pane: SHORT_PANE });
+			const c = (r.easeCovers ?? []).find((x: any) => x.phase === 'reachable');
+			const seen = JSON.stringify(c ?? null);
+			expect(c && c.from && c.ink, `premise: the reachable arm's ease is read (${seen})`).toBeTruthy();
+			for (const [i, side] of (axis === 'corner' ? [[0, 'right'], [1, 'bottom']] : [[0, 'right']]) as Array<[number, string]>) {
+				const startPx = Math.ceil(Math.abs(c.from[i]) / c.cssScale);
+				expect(c.from[i], `premise: the reachable arm eases from ${i ? 'above' : 'left of'} its rest (${seen})`).toBeLessThan(0);
+				expect(startPx - c.margin, `premise: the start offset, ${startPx} band px, passes the band margin ${c.margin} by 10 or more (${seen})`).toBeGreaterThanOrEqual(10);
+				expect(startPx, `premise: the start offset, ${startPx} band px, is inside the scroll room ${side} of the scroll, ${c.room[i].toFixed(2)} (${seen})`).toBeLessThanOrEqual(c.room[i]);
+				expect.soft(c.ink[2 + i] - c.pane[2 + i], `reachable: the ink raster reaches the pane's ${side} edge on the ease's first frame (start offset ${c.from[i].toFixed(2)}, offset now ${c.offset[i].toFixed(2)})`).toBeGreaterThanOrEqual(-.5);
+			}
+		} finally { await page.close(); }
+	}, 120000);
+}
+
 // THE INSTRUMENTED READ, one run, two cells, no fix. READ ONLY: it asserts nothing about the
 // product, because its whole job is to say WHICH of the three causes the ruling names is the real one
 // before a line of the fix is written.
@@ -2161,7 +2234,12 @@ for (const readable of [false, true]) for (const infiniteCanvas of [false, true]
 			if (seeded) expect(r.rows.at(-1).resizeCalls - r.initial.resizeCalls).toBeGreaterThan(0);
 			if (infiniteCanvas) {
 				if (mode === 'native') { expect.soft(r.initial.width - r.initial.clientWidth, 'initial horizontal range').toBeGreaterThan(100 / zoom); expect(r.initial.overflowX).toBe('auto'); }
-				for (const row of r.rows.filter((s: any) => s.phase.endsWith('-done'))) expect.soft(row.travel, row.phase).toBeGreaterThan(mode === 'pinch' ? 790 : 100);
+				// The pending cadence never paints its last 200 px move before the lift. The lift lands the last painted
+				// frame, so the page rests where that frame put it, 600 px along, and the unpainted move is dropped.
+				for (const row of r.rows.filter((s: any) => s.phase.endsWith('-done'))) {
+					if (mode === 'pinch' && cadence === 'pending') expect.soft(Math.abs(row.travel - 600), `${row.phase}: rests on the last painted frame (travel ${row.travel})`).toBeLessThanOrEqual(.5);
+					else expect.soft(row.travel, row.phase).toBeGreaterThan(mode === 'pinch' ? 790 : 100);
+				}
 				if (mode === 'pinch') for (const row of r.rows.filter((s: any) => s.phase.endsWith('-done'))) {
 					expect.soft(Math.abs(row.pan.x), `${row.phase}: native X did not absorb pan`).toBeLessThan(.5);
 					expect.soft(Math.abs(row.pan.y), `${row.phase}: native Y did not absorb pan`).toBeLessThan(.5);
@@ -2357,7 +2435,10 @@ for (const ending of ['abandon','switch','destroy'] as const) {
 			expect(r.lifecycle.afterResetDeferred).toBe(false);
 			expect(r.lifecycle.afterDeferred).toBe(false);
 			expect(r.lifecycle.locked).toBe(false);expect(r.lifecycle.queued).toBe(false);
-			expect(r.lifecycle.unchangedMemory).toBe(true);expect(r.lifecycle.unchangedSidecar).toBe(true);
+			// A view destroyed with a pen stroke in flight (a pane closed mid-stroke) commits and saves it, as a window blur does; an
+			// abandon or a file switch leaves the note as it was.
+			if(ending==='destroy')expect({memory:r.lifecycle.addedMemory,sidecar:r.lifecycle.addedSidecar},'the stroke in flight is committed and saved').toEqual({memory:1,sidecar:1});
+			else{expect(r.lifecycle.unchangedMemory).toBe(true);expect(r.lifecycle.unchangedSidecar).toBe(true);}
 			expect(r.lifecycle.mounted).toBe(ending!=='destroy');
 			if(ending!=='destroy')expect(r.lifecycle.covered).toBe(true);
 		} finally { await page.close(); }

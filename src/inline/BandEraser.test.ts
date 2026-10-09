@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { bandEraserIntent } from "./InlinePenRouter";
+import { resetTipModeForTest, setSideButtonErases } from "./TipMode";
 
 describe("bandEraserIntent (linked-mentions band claims)", () => {
+	beforeEach(resetTipModeForTest);
+	afterEach(resetTipModeForTest);
 	it("pen eraser end claims: buttons bit", () => {
 		expect(bandEraserIntent("pen", 32, 0, false, false)).toBe(true);
 	});
@@ -30,6 +33,17 @@ describe("bandEraserIntent (linked-mentions band claims)", () => {
 
 	it("mouse right button never claims, even in eraser mode with mouse ink", () => {
 		expect(bandEraserIntent("mouse", 2, 2, true, true)).toBe(false);
+	});
+
+	it("Android side-button pen contact claims; bare tip, mouse and touch stay unchanged", () => {
+		setSideButtonErases(true);
+		expect(bandEraserIntent("pen", 3, 0, false, false)).toBe(true);
+		expect(bandEraserIntent("pen", 1, 0, false, false)).toBe(false);
+		expect(bandEraserIntent("mouse", 2, 2, false, true)).toBe(false);
+		expect(bandEraserIntent("mouse", 3, 0, false, true)).toBe(false);
+		expect(bandEraserIntent("touch", 3, 0, false, true)).toBe(false);
+		setSideButtonErases(false);
+		expect(bandEraserIntent("pen", 3, 0, false, false)).toBe(false);
 	});
 
 	it("touch never claims", () => {

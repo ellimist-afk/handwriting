@@ -194,13 +194,21 @@ describe("zoom-out is locked below the 10% floor", () => {
 		expect(rig.scale()).toBeGreaterThan(seven);
 	});
 
-	it("(a) the ease-back still lands when the lift comes before its frame: 7% -> 9% painted -> 8% pending settles 8%", () => {
-		// The painted preview wrote 9% as the live scale. The settle must be judged
-		// against the gesture's 7% start, not that preview.
+	it("(a) a lift before the ease-back's frame lands the painted frame: 7% -> 9% painted -> 8% unpainted settles 9%", () => {
+		// The painted preview wrote 9% as the live scale and the 8% move was never
+		// drawn, so the lift lands 9%. The floor is judged against the gesture's 7%
+		// start, and 9% is above it.
 		const rig = makeRig();
 		rig.fit(0.05);
 		rig.gesture(0.07);
-		expect(rig.gestureLiftPending(0.09, 0.08)).toBeCloseTo(0.08, 12);
+		expect(rig.gestureLiftPending(0.09, 0.08)).toBeCloseTo(0.09, 12);
+	});
+
+	it("(a) with no frame painted the lift still lands the move: 7% -> 8% unpainted settles 8%", () => {
+		const rig = makeRig();
+		rig.fit(0.05);
+		rig.gesture(0.07);
+		expect(rig.gestureLiftPending(0.08)).toBeCloseTo(0.08, 12);
 	});
 
 	it("(b) a re-commit at Fit's own scale succeeds (the resize and column paths)", () => {

@@ -92,7 +92,10 @@ function makeRig() {
 	overlay.prepareViewportLayout = () => true;
 	overlay.viewportLayout = {width:640,height:480,baseTransform:"none"};
 	overlay.applyViewportBox = (next:number) => host.setCssStyles({transform:`scale(${next})`,transformOrigin:"0 0"});
-	overlay.commitCameraScale = (next: number) => {
+	// The real commit writes the scroll target it is given (after its own corrections, none of which apply to this
+	// bare rig), so the gesture-start anchor reaches the scroller through the commit, not through a second write.
+	overlay.commitCameraScale = (next: number, scroll?: { left: number; top: number }) => {
+		if (scroll) { scroller.scrollLeft = scroll.left; scroller.scrollTop = scroll.top; }
 		overlay.pinchScaleNow = next;
 		overlay.cssScale = next;
 		host.setCssStyles({ transform: `scale(${next})`, transformOrigin: "0 0" });
@@ -146,7 +149,7 @@ describe("InkOverlay pinch end with a coalesced move still pending", () => {
 		expect(rig.handleResize).toHaveBeenCalledTimes(1);
 		expect(rig.pendingFrames()).toBe(0);
 	});
-	it("lands the final requested scale and settles exactly once", () => {
+	it("lands the last painted scale, drops the unpainted move, and settles exactly once", () => {
 		const rig = makeRig();
 		const centroid = { x: 100, y: 80 };
 
@@ -157,25 +160,28 @@ describe("InkOverlay pinch end with a coalesced move still pending", () => {
 		expect(rig.handleResize).not.toHaveBeenCalled();
 		expect(rig.requestMeasure).not.toHaveBeenCalled();
 
-		// This move is newer than the frame that applied scale 2.  Lift before
-		// its requested frame runs: pinch end itself owes scale 3 and one settle.
+		// This move is newer than the frame that painted scale 2. Lift before its
+		// requested frame runs: scale 3 was never drawn, so the lift lands the
+		// painted 2, cancels the pending frame, and settles once.
 		rig.onPinch("move", 3, centroid);
 		expect(rig.pendingFrames()).toBe(1);
 		rig.onPinch("end", 3, centroid);
 
-		expect.soft(rig.scale(), "the final coalesced move was discarded").toBe(3);
-		expect.soft(rig.rasterScale(), "the raster never caught the landing").toBe(3);
-		expect.soft(rig.hostStyles.transform, "the compositor stayed on the prior frame").toBe(
-			"scale(3)"
+		expect.soft(rig.scale(), "the lift committed the unpainted move").toBe(2);
+		expect.soft(rig.rasterScale(), "the raster did not land the painted frame").toBe(2);
+		expect.soft(rig.hostStyles.transform, "the compositor left the painted frame").toBe(
+			"scale(2)"
 		);
 		expect.soft(rig.handleResize, "pinch end never settled/recomputed extent").toHaveBeenCalledTimes(1);
 		expect(rig.requestMeasure).toHaveBeenCalledTimes(1);
-		expect(rig.scroll().left, "the final frame lost the gesture-start x anchor").toBeCloseTo(
-			78.6666667,
+		// The gesture-start anchor at the landed scale: start scroll plus centroid / 1, less centroid / 2.
+		const start = { left: 12, top: 20 }, landed = 2;
+		expect(rig.scroll().left, "the landing lost the gesture-start x anchor").toBeCloseTo(
+			start.left + centroid.x - centroid.x / landed,
 			7
 		);
-		expect(rig.scroll().top, "the final frame lost the gesture-start y anchor").toBeCloseTo(
-			73.3333333,
+		expect(rig.scroll().top, "the landing lost the gesture-start y anchor").toBeCloseTo(
+			start.top + centroid.y - centroid.y / landed,
 			7
 		);
 		expect(rig.pendingFrames(), "a callback survived pinch end").toBe(0);

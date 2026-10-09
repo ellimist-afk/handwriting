@@ -807,6 +807,13 @@ it("AT REST: the rules are anchored to the note origin at 100 percent when fresh
 		const c = await read("after switching notes");
 		expect(c.geo.taken, "C premise: switching notes released the viewport").toBe(false);
 		expect.soft(c.off, `C after the view switched notes: rule end ${c.end} vs note origin ${c.expected}; ${JSON.stringify(c)}`).toBeLessThanOrEqual(0.5);
+
+		// D, the return arm (issue 9): back to the first note, which Reset left at 100 percent, so it
+		// returns at 100 percent with its rules on its origin. C above is the first-open arm: a note never seen this session.
+		await p.evaluate(() => (window as any).viewportFixture.switchPath("paper", "fit-paper.md"));
+		const d = await read("after switching back");
+		expect(d.geo.zoom, "D premise: the note returned at the 100 percent it was left at").toBeCloseTo(1, 6);
+		expect.soft(d.off, `D after switching back: rule end ${d.end} vs note origin ${d.expected}; ${JSON.stringify(d)}`).toBeLessThanOrEqual(0.5);
 	} finally {
 		await p.close();
 	}
@@ -864,6 +871,15 @@ it("AFTER A RELEASE: the first frame after a note switch paints the paper at the
 			expect.soft(frames[at].pitch, `${at}: pitch in the switched note's first frame; ${report}`).toBe("42px");
 			expect.soft(frames[at].rule, `${at}: rule in the switched note's first frame, at rest at 100 percent; ${report}`).toBe("1.5px");
 		}
+		// The return arm (issue 9): the switch above opened a note never seen this session, at 100
+		// percent. Switching back to the first note restores the 10 percent it was left at, and its paper with it.
+		const back = await p.evaluate(`(async () => {
+			await window.viewportFixture.switchPath("paper", "fit-paper.md");
+			for (let i = 0; i < 4; i++) await window.viewportFixture.settle();
+			return { zoom: window.viewportFixture.snap("paper").state.zoom, vars: (${readPaperVars})(document.querySelector(".cm-editor")) };
+		})()`) as { zoom: number; vars: PaperVars };
+		expect(back.zoom, `RETURN: the first note comes back at the 10 percent it was left at; ${JSON.stringify(back)}`).toBeCloseTo(0.1, 6);
+		expect.soft([back.vars.taken, back.vars.pitch, back.vars.rule], `RETURN: its paper at 24 px text, 10 percent; ${JSON.stringify(back)}`).toEqual([true, "42px", "10.15625px"]);
 	} finally {
 		await p.close();
 	}

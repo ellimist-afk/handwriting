@@ -589,3 +589,122 @@ describe("embed ink registry hooks", () => {
 		teardownEmbedInk();
 	});
 });
+
+/** A block in a rendered note: its class and where its border box sits on screen. */
+function fakeBlock(reads: { n: number }, left: number, width = 600, cls = "el-p") {
+	return {
+		classList: { contains: (c: string) => c === cls },
+		getBoundingClientRect: () => {
+			reads.n++;
+			return { left, width, right: left + width, top: 0, height: 20, bottom: 20 };
+		},
+	};
+}
+
+/** A reading view whose sizer has rendered blocks: offsets, the sizer's own rect, and its children. */
+function columnRoot(reads: { n: number }, offsetLeft: number, sizerLeft: number, blocks: unknown[]) {
+	const sizer = {
+		offsetLeft,
+		offsetTop: 32,
+		offsetParent: null as unknown,
+		children: blocks,
+		querySelector: () => null,
+		getBoundingClientRect: () => {
+			reads.n++;
+			return { left: sizerLeft, width: 600, right: sizerLeft + 600, top: 0, height: 600, bottom: 600 };
+		},
+	};
+	const root = fakeAnchorRoot("markdown-preview-view", sizer as unknown as FakeSizer);
+	sizer.offsetParent = root;
+	return root as unknown as HTMLElement;
+}
+
+describe("embedInkAnchor: the x origin is the text column's left edge, measured from the root", () => {
+	it("a sizer at 0 whose paragraph sits 380 in: the layer starts at 380", () => {
+		const reads = { n: 0 };
+		const root = columnRoot(reads, 0, 0, [fakeBlock(reads, 380)]);
+		expect(embedInkAnchor(root)?.left).toBe(380);
+	});
+
+	it("stock shape, the sizer is the column: the sizer's left, not doubled", () => {
+		const reads = { n: 0 };
+		const root = columnRoot(reads, 32, 376, [fakeBlock(reads, 376)]);
+		// The view itself on screen, 32 left of its sizer: a column measured
+		// from the view and not the sizer reads 64.
+		(root as unknown as { getBoundingClientRect: () => unknown }).getBoundingClientRect = () =>
+			({ left: 344, width: 664, right: 1008, top: 0, height: 600, bottom: 600 });
+		expect(embedInkAnchor(root)?.left).toBe(32);
+	});
+
+	it("a table wider than the column first, then a paragraph: the paragraph's left", () => {
+		const reads = { n: 0 };
+		const root = columnRoot(reads, 32, 376, [fakeBlock(reads, 376, 900, "el-table"), fakeBlock(reads, 414.1)]);
+		expect(embedInkAnchor(root)?.left).toBeCloseTo(70.1, 6);
+	});
+
+	it("only a header, a pusher and a zero-width child, never measured: the sizer's left as before", () => {
+		const reads = { n: 0 };
+		const root = columnRoot(reads, 32, 376, [
+			fakeBlock(reads, 300, 600, "mod-header"),
+			fakeBlock(reads, 300, 600, "markdown-preview-pusher"),
+			fakeBlock(reads, 700, 0),
+		]);
+		expect(embedInkAnchor(root)?.left).toBe(32);
+	});
+
+	it("Minimal with readable line length on: the layer lands under 1 px from the text, not 38.6 px left", () => {
+		// Measured in Minimal with readable line length on: view at 344, sizer offsetLeft 32 (rect 376), text at 414.1.
+		const reads = { n: 0 };
+		const root = columnRoot(reads, 32, 376, [fakeBlock(reads, 414.1)]);
+		const textFromRoot = 414.1 - 344;
+		expect(Math.abs((embedInkAnchor(root)?.left ?? 0) - textFromRoot)).toBeLessThan(1);
+	});
+
+	it("an embed whose text sits 24 px inside its content box: the layer starts 24 in, top unchanged", () => {
+		// An embed, measured in every theme: root at 444.7, text at 468.7.
+		const reads = { n: 0 };
+		const embed = {
+			classList: { contains: (c: string) => c === "markdown-embed-content" },
+			clientLeft: 0,
+			children: [fakeBlock(reads, 468.7)],
+			querySelector: () => null,
+			getBoundingClientRect: () => ({ left: 444.7, width: 514, right: 958.7, top: 0, height: 286, bottom: 286 }),
+		};
+		const at = embedInkAnchor(embed as unknown as HTMLElement);
+		expect(at?.left).toBeCloseTo(24, 6);
+		expect(at?.top).toBe(0);
+	});
+
+	it("an embed with a column it remembers looks nothing up inside itself on the next paint", () => {
+		// The embed's sizer is found by a descendant query, a walk of the
+		// embed; it runs only when the column is measured.
+		const reads = { n: 0 };
+		const deep = { n: 0 };
+		const embed = {
+			classList: { contains: (c: string) => c === "markdown-embed-content" },
+			clientLeft: 0,
+			children: [fakeBlock(reads, 468.7)],
+			querySelector: (sel: string) => {
+				if (!sel.startsWith(":scope")) deep.n++;
+				return null;
+			},
+			getBoundingClientRect: () => ({ left: 444.7, width: 514, right: 958.7, top: 0, height: 286, bottom: 286 }),
+		};
+		expect(embedInkAnchor(embed as unknown as HTMLElement)?.left).toBeCloseTo(24, 6);
+		deep.n = 0;
+		expect(embedInkAnchor(embed as unknown as HTMLElement)?.left).toBeCloseTo(24, 6);
+		expect(deep.n, "descendant queries on a paint of an embed with a memory").toBe(0);
+	});
+
+	it("bounded: a note of 500 blocks costs at most 9 rect reads on the first call and none on the next paint", () => {
+		const reads = { n: 0 };
+		const blocks = Array.from({ length: 500 }, () => fakeBlock(reads, 414.1));
+		const root = columnRoot(reads, 32, 376, blocks);
+		embedInkAnchor(root);
+		expect(reads.n, "rect reads on the first anchor call").toBeGreaterThan(0);
+		expect(reads.n, "rect reads on the first anchor call").toBeLessThanOrEqual(9);
+		reads.n = 0;
+		embedInkAnchor(root);
+		expect(reads.n, "rect reads on a paint of a root with a memory").toBe(0);
+	});
+});

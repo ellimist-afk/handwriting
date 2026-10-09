@@ -37,7 +37,7 @@ describe("inline pen release filtering", () => {
 		expect(strokes[0]!.points.at(-1)!.x).toBe(2);
 	});
 
-	it("turns a confirmed release gap followed by renewed contact into two strokes", () => {
+	it("keeps one stroke when contact comes back after a light run with no lift between", () => {
 		const value = builder();
 		value.add(0, 0, 0.4, 1000);
 		value.add(10, 0, 0.3, 1006);
@@ -49,13 +49,12 @@ describe("inline pen release filtering", () => {
 
 		const strokes = value.finishReleaseFiltered();
 
-		expect(strokes).toHaveLength(2);
-		expect(strokes[0]!.points.at(-1)!.x).toBe(10);
-		expect(strokes[1]!.points[0]!.x).toBe(28);
-		expect(strokes[0]!.id).not.toBe(strokes[1]!.id);
+		// The pen never left the glass: the light samples are ink drawn in contact.
+		expect(strokes).toHaveLength(1);
+		expect(strokes[0]!.points.map((point) => point.x)).toEqual([0, 10, 12, 24, 28, 31, 40]);
 	});
 
-	it("handles repeated release gaps and removes the final release tail", () => {
+	it("keeps repeated light runs that recover whole and still removes the final release tail", () => {
 		const value = builder();
 		for (const [x, pressure, time] of [
 			[0, 0.3, 1000],
@@ -78,12 +77,8 @@ describe("inline pen release filtering", () => {
 
 		const strokes = value.finishReleaseFiltered();
 
-		expect(strokes).toHaveLength(3);
-		expect(strokes.map((stroke) => [stroke.points[0]!.x, stroke.points.at(-1)!.x])).toEqual([
-			[0, 5],
-			[23, 30],
-			[48, 55],
-		]);
+		expect(strokes).toHaveLength(1);
+		expect(strokes[0]!.points.map((point) => point.x)).toEqual([0, 5, 10, 20, 23, 25, 30, 35, 45, 48, 50, 55]);
 	});
 
 	it("preserves a short low-pressure wobble that is too small to prove a release", () => {
@@ -178,14 +173,14 @@ describe("inline pen release filtering: light runs longer than a bounce are writ
 		expect(strokes[0]!.points.map((point) => point.x), "every sample the wet layer drew is committed").toEqual(added);
 	});
 
-	it("still removes and splits a light run of exactly the ceiling, and keeps one a millisecond longer", () => {
+	it("keeps a light run that recovers whole at the ceiling and a millisecond over it", () => {
 		expect(RELEASE_MAX_MS).toBeGreaterThan(RELEASE_MIN_MS_FOR_TEST);
-		const atCeiling = withLightRun(RELEASE_MAX_MS).value.finishReleaseFiltered();
-		expect(atCeiling, "a bounce at the ceiling splits").toHaveLength(2);
-		const over = withLightRun(RELEASE_MAX_MS + 1);
-		const kept = over.value.finishReleaseFiltered();
-		expect(kept, "one millisecond over the ceiling is writing").toHaveLength(1);
-		expect(kept[0]!.points.map((point) => point.x)).toEqual(over.added);
+		for (const lightMs of [RELEASE_MAX_MS, RELEASE_MAX_MS + 1]) {
+			const run = withLightRun(lightMs);
+			const kept = run.value.finishReleaseFiltered();
+			expect(kept, `a ${lightMs} ms run between two contacts is writing`).toHaveLength(1);
+			expect(kept[0]!.points.map((point) => point.x)).toEqual(run.added);
+		}
 	});
 
 	it("applies the same ceiling at the end of a contact: a long light ending stays, a short light tail goes", () => {
@@ -198,20 +193,54 @@ describe("inline pen release filtering: light runs longer than a bounce are writ
 		expect(short[0]!.points.map((point) => point.x), "a tail within the ceiling is release travel").toEqual([0, 4]);
 	});
 
-	it("does not count a still hold before the run: a 15 ms bounce after 300 ms without movement is still a bounce", () => {
+	it("does not count a still hold before the run: a 15 ms light ending after 300 ms without movement is still a tail", () => {
 		const value = builder();
 		value.add(0, 0, 0.4, 1000);
 		value.add(8, 0, 0.5, 1100); // then the pen holds still: no sample is accepted until it moves
 		value.add(12, 0, 0.01, 1400);
 		value.add(20, 0, 0.01, 1415);
-		value.add(24, 0, 0.5, 1425);
 
 		const strokes = value.finishReleaseFiltered();
 
-		expect(strokes, "the bounce splits the stroke").toHaveLength(2);
-		expect(strokes[0]!.points.map((point) => point.x), "the piece before the bounce").toEqual([0, 8]);
-		// A one-sample piece is stored with a 0.01 px twin so it still draws a dot (buildStroke).
-		expect(strokes[1]!.points[0]!.x, "the piece after it starts where contact resumed").toBe(24);
+		expect(strokes, "the light ending is trimmed, one stroke is left").toHaveLength(1);
+		expect(strokes[0]!.points.map((point) => point.x), "the stroke up to the hold").toEqual([0, 8]);
+	});
+
+	/**
+	 * A confident stroke, a light run, then a lift whose last samples rise into
+	 * the band between RELEASE_PRESSURE_MAX (0.025) and CONFIDENT_CONTACT_PRESSURE
+	 * (0.08). Light run: 3 samples at 0.01, 3 px apart. Band samples: `band`,
+	 * each 4 ms and 3 px further on. All inside the gates: 8 ms and 3 px
+	 * from the release edge, and a light span far under RELEASE_MAX_MS.
+	 */
+	function withBandEnding(band: number[]): { strokes: ReturnType<StrokeBuilder["finishReleaseFiltered"]>; added: number[] } {
+		const value = builder();
+		const added: number[] = [];
+		const add = (x: number, p: number, t: number): void => {
+			if (value.add(x, 0, p, t)) added.push(x);
+		};
+		add(0, 0.4, 1000);
+		add(4, 0.3, 1004); // the release edge
+		add(7, 0.01, 1008);
+		add(10, 0.01, 1012);
+		add(13, 0.01, 1016);
+		band.forEach((p, k) => add(16 + 3 * k, p, 1020 + 4 * k));
+		return { strokes: value.finishReleaseFiltered(), added };
+	}
+
+	it("trims a light ending whose last samples rise into the band but never reach confident contact (0.04 to 0.07 to the lift)", () => {
+		const { strokes, added } = withBandEnding([0.04, 0.06, 0.07]);
+
+		expect(added, "the fixture adds every sample").toHaveLength(8);
+		expect(strokes, "one stroke is left").toHaveLength(1);
+		expect(strokes[0]!.points.map((point) => point.x), "the light run and the band samples ride together and are trimmed").toEqual([0, 4]);
+	});
+
+	it("keeps the whole stroke when the same ending reaches confident contact: 0.04, 0.06, then 0.08", () => {
+		const { strokes, added } = withBandEnding([0.04, 0.06, 0.08]);
+
+		expect(strokes, "contact came back with no lift between: one stroke").toHaveLength(1);
+		expect(strokes[0]!.points.map((point) => point.x), "every sample drawn is committed").toEqual(added);
 	});
 });
 
@@ -234,10 +263,55 @@ describe("non-finishing release-filtered snapshots", () => {
  });
  it("uses the same release groups and profile as lift", () => {
   const b = new StrokeBuilder("pen", "#123456", 2);
-  b.start(0); b.add(0,0,0.4,0); b.add(10,0,0.4,10); b.add(20,0,0.01,20); b.add(30,0,0.01,30); b.add(40,0,0.5,40);
+  b.start(0); b.add(0,0,0.4,0); b.add(10,0,0.4,10); b.add(20,0,0.01,20); b.add(30,0,0.01,30);
   const snapshot=b.snapshotReleaseFiltered(), final=b.finishReleaseFiltered();
-  expect(snapshot).toHaveLength(2);
+  expect(snapshot).toHaveLength(1);
+  expect(snapshot[0]!.points.map(p=>p.x)).toEqual([0,10]);
   expect(snapshot.map(s=>[s.points,s.width,s.pressureProfile])).toEqual(final.map(s=>[s.points,s.width,s.pressureProfile]));
   expect(snapshot[0]!.points[0]).not.toBe(final[0]!.points[0]);
  });
+});
+
+describe("release filter: a point that arrives light and is then held and pressed", () => {
+	it("keeps the whole stroke when the held pen reaches confident pressure on the point", () => {
+		const b = new StrokeBuilder("pen", "#000", 2);
+		b.start(1000);
+		const drawn: number[] = [];
+		const add = (x: number, p: number, t: number) => {
+			if (b.add(x, 0, p, t)) drawn.push(x);
+		};
+		add(0, 0.4, 1000);
+		add(4, 0.4, 1008);
+		add(8, 0.02, 1020);
+		expect(b.add(8.05, 0, 0.4, 1030)).toBeUndefined();
+
+		const strokes = b.finishReleaseFiltered();
+
+		expect(strokes).toHaveLength(1);
+		expect(strokes[0]!.points.map((p) => p.x), "the pressed point is committed with the stroke").toEqual(drawn);
+	});
+});
+
+describe("a held pen's later pressure stays off the saved point", () => {
+	it("saves the pressure the point arrived with, which the wet layer drew", () => {
+		const b = new StrokeBuilder("pen", "#000", 2);
+		b.start(0);
+		b.add(0, 0, 0.2, 0);
+		expect(b.add(0.05, 0, 0.9, 8)).toBeUndefined();
+		b.add(4, 0, 0.2, 16);
+		expect(b.finishReleaseFiltered()[0]!.points.map((p) => p.pressure)).toEqual([0.2, 0.2]);
+	});
+	it("forgets a held press at the next start, so a light ending there is still release", () => {
+		const b = new StrokeBuilder("pen", "#000", 2);
+		b.start(1000);
+		b.add(0, 0, 0.4, 1000);
+		b.add(4, 0, 0.4, 1008);
+		b.add(8, 0, 0.02, 1020);
+		expect(b.add(8.05, 0, 0.4, 1030)).toBeUndefined();
+		b.start(2000);
+		b.add(0, 0, 0.4, 2000);
+		b.add(4, 0, 0.4, 2008);
+		b.add(8, 0, 0.02, 2020);
+		expect(b.finishReleaseFiltered()[0]!.points.map((p) => p.x)).toEqual([0, 4]);
+	});
 });

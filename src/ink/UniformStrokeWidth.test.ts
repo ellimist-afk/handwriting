@@ -214,12 +214,16 @@ describe("uniform finger stroke width", () => {
 			[28, 0.04, 1027],
 			[31, 0.08, 1032],
 			[40, 0.2, 1040],
+			[50, 0.01, 1050],
+			[60, 0, 1060],
 		] as const) {
 			grouped.add(x, 0, pressure, time);
 		}
+		// The light run in the middle recovers, so it stays in the one stroke; the light ending is trimmed.
 		const groups = grouped.finishReleaseFiltered();
-		expect(groups).toHaveLength(2);
-		expect(groups.map((value) => value.widthMode)).toEqual(["uniform", "uniform"]);
+		expect(groups).toHaveLength(1);
+		expect(groups[0]!.points.map((point) => point.x)).toEqual([0, 10, 12, 24, 28, 31, 40]);
+		expect(groups.map((value) => value.widthMode)).toEqual(["uniform"]);
 	});
 
 	it("round-trips as a recognized optional PageData field without changing the schema", () => {

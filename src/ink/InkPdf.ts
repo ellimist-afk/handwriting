@@ -208,6 +208,23 @@ export function inkPageBox(strokes: readonly InkStroke[]): { w: number; h: numbe
 	return { w, h };
 }
 
+/** The largest page side, in default user-space units, that strict readers follow (PDF 1.7 implementation limit). */
+export const MAX_PAGE_UNITS = 14400;
+
+/**
+ * The /UserUnit a page needs: 1 inside the limit, otherwise the smallest whole number that brings both sides inside.
+ * A reader that ignores the key shows a smaller nominal page and loses nothing; the geometry is whole either way.
+ */
+export function pdfUserUnit(widthPx: number, heightPx: number): number {
+	const longest = Math.max(widthPx, heightPx) * PX_TO_PT;
+	return longest > MAX_PAGE_UNITS ? Math.ceil(longest / MAX_PAGE_UNITS) : 1;
+}
+
+/** A scale to eight places: `pdfNum` stops at two, which would turn 0.375 into 0.38 and stretch a long note by a percent. */
+function pdfScale(v: number): string {
+	return v.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 /**
  * A one-page PDF around a content stream.
  *
@@ -222,15 +239,18 @@ export function inkPageBox(strokes: readonly InkStroke[]): { w: number; h: numbe
  * hex and every other value is a formatted number.
  */
 export function pdfDocument(widthPx: number, heightPx: number, content: string): string {
-	const wPt = pdfNum(widthPx * PX_TO_PT);
-	const hPt = pdfNum(heightPx * PX_TO_PT);
+	const unit = pdfUserUnit(widthPx, heightPx);
+	const wPt = pdfNum((widthPx * PX_TO_PT) / unit);
+	const hPt = pdfNum((heightPx * PX_TO_PT) / unit);
 	// The stream's flip is in px; the page box is in points. The page carries
-	// the px-to-pt scale so the ink never has to know about units.
-	const body = `q ${pdfNum(PX_TO_PT)} 0 0 ${pdfNum(PX_TO_PT)} 0 0 cm ${content} Q`;
+	// the px-to-pt scale so the ink never has to know about units. Past the
+	// page-size limit the box and the scale both shrink by the UserUnit.
+	const scale = unit === 1 ? pdfNum(PX_TO_PT) : pdfScale(PX_TO_PT / unit);
+	const body = `q ${scale} 0 0 ${scale} 0 0 cm ${content} Q`;
 	const objects = [
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${wPt} ${hPt}]` +
+		`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${wPt} ${hPt}]${unit === 1 ? "" : ` /UserUnit ${unit}`}` +
 			" /Contents 4 0 R /Resources << /ExtGState << /GSa 5 0 R >> >> >>",
 		`<< /Length ${body.length} >>\nstream\n${body}\nendstream`,
 		`<< /Type /ExtGState /ca ${pdfNum(HIGHLIGHTER_ALPHA)} /CA ${pdfNum(HIGHLIGHTER_ALPHA)} >>`,

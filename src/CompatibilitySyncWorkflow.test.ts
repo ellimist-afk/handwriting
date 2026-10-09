@@ -82,7 +82,9 @@ async function device(adapter = new SyncAdapter(), raw: unknown = {}, beforeLoad
   Object.assign(plugin, { store, pdfStore: pdf, settingsTimer: null, settingsDirty: false,
     settingsWriting: null, settingsWriteAgain: false,
     app: { vault: { adapter }, workspace: { onLayoutReady() {} } },
-    loadData: async () => raw, saveData: async (value: unknown) => { saved = structuredClone(value); },
+    // data.json as a real file is: a read returns the last save. Frozen at `raw`, every save
+    // read "another device says <raw>", which no real vault does after its own save.
+    loadData: async () => saved ?? raw, saveData: async (value: unknown) => { saved = structuredClone(value); },
     applyPaperTo() {}, applyBooxMode() {} });
   beforeLoad?.(store);
   await plugin.loadSettings();
@@ -280,6 +282,7 @@ describe("compatibility across two synthetic devices", () => {
     expect([...files.files]).toEqual(before);
     expect((await d.clickCompatibility())[0]).toBe("Turn off");
     expect(d.store.inkFolder()).toBe(".handwriting");
+    expect(d.plugin.settings.inkFolder, "the settings and the store name different folders").toBe(".handwriting");
   });
   it("JSON arriving after empty initial open appears through the registered poll without drawing or reopening", async () => {
     const files = new SyncAdapter(); documents(files);

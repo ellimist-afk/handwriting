@@ -484,7 +484,14 @@ export class PointerRouter {
 
 		// Pinch: use the first two contacts.
 		const ids = [...this.touches.keys()].slice(0, 2);
-		if (!ids.includes(e.pointerId)) return; // extra fingers ignored
+		if (!ids.includes(e.pointerId)) {
+			// An extra finger moves no camera, but its position stays current:
+			// when one of the pair lifts it joins the pair, and its next move is
+			// measured from where it is, not from where it landed.
+			state.x = p.x;
+			state.y = p.y;
+			return;
+		}
 		const a = this.touches.get(ids[0]!)!;
 		const b = this.touches.get(ids[1]!)!;
 		const prevMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };

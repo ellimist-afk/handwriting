@@ -236,7 +236,9 @@ describe("the cross-reference row cap", () => {
 	// Same fixture cost as the stream-xref pair above (bigClassicXref builds
 	// MAX_XREF_ROWS+1 rows too); this one lacked the 20_000 timeout and timed
 	// out at the default 5 s under load, 2026-09-02, three lanes running
-	// vitest at once.
+	// vitest at once. 20_000 was not enough either, 2026-10-03: 2.5 s alone, 33 s
+	// and a timeout with 64 busy threads on the same eight CPUs, 24-27 s with
+	// three full suites at once in a cloud run.
 	it(
 		"refuses a classic table one row past the cap",
 		() => {
@@ -244,7 +246,7 @@ describe("the cross-reference row cap", () => {
 			expect(r.ok).toBe(false);
 			expect(r.ok || r.reason).toContain(`more than ${MAX_XREF_ROWS} rows`);
 		},
-		20_000,
+		60_000,
 	);
 });
 

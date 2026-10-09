@@ -18,6 +18,7 @@
  * only the DOM sinks and the window are controlled.
  */
 import { describe, expect, it, vi } from "vitest";
+import { Platform } from "obsidian";
 
 // The overlay reaches window through winRef; the node environment has none,
 // so mirror the other prototype suites' shim before the module graph loads.
@@ -148,8 +149,12 @@ interface Rig {
  * The computed zoom is therefore the real cascade - inline-important, then
  * sheet-important, then inline, then the sheet's plain value - rather than the
  * two-case "stylesheet value / stylesheet wins" it modelled before.
+ *
+ * `report` is how the engine spells that cascade back: Chromium serialises a
+ * computed zoom to six significant digits, which the read-back cells model.
  */
-function rig(supported: boolean | null, baseTransform = "none", themeZoom?: string, stuckZoom: boolean | string = false): Rig {
+function rig(supported: boolean | null, baseTransform = "none", themeZoom?: string, stuckZoom: boolean | string = false,
+	report: (zoom: string | undefined) => string | undefined = zoom => zoom): Rig {
 	const supports = vi.fn((property: string, value: string) => property === "zoom" && value === "0.5" && supported === true);
 	// The sheet's `!important` declaration, if it has one.
 	const sheetImportant = stuckZoom === true ? themeZoom : (typeof stuckZoom === "string" ? stuckZoom : undefined);
@@ -164,7 +169,7 @@ function rig(supported: boolean | null, baseTransform = "none", themeZoom?: stri
 		getComputedStyle: (el?: unknown) => ({
 			marginLeft: "24px", marginRight: "24px", transform: baseTransform, width: "640px", height: "480px",
 			// Only the host resolves a zoom; contentDOM is asked for margins.
-			...(el === host && (themeZoom !== undefined || sheetImportant !== undefined) ? { zoom: cascadeZoom() } : {}),
+			...(el === host && (themeZoom !== undefined || sheetImportant !== undefined) ? { zoom: report(cascadeZoom()) } : {}),
 		}),
 		cancelAnimationFrame: () => undefined,
 	};
@@ -460,6 +465,52 @@ describe("applyViewportBox: a zoom the host already had", () => {
 		expect(supportedNow(overlay), "and the overlay stays on the fallback").toBe(false);
 	});
 
+	/**
+	 * THE ENGINE'S SPELLING IS NOT A WRITE THAT FAILED. Chromium serialises a computed zoom to six significant
+	 * digits, so the read-back of a product above 1 can sit more than 1e-6 off it: sqrt(2.5) reads "1.58114", 1.2e-6
+	 * off. An absolute 1e-6 bound took that for a write that did not take and moved the note to the transform form
+	 * for the life of the overlay. The zoom form runs only at or below 1
+	 * now, on every platform, so the product is above 1 only on a host with its own zoom (2 x sqrt(0.5) reads
+	 * "1.41421", 3.6e-6 off). Each product is first shown to sit more than 1e-6 off its six-digit spelling, so no arm
+	 * here passes the old bound.
+	 */
+	const sixDigits = (zoom: string | undefined): string | undefined => zoom === undefined ? zoom : String(Number(Number(zoom).toPrecision(6)));
+	const readBackArms = [
+		{ name: "desktop, host zoom 2, shrink to sqrt(0.5)", mobile: false, theme: "2", k: Math.SQRT1_2 },
+		{ name: "desktop, host zoom 1.75, shrink to sqrt(0.5)", mobile: false, theme: "1.75", k: Math.SQRT1_2 },
+		{ name: "mobile, host zoom 2, shrink to sqrt(0.5)", mobile: true, theme: "2", k: Math.SQRT1_2 },
+	];
+	for (const arm of readBackArms) it(`keeps the zoom form when the host reads the product back to six significant digits: ${arm.name}`, () => {
+		const mobile = Platform.isMobileApp;
+		Platform.isMobileApp = arm.mobile;
+		try {
+			const want = Number(arm.theme) * arm.k;
+			expect(Math.abs(Number(sixDigits(String(want))) - want), `${want} reads back within 1e-6: not a product this cell can use`).toBeGreaterThan(1e-6);
+			const { overlay, host } = rig(true, "none", arm.theme, false, sixDigits);
+			prepare(overlay);
+			apply(overlay, arm.k);
+			expect(supportedNow(overlay), "the overlay kept the zoom form").toBe(true);
+			expect(host.calls.at(-1)?.transform, "no scale transform was written").toBe("");
+			expect(Number.parseFloat(host.props.zoom!), "the zoom is still on the host").toBeCloseTo(want, 12);
+		} finally {
+			Platform.isMobileApp = mobile;
+		}
+	});
+
+	/**
+	 * THE OTHER SIDE OF THE SAME BOUND. A host that lands on another factor - 1e-4 of the product off, twenty times
+	 * the engine's worst six-digit error - still hands the overlay to the transform form on the same call.
+	 */
+	it("still falls back when the host reads back another factor, 1e-4 of the product off", () => {
+		const off = (zoom: string | undefined): string | undefined => zoom === undefined || zoom === "1" ? zoom : String(Number(zoom) * (1 + 1e-4));
+		const { overlay, host } = rig(true, "none", "1", false, off);
+		prepare(overlay);
+		apply(overlay, Math.SQRT1_2);
+		expect(supportedNow(overlay), "the overlay moved to the transform form").toBe(false);
+		expect(host.calls.at(-1), "the call ends in the fallback form").toEqual(expect.objectContaining({ zoom: "", transformOrigin: "0 0" }));
+		expect(host.props.zoom, "no zoom left on the host").toBeUndefined();
+	});
+
 	it("reads the host's zoom back once per takeover, not once per frame", () => {
 		const { overlay, host } = rig(true, "none", "1.25");
 		const scroller = (overlay.view as { scrollDOM: unknown }).scrollDOM;
@@ -483,6 +534,103 @@ describe("applyViewportBox: a zoom the host already had", () => {
 		const beforeSettle = readsOf(reads, scroller);
 		apply(overlay, 0.1);
 		expect(readsOf(reads, scroller) - beforeSettle, "the settle measures it exactly once").toBe(1);
+	});
+});
+
+/**
+ * THE FORM PER k, one rule on every platform. Above 1 the transform form: the
+ * zoom form lays the text out again at the zoomed font size with whole-px glyph metrics and the glyphs move against
+ * the ink (measured: 0.54 CSS px at 1.79 on a 1.8257 display). At or below 1 the zoom form, where the engine has
+ * it. The engine's answer is not touched: above 1 is a choice, not a demotion, and it reads nothing back.
+ */
+describe("applyViewportBox: the form per k", () => {
+	it("writes the transform form above 1 and reads nothing back", () => {
+		const { overlay, host } = rig(true, "none", "1");
+		const win = (host.ownerDocument as { defaultView: Fields }).defaultView;
+		const reads = vi.fn(win.getComputedStyle as (el?: unknown) => Record<string, string>);
+		win.getComputedStyle = reads;
+		prepare(overlay);
+		const before = readsOf(reads, host);
+		apply(overlay, 1.79);
+		expect(host.calls.at(-1), "the scale transform, no zoom")
+			.toEqual(expect.objectContaining({ zoom: "", transform: "scale(1.79)", transformOrigin: "0 0" }));
+		expect(host.props.zoom, "no zoom on the host").toBeUndefined();
+		expect(readsOf(reads, host) - before, "no read-back above 1").toBe(0);
+		expect(supportedNow(overlay), "the engine's answer is kept").toBe(true);
+		expect(layoutOf(overlay).zoomVerified, "nothing was certified").not.toBe(true);
+	});
+
+	it("writes the zoom form at 1 and below", () => {
+		for (const k of [1, 0.999, 0.5, 0.1]) {
+			const { overlay, host } = rig(true, "none", "1");
+			prepare(overlay);
+			apply(overlay, k);
+			expect(host.calls.at(-1)?.transform, `${k}: no scale transform`).toBe("");
+			expect(Number.parseFloat(host.props.zoom!), `${k}: the zoom on the host`).toBeCloseTo(k, 12);
+		}
+	});
+
+	it("crosses at 1 in both directions, each write clearing the other form", () => {
+		const { overlay, host } = rig(true, "none", "1");
+		prepare(overlay);
+		const forms: string[] = [];
+		for (const k of [0.5, 1.5, 2.5, 0.8, 1, 1.2]) {
+			apply(overlay, k);
+			const call = host.calls.at(-1)!;
+			forms.push(call.zoom !== "" && call.transform === "" ? `zoom ${call.zoom}` : call.zoom === "" && call.transform !== "" ? call.transform! : "both or neither");
+		}
+		expect(forms).toEqual(["zoom 0.5", "scale(1.5)", "scale(2.5)", "zoom 0.8", "zoom 1", "scale(1.2)"]);
+	});
+
+	it("writes the same forms on mobile: transform above 1, zoom at 1 and below", () => {
+		const mobile = Platform.isMobileApp;
+		Platform.isMobileApp = true;
+		try {
+			const { overlay, host } = rig(true, "none", "1");
+			prepare(overlay);
+			apply(overlay, 1.79);
+			expect(host.calls.at(-1), "above 1: the scale transform, no zoom").toEqual(expect.objectContaining({ zoom: "", transform: "scale(1.79)", transformOrigin: "0 0" }));
+			apply(overlay, 0.5);
+			expect(host.calls.at(-1)?.transform, "below 1: no scale transform").toBe("");
+			expect(Number.parseFloat(host.props.zoom!), "below 1: the zoom on the host").toBeCloseTo(0.5, 12);
+		} finally {
+			Platform.isMobileApp = mobile;
+		}
+	});
+
+	it("writes the transform form at every k where the engine has no zoom", () => {
+		for (const k of [0.5, 1.79]) {
+			const { overlay, host } = rig(false, "none", "1");
+			prepare(overlay);
+			apply(overlay, k);
+			expect(host.calls.at(-1), `${k}`).toEqual(expect.objectContaining({ zoom: "", transform: `scale(${k})`, transformOrigin: "0 0" }));
+		}
+	});
+
+	/**
+	 * A CROSSING RE-PLACES THE CANVASES. Below 1 under the transform form the layer box is the band times k stretched
+	 * back, so the five canvases follow the form; the frames that do not cross write nothing on them.
+	 */
+	it("re-places the canvases on the frame that crosses 1, and on no other", () => {
+		const r = rig(true, "none", "1");
+		Object.assign(r.overlay, { cssWidth: 1000, cssHeight: 800, cssScale: 0.5, pinchScaleNow: 0.5 });
+		const tail = r.overlay.tail as TailRenderer;
+		tail.configureInlineBacking(1000, 800, 1, 0.5, true);
+		tail.restoreFullSurface();
+		prepare(r.overlay);
+		const at = (k: number) => { Object.assign(r.overlay, { cssScale: k, pinchScaleNow: k }); for (const c of r.canvases) c.calls.length = 0; apply(r.overlay, k); };
+		const placed = () => r.canvases.filter((c, i) => i !== 2 && c.calls.length > 0).length;
+		at(0.5);
+		expect(placed(), "the first write records the form only").toBe(0);
+		at(0.6);
+		expect(placed(), "no crossing, no placement").toBe(0);
+		at(1.5);
+		expect(placed(), "the crossing up re-places the four canvases").toBe(4);
+		at(1.6);
+		expect(placed(), "no crossing, no placement").toBe(0);
+		at(0.5);
+		expect(placed(), "the crossing down re-places them again").toBe(4);
+		expect(r.canvases[0]!.calls.at(-1), "placed for the zoom form below 1: the plain band box").toEqual({ width: "1000px", height: "800px", transform: "", transformOrigin: "" });
 	});
 });
 

@@ -3,10 +3,17 @@ import type { StrokeWidthMode, PressureProfile } from "./StrokeWidth";
 
 /**
  * Some pens keep reporting contact while the nib is already leaving the
- * glass. Pressure falls to a tiny value, coordinates travel, and pressure may
- * then recover without another pointerdown. Those coordinates are release
- * travel, not ink. The two pressure bands provide hysteresis; the time and
- * distance gates keep a brief light-pressure wobble in the stroke.
+ * glass. Pressure falls to a tiny value and coordinates travel. At the END of
+ * a contact those coordinates are release travel, not ink, and are trimmed.
+ * The two pressure bands provide hysteresis; the time and distance gates keep
+ * a brief light-pressure wobble in the stroke.
+ *
+ * A light run that is followed by confident contact, with no lift between,
+ * is not release: the pen never left the glass, so the run is ink drawn in
+ * contact (a pressure dip) and stays in the stroke whole, as one stroke. A
+ * split there would delete ink the pen drew and change the line at the lift.
+ * Real captures hold no pen that travels far in contact and then returns to
+ * pressure; only a run with no recovery is removed.
  *
  * Pressure cannot tell release travel from a deliberate light glide: Alan's
  * in-contact glide (trace d1c16bdb) went down to 0.0039, below the release
@@ -21,7 +28,8 @@ const RELEASE_MIN_MS = 8;
 const RELEASE_MIN_TRAVEL = 3;
 /**
  * The longest light run still read as release travel, timed from the run's
- * FIRST light sample to its last: a still hold at confident pressure before
+ * FIRST light sample to the last sample it would remove, including any
+ * above-band samples that ride with it at a stroke end: a still hold at confident pressure before
  * the run is not part of it (the builder accepts no sample while the pen is
  * still, so an edge-inclusive time would count the hold). RELEASE_MIN_MS keeps
  * its edge-inclusive measure.
@@ -44,6 +52,10 @@ export const RELEASE_MAX_MS = 50;
  */
 export class StrokeBuilder {
 	private points: InkPoint[] = [];
+	/** Pressure each point arrived with. The release filter judges by the higher of this and the point's latest pressure: a deduped sample with a low pressure must not make a confident point read as release, and one with a high pressure must not leave a pressed point read as release. */
+	private arrivalPressure: number[] = [];
+	/** Newest pressure of a held pen on each point, from samples the distance filter drops. The release filter reads it; the point never does, because the wet layer drew the point at its arrival pressure and the saved stroke must match. */
+	private latestPressure: number[] = [];
 	private startedAt = 0;
 	private tool: InkTool;
 	private color: string;
@@ -83,6 +95,8 @@ export class StrokeBuilder {
 	start(now: number): void {
 		this.startedAt = now;
 		this.points = [];
+		this.arrivalPressure = [];
+		this.latestPressure = [];
 	}
 
 	/**
@@ -95,9 +109,9 @@ export class StrokeBuilder {
 			const dx = x - prev.x;
 			const dy = y - prev.y;
 			if (dx * dx + dy * dy < this.minDist * this.minDist) {
-				// Keep the newest pressure on the retained point so a held,
-				// pressed pen still updates width later.
-				prev.pressure = pressure;
+				// The retained point keeps the pressure it was drawn wet with;
+				// only the release filter hears a held pen's newer pressure.
+				this.latestPressure[this.points.length - 1] = pressure;
 				return undefined;
 			}
 		}
@@ -110,6 +124,8 @@ export class StrokeBuilder {
 		if (tiltX !== undefined) point.tiltX = tiltX;
 		if (tiltY !== undefined) point.tiltY = tiltY;
 		this.points.push(point);
+		this.arrivalPressure.push(pressure);
+		this.latestPressure.push(pressure);
 		return point;
 	}
 
@@ -122,10 +138,10 @@ export class StrokeBuilder {
 	/**
 	 * Finalize inline pen input after removing proven release travel.
 	 *
-	 * A recovered contact becomes another ordinary stroke so no renderer joins
-	 * two letters across the physical gap. The caller still stores and records
-	 * all returned strokes as one gesture. Other surfaces use finish(), so this
-	 * hardware correction cannot alter canvas behavior.
+	 * Only a light ending with no recovery is cut off, so a contact is one
+	 * stroke. The inline and slides surfaces and the website demo's pen use
+	 * it; the other surfaces use finish(), so this hardware correction cannot
+	 * alter canvas behavior.
 	 */
 	finishReleaseFiltered(): InkStroke[] {
 		const groups = this.releaseFilteredPointGroups();
@@ -153,6 +169,12 @@ export class StrokeBuilder {
 		const finishedPoints = points.length === 1
 			? [points[0]!, { ...points[0]!, x: points[0]!.x + 0.01, t: points[0]!.t + 1 }]
 			: points;
+		// A tap: the builder accepted one point over the whole contact, so the
+		// screen showed the nib dot, which pressure never sizes. It is saved as
+		// uniform ink, the shape a finger stroke has, and draws at the nib.
+		// Counted on the contact, not on a release-filtered group: a contact
+		// that moved was drawn as a ribbon and is saved as one.
+		const tap = this.pressureProfile !== undefined && this.points.length === 1;
 		return {
 			id: id ?? newStrokeId(),
 			tool: this.tool,
@@ -162,8 +184,8 @@ export class StrokeBuilder {
 			bbox: computeBBox(finishedPoints, this.width * 2),
 			createdAt,
 			...(this.device === "mouse" ? { device: this.device } : {}),
-			...(this.widthMode === "uniform" ? { widthMode: this.widthMode } : {}),
-			...(this.pressureProfile ? { pressureProfile: this.pressureProfile } : {}),
+			...(this.widthMode === "uniform" || tap ? { widthMode: "uniform" as const } : {}),
+			...(this.pressureProfile && !tap ? { pressureProfile: this.pressureProfile } : {}),
 		};
 	}
 
@@ -175,67 +197,61 @@ export class StrokeBuilder {
 		let i = 0;
 
 		while (i < this.points.length) {
-			const point = this.points[i]!;
-			if (point.pressure >= CONFIDENT_CONTACT_PRESSURE) confidentContactSeen = true;
-			if (!confidentContactSeen || point.pressure > RELEASE_PRESSURE_MAX) {
+			const arrival = this.releasePressure(i);
+			if (arrival >= CONFIDENT_CONTACT_PRESSURE) confidentContactSeen = true;
+			if (!confidentContactSeen || arrival > RELEASE_PRESSURE_MAX) {
 				i++;
 				continue;
 			}
 
 			const gapStart = i;
-			let recoveryStart = -1;
 			let recoveryConfirmed = -1;
 			for (let j = i + 1; j < this.points.length; j++) {
-				const pressure = this.points[j]!.pressure;
-				if (pressure <= RELEASE_PRESSURE_MAX) {
-					recoveryStart = -1;
-				} else if (recoveryStart < 0) {
-					recoveryStart = j;
-				}
-				if (pressure >= CONFIDENT_CONTACT_PRESSURE) {
+				if (this.releasePressure(j) >= CONFIDENT_CONTACT_PRESSURE) {
 					recoveryConfirmed = j;
 					break;
 				}
 			}
 
-			const gapEnd = recoveryConfirmed >= 0 ? recoveryStart - 1 : this.points.length - 1;
+			// Contact comes back with no lift between: the pen never left the
+			// glass, so the light samples are ink drawn in contact (a pressure dip,
+			// not a release). The run stays in the stroke whole, and the stroke
+			// stays one stroke.
+			if (recoveryConfirmed >= 0) {
+				i = recoveryConfirmed + 1;
+				continue;
+			}
+
+			// No recovery: the light run reaches the end of the contact, a tail.
+			const gapEnd = this.points.length - 1;
 			// Include the edge entering the low-pressure run. On the captured
 			// hardware that first sample can contain most of the false travel.
 			const releaseEdge = Math.max(groupStart, gapStart - 1);
 			const duration = this.points[gapEnd]!.t - this.points[releaseEdge]!.t;
 			const travel = this.pathLength(releaseEdge, gapEnd);
-			// The light run's own span. A terminal gap can end in samples above
-			// the release band that never reach confident contact; they ride with
-			// the run, but its span stops at its last light sample.
-			let lastLight = gapEnd;
-			while (lastLight > gapStart && this.points[lastLight]!.pressure > RELEASE_PRESSURE_MAX) lastLight--;
-			const lightSpan = this.points[lastLight]!.t - this.points[gapStart]!.t;
-			// Longer than a bounce, a light run is writing: not release, so it
+			// The run's span reaches the last sample it would remove. A terminal
+			// gap can end in samples above the release band that never reach
+			// confident contact; they ride with the run, so their time counts.
+			const lightSpan = this.points[gapEnd]!.t - this.points[gapStart]!.t;
+			// Longer than a bounce, a light ending is writing: not release, so it
 			// stays in this group.
 			const provenRelease =
 				duration >= RELEASE_MIN_MS &&
 				travel >= RELEASE_MIN_TRAVEL &&
 				lightSpan <= RELEASE_MAX_MS;
-
-			if (!provenRelease) {
-				if (recoveryConfirmed < 0) break;
-				i = recoveryConfirmed + 1;
-				continue;
-			}
+			if (!provenRelease) break;
 
 			groups.push(this.points.slice(groupStart, gapStart));
-			if (recoveryConfirmed < 0) {
-				groupStart = this.points.length;
-				break;
-			}
-
-			groupStart = recoveryStart;
-			confidentContactSeen = true;
-			i = recoveryConfirmed + 1;
+			groupStart = this.points.length;
+			break;
 		}
 
 		if (groupStart < this.points.length) groups.push(this.points.slice(groupStart));
 		return groups.filter((points) => points.length > 0);
+	}
+
+	private releasePressure(i: number): number {
+		return Math.max(this.arrivalPressure[i] ?? 0, this.latestPressure[i] ?? 0);
 	}
 
 	private pathLength(from: number, to: number): number {

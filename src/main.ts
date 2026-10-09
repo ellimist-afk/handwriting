@@ -28,6 +28,7 @@ import {
 	SLIDES_SIDECAR_SUFFIX,
 	slidesInkEnabled,
 	slidesReloadCandidate,
+	slidesSidecarId,
 } from "./slides/SlidesInkSurface";
 import { mountSlidesTools, presentationCommands, requestSlidesAction } from "./slides/SlidesTools";
 import {
@@ -57,6 +58,7 @@ import {
 	getInlineTool,
 	getToolbarCorner,
 	inkExternallyReloaded,
+	overlayForPath,
 	inkOverlayExtension,
 	inlineInk,
 	inlineReloadBindings,
@@ -96,7 +98,8 @@ import {
 } from "./inline/PenHitProbe";
 import { clearScrollProbe, formatScrollProbe } from "./inline/ScrollProbe";
 import { surfaceExtents } from "./inline/SurfaceExtent";
-import { UnreadableFrontmatterError, claimMarkdown, hasFrontmatterBlock, reassignMarkdown } from "./inline/InlineClaim";
+import { noteCameras } from "./inline/NoteCamera";
+import { UnreadableFrontmatterError, claimMarkdown, hasEmptyFrontmatterBlock, hasFrontmatterBlock, reassignMarkdown } from "./inline/InlineClaim";
 import { INK_SIZE_STEPS, clampInkSize, nextInkSize } from "./ink/InkSize";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius, nextEraserSize } from "./ink/EraserSize";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN, setPressureSensitivity } from "./ink/PenStyle";
@@ -166,7 +169,7 @@ import { PaperStyle, nextPaperStyle, normalizePaperStyle, paperClass } from "./i
 import { NotePaper, NotePaperPicker } from "./inline/NotePaper";
 import { setScrollExpansionEnabled } from "./inline/InkOverlay";
 import { inkToSvg } from "./ink/SvgExport";
-import { InkTool } from "./ink/Stroke";
+import { InkTool, type InkStroke } from "./ink/Stroke";
 import { appendInkToPdf, flattenedPdfPath } from "./ink/InkPdfAppend";
 import { inkToPdf, normalizePdfPageAssumption, PdfPageAssumption } from "./ink/InkPdf";
 import { bytesOf } from "./pdf/PdfSyntax";
@@ -235,7 +238,7 @@ import { pdfInkReport } from "./pdf/PdfInkReport";
 import { PdfInkController } from "./pdf/PdfInkController";
 import { clearPdfPanTrace, formatPdfPanTrace } from "./pdf/PdfPanTrace";
 import { calibrationStrokes } from "./pdf/PdfCalibration";
-import { PdfInkStore } from "./pdf/PdfInkStore";
+import { PdfInkStore, type PdfDeleteContext } from "./pdf/PdfInkStore";
 import {
 	InstanceClaim,
 	chooseInstance,
@@ -245,7 +248,7 @@ import {
 } from "./pdf/PdfIdentity";
 import { HeadSource, RangedHandle, readPdfHead } from "./pdf/PdfHead";
 import { applyOp } from "./pdf/PdfInkHistory";
-import { isSafePageId, newPageId, parsePage } from "./model/PageData";
+import { emptyPage, isSafePageId, newPageId, parsePage, serializePage } from "./model/PageData";
 import type { InkPresence, InlineDeleteCapture } from "./inline/InlineInkStore";
 import { PageIdIndex, RegisterVerdict } from "./model/PageIdIndex";
 import { PageStore, WRITE_ATTEMPTS, newPageWriter } from "./persistence/PageStore";
@@ -297,6 +300,9 @@ const TRACE_UPLOAD_URL: string = "https://handwriting-traces.trace-worker.worker
  */
 const RECYCLE_GRACE_MS = 10_000;
 
+/** The per-vault local store key for PDF deletions still in their grace at quit. */
+const PDF_PENDING_DELETES_KEY = "handwriting-pdf-pending-deletes";
+
 /**
  * How long a note's page id may be unreadable before we believe it is gone.
  *
@@ -312,6 +318,14 @@ const RECYCLE_GRACE_MS = 10_000;
  * costs nothing.
  */
 const DECLAIM_GRACE_MS = 5_000;
+
+/**
+ * How long a PDF's bytes must stay still after a change before the panes
+ * showing it are identified again. A sync can land one file in more than one
+ * write, and the id is read from the file's head and length, so identifying
+ * between writes reads a document that never existed.
+ */
+const PDF_MODIFY_SETTLE_MS = 1_000;
 
 /**
  * The two refusals "Delete all ink" can give a PDF, written once because the
@@ -368,6 +382,10 @@ const DECLAIM_GRACE_MS = 5_000;
  * be extended to this surface is his to rule.
  */
 const PDF_INK_NOT_READY = "Handwriting: this PDF's ink storage is not ready. nothing was deleted.";
+/** The note path's two backup refusals, worded for a PDF. */
+const PDF_INK_NO_BACKUP = "Handwriting: this PDF's ink cannot be deleted.";
+const PDF_INK_BACKUP_UNVERIFIED =
+	"Handwriting: this PDF's ink cannot be deleted right now. try again in a moment.";
 const PDF_INK_CHANGED_DURING_BACKUP =
 	"Handwriting: the ink changed while its backup was being made. nothing was deleted. run Delete all ink again if you still want to remove it.";
 
@@ -916,6 +934,32 @@ read: (path: string) => Promise<string>
 }
 
 /**
+ * Read the PDF copy `preserve` returned and check it holds the ink that was
+ * on screen when the wipe began, at the precision a saved file is written with.
+ */
+async function backupHoldsStrokes(
+	pageId: string,
+	strokes: readonly InkStroke[],
+	at: string,
+	read: (path: string) => Promise<string>
+): Promise<boolean> {
+	try {
+		const raw: unknown = JSON.parse(await read(at));
+		if ((raw as { pageId?: unknown } | null)?.pageId !== pageId) return false;
+		const copy = parsePage(JSON.stringify(raw), pageId);
+		if (copy.damaged || copy.futureVersion !== undefined) return false;
+		const expected = emptyPage(pageId);
+		expected.strokes = [...strokes];
+		const asSaved = parsePage(serializePage(expected), pageId);
+		if (asSaved.damaged) return false;
+		return JSON.stringify(copy.data.strokes) === JSON.stringify(asSaved.data.strokes);
+	} catch (err) {
+		console.error("[handwriting] could not read back the PDF delete-all backup", at, err);
+		return false;
+	}
+}
+
+/**
  * The note a delete-all was invoked on: the object AND the path it was
  * invoked under, captured together before any await.
  *
@@ -1455,7 +1499,19 @@ export default class HandwritingPlugin extends Plugin {
 				},
 				// The one write at the end of a gesture whose ops were applied
 				// live. The controller decides when; the store decides how.
-				(id) => this.pdfStore.save(id),
+				// Live ops return before the other-pane refresh in the op sink
+				// above, so the end of the gesture is where another pane on the
+				// same PDF hears of it: an erase, lasso move or insert-space
+				// otherwise left that pane showing the old ink. With one pane
+				// open this is the save and one size check, nothing more.
+				(id) => {
+					this.pdfStore.save(id);
+					if (this.pdfInk.size < 2) return;
+					for (const [otherRoot, other] of this.pdfInk) {
+						if (otherRoot === root || this.pdfIds.get(otherRoot) !== id || !other.idle) continue;
+						other.refresh();
+					}
+				},
 				// Both sources above are substituted under calibration, so the
 				// document the controller reads is made up and nothing it works
 				// out from it may be written. Set HERE, next to the
@@ -1512,6 +1568,110 @@ export default class HandwritingPlugin extends Plugin {
 	}
 
 	/**
+	 * Re-identifications waiting for a changed PDF to settle, by path. `panes`
+	 * is null for every pane on the file, or the panes a stroke held back.
+	 */
+	private pdfModifyTimers?: Map<string, { timer: number; panes: Set<HTMLElement> | null }>;
+
+	/**
+	 * The newest identification started for each pane. A changed PDF can be
+	 * identified again while an earlier identification of the same file is
+	 * still reading it (a whole-file read on mobile, a large scan). Both pass a
+	 * guard that checks only the pane and its path, so the one that finished
+	 * last won, and that could be the older revision's id: the pane's ink went
+	 * to the wrong sidecar. An identification that a newer one has overtaken
+	 * stops at its next guard.
+	 */
+	private pdfResolveTokens?: WeakMap<HTMLElement, object>;
+
+	/**
+	 * A PDF's bytes changed on disk: identify its panes again once the file is
+	 * still. `panes` narrows that to the panes named; a wait already asking
+	 * for every pane keeps asking for every pane.
+	 */
+	private schedulePdfModified(path: string, panes?: ReadonlySet<HTMLElement>): void {
+		const timers = (this.pdfModifyTimers ??= new Map<string, { timer: number; panes: Set<HTMLElement> | null }>());
+		const pending = timers.get(path);
+		if (pending !== undefined) window.clearTimeout(pending.timer);
+		let waiting: Set<HTMLElement> | null = null;
+		if (panes && pending?.panes !== null) waiting = new Set([...(pending?.panes ?? []), ...panes]);
+		timers.set(path, {
+			timer: window.setTimeout(() => {
+				timers.delete(path);
+				runDetached(this.onPdfModified(path, waiting), `identify ${path} again after it changed`);
+			}, PDF_MODIFY_SETTLE_MS),
+			panes: waiting,
+		});
+	}
+
+	/**
+	 * The ink id is made from the file's content, so new bytes are a new
+	 * document, and every pane showing the file is identified again the way a
+	 * pane that switches file is. Kept, a pane replaced under it (a sync, a
+	 * re-export over the file) went on drawing into the old content's
+	 * sidecar, and that ink was gone when the file reopened under its new
+	 * content. A pane mid-gesture is left alone and asked again after another
+	 * settle, so the document never changes under a live stroke. Only that
+	 * pane is asked again: identifying a pane forgets its undo, and a second
+	 * pane on the file that was identified already would lose the undo of
+	 * every stroke drawn in it since.
+	 *
+	 * The plugin's own PDF writes never arrive here: flatten, snip and export
+	 * all create a new file beside the source and never modify one.
+	 */
+	private async onPdfModified(path: string, panes?: ReadonlySet<HTMLElement> | null): Promise<void> {
+		const resolutions: Promise<void>[] = [];
+		const held = new Set<HTMLElement>();
+		// The panes whose old id held ink, with that ink and whether its record was sound, read before
+		// releasePdfId: the release forgets the old record detached, and it can finish before the new id lands,
+		// so asking after the await can miss the ink.
+		const inked: { root: HTMLElement; was: string; strokes: readonly InkStroke[]; sound: boolean }[] = [];
+		for (const leaf of this.app.workspace.getLeavesOfType("pdf")) {
+			const root = (leaf.view as unknown as { containerEl?: HTMLElement }).containerEl;
+			if (!root || this.pdfFiles.get(root) !== path) continue;
+			if (panes && !panes.has(root)) continue;
+			const controller = this.pdfInk.get(root);
+			if (!controller) continue;
+			if (!controller.idle) {
+				held.add(root);
+				continue;
+			}
+			const was = this.pdfIds.get(root);
+			if (was && this.pdfStore.hasInk(was)) {
+				inked.push({ root, was, strokes: this.pdfStore.strokes(was), sound: this.pdfStore.inkReady(was) });
+			}
+			this.pdfIds.delete(root);
+			if (was) this.releasePdfId(was);
+			controller.forgetHistory();
+			resolutions.push(
+				this.resolvePdfId(leaf, root, controller).catch(() => {
+					new Notice("Handwriting: could not identify this PDF - ink is disabled for it. Reopening the file retries.");
+				})
+			);
+		}
+		if (held.size > 0) this.schedulePdfModified(path, held);
+		await Promise.all(resolutions);
+		// New content means a new ink file (PdfIdentity). The ink drawn before the change is copied into it when
+		// the new file is fresh and the old record was sound, so the page keeps its ink; the copy is the same
+		// stroke objects, so saved ink looks exactly as it did. The old record and its file are never written.
+		// A locked old record, or a new file that already has ink, keeps the old ink where it is. Said once per
+		// file, not once per pane. No id means the resolution failed and has said so already.
+		let changed = false, carried = false;
+		for (const { root, was, strokes, sound } of inked) {
+			const now = this.pdfIds.get(root);
+			if (now === undefined || now === was) continue;
+			changed = true;
+			if (sound && this.pdfStore.inkReady(now) && !this.pdfStore.hasInk(now)) {
+				this.pdfStore.replaceAll(now, strokes);
+				for (const [pane, id] of this.pdfIds) if (id === now) this.pdfInk.get(pane)?.refresh();
+				carried = true;
+			}
+		}
+		if (carried) new Notice("Handwriting: this PDF changed on disk. Your ink was carried over to its new version.");
+		else if (changed) new Notice("Handwriting: this PDF changed on disk. Ink drawn before the change is kept in its old ink file; new ink goes to a new one.");
+	}
+
+	/**
 	 * Work out which sidecar this PDF's ink belongs in, then show it.
 	 *
 	 * Content-keyed, so this reads the file rather than any metadata - see
@@ -1527,7 +1687,24 @@ export default class HandwritingPlugin extends Plugin {
 	): Promise<void> {
 		const file = (leaf.view as unknown as { file?: TFile }).file;
 		if (!file) return;
-		const path = file.path;
+		// The path the pane opened with, read before the first await. Never a
+		// guard (those read file.path fresh, below): only the claim step uses it,
+		// so a rename while the file is identified moves the claim instead of
+		// leaving the old name in the ink file beside the new one.
+		const started = file.path;
+		const token = {};
+		const tokens = (this.pdfResolveTokens ??= new WeakMap<HTMLElement, object>());
+		tokens.set(root, token);
+		// The guard after every await. The plugin can also be unloaded across
+		// one: the continuation then outlives onunload and registered a path
+		// claim, an id and a repaint for a plugin that is gone. Claims are
+		// session memory, so stopping is enough; nothing needs releasing.
+		const current = () => !this.unloaded && root.isConnected && this.pdfFiles.get(root) === file.path && tokens.get(root) === token;
+		// `file.path` is read fresh at every step, never kept: a rename during
+		// identification moves the same TFile, and the rename handler moves
+		// pdfFiles with it, so the live path still matches the pane. A copy of
+		// the old path stopped matching at the next guard and the pane was left
+		// with no id until the PDF was reopened.
 		// The head and the file's length, which is all the id is made of.
 		// This used to be `readBinary(file)` - the whole document, so a
 		// 200 MB scan was read into memory on every open to hash its first
@@ -1539,9 +1716,9 @@ export default class HandwritingPlugin extends Plugin {
 		// switched one: two resolutions racing in the same pane could finish
 		// out of order and stamp the earlier document's id onto the later
 		// one - so the guard repeats after every await.
-		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
+		if (!current()) return;
 		const family = await pdfInkIdFromHead(head, byteLength, window.crypto);
-		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
+		if (!current()) return;
 		// Which INSTANCE of the content family this file is. Byte-identical
 		// copies are one family, but each vault file is its own instance -
 		// launch day proved why: a re-export of an unchanged OneNote page
@@ -1566,10 +1743,25 @@ export default class HandwritingPlugin extends Plugin {
 			if (known) known.paths = [...new Set([...known.paths, ...held.paths])];
 			else candidates.push(held);
 		}
-		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
+		// And the choices other panes have made but not claimed yet, because
+		// their sidecar is still loading. Two copies of one template opened
+		// together (a restored workspace, two quick tabs) otherwise both chose
+		// the first free instance and shared one sidecar.
+		const resolving = (this.pdfResolving ??= new Map<HTMLElement, { id: string; path: string }>());
+		for (const [other, inFlight] of resolving) {
+			if (other === root || familyOf(inFlight.id) !== family) continue;
+			// The pane's path NOW, not when it chose: a rename during its load
+			// moves pdfFiles, and a new file at the old name must not be handed
+			// the renamed file's choice.
+			const path = this.pdfFiles.get(other) ?? inFlight.path;
+			const known = candidates.find((c) => c.id === inFlight.id);
+			if (known) known.paths = [...new Set([...known.paths, path])];
+			else candidates.push({ id: inFlight.id, paths: [path] });
+		}
+		if (!current()) return;
 		const choice = chooseInstance(
 			family,
-			path,
+			file.path,
 			candidates,
 			(p) => this.app.vault.getFileByPath(p) !== null,
 			this.pdfStore.pendingClaims()
@@ -1577,8 +1769,17 @@ export default class HandwritingPlugin extends Plugin {
 		this.pdfIds.set(root, choice.id);
 		// Kept past the pane: a save that fails or a conflict copy can be reported after the pane
 		// closed and its own id and path maps were dropped, and the notice must still name the file.
-		(this.pdfPathById ??= new Map()).set(choice.id, path);
-		await this.pdfStore.ensureLoaded(choice.id);
+		(this.pdfPathById ??= new Map()).set(choice.id, file.path);
+		// Held only across the load: every return before this point comes
+		// before the reservation, and the guard after it comes after the
+		// release, so no path out of here leaves a choice reserved.
+		const mine = { id: choice.id, path: file.path };
+		resolving.set(root, mine);
+		try {
+			await this.pdfStore.ensureLoaded(choice.id);
+		} finally {
+			if (resolving.get(root) === mine) resolving.delete(root);
+		}
 		// The fourth await, and the guard the first three already carry: the
 		// pane can change document across this one too, and what follows is
 		// the durable half - claimPath writes this path into that sidecar, and
@@ -1588,11 +1789,14 @@ export default class HandwritingPlugin extends Plugin {
 		// await - the controller must be able to ask for it the moment the
 		// choice is made - and a stale one is corrected by the next sync,
 		// which is what clears pdfIds when the pane's file changes.
-		if (!root.isConnected || this.pdfFiles.get(root) !== path) return;
+		if (!current()) return;
 		// Always claimed: an adoption becomes durable at once, a fresh
 		// instance merely remembers until its first stroke, and a repeat
-		// claim is a no-op.
-		this.pdfStore.claimPath(choice.id, path);
+		// claim is a no-op. Renamed since the pane opened: the handler had no id
+		// to move, or the ink file's load merged the old name back, so the claim
+		// moves here.
+		if (file.path !== started) this.pdfStore.renamePath(choice.id, started, file.path);
+		else this.pdfStore.claimPath(choice.id, file.path);
 		controller.refresh();
 		// canPasteInk flips the moment documentId() stops being null, but
 		// nothing repaints the strip for it: refresh() above only repaints
@@ -1633,6 +1837,47 @@ export default class HandwritingPlugin extends Plugin {
 		const full = adapter.getFullPath(file.path);
 		if (typeof full !== "string" || full.length === 0) return { whole };
 		return { openRanged: () => openRangedFile(full), whole };
+	}
+
+	/**
+	 * A PDF renamed while no pane shows it: the sidecar claiming the old name
+	 * now claims the new one. Left on the old name, the claim outlived the
+	 * file: a file saved there later opened wearing this ink, and erasing on
+	 * either erased both. Identification's own adoption keeps every claim, as
+	 * it must - a claimed path can be missing only because that file has not
+	 * synced here yet - so the move happens here, where the rename is known.
+	 * Found by content, the way identification finds it. A rename made while
+	 * Obsidian was closed, or by another program, sends no event and is not
+	 * covered.
+	 */
+	private async movePdfClaimOnRename(file: TFile, oldPath: string): Promise<void> {
+		// The plugin can be unloaded across any await below. The continuation
+		// then outlived onunload: it moved a claim and released a record for a
+		// plugin that is gone. Claims are session memory, so stopping is enough.
+		const { head, byteLength } = await readPdfHead(this.pdfHeadSource(file));
+		if (this.unloaded) return;
+		const family = await pdfInkIdFromHead(head, byteLength, window.crypto);
+		if (this.unloaded) return;
+		const heldPaths = (id: string) => this.pdfStore.claimedInstances((i) => i === id)[0]?.paths;
+		const ids = new Set((await this.store.listIds(family)).filter((i) => familyOf(i) === family));
+		if (this.unloaded) return;
+		for (const held of this.pdfStore.claimedInstances((i) => familyOf(i) === family)) ids.add(held.id);
+		for (const id of ids) {
+			const claimed = heldPaths(id) ?? (await this.store.readPdfPaths(id));
+			if (this.unloaded) return;
+			if (!claimed?.includes(oldPath)) continue;
+			try {
+				await this.pdfStore.ensureLoaded(id);
+				// Loaded, the record's own claims are the ones to trust.
+				if (!this.unloaded && heldPaths(id)?.includes(oldPath)) this.pdfStore.renamePath(id, oldPath, file.path);
+			} finally {
+				// Loaded here for a PDF no pane may show. Kept, the record stood in
+				// for the sidecar at the next open, and ink another device added
+				// meanwhile was missing. Released once what it holds is on disk;
+				// releasePdfId keeps it while a pane shows it.
+				if (!this.unloaded) this.releasePdfId(id);
+			}
+		}
 	}
 
 	/**
@@ -1731,6 +1976,15 @@ export default class HandwritingPlugin extends Plugin {
 			new Notice(deleteAllBackupFailureText(err, "PDF"));
 			return;
 		}
+		// Read the copy back NOW, the one await after the copy, and judge it
+		// below once the two guards have had their say: a copy that does not
+		// exist, or does not hold the ink that was on screen, is not a copy.
+		const kept0 = kept;
+		const copyOk =
+			(JSON.parse(before) as InkStroke[]).length === 0 ||
+			(kept0 !== null &&
+				kept0.trim() !== "" &&
+				(await backupHoldsStrokes(id, JSON.parse(before) as InkStroke[], kept0, (p) => this.store.readText(p))));
 		// Both guards again, and NOTHING may await between here and the clear.
 		// Readiness is rechecked because the wait is long enough to lose it: a
 		// poll that finds the sidecar half-written by a sync client locks the
@@ -1745,6 +1999,10 @@ export default class HandwritingPlugin extends Plugin {
 		// but nothing here claims it holds the strokes drawn since.
 		if (this.pdfInkSnapshot(id) !== before) {
 			new Notice(PDF_INK_CHANGED_DURING_BACKUP);
+			return;
+		}
+		if (!copyOk) {
+			new Notice(kept === null || kept.trim() === "" ? PDF_INK_NO_BACKUP : PDF_INK_BACKUP_UNVERIFIED);
 			return;
 		}
 		const n = this.pdfStore.strokes(id).length;
@@ -2190,6 +2448,13 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 	private pdfFiles = new Map<HTMLElement, string>();
 	/** The vault path each PDF ink id was resolved from this session; outlives the pane. Cleared on unload. */
 	private pdfPathById?: Map<string, string>;
+	/**
+	 * The id each pane's identification has chosen but not yet claimed, with
+	 * the path it chose it for. resolvePdfId claims only after the sidecar has
+	 * loaded, and a byte-identical copy identified during that load must still
+	 * see the choice, or both files are handed one instance.
+	 */
+	private pdfResolving?: Map<HTMLElement, { id: string; path: string }>;
 	/** Session ink for PDFs. Separate instance from the note store, by design. */
 	private pdfStore = new PdfInkStore();
 	/** M1 only: draw calibration crosses instead of real ink. Off by default. */
@@ -2199,15 +2464,20 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 	/** Collisions with no safe owner: id → the paths locked over it. */
 	private ambiguousIds = new Map<string, string[]>();
 	private pageIdWatchReady = false;
-	/** Deleted pages waiting out the delete+create window. See scheduleRecycle. */
-	private pendingRecycle = new Map<string, number>();
+	/** Deleted pages waiting out the delete+create window, with the path each was deleted at. See scheduleRecycle. */
+	private pendingRecycle = new Map<string, { timer: number; path: string }>();
 	/** Notes whose id went missing, waiting to be confirmed. See declaimLater. */
 	private declaimTimers = new Map<string, number>();
 	/** Notes whose record declaimNow dropped; reloaded if their id comes back. */
 	private declaimedPaths = new Set<string>();
 	/** Notes already warned about an unusable page id; see warnUnusablePageId. */
 	private badPageIds = new Set<string>();
-	private resolvingDuplicates = new Set<string>();
+	/**
+	 * Duplicate repairs in flight, keyed by the note's TFile: it keeps its
+	 * identity through a rename, so a second call naming the renamed path
+	 * while the first awaits is still the same note.
+	 */
+	private resolvingDuplicates = new Set<TFile>();
 
 	/**
 	 * Write one note's Infinite Canvas choice, from the menu or the command.
@@ -2323,6 +2593,13 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 			load: (key) => this.app.loadLocalStorage(key) as string | boolean | null,
 			save: (key, value) => this.app.saveLocalStorage(key, value),
 		});
+		// The side-button choice belongs to this device, never synced settings.
+		const { setSideButtonStore } = await import("./inline/TipMode");
+		setSideButtonStore({
+			load: (key) => this.app.loadLocalStorage(key) as unknown,
+			save: (key, value) => this.app.saveLocalStorage(key, value),
+			defaultErases: Platform.isAndroidApp,
+		});
 		initPressureGain(Platform.isIosApp ? IOS_WEBKIT_CEILING : 0);
 		this.store = new PageStore(this.app);
 		// Recovery pairs record which install wrote them, so another device
@@ -2358,6 +2635,9 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		};
 		bindRecoveryNotices(this.store, (pageId) => this.noteNameFor(pageId));
 		await this.loadSettings();
+		// After the PDF host is attached in loadSettings: restoring a deletion
+		// can load and write sidecars.
+		this.attachPdfPendingDeletes();
 
 		this.registerView(HANDWRITING_PEN_LAB_VIEW_TYPE, (leaf) => new PenLabView(leaf));
 		this.registerView(
@@ -2383,6 +2663,8 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 				this.store.prepareExternalAdoption(pageId, outgoing),
 			acceptExternalAdoption: (prepared) => this.store.acceptExternalAdoption(prepared),
 			sidecarChanged: (pageId) => this.store.externallyChanged(pageId),
+			hasQueuedWrite: (pageId) => this.store.hasQueuedWrite(pageId),
+			panesQuiet: (path) => inlineReloadBindings().every(binding => binding.path !== path || binding.quiet),
 			notify: (message) => blockNotice(message),
 		});
 
@@ -2520,6 +2802,22 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 					// Registered even with zero strokes: a note drawn on
 					// AFTER its embed rendered still gains ink live.
 					attach();
+					// The record may predate ink another device synced since;
+					// ask the same freshness question a reopened editor asks, and
+					// repaint if the sidecar was newer. The picture an export
+					// takes is the one painted above. A note an editor pane holds
+					// is that pane's to refresh: its poll waits for a quiet pane,
+					// and an adoption here could land in the middle of a stroke or
+					// a lasso.
+					if (!overlayForPath(path)) {
+						runDetached(
+							inlineInk.ensureLoaded(path).then((changed) => {
+								if (!changed) return;
+								inkExternallyReloaded(path);
+							}),
+							"refresh ink for an embed"
+						);
+					}
 					return;
 				}
 				runDetached(
@@ -2678,7 +2976,15 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 								if (!panes.length || panes.some(([, controller]) =>
 									failedPdfRefreshes.get(controller) === "eligibility" || !controller.idle
 								)) continue;
-								if (!(await this.store.externallyChanged(id))) continue;
+								// Positively observed absence counts here as it does for a
+								// note: it goes on to the adoption, which holds and, once
+								// the absence persists, tells the user. Stat and read
+								// errors stay unchanged.
+								const sidecarChanged = await this.store.externallyChanged(id);
+								const observation = sidecarChanged
+									? "changed"
+									: (this.store.externalChangeObservation?.(id) ?? "unchanged");
+								if (observation === "unchanged") continue;
 								// Stat awaited: panes may have joined, switched or started
 								// a gesture. Check every current binding before reloading
 								// the record they all share.
@@ -2690,6 +2996,21 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 								// snapshot. Preserve the write-path conflict guard until
 								// that write lands, then reload on a later poll.
 								if (this.store.hasQueuedWrite(id)) continue;
+								// A PDF opened while its sidecar was mid-sync read it as
+								// damaged and locked the record: no ink on screen, and
+								// nothing drawn saved, for as long as the PDF stayed
+								// open. Adoption answers a lock with "existing-lock",
+								// so a locked record is re-read here instead, the way
+								// reopening the PDF re-reads it. A read that is still
+								// unsound changes nothing and falls through as before.
+								if (this.pdfStore.inkReady?.(id) === false && (await this.pdfStore.reloadExternal?.(id))) {
+									changed = true;
+									for (const [root, controller] of currentPdfPanes(id)) {
+										pendingPdfRefreshes.set(root, { id, controller });
+									}
+									refreshPendingPdfPanes(failedPdfRefreshes);
+									continue;
+								}
 								// Only a completed preserving adoption may replace an
 								// established PDF record. Missing capability, unavailable
 								// input, locks, preservation failures and stale qualification
@@ -2742,8 +3063,9 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 								}
 								// Inline needs one fact the shared boolean intentionally
 								// collapses: positively observed absence starts the existing
-								// held-adoption notice. PDF and Slides keep boolean false for
-								// absence, and stat/read errors remain ordinary unchanged.
+								// held-adoption notice. PDF reads it the same way; Slides
+								// keeps boolean false for absence, and stat/read errors
+								// remain ordinary unchanged.
 								const sidecarChanged = await this.store.externallyChanged(id);
 								const observation = sidecarChanged
 									? "changed"
@@ -2981,14 +3303,7 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 				const on = !slidesInkEnabled();
 				this.settings.slidesInk = on;
 				runDetached(this.persistSettings(), "save the slides ink setting");
-				if (on) this.startSlidesInk();
-				else {
-					setSlidesInk(false);
-					// The next switch-on makes a new writer; this one must not
-					// keep claiming the sidecar (audit 125).
-					if (this.slidesWriter) this.store.retireWriter(this.slidesWriter);
-					this.slidesWriter = null;
-				}
+				this.applySlidesInk(on);
 				new Notice(
 					on
 						? "Handwriting: slides ink on (start a presentation, then draw)"
@@ -3935,7 +4250,7 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 				id: "copy-inline-scroll-trace",
 				name: "Diagnostics: show scroll trace",
 				callback: () => {
-					showDiagnosticText(this.app, "Handwriting scroll trace", formatScrollProbe());
+					showDiagnosticText(this.app, "Handwriting scroll trace", formatScrollProbe(loadedBuild(this.manifest.version)));
 				},
 			});
 		}
@@ -4026,6 +4341,13 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 					inlineInk.handleRename(oldPath, file.path);
 					embedInkRenamed(oldPath, file.path);
 					surfaceExtents.handleRename(oldPath, file.path);
+					noteCameras.handleRename(oldPath, file.path);
+				} else if (file instanceof TFile && isMarkdownPath(oldPath)) {
+					// Renamed away from Markdown (note.md -> note.mdenc): nothing at
+					// the old path is this note any more, so the next file there starts clean.
+					inlineInk.handleDelete(oldPath);
+					surfaceExtents.handleDelete(oldPath);
+					noteCameras.handleDelete(oldPath);
 				}
 				// A pdf renamed while OPEN: the pane keeps its id, and the
 				// sidecar's path claim moves with the file - left stale, the
@@ -4039,14 +4361,36 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 						const id = this.pdfIds.get(root);
 						if (id) this.pdfStore.renamePath(id, oldPath, file.path);
 					}
+					// The path a closed pane's notices name moves too: a save failure or a
+					// conflict copy reported after the rename must name the file as it is now.
+					const byId = this.pdfPathById;
+					for (const [id, p] of byId ?? []) {
+						if (p === oldPath) byId?.set(id, file.path);
+					}
+				}
+				// Renamed while no pane shows it: the claim still has to move.
+				if (file instanceof TFile && file.extension === "pdf" && ![...this.pdfFiles.values()].includes(file.path)) {
+					runDetached(this.movePdfClaimOnRename(file, oldPath), `move the ink claim of ${oldPath} to ${file.path}`);
 				}
 			})
 		);
+		// A PDF changed in place is a new document to the content-keyed id;
+		// see onPdfModified.
+		this.registerEvent(
+			this.app.vault.on("modify", (file) => {
+				if (file instanceof TFile && file.extension === "pdf") this.schedulePdfModified(file.path);
+			})
+		);
+		this.register(() => {
+			for (const pending of this.pdfModifyTimers?.values() ?? []) window.clearTimeout(pending.timer);
+			this.pdfModifyTimers?.clear();
+		});
 		this.registerEvent(
 			this.app.vault.on("delete", (file) => {
 				if (file instanceof TFile && file.extension === "md") {
 					inlineInk.handleDelete(file.path);
 					surfaceExtents.handleDelete(file.path);
+					noteCameras.handleDelete(file.path);
 				}
 			})
 		);
@@ -4255,14 +4599,36 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 			this.app.vault.on("rename", (file, oldPath) => {
 				if (file instanceof TFile && file.extension === "md") {
 					this.pageIds.handleRename(oldPath, file.path);
+					// The declaim grace and the declaimed set are keyed by path: follow the note.
+					const pending = this.declaimTimers.get(oldPath);
+					if (pending !== undefined) {
+						window.clearTimeout(pending);
+						this.declaimTimers.delete(oldPath);
+						this.declaimLater(file.path);
+					}
+					if (this.declaimedPaths.delete(oldPath)) this.declaimedPaths.add(file.path);
 					for (const paths of this.ambiguousIds.values()) {
 						const i = paths.indexOf(oldPath);
 						if (i >= 0) paths[i] = file.path;
 					}
 					if (this.pageIdWatchReady) this.persistOwners();
+				} else if (file instanceof TFile && isMarkdownPath(oldPath)) {
+					if (this.pageIds.handleDelete(oldPath).length > 0 && this.pageIdWatchReady) this.persistOwners();
 				}
 			})
 		);
+		// Turned on or updated while Obsidian runs: the index finished before
+		// this load and no "resolved" comes until some file changes, so until
+		// then a note and its copy would write one ink file. When the layout is
+		// ready and every markdown file already has a cache, the index is whole:
+		// run the census now. A cold start, or a file still unindexed, waits for
+		// "resolved" as before; runCensus runs once either way.
+		if (
+			this.app.workspace.layoutReady &&
+			this.app.vault.getMarkdownFiles().every((f) => this.app.metadataCache.getFileCache(f) !== null)
+		) {
+			runCensus();
+		}
 	}
 
 	// ---- duplicate page ids (v0.13.6) ---------------------------------------
@@ -4332,6 +4698,16 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 			window.clearTimeout(pending);
 			this.declaimTimers.delete(path);
 		}
+		// The note now carries another id than its record: the copy of an
+		// ambiguous duplicate was fixed by editing its id value (the original's
+		// lock lifts below), or the other device gave the note its own id. The
+		// record still names the old one. Follow the new value once the edit
+		// has settled, the same grace a deleted line gets: each half-typed id
+		// is a value.
+		const held = inlineInk.pageIdOf(path);
+		if (held !== null && held !== id) {
+			this.declaimLater(path);
+		}
 		// It came back after the grace ran out: frontmatter that stayed
 		// unparseable longer than Obsidian's save-and-index delay. The record
 		// was dropped, so read the sidecar again and repaint, rather than
@@ -4373,6 +4749,8 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 	 *
 	 * A real declaim is not urgent: nothing is lost by confirming it a moment
 	 * later, and the confirmation is just asking again.
+	 *
+	 * The same timer settles a duplicate-locked copy's edited id value.
 	 */
 	private declaimLater(path: string): void {
 		if (this.declaimTimers.has(path)) return;
@@ -4382,9 +4760,71 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 				this.declaimTimers.delete(path);
 				const file = this.app.vault.getFileByPath(path);
 				if (!file) return;
-				if (this.recentPageIdFor(file)) return; // it came back
-				this.declaimNow(path);
+				const id = this.recentPageIdFor(file);
+				if (id) this.followEditedId(path, id); // it came back, or was edited
+				else this.declaimNow(path);
 			}, DECLAIM_GRACE_MS)
+		);
+	}
+
+	/**
+	 * The note carries an id its record does not: the record moves to it and
+	 * the note repaints from it.
+	 *
+	 * A duplicate-locked copy keeps the ink drawn on it while locked, and the
+	 * shared id's file stays the original's. Any other record wrote this
+	 * device's ink under the old id, and nothing names that file now: it is
+	 * set beside the new page first (PageStore.keepAsideUnder), listed by fix
+	 * ink de-sync against it, unless another note still names the old id, in
+	 * which case it is that note's.
+	 *
+	 * THE MOVE COMES FIRST. The record lets go of the old id only once the
+	 * file has moved: a move that fails, or a queue that will not write,
+	 * leaves the note writing under the old id, and the next identity check
+	 * (the note still carries another id than its record) tries again.
+	 */
+	private followEditedId(path: string, id: string): void {
+		const held = inlineInk.pageIdOf(path);
+		if (held === null || held === id) return;
+		const owner = this.pageIds.owner(held);
+		const keepAside =
+			!inlineInk.isDuplicateLocked(path) &&
+			(owner === undefined || owner === path) &&
+			!this.ambiguousIds.has(held);
+		const follow = (): Promise<void> => {
+			if (keepAside) {
+				this.pageIds.release(path, held);
+				this.persistOwners();
+			}
+			inlineInk.handleDeclaimed(path);
+			return inlineInk.ensureLoaded(path).then(() => {
+				inkExternallyReloaded(path);
+				notifyInkChanged(path);
+			});
+		};
+		if (!keepAside) {
+			runDetached(follow(), `reload ink for ${path} under its edited page id`);
+			return;
+		}
+		runDetached(
+			this.store.keepAsideUnder(held, id).then(
+				(kept) => {
+					// The note moved on meanwhile (another edit, a close): this
+					// round is not its follow any more.
+					if (inlineInk.pageIdOf(path) !== held) return;
+					// A stroke drawn while the file moved is queued under the old
+					// id; the next identity check moves what it writes.
+					if (kept.kind === "held" || this.store.hasQueuedWrite(held)) {
+						console.error("[handwriting] could not move the old id's ink beside the new page; will try again", path, held, id);
+						return;
+					}
+					return follow();
+				},
+				(err) => {
+					console.error("[handwriting] could not move the old id's ink beside the new page; will try again", path, held, id, err);
+				}
+			),
+			`follow the edited page id of ${path}`
 		);
 	}
 
@@ -4393,8 +4833,18 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 			// The id line really is gone (duplicate resolution by hand, or an
 			// external edit). Free anything this path owned, drop its stale
 			// session record, and re-check collisions it participated in.
+			// Ink a duplicate lock held back is carried to a fresh id.
 			const freed = this.pageIds.handleDelete(path);
 			inlineInk.handleDeclaimed(path);
+			if (inlineInk.hasInk(path)) {
+				runDetached(
+					inlineInk.ensureLoaded(path).then(() => {
+						inkExternallyReloaded(path);
+						notifyInkChanged(path);
+					}),
+					`repaint ink carried off ${path}'s shared page id`
+				);
+			}
 			this.declaimedPaths.add(path);
 			for (const fid of freed) {
 				const other = this.findOtherCarrier(fid, path);
@@ -4465,28 +4915,42 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 	 * leaves at worst an orphan clone), then the copy's frontmatter is
 	 * re-identified atomically, then live session state follows. The
 	 * original note and its sidecar are never written.
+	 *
+	 * Every step after an await names the copy by `file.path`, not
+	 * `copyPath`: the copy can be renamed while the clone or the rewrite is in
+	 * flight, the TFile follows the rename, and the live record has already
+	 * moved to the new path (the vault "rename" handler).
 	 */
 	private async resolveDuplicate(
 		copyPath: string,
 		id: string,
 		ownerPath: string
 	): Promise<void> {
-		if (this.resolvingDuplicates.has(copyPath)) return;
-		this.resolvingDuplicates.add(copyPath);
+		const file = this.app.vault.getFileByPath(copyPath);
+		if (!file) return;
+		if (this.resolvingDuplicates.has(file)) return;
+		this.resolvingDuplicates.add(file);
 		try {
-			const file = this.app.vault.getFileByPath(copyPath);
-			if (!file) return;
 			const newId = newPageId();
 			let cloned: "cloned" | "none" | "unreadable" | "exists";
+			let slidesCloned = false;
 			try {
 				cloned = await this.store.clone(id, newId);
+				if (cloned === "cloned") {
+					const slides = await this.store.clone(slidesSidecarId(id), slidesSidecarId(newId));
+					if (slides === "exists" || slides === "unreadable") {
+						inlineInk.markDuplicateLocked(file.path, ownerPath);
+						return;
+					}
+					slidesCloned = slides === "cloned";
+				}
 			} catch (err) {
 				console.error("[handwriting] duplicate sidecar clone failed", err);
-				inlineInk.markDuplicateLocked(copyPath, ownerPath);
+				inlineInk.markDuplicateLocked(file.path, ownerPath);
 				return; // fail closed: locked beats half-resolved
 			}
 			if (cloned === "exists") {
-				inlineInk.markDuplicateLocked(copyPath, ownerPath);
+				inlineInk.markDuplicateLocked(file.path, ownerPath);
 				return;
 			}
 			let outcome: { changed: boolean; futureVersion?: number } = { changed: false };
@@ -4499,13 +4963,14 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 				// The id line vanished meanwhile (nothing to do) or the note
 				// declares a newer format (never write): clean the unused clone.
 				if (cloned === "cloned") await this.store.remove(newId).catch(() => undefined);
+				if (slidesCloned) await this.store.remove(slidesSidecarId(newId)).catch(() => undefined);
 				if (outcome.futureVersion !== undefined) {
-					inlineInk.markDuplicateLocked(copyPath, ownerPath);
+					inlineInk.markDuplicateLocked(file.path, ownerPath);
 				}
 				return;
 			}
-			this.pageIds.register(copyPath, newId);
-			const verdict = inlineInk.reassignPage(copyPath, newId, ownerPath);
+			this.pageIds.register(file.path, newId);
+			const verdict = inlineInk.reassignPage(file.path, newId, ownerPath);
 			// Anything the copy queued under the OLD id before resolution is
 			// orphaned. Discard it only when this session provably has no other
 			// writer for that id (no live owner record).
@@ -4524,7 +4989,7 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 							: ".")
 			);
 		} finally {
-			this.resolvingDuplicates.delete(copyPath);
+			this.resolvingDuplicates.delete(file);
 		}
 	}
 
@@ -5190,6 +5655,8 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		// initializers never ran and settings may be absent.
 		void stopTraceAtUnload(this.inkTrace, this.settings?.devDiagnostics === true);
 		this.pdfPathById?.clear();
+		// Each note's last zoom and scroll is session memory; a reload starts every note as new.
+		noteCameras.clear();
 		this.notePaper?.destroy();
 		this.canvasOverride?.destroy();
 		// Pending recycles are DROPPED, never run early. A sidecar left in
@@ -5197,7 +5664,7 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		// that was about to come back is the failure this delay exists to
 		// prevent, and unload is exactly when a sync is most likely still
 		// mid-pair. The next session's delete will schedule it again.
-		for (const timer of this.pendingRecycle.values()) window.clearTimeout(timer);
+		for (const pending of this.pendingRecycle.values()) window.clearTimeout(pending.timer);
 		this.pendingRecycle.clear();
 		this.pdfStore.cancelPendingDeletes();
 		// Same reasoning for pending declaims: not confirming one leaves a
@@ -5368,6 +5835,14 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		} catch (err) {
 			console.error("[handwriting] flush on unload failed", err);
 		}
+		// A failed write goes back in the queue and `flush` still resolves, and
+		// at unload no retry timer will ever run it: say so while the user can
+		// still act.
+		if (this.store.hasAnyQueuedWrite()) {
+			new Notice(
+				"Handwriting: the newest ink may not have been saved. Open the note and check it before you close Obsidian."
+			);
+		}
 		try {
 			await this.flushSettings();
 		} catch (err) {
@@ -5384,20 +5859,42 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		});
 	}
 
+	/**
+	 * What retiring a deleted PDF's claim needs, for a deletion seen now and
+	 * for one restored from the session before.
+	 */
+	private pdfDeleteContext(): PdfDeleteContext {
+		return {
+			store: this.store,
+			listPdfPaths: () => this.app.vault.getFiles().filter((f) => f.extension === "pdf").map((f) => f.path),
+			familyForPath: async (path) => {
+				const found = this.app.vault.getFileByPath(path);
+				if (!found || found.extension !== "pdf") return null;
+				const { head, byteLength } = await readPdfHead(this.pdfHeadSource(found));
+				return pdfInkIdFromHead(head, byteLength, window.crypto);
+			},
+			graceMs: RECYCLE_GRACE_MS,
+			release: (id) => this.releasePdfId(id),
+		};
+	}
+
+	/**
+	 * PDF deletions still in their grace, kept per vault and per device: the
+	 * app's local store, not data.json, which syncs and would hand one
+	 * device's deletions to another, and not raw localStorage, which every
+	 * vault on this device shares.
+	 */
+	private attachPdfPendingDeletes(): void {
+		this.pdfStore.attachPendingDeletes({
+			load: () => this.app.loadLocalStorage(PDF_PENDING_DELETES_KEY) as unknown,
+			save: (saved) => this.app.saveLocalStorage(PDF_PENDING_DELETES_KEY, saved),
+			context: () => this.pdfDeleteContext(),
+		});
+	}
+
 	private async onFileDeleted(file: TAbstractFile): Promise<void> {
 		if (file instanceof TFile && file.extension === "pdf") {
-			this.pdfStore.markDeletedPath(
-				file.path,
-				this.store,
-				() => this.app.vault.getFiles().filter((f) => f.extension === "pdf").map((f) => f.path),
-				async (path) => {
-					const found = this.app.vault.getFileByPath(path);
-					if (!found || found.extension !== "pdf") return null;
-					const { head, byteLength } = await readPdfHead(this.pdfHeadSource(found));
-					return pdfInkIdFromHead(head, byteLength, window.crypto);
-				},
-				RECYCLE_GRACE_MS
-			);
+			this.pdfStore.markDeletedPath(file.path, this.pdfDeleteContext());
 			return;
 		}
 		if (!(file instanceof TFile) || file.extension !== "md") return;
@@ -5425,7 +5922,7 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 			return;
 		}
 		this.ambiguousIds.delete(pageId);
-		this.scheduleRecycle(pageId);
+		this.scheduleRecycle(pageId, file.path);
 	}
 
 	/**
@@ -5442,16 +5939,16 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 	 * seconds later. Waiting costs nothing (the sidecar is not in anyone's
 	 * way meanwhile) and the failure it prevents is silent.
 	 */
-	private scheduleRecycle(pageId: string): void {
+	private scheduleRecycle(pageId: string, deletedPath: string): void {
 		const existing = this.pendingRecycle.get(pageId);
-		if (existing !== undefined) window.clearTimeout(existing);
-		this.pendingRecycle.set(
-			pageId,
-			window.setTimeout(() => {
+		if (existing !== undefined) window.clearTimeout(existing.timer);
+		this.pendingRecycle.set(pageId, {
+			path: deletedPath,
+			timer: window.setTimeout(() => {
 				this.pendingRecycle.delete(pageId);
-				runDetached(this.recycleIfStillGone(pageId), `recycle ink for ${pageId}`);
-			}, RECYCLE_GRACE_MS)
-		);
+				runDetached(this.recycleIfStillGone(pageId, deletedPath), `recycle ink for ${pageId}`);
+			}, RECYCLE_GRACE_MS),
+		});
 	}
 
 	/**
@@ -5461,15 +5958,37 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 	 * delete+create can land at a DIFFERENT name - that is exactly what a
 	 * rename arriving over sync looks like from here.
 	 */
-	private async recycleIfStillGone(pageId: string): Promise<void> {
+	private async recycleIfStillGone(pageId: string, deletedPath: string): Promise<void> {
 		// No path is excluded from the search - the deleted one is gone, and
 		// any file carrying this id now is the note come back.
 		if (this.findOtherCarrier(pageId, "") !== null) return;
+		// An encryption plugin turns note.md into note.mdenc: a synced device
+		// sees the .md deleted and the other file created, and the id search
+		// cannot read an encrypted file. A file at the note's own folder and
+		// name with another extension is that note, so its ink stays.
+		if (this.stemTwinExists(deletedPath)) return;
 		await this.store.remove(pageId);
 		delete this.settings.cameras[pageId];
 		delete this.settings.pageOwners[pageId];
 		this.settingsDirty = true;
 		await this.flushSettings();
+	}
+
+	/**
+	 * Is there a file in the same folder, with the same name and an
+	 * extension other than md, as the deleted note? A false yes leaves an
+	 * orphaned sidecar, which is recoverable; a false no recycles ink that
+	 * belongs to a note still in the vault.
+	 */
+	private stemTwinExists(deletedPath: string): boolean {
+		if (!isMarkdownPath(deletedPath)) return false;
+		const stem = stripMarkdownExtension(deletedPath);
+		for (const f of this.app.vault.getFiles()) {
+			if (f.extension === "md") continue;
+			const dot = f.path.lastIndexOf(".");
+			if (dot > f.path.lastIndexOf("/") && f.path.slice(0, dot) === stem) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -5632,8 +6151,13 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 			if (guard && (file !== guard.file || !guard.current() || data !== guard.markdown))
 				throw new Error("This canvas changed before its page identity could be saved.");
 			// A block Obsidian cannot parse: refuse rather than write an id no
-			// read will ever see.
-			if (this.app.metadataCache.getFileCache(file)?.frontmatter === undefined && hasFrontmatterBlock(data)) {
+			// read will ever see. An empty block reports no frontmatter too,
+			// but it is valid and an id written into it is read.
+			if (
+				this.app.metadataCache.getFileCache(file)?.frontmatter === undefined &&
+				hasFrontmatterBlock(data) &&
+				!hasEmptyFrontmatterBlock(data)
+			) {
 				throw new UnreadableFrontmatterError();
 			}
 			const r = claimMarkdown(data, proposedId);
@@ -5737,6 +6261,17 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 			buildId: this.manifest.version,
 		};
 		setSlidesInk(true, host);
+	}
+
+	private applySlidesInk(on: boolean): void {
+		if (on) this.startSlidesInk();
+		else {
+			setSlidesInk(false);
+			// The next switch-on makes a new writer; this one must not
+			// keep claiming the sidecar (audit 125).
+			if (this.slidesWriter) this.store.retireWriter(this.slidesWriter);
+			this.slidesWriter = null;
+		}
 	}
 
 	/** The writer identity of the running slides ink, or null while it is off. */
@@ -5872,6 +6407,16 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 	 */
 	async changeInkFolder(raw: string): Promise<void> {
 		const next = normalizeInkFolder(raw);
+		// With the settings file unreadable the plugin writes none of it, so a
+		// move now would be undone at the next start with the ink left behind.
+		if (this.settingsReadFailed) {
+			new Notice(
+				"Handwriting: the ink folder was not changed. The plugin settings could not be read at startup; restart Obsidian and try again."
+			);
+			return;
+		}
+		const previous = this.store.inkFolder();
+		let saveFailed = false;
 		// Set BEFORE the first await and cleared however the move ends: until the move holds writes, the
 		// store does not report it, and a settings row rebuilt in that span offered a second move.
 		this.inkFolderMoveInFlight = true;
@@ -5899,10 +6444,17 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 					releaseWrites: () => this.store.releaseWrites(),
 					migrate: (from, to) => migrateInkFolder(this.app.vault.adapter, from, to),
 					repoint: (to) => this.store.useInkFolder(to),
+					// The move stays whatever the save does: the files are already
+					// in the new folder. A failed save leaves the setting in memory
+					// and marked unsaved, so the next save or unload writes it.
 					persist: async (to) => {
 						this.settings.inkFolder = to;
-						// saveSettingsNow is synchronous; awaiting it awaited undefined.
-						this.saveSettingsNow();
+						try {
+							await this.persistSettings();
+						} catch (err) {
+							console.error("[handwriting] ink folder setting not saved", err);
+							saveFailed = true;
+						}
 					},
 				},
 				this.store.inkFolder(),
@@ -5918,6 +6470,12 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		}
 		if (outcome.kind === "unsupported") {
 			new Notice("Handwriting: this vault cannot list files, so the ink was not moved.");
+			return;
+		}
+		if (saveFailed) {
+			new Notice(
+				`Handwriting: ink moved to ${next}, but the setting could not be saved. Change any Handwriting setting to save it, or the ink folder goes back to ${previous} at the next start.`
+			);
 			return;
 		}
 		const { moved, skipped } = outcome.result;
@@ -5978,6 +6536,8 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		// Marked here rather than handled in CSS alone, because the clearance
 		// must NOT apply on ios, where the same 8px is correct and a shifted
 		// toolbar would be a regression for everyone already using it.
+		const { restoreSideButtonErases } = await import("./inline/TipMode");
+		restoreSideButtonErases();
 		if (Platform.isAndroidApp) document.body.classList.add("handwriting-android");
 		// No data.json means the folder choice is gone, not that the ink is.
 		// A vault synced in compatibility mode carries `handwriting/` and not
@@ -6012,6 +6572,10 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		// left data.json on 2026-09-05 because that file syncs. A synced
 		// `penHardwareEverSeen: true` from another machine is ignored here.
 		restorePenHardwareEverSeenFromStore();
+		// The stored mouse setting, once, at load. Later only a changed stored
+		// value is applied (takeMergedSettings): re-applying it on every settings
+		// change turned off the arm that lasts only for this session.
+		setMouseInk(this.settings.mouseInk);
 		// Every setting a module reads at runtime, pushed in before any surface
 		// builds its first strip (see applyRuntimeSettings).
 		this.applyRuntimeSettings();
@@ -6101,7 +6665,7 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		this.pdfStore.attachHost({
 			load: (id, options) => this.store.load(id, options),
 			schedule: (id, data) => this.store.schedule(id, data),
-			notice: (message) => void new Notice(message),
+			notice: (message) => void blockNotice(message),
 			prepareExternalAdoption: (id, outgoing) =>
 				this.store.prepareExternalAdoption(id, outgoing, "pdf"),
 			acceptExternalAdoption: (prepared) => this.store.acceptExternalAdoption(prepared),
@@ -6268,7 +6832,6 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		// first strip - a fold order applied after the fact would leave the
 		// first pane of the session folding in the default order.
 		setStripFoldOrder(this.settings.stripFoldOrder);
-		setMouseInk(this.settings.mouseInk);
 		// applyPaper's iterateAllLeaves walks the workspace's restored layout;
 		// called here, during onload before layout is restored, it would see
 		// none of the popouts a reload is about to bring back (Obsidian plugin
@@ -6318,14 +6881,70 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 		if (fresh === undefined || fresh === null) return;
 		// A clean read: the file is readable again, so saving is safe again.
 		this.settingsReadFailed = false;
-		const folderBefore = this.settings.inkFolder;
 		const { merged, localChanges } = this.mergeSettings(fresh);
-		Object.assign(this.settings, merged);
+		this.takeMergedSettings(merged);
 		this.settingsBaseline = this.settingsSnapshot(this.settingsFrom(fresh));
 		this.applyRuntimeSettings();
 		this.applyPaper(this.settings.paperStyle);
-		if (this.settings.inkFolder !== folderBefore) this.store.useInkFolder(this.settings.inkFolder);
 		if (localChanges) this.saveSettingsNow();
+	}
+
+	/** The settings that change how saved ink draws: pressure, smoothing, Boox mode, theme adaptation. */
+	private inkShapingKey(): string {
+		const s = this.settings;
+		return `${s.pressureSensitivity}|${s.inkSmoothing}|${s.booxMode}|${s.inkAdaptsToTheme}`;
+	}
+
+	/**
+	 * Take merged settings into this.settings, and act on the two that cannot
+	 * wait: the ink folder the store writes to, and the stored mouse setting.
+	 * Both the change report and a save's merge come through here, because a
+	 * save can be the first to read another device's file; the change report
+	 * that follows then sees nothing changed. The mouse is set only when the
+	 * stored value changed, so the arm that lasts only for this session
+	 * survives a sync that does not touch it. No ink file moves here: startup
+	 * does that. Synchronous, so the save's hide path stays free of awaits.
+	 */
+	private takeMergedSettings(merged: HandwritingSettings): void {
+		const folderBefore = this.settings.inkFolder;
+		const mouseBefore = this.settings.mouseInk;
+		const slidesBefore = this.settings.slidesInk;
+		const shapedBefore = this.inkShapingKey();
+		const before = JSON.stringify(this.settingsSnapshot(this.settings));
+		Object.assign(this.settings, merged);
+		if (this.settings.inkFolder !== folderBefore) this.store.useInkFolder(this.settings.inkFolder);
+		if (this.settings.mouseInk !== mouseBefore) setMouseInk(this.settings.mouseInk);
+		// Here and not in the change report: a save that read the file first takes
+		// another device's value through this method, and the report that follows
+		// then finds nothing changed. The hide path merges over the file as last
+		// read, so it changes no value and does no extra work. Every key counts:
+		// whatever another device changed is applied and refreshed as the settings tab does.
+		// A refresh that throws must not stop the save that took the values or the
+		// change report that moves the baseline: report it and carry on.
+		if (JSON.stringify(this.settingsSnapshot(this.settings)) !== before) {
+			try {
+				this.applyRuntimeSettings();
+				this.refreshSettingSurfaces();
+				// Saved strokes are shaped and coloured at draw time: whichever of a
+				// save or the change report takes another device's value, it redraws.
+				if (this.inkShapingKey() !== shapedBefore) {
+					repaintAllInkOverlays();
+					embedInkRepaintAll();
+				}
+				if (this.settings.slidesInk !== slidesBefore) this.applySlidesInk(this.settings.slidesInk);
+			} catch (err) {
+				console.error("[handwriting] refreshing the screens after a synced setting failed", err);
+			}
+		}
+	}
+
+	/** What the settings tab refreshes after it flips a row, for a value that arrived from another device. */
+	private refreshSettingSurfaces(): void {
+		refreshNoteZoomControlsAll();
+		this.refreshHeaderActions();
+		refreshPenToolsAll();
+		this.applyStatusBarVisibility();
+		this.applyGatedCommandRegistration();
 	}
 
 	/**
@@ -6671,6 +7290,10 @@ turn off scribble > iPad settings > Apple pencil > scribble toggle off
 		this.settingsDirty = false;
 		// The file could not be read at launch: write nothing (settingsReadFailed).
 		if (this.settingsReadFailed) return Promise.resolve();
+		// At hide the write goes over the settings as last read, with no time to
+		// read first. With no change of this device's own it can only put back
+		// an older value of a setting another device synced in: write nothing.
+		if (onHide && !this.mergeSettings(this.settingsBaseline).localChanges) return Promise.resolve();
 		if (this.settingsWriting) {
 			this.settingsWriteAgain = true;
 			return this.settingsWriting;
@@ -6683,13 +7306,20 @@ turn off scribble > iPad settings > Apple pencil > scribble toggle off
 		// reconciles.
 		const payload = (fresh: Partial<HandwritingSettings> | null | undefined): HandwritingSettings => {
 			const { merged } = this.mergeSettings(fresh ?? this.settingsBaseline);
-			Object.assign(this.settings, merged);
+			this.takeMergedSettings(merged);
 			return merged;
 		};
-		const send = (data: HandwritingSettings): Promise<void> =>
-			this.saveData(data).then(() => {
-				this.settingsBaseline = this.settingsSnapshot(data);
+		// The baseline is what went to the disk, snapshotted BEFORE the write:
+		// `data` shares its colour and size maps with the live settings (the
+		// merge assigns shallow), so a pick during the write would otherwise
+		// enter the baseline without reaching the disk, and the next save would
+		// read it as no change and write the old value back.
+		const send = (data: HandwritingSettings): Promise<void> => {
+			const sent = this.settingsSnapshot(data);
+			return this.saveData(data).then(() => {
+				this.settingsBaseline = sent;
 			});
+		};
 		const writeOnce = (): Promise<void> =>
 			onHide
 				? send(payload(undefined))
@@ -6708,6 +7338,10 @@ turn off scribble > iPad settings > Apple pencil > scribble toggle off
 				(err: unknown) => {
 					this.settingsWriting = null;
 					this.settingsWriteAgain = false;
+					// Nothing reached the disk, and dirty was cleared before
+					// the write: without this a change waiting on the latch
+					// is forgotten, and the flush at quit or hide skips it.
+					this.settingsDirty = true;
 					throw err;
 				}
 			);
@@ -7002,17 +7636,17 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Infinite canvas",
-						desc: "Turns on Infinite canvas. Also turns on zoom bar. Default off.",
+						desc: "Let the page grow as you write and scroll. Also turns on the zoom bar. Global setting. A note can override it with handwriting-canvas: true or false in its frontmatter. Default off.",
 						control: { type: "toggle", key: "extendCanvasWhileScrolling" },
 					},
 					{
 						name: "Hide status bar on handwriting notes",
-						desc: "Hide Obsidian's status bar while a note with handwriting is open. It sits over the bottom edge of the writing surface and the horizontal scrollbar. Off by default; the status bar is shown as usual.",
+						desc: "Hide Obsidian's status bar on notes with handwriting. Global setting. Default off.",
 						control: { type: "toggle", key: "hideStatusBarOnInkedNotes" },
 					},
 					{
 						name: "Paper background",
-						desc: "Lined, grid, or dotted paper. Global setting. Default none.",
+						desc: "Lined, grid, or dotted paper. Global setting. A note can override it with handwriting-paper in its frontmatter. Default none.",
 						control: {
 							type: "dropdown",
 							key: "paperStyle",
@@ -7027,7 +7661,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Toolbar visibility",
-						desc: "Show or hide the toolbar. Default Auto.",
+						desc: "Show or hide the pen toolbar. Auto shows it on phones and tablets, on desktop once a pen is used, and moves it aside while you write. Global setting. Default auto.",
 						control: {
 							type: "dropdown",
 							key: "penTools",
@@ -7038,22 +7672,16 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// Option labels match the Toolbar visibility row's above
 						// verbatim - the two settings behave identically.
 						name: "Zoom bar",
-						desc: "Show or hide the zoom bar. Default Auto. Needs Infinite canvas.",
+						desc: "Buttons to zoom the page in and out. Needs Infinite canvas on for the note. Auto moves it aside while you write. Global setting. Default auto.",
 						control: {
 							type: "dropdown",
 							key: "noteZoomControls",
 							options: { hide: "Off", show: "On", auto: "Auto" },
-							// The zoom bar cannot show without the canvas, so the row
-							// that decides when it shows cannot be used without it
-							// either. A predicate, not a stored value: it is read at
-							// render time, and `setControlValue` redraws the tab when
-							// the canvas moves, so the greying follows at once.
-							disabled: (): boolean => !this.plugin.settings.extendCanvasWhileScrolling,
 						},
 					},
 					{
 						name: "Toolbar placement",
-						desc: "Where the toolbar sits. Default top right.",
+						desc: "Where the toolbar sits. Global setting. Default top right.",
 						// "Corner" is what this row was called for two releases and
 						// what the setting is still named in data.json, so it stays
 						// searchable: the settings search indexes name, desc and
@@ -7066,6 +7694,18 @@ export class HandwritingSettingTab extends PluginSettingTab {
 							type: "dropdown",
 							key: "toolbarCorner",
 							options: Object.fromEntries(TOOLBAR_CORNER_LABELS.map(({ value, label }) => [value, label])),
+						},
+					},
+					{
+						name: "Pen side button",
+						desc: "Choose what a held pen side button does on contact. The mouse right button follows this choice. Remembered on this device; lasso stays on the toolbar.",
+						render: async (setting) => {
+							const { sideButtonErasesEnabled, saveSideButtonErases } = await import("./inline/TipMode");
+							setting.addDropdown((dropdown) => {
+								dropdown.addOption("lasso", "Lasso select").addOption("erase", "Hold to erase")
+									.setValue(sideButtonErasesEnabled() ? "erase" : "lasso")
+									.onChange((value) => saveSideButtonErases(value === "erase"));
+							});
 						},
 					},
 					{
@@ -7112,7 +7752,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// the rest, and the mechanism lives in InkPdfAppend.ts
 						// where it belongs.
 						name: "Ink color on PDFs",
-						desc: "Darken, lighten, or leave it alone. Default darken.",
+						desc: "Darken, lighten, or leave it alone. Global setting. Default darken.",
 						// Shipped in 1.4.18 as "Ink color when flattening PDFs".
 						// Search indexes name, desc and aliases only, so the old
 						// title stays findable here; see "Toolbar placement".
@@ -7135,7 +7775,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Ink color when exporting",
-						desc: "Keep pen ink readable in exports, prints, and snips. Default automatic readability.",
+						desc: "Keep pen ink readable in exports, prints, and snips. Global setting. Default automatic readability.",
 						aliases: ["print", "snip", "highlighter"],
 						control: {
 							type: "dropdown", key: "inkReadableInExports",
@@ -7150,7 +7790,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Ink prediction",
-						desc: "Reduce visible pen lag. Default on.",
+						desc: "Reduce visible pen lag. Global setting. Default on.",
 						aliases: ["latency", "nib", "sharp corners"],
 						control: {
 							type: "toggle",
@@ -7166,7 +7806,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Pressure sensitivity",
-						desc: "Adjust line width with pen pressure. Default on.",
+						desc: "Adjust line width with pen pressure. Global setting. Default on.",
 						// The ordinary control path, not 1.4.19's `render` one. That
 						// row carried a Recalibrate button beside the toggle, and a
 						// button can only reach a row through `render`; Recalibrate
@@ -7183,7 +7823,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// this on the same day (boox thread, 2026-08-30) and were told to turn
 						// prediction off, which is a different feature and did nothing.
 						name: "Ink smoothing",
-						desc: "Smooth and taper strokes. Default on.",
+						desc: "Smooth and taper strokes. Global setting. Default on.",
 						aliases: ["shaping", "speed"],
 						control: {
 							type: "toggle",
@@ -7193,7 +7833,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Pen reticle",
-						desc: "Show a dot at the pen tip. Default on.",
+						desc: "Show a dot at the pen tip. Global setting. Default on.",
 						aliases: ["cursor"],
 						control: {
 							type: "toggle",
@@ -7203,7 +7843,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Shape snap",
-						desc: "Hold at the end of a stroke to snap it into a shape. Default on.",
+						desc: "Hold at the end of a stroke to snap it into a shape. Global setting. Default on.",
 						control: { type: "toggle", key: "shapeSnap" },
 					},
 				],
@@ -7230,7 +7870,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 							"command palette",
 						],
 						desc:
-							"Add tool, color, size, and quick pen commands for hotkeys. Default off." +
+							"Add tool, color, size, and quick pen commands for hotkeys. Global setting. Default off." +
 							(this.plugin.gatedCommandRemovalAvailable()
 								? ""
 								: " Turning it off takes effect after the plugin reloads."),
@@ -7285,7 +7925,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					{
 						name: "Developer diagnostics",
 						desc:
-							"Show diagnostic commands after reloading the plugin. Default off.",
+							"Show diagnostic commands after reloading the plugin. Global setting. Default off.",
 						control: { type: "toggle", key: "devDiagnostics" },
 					},
 					{
@@ -7293,7 +7933,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// simplification). The rows it overrides keep their
 						// `disabled` read of it wherever they sit.
 						name: "Boox mode",
-						desc: "Adjust pen input and animations for e-ink screens. Default off.",
+						desc: "Adjust pen input and animations for e-ink screens. Global setting. Default off.",
 						control: { type: "toggle", key: "booxMode" },
 					},
 					{
@@ -7305,7 +7945,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// favour of this button. The old row's name stays an alias
 						// so settings search still lands somewhere.
 						name: "Recalibrate pen pressure",
-						desc: "Forget the pressure range learned on this device and relearn it from your next strokes.",
+						desc: "Forget the pressure range learned on this device and relearn it from your next strokes. This device only.",
 						aliases: ["pressure sensitivity", "recalibrate", "calibration"],
 						render: (setting) => this.renderPressureRecalibrate(setting),
 					},
@@ -7383,9 +8023,9 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				setZoomBarCanvasEnabled(on);
 				refreshNoteZoomControlsAll();
 				this.plugin.refreshHeaderActions();
-				// The Zoom bar row is greyed out by this value, and its `disabled`
-				// predicate is read at render time: without this the row keeps the
-				// state it was drawn in until the tab is closed and opened again.
+				// No row's `disabled` predicate reads this value today. The rerender
+				// stays so that a row which does read it is redrawn at once, not
+				// when the tab is closed and opened again.
 				this.rerender();
 				break;
 			case "pressureSensitivity":
@@ -7575,9 +8215,10 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				});
 			} else if (item.control?.type === "dropdown") {
 				const { key, options, disabled } = item.control;
-				// Same reason as the toggle above, and the Zoom bar row is a
-				// dropdown: a row the definitions mark unusable must not paint as
-				// a live control here while 1.13 greys it.
+				// Same reason as the toggle above: a row the definitions mark
+				// unusable must not paint as a live control here. No row is a
+				// disabled dropdown today; SettingsCanvasRows.test.ts pins this
+				// branch on a synthetic row.
 				const off = typeof disabled === "function" ? disabled() : disabled === true;
 				setting.addDropdown((d) => {
 					for (const [value, label] of Object.entries(options)) d.addOption(value, label);

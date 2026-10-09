@@ -110,7 +110,10 @@ export function contentStamp(s: string): string {
  *
  * Saves wait for a 700 ms quiet period, but a batch of changes is written at
  * the latest MAX_DIRTY_MS after its first change, so continuous writing is
- * never more than a few seconds from disk.
+ * never more than a few seconds from disk. Neither timer writes while a pen is
+ * down (see pensDown): a batch past MAX_DIRTY_MS is written at the first pen
+ * lift, and MAX_DIRTY_MS after that at the latest, pen or no pen, so the worst
+ * case from the first change to the write is 2 x MAX_DIRTY_MS.
  */
 
 const DEBOUNCE_MS = 700;
@@ -124,11 +127,33 @@ const DEBOUNCE_MS = 700;
  * A name that does not fit the shape sorts oldest rather than throwing:
  * something else put it there, and it is not ours to rank.
  */
+/**
+ * A note's own paper or canvas choice is content: a file holding only that
+ * is recycled like any other page, never deleted, so a note brought back
+ * from the trash keeps it. An older build reaches the same answer, because
+ * it reads the two fields as unknown top-level ones.
+ */
+function holdsChoice(page: PageData): boolean {
+	return page.noteCanvas !== undefined || page.notePaper !== undefined;
+}
+
 function generationOf(file: string, prefix: string): number {
 	const name = (file.split("/").pop() ?? "").slice(prefix.length, -".json".length);
 	const m = /^(\d+)(?:-(\d+))?$/.exec(name);
 	if (!m) return -1;
 	return Number(m[1]) * 1000 + Number(m[2] ?? 1);
+}
+
+/**
+ * The same sort key for a copy `remove` set aside because another device
+ * wrote it: `<pageId>-<stamp>[-<n>]-external.json` reads as the plain name
+ * would, any other name -1.
+ */
+function externalGenerationOf(file: string, prefix: string): number {
+	const name = file.split("/").pop() ?? "";
+	const tag = "-external.json";
+	if (!name.endsWith(tag)) return -1;
+	return generationOf(name.slice(0, -tag.length) + ".json", prefix);
 }
 
 /**
@@ -151,7 +176,9 @@ function folderOf(path: string): string {
  * Maximum dirty interval, anchored to the FIRST unsaved change of a batch and
  * never re-armed by later ones. The quiet-period debounce alone restarted on
  * every stroke, so a stroke every few hundred ms deferred the write
- * indefinitely (persistence gate, 2026-08-22).
+ * indefinitely (persistence gate, 2026-08-22). When it fires with a pen down
+ * the batch is written at the first pen lift instead, and a second
+ * MAX_DIRTY_MS caps that wait: 10 s from the first change at the worst.
  */
 export const MAX_DIRTY_MS = 5000;
 
@@ -360,6 +387,21 @@ export class PageStore {
 	/** One-shot maximum-dirty-interval timer per page; see MAX_DIRTY_MS. */
 	private maxTimers = new Map<string, number>();
 	/**
+	 * PENS DOWN RIGHT NOW, by pointer id. A save serializes the whole page on the main thread in one task (20 to 40 ms
+	 * at 3000 strokes), and the bounded-dirty timer fires 5 s into continuous writing, so on a big note it landed
+	 * inside a stroke: a hitch every 5 s. Neither save timer writes while a pen is down. A page the quiet timer found
+	 * with a pen down takes a fresh quiet period when the last pen lifts; a page past its MAX_DIRTY_MS bound is
+	 * written at that first lift, and MAX_DIRTY_MS after its bound at the latest, pen or no pen (a lift that never
+	 * arrives). Pen pointers only. Watched on the main window from the first `schedule` until `flush` (page switch,
+	 * view close, plugin unload); a pen in a popout window, mouse ink and finger ink save as before.
+	 */
+	private pensDown = new Set<number>();
+	/** Pages the quiet timer found with a pen down; they take a fresh quiet period when the last pen lifts. */
+	private heldForPen = new Set<string>();
+	/** Pages past their MAX_DIRTY_MS bound with a pen down: written at the first lift, or by their cap timer. */
+	private heldPastBound = new Map<string, number>();
+	private penWatch: (() => void) | null = null;
+	/**
 	 * One tail PER PAGE, not one for the store. The tmp/rename dance must
 	 * never interleave for the SAME page - that was always the invariant -
 	 * but a store-wide chain also made every page wait behind every other,
@@ -405,9 +447,78 @@ export class PageStore {
 	 */
 	private outstandingWrites = new Map<string, number>();
 
+	/**
+	 * The page each write attempt that has left `pending` but not landed is
+	 * carrying, by consume sequence. While a write is queued `load` answers
+	 * from here (or `pending`) instead of reading disk, so a reload cannot
+	 * move the baseline to another revision under ink that exists only in
+	 * memory. Pushed in `writePending` right after the batch leaves `pending`,
+	 * with no await between, and dropped in the same `finally` that releases
+	 * the outstanding claim.
+	 */
+	private inFlight = new Map<string, { seq: number; data: PageData }[]>();
+
+	/**
+	 * The newest batch each writer has taken off the queue, per page: a number
+	 * from `consumeSeq`, stamped in `writePending` when the batch is consumed.
+	 *
+	 * A failed write used to be put back whenever `pending` was empty. But a
+	 * batch leaves `pending` before it waits for the page's earlier write, so a
+	 * newer batch B from the same writer could already be on its way while the
+	 * older A failed: A went back into the queue and its retry landed over B
+	 * (the live file's known mtime was B's, so the guard saw nothing), or B then
+	 * failed too and was dropped because A held the slot. Either way the user's
+	 * newest strokes were gone with no message.
+	 *
+	 * A failed or held batch is put back only when no LATER batch from the SAME
+	 * writer has left the queue (`superseded`). Per writer, because two panes on
+	 * one canvas page write different pages (see PageWriter): one pane's newer
+	 * batch says nothing about the other's.
+	 */
+	private consumedSeq = new Map<string, Map<PageWriter | undefined, number>>();
+	private consumeSeq = 0;
+	/**
+	 * Bumped by `remove` before it drops anything. A write reads it when it
+	 * starts: one that fails after its page was removed must not go back to
+	 * `pending`, because `remove` has just deleted the `consumedSeq` entry
+	 * that `superseded` would read, and a retry from there writes a live
+	 * sidecar for a note that no longer exists. See `recycleFailedWrite`.
+	 */
+	private removals = new Map<string, number>();
+	/**
+	 * The `removals` count at which `remove` recycled a queued state. That
+	 * state was scheduled after any write already running, so it is newer
+	 * than that write's payload: a write that fails after such a removal is
+	 * filed as a tagged generation, which a restore never opens over it.
+	 */
+	private removedWithQueued = new Map<string, number>();
+
+	/** A later batch from this writer has already left the queue for this page. */
+	private superseded(pageId: string, writer: PageWriter | undefined, seq: number | undefined): boolean {
+		if (seq === undefined) return false;
+		const newest = this.consumedSeq.get(pageId)?.get(writer);
+		return newest !== undefined && newest > seq;
+	}
+
 	/** Claim an attempt. Synchronous, and always paired with a release. */
 	private beginOutstandingWrite(pageId: string): void {
 		this.outstandingWrites.set(pageId, (this.outstandingWrites.get(pageId) ?? 0) + 1);
+	}
+
+	/**
+	 * The newest page this store holds for `pageId` that has not landed on
+	 * disk: the queued batch if there is one, else the newest consumed
+	 * attempt still writing. Null when nothing is held, including a queued
+	 * write whose payload is gone, which then reads disk as it always did.
+	 */
+	private latestUnlanded(pageId: string): PageData | null {
+		const queued = this.pending.get(pageId);
+		if (queued) return queued;
+		const attempts = this.inFlight.get(pageId);
+		if (!attempts || attempts.length === 0) return null;
+		let newest = attempts[0]!;
+		for (const a of attempts) if (a.seq > newest.seq) newest = a;
+		return newest.data;
 	}
 
 	/** Release one attempt; the key goes when the last one does, so `size` counts pages. */
@@ -515,6 +626,17 @@ export class PageStore {
 	 * completed save (see `absorbProvisional` and `pendingConflict`).
 	 */
 	private displacedProvisional = new Map<string, string>();
+	/**
+	 * The `.tmp` paths this store wrote and has not yet renamed into place
+	 * (R4). A `.tmp` that is NOT in here is a save that never replaced the live
+	 * file - this device's earlier session killed or locked out between the two
+	 * steps, or another process - and it can be the only copy of its ink. Load
+	 * leaves it alone beside a readable live file (it never chooses between two
+	 * valid files), so the next save used to write the same name over it and
+	 * those strokes were gone with no message. A save
+	 * now keeps such a file as a conflict copy before it reuses the name.
+	 */
+	private ownTmp = new Set<string>();
 	/** This install's id, written into the pairs it preserves (see ADOPTED_BY_KEY). */
 	private deviceId: string | null = null;
 
@@ -538,8 +660,21 @@ export class PageStore {
 	 * rename lands. If the write fails for good, this entry is what tells the
 	 * user where their other version went, because the live path is empty by
 	 * then.
+	 *
+	 * A LIST per page (R8): one save can keep more than one copy - a blind local
+	 * file (absorbProvisional), the revision the guard moved aside, and one that
+	 * landed at the live path after that move - and a single slot let the
+	 * second overwrite the first, so one kept copy was never named. Each is
+	 * announced once, after the save lands. See parkConflict.
 	 */
-	private pendingConflict = new Map<string, string>();
+	private pendingConflict = new Map<string, string[]>();
+
+	/** Park a kept copy for the announcement that follows a landed save. */
+	private parkConflict(pageId: string, kept: string): void {
+		const list = this.pendingConflict.get(pageId);
+		if (list === undefined) this.pendingConflict.set(pageId, [kept]);
+		else list.push(kept);
+	}
 	/**
 	 * The recovery pair most recently completed for a page, with the identity
 	 * of the exact revision pair it preserves. See `reuseAdoptionPair`: a
@@ -1091,6 +1226,11 @@ export class PageStore {
 		return this.migrating;
 	}
 
+	/** The text of a file the store wrote, for reading a copy back. */
+	readText(path: string): Promise<string> {
+		return this.app.vault.adapter.read(path);
+	}
+
 	/**
 	 * Is a write for this page queued right now? Synchronous on purpose.
 	 *
@@ -1111,6 +1251,16 @@ export class PageStore {
 			// AND a write that has left the queue but not landed: the ink is
 			// still only in memory, so a reload here would discard it.
 			(this.outstandingWrites.get(pageId) ?? 0) > 0
+		);
+	}
+
+	/** Is any page's write still queued or on its way to the adapter? */
+	hasAnyQueuedWrite(): boolean {
+		return (
+			this.pending.size > 0 ||
+			this.timers.size > 0 ||
+			this.maxTimers.size > 0 ||
+			[...this.outstandingWrites.values()].some((n) => n > 0)
 		);
 	}
 
@@ -1274,6 +1424,26 @@ export class PageStore {
 	 * closed, and the poll keeps watching the page (see observeUnreadable).
 	 */
 	async load(pageId: string, options: { restore?: boolean } = {}): Promise<LoadResult | null> {
+		// A page with a write queued is live in memory and disk is behind it.
+		// Reading disk here would move the baseline to whatever revision is
+		// there now (another device's, a rename's) and the queued write would
+		// then land over it with no conflict copy. So the answer is the page
+		// held in memory, a copy because the writer still hashes its own, and
+		// disk, the trash lookup and the baseline are not touched. This covers
+		// every call: `restore` only decides the trash lookup for a missing
+		// file, and a page with a queued write is not missing.
+		const held = this.latestUnlanded(pageId);
+		if (held) {
+			return {
+				data: {
+					...held,
+					textBoxes: held.textBoxes.map((t) => ({ ...t })),
+					images: held.images.map((i) => ({ ...i })),
+					strokes: held.strokes.map((st) => ({ ...st })),
+				},
+				recovered: false,
+			};
+		}
 		const result = await this.loadFromDisk(pageId, options);
 		if (!result?.damaged) this.unreadable.delete(pageId);
 		return result;
@@ -1323,6 +1493,11 @@ export class PageStore {
 				// interrupted save is a complete, current-format page for this
 				// id. Anything less keeps the read-only lock.
 				this.unreadable.set(pageId, contentStamp(text));
+				// Not when the only fault is ink under a key this build does not
+				// read: that file is most likely a newer build's, and a leftover
+				// save put in its place would become the page on every device.
+				// It keeps its place, locked, as when no save was left behind.
+				if (result.onlyUnknownPointKeys) return { ...result, damagedPath: final };
 				return (
 					(await this.promoteTmpOverDamaged(pageId, final, st?.mtime ?? 0, contentStamp(text))) ?? {
 						...result,
@@ -1330,14 +1505,22 @@ export class PageStore {
 					}
 				);
 			}
-			// No live sidecar, but a background flush's carrier: promote it,
-			// as an interrupted save would be.
-			const carried = await this.recoverFlushCarrier(pageId, final, 0, null);
-			if (carried !== null) return carried;
 			// No live sidecar. An interrupted save's .tmp is looked for beside
 			// the resolved path first, then beside the page's name in every
 			// other folder it can be served from (findInterruptedSave).
+			//
+			// The .tmp is judged BEFORE a background flush's carrier (R2). The
+			// carrier used to be promoted first, unconditionally, so a carrier
+			// from an older flush beat the newer save whose .tmp was waiting
+			// beside it and the newest strokes were gone with no message.
+			// A usable .tmp is promoted below and the carrier
+			// is then judged against it exactly as against a live file. With no
+			// usable .tmp the carrier is promoted, as an interrupted save would be.
 			const save = await this.findInterruptedSave(pageId, final);
+			if (save === null || save.result.damaged) {
+				const carried = await this.recoverFlushCarrier(pageId, final, 0, null);
+				if (carried !== null) return carried;
+			}
 			if (save !== null) {
 				const { tmp, live, text, result } = save;
 				// PROMOTED, not just read. Recovering the content and leaving
@@ -1365,6 +1548,12 @@ export class PageStore {
 						const st = await adapter.stat(live).catch(() => null);
 						if (st) this.knownMtime.set(pageId, st.mtime);
 						this.knownHash.set(pageId, contentStamp(text));
+						// A carrier beside it is now judged against the promoted
+						// page: built on its bytes, or holding every stroke it has,
+						// the carrier is promoted and this page kept as superseded;
+						// otherwise the carrier's page is kept aside and announced.
+						const carried = await this.recoverFlushCarrier(pageId, live, st?.mtime ?? 0, contentStamp(text));
+						if (carried !== null) return carried;
 					} catch (err) {
 						// The content is in hand either way; the caller gets it
 						// and the next save will write it out properly.
@@ -1477,13 +1666,25 @@ export class PageStore {
 	 * where sync cannot see it, while the other device (which had the deletion)
 	 * opened the note blank and started a second sidecar on its first stroke.
 	 *
-	 * A `-wipe` generation (preserve()'s own Delete-all safety copy) is never
-	 * a candidate here. That copy exists so the user's own trash still holds
-	 * ink they deliberately wiped - it is not this page's last live state.
-	 * Deleting a note right after a wipe recycles nothing new (the live file
-	 * is provably empty), so without this exclusion the wipe copy would be
-	 * the only generation on disk and restoring the note would silently
-	 * bring back ink the user chose to erase.
+	 * An `-external` copy is the fallback: the live file `remove` found
+	 * written by another device and set aside. It is tried, newest first and
+	 * through the same checks, only when no plain generation restores, so a
+	 * note whose live ink came from another device comes back with that ink
+	 * instead of opening blank. When a plain one restores, every `-external`
+	 * copy stays in the trash.
+	 *
+	 * Every other TAGGED generation is never a candidate here. A
+	 * `-wipe` one is preserve()'s own Delete-all safety copy: it exists so the
+	 * user's own trash still holds ink they deliberately wiped. Deleting a
+	 * note right after a wipe recycles nothing new (the live file is provably
+	 * empty), so without this exclusion the wipe copy would be the only
+	 * generation on disk and restoring the note would silently bring back ink
+	 * the user chose to erase. The others are what `remove` found beside the
+	 * page: `-tmp` an interrupted save, `-flush` a background-flush carrier,
+	 * `-superseded` a save that failed after the delete, older than the
+	 * queued state the delete recycled. Each is kept for the user to recover
+	 * by hand; none is this page's last live state, and promoting one would
+	 * put an unfinished or older save in the live file with no message.
 	 */
 	private async restoreFromTrash(pageId: string): Promise<ParseResult | null> {
 		const adapter = this.app.vault.adapter;
@@ -1492,7 +1693,8 @@ export class PageStore {
 		const prefix = `${pageId}-`;
 		// Tagged with the folder that owns the trash, because that folder is
 		// where the page goes back to.
-		const candidates: Array<{ file: string; home: string }> = [];
+		const plain: Array<{ file: string; home: string; gen: number }> = [];
+		const external: Array<{ file: string; home: string; gen: number }> = [];
 		for (const home of this.searchFolders()) {
 			let files: string[];
 			try {
@@ -1502,9 +1704,16 @@ export class PageStore {
 			}
 			for (const f of files) {
 				const name = f.split("/").pop() ?? "";
-				if (name.startsWith(prefix) && name.endsWith(".json") && !name.endsWith("-wipe.json")) {
-					candidates.push({ file: f, home });
+				if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
+				// A plain generation, `<pageId>-<stamp>[-<n>].json`, or an
+				// `-external` one. Every other tagged name reads -1 in both.
+				const gen = generationOf(f, prefix);
+				if (gen >= 0) {
+					plain.push({ file: f, home, gen });
+					continue;
 				}
+				const ext = externalGenerationOf(f, prefix);
+				if (ext >= 0) external.push({ file: f, home, gen: ext });
 			}
 		}
 		// Newest first, ACROSS the folders. The names carry a wall-clock stamp
@@ -1512,7 +1721,21 @@ export class PageStore {
 		// digits; the generations are few, so this compares the numbers. Equal
 		// stamps keep the folder order above, which is the configured folder
 		// first - the same tie-break every other lookup here makes.
-		candidates.sort((a, b) => generationOf(b.file, prefix) - generationOf(a.file, prefix));
+		plain.sort((a, b) => b.gen - a.gen);
+		external.sort((a, b) => b.gen - a.gen);
+		return (await this.restoreFirstOf(pageId, plain)) ?? (await this.restoreFirstOf(pageId, external));
+	}
+
+	/**
+	 * The first candidate, in the order given, that parses undamaged with this
+	 * page id is renamed back onto the live path in its own folder. Null when
+	 * none does.
+	 */
+	private async restoreFirstOf(
+		pageId: string,
+		candidates: Array<{ file: string; home: string }>,
+	): Promise<ParseResult | null> {
+		const adapter = this.app.vault.adapter;
 		for (const { file, home } of candidates) {
 			let text: string;
 			try {
@@ -1664,11 +1887,16 @@ export class PageStore {
 	}
 
 	/**
-	 * Read a flush carrier: the page it holds and the stamp of the live bytes
-	 * it was built on (null when there was no live file yet). Null when it is
-	 * not a complete, current-format page for this id.
+	 * Read a flush carrier: the page it holds, the stamp of the live bytes it
+	 * was built on (null when there was no live file yet), and the saves that
+	 * were in flight when it was written (null when it cannot say: an older
+	 * build's carrier has no such list). Null when it is not a complete,
+	 * current-format page for this id.
 	 */
-	private parseCarrier(text: string, pageId: string): { page: PageData; base: string | null } | null {
+	private parseCarrier(
+		text: string,
+		pageId: string
+	): { page: PageData; base: string | null; inFlight: Array<string | null> | null } | null {
 		let raw: unknown;
 		try {
 			raw = JSON.parse(text);
@@ -1676,12 +1904,16 @@ export class PageStore {
 			return null;
 		}
 		if (!raw || typeof raw !== "object") return null;
-		const { flushBase, page } = raw as { flushBase?: unknown; page?: unknown };
+		const { flushBase, flushInFlight, page } = raw as { flushBase?: unknown; flushInFlight?: unknown; page?: unknown };
 		if (flushBase !== null && typeof flushBase !== "string") return null;
+		const inFlight =
+			Array.isArray(flushInFlight) && flushInFlight.every((s) => s === null || typeof s === "string")
+				? (flushInFlight as Array<string | null>)
+				: null;
 		if (!page || typeof page !== "object") return null;
 		const parsed = parsePage(JSON.stringify(page), pageId);
 		if (parsed.damaged || parsed.futureVersion !== undefined || parsed.data.pageId !== pageId) return null;
-		return { page: parsed.data, base: flushBase };
+		return { page: parsed.data, base: flushBase, inFlight };
 	}
 
 	/**
@@ -1694,9 +1926,12 @@ export class PageStore {
 	 * not evidence, sync keeps mtimes - so its page is kept aside as
 	 * `<name>.flush-conflict-<mtime>.json` and the live file stands. With no
 	 * live file (`liveStamp` null) the carrier is promoted, as an interrupted
-	 * save is. A carrier built on other bytes that still holds every stroke of
-	 * the live page is promoted too: a save in flight when it was written
-	 * landed first. Nothing is deleted except the carrier itself, and only
+	 * save is. A carrier built on other bytes is promoted too when a save in
+	 * flight when it was written landed first: it holds every stroke of the
+	 * live page AND names the live bytes among its saves in flight, or cannot
+	 * say (an older build's carrier, or a save whose bytes were not known
+	 * yet). Stroke ids alone cannot tell that save from another device's edit
+	 * that moved a stroke. Nothing is deleted except the carrier itself, and only
 	 * once its page is written elsewhere. Null when there is no usable
 	 * carrier, when either file changed under us, or when the carrier was
 	 * kept aside (announced through `onFlushKeptAside`).
@@ -1723,12 +1958,20 @@ export class PageStore {
 			const liveNow = liveText === null ? null : contentStamp(liveText);
 			if (liveNow !== liveStamp) return { kind: "none" };
 			const pageText = serializePage(parsed.page);
-			// Built on other bytes, it is still the successor when it holds every
-			// stroke the live page has: a save that was already in flight when the
-			// carrier was written can land first and move the live file on. The
-			// containment rule the two-folder choice uses. A carrier that lacks a
-			// live stroke stays aside, and is named to the user.
-			if (liveStamp !== null && parsed.base !== liveStamp && !holdsEveryStroke(parsed.page, liveText, pageId)) {
+			// Built on other bytes, it is still the successor when a save that was
+			// already in flight when the carrier was written landed first and moved
+			// the live file on: it holds every stroke the live page has, and it
+			// names the live bytes among its saves in flight or cannot say. Stroke
+			// ids alone also match bytes another device wrote after moving a stroke,
+			// and promoting those would move the stroke back. Anything else stays
+			// aside, and is named to the user.
+			const accounted =
+				parsed.inFlight === null || parsed.inFlight.includes(null) || parsed.inFlight.includes(liveStamp);
+			if (
+				liveStamp !== null &&
+				parsed.base !== liveStamp &&
+				!(accounted && holdsEveryStroke(parsed.page, liveText, pageId))
+			) {
 				const mtime = (await adapter.stat(carrier).catch(() => null))?.mtime ?? 0;
 				const aside = await this.freeKeptPath(final, "flush-conflict", mtime);
 				await adapter.write(aside, pageText);
@@ -1801,22 +2044,116 @@ export class PageStore {
 		this.pendingCovers.set(pageId, this.carriersWritten.get(pageId));
 		const existing = this.timers.get(pageId);
 		if (existing !== undefined) window.clearTimeout(existing);
-		this.timers.set(
-			pageId,
-			window.setTimeout(() => {
-				this.timers.delete(pageId);
-				runDetached(this.writePending(pageId), `write queued sidecar ${pageId}`);
-			}, DEBOUNCE_MS)
-		);
+		this.watchPens();
+		this.armQuiet(pageId);
 		if (!this.maxTimers.has(pageId)) {
 			this.maxTimers.set(
 				pageId,
 				window.setTimeout(() => {
 					this.maxTimers.delete(pageId);
-					runDetached(this.writePending(pageId), `write bounded-dirty sidecar ${pageId}`);
+					this.saveAtBound(pageId);
 				}, MAX_DIRTY_MS)
 			);
 		}
+	}
+
+	/** The quiet-period timer: DEBOUNCE_MS from now, replacing any running one. */
+	private armQuiet(pageId: string): void {
+		const existing = this.timers.get(pageId);
+		if (existing !== undefined) window.clearTimeout(existing);
+		this.timers.set(
+			pageId,
+			window.setTimeout(() => {
+				this.timers.delete(pageId);
+				this.saveUnlessPenDown(pageId, `write queued sidecar ${pageId}`);
+			}, DEBOUNCE_MS)
+		);
+	}
+
+	/** A save timer's write, held while a pen is down (see pensDown). The batch stays in `pending` either way. */
+	private saveUnlessPenDown(pageId: string, label: string): void {
+		// `?.`: a unit rig built with Object.create never runs the field initialisers.
+		if ((this.pensDown?.size ?? 0) > 0) {
+			this.heldForPen.add(pageId);
+			return;
+		}
+		runDetached(this.writePending(pageId), label);
+	}
+
+	/**
+	 * The MAX_DIRTY_MS bound: written now, or with a pen down at the first lift, with a cap timer MAX_DIRTY_MS out.
+	 * The cap writes pen or no pen and forgets every pen believed down: a lift that never arrived is not waited for
+	 * again, and the next real contact is tracked afresh.
+	 */
+	private saveAtBound(pageId: string): void {
+		if ((this.pensDown?.size ?? 0) === 0) {
+			runDetached(this.writePending(pageId), `write bounded-dirty sidecar ${pageId}`);
+			return;
+		}
+		if (this.heldPastBound.has(pageId)) return;
+		this.heldPastBound.set(
+			pageId,
+			window.setTimeout(() => {
+				this.heldPastBound.delete(pageId);
+				this.pensDown.clear();
+				runDetached(this.writePending(pageId), `write capped sidecar ${pageId}`);
+			}, MAX_DIRTY_MS)
+		);
+	}
+
+	/**
+	 * The last pen lifted (or the window lost focus). Pages past their bound are written in a task after the lift's own
+	 * handlers, which commit the stroke the lift ends, so the write carries it; no new quiet period. Pages held by the
+	 * quiet timer alone take a fresh quiet period.
+	 */
+	private releaseHeld(): void {
+		const held = [...this.heldForPen];
+		this.heldForPen.clear();
+		for (const pageId of held) if (this.pending.has(pageId) && !this.heldPastBound.has(pageId)) this.armQuiet(pageId);
+		const bound = [...this.heldPastBound.keys()];
+		if (bound.length === 0) return;
+		window.setTimeout(() => {
+			for (const pageId of bound) {
+				if (!this.heldPastBound.has(pageId)) continue;
+				runDetached(this.writePending(pageId), `write bounded-dirty sidecar at the lift ${pageId}`);
+			}
+		}, 0);
+	}
+
+	/** Listen for pen contacts on the main window, once; capture phase, so no handler below can hide one. */
+	private watchPens(): void {
+		if (this.penWatch || typeof window === "undefined" || typeof window.addEventListener !== "function") return;
+		const win = window;
+		const down = (e: PointerEvent): void => {
+			if (e.pointerType === "pen") this.pensDown.add(e.pointerId);
+		};
+		const up = (e: PointerEvent): void => {
+			if (e.pointerType !== "pen" || !this.pensDown.delete(e.pointerId)) return;
+			if (this.pensDown.size === 0) this.releaseHeld();
+		};
+		const lost = (): void => {
+			this.pensDown.clear();
+			this.releaseHeld();
+		};
+		win.addEventListener("pointerdown", down, true);
+		win.addEventListener("pointerup", up, true);
+		win.addEventListener("pointercancel", up, true);
+		win.addEventListener("blur", lost);
+		this.penWatch = () => {
+			win.removeEventListener("pointerdown", down, true);
+			win.removeEventListener("pointerup", up, true);
+			win.removeEventListener("pointercancel", up, true);
+			win.removeEventListener("blur", lost);
+		};
+	}
+
+	private unwatchPens(): void {
+		this.penWatch?.();
+		this.penWatch = null;
+		this.pensDown?.clear();
+		this.heldForPen?.clear();
+		for (const cap of this.heldPastBound?.values() ?? []) window.clearTimeout(cap);
+		this.heldPastBound?.clear();
 	}
 
 	/**
@@ -1875,6 +2212,13 @@ export class PageStore {
 			window.clearTimeout(max);
 			this.maxTimers.delete(pageId);
 		}
+		// A held page's batch is consumed with its timers: nothing is left for a lift or a cap to write.
+		const cap = this.heldPastBound?.get(pageId);
+		if (cap !== undefined) {
+			window.clearTimeout(cap);
+			this.heldPastBound.delete(pageId);
+		}
+		this.heldForPen?.delete(pageId);
 	}
 
 	/**
@@ -1887,6 +2231,14 @@ export class PageStore {
 	 */
 	private carriersWritten = new Map<string, number>();
 	private carrierGeneration = 0;
+	/**
+	 * The saves in flight for each page. writeNow enters here at its start,
+	 * records the stamp of the bytes it will write once they exist, and leaves
+	 * on every exit. A carrier written meanwhile names them, so recovery can
+	 * tell a live file this session's own save moved on from one that arrived
+	 * from elsewhere (recoverFlushCarrier).
+	 */
+	private savesInFlight = new Map<string, Set<{ stamp: string | null }>>();
 
 	/**
 	 * Hand every dirty sidecar's FLUSH CARRIER to the adapter in one synchronous
@@ -1983,10 +2335,13 @@ export class PageStore {
 			// Its OWN file, never the shared .tmp: a .tmp
 			// beside a valid live file cannot say which bytes it followed, so
 			// load could never safely prefer it. The carrier records the stamp
-			// of the live bytes this session loaded or wrote.
+			// of the live bytes this session loaded or wrote, and the saves in
+			// flight now: each one's stamp, or null when its bytes are not known
+			// yet. Older builds read past the extra field.
 			const carrier = this.carrierFor(this.pinnedPath(pageId));
 			const base = this.knownHash.get(pageId) ?? null;
-			const text = `{"flushBase":${JSON.stringify(base)},"page":${serializePage(data)}}`;
+			const inFlight = [...(this.savesInFlight.get(pageId) ?? [])].map((f) => f.stamp);
+			const text = `{"flushBase":${JSON.stringify(base)},"flushInFlight":${JSON.stringify(inFlight)},"page":${serializePage(data)}}`;
 			const generation = ++this.carrierGeneration;
 			this.carriersWritten.set(pageId, generation);
 			// The carrier is written from the payload in `pending`, so that
@@ -2019,6 +2374,83 @@ export class PageStore {
 		const ids = [...this.pending.keys()];
 		for (const id of ids) await this.writePending(id);
 		await Promise.all([...this.tails.values()]);
+		// Everything held for a pen is written above; the next `schedule` watches again.
+		this.unwatchPens();
+	}
+
+	/**
+	 * A note open here now names `newId`, an id the other device gave it, and
+	 * the ink this device drew sits in `oldId`'s file. Nothing names that file
+	 * any more, so it is set beside the new page where fix ink de-sync finds
+	 * it: as `<newId>.conflict-<mtime>.json`, a kept copy listed against the
+	 * new live page (ForkResolution.scanForForks). When the new id has no live
+	 * file yet there is no other revision to choose against, and the old file
+	 * becomes the new id's live file instead, declaring the new id, so the
+	 * note keeps its ink.
+	 *
+	 * Anything still queued for `oldId` is written first, and the move runs on
+	 * its write chain, so it moves the newest bytes. A queue that will not
+	 * write leaves the file where it is. Answers where the file went, that
+	 * there was nothing to move, or that it stayed because the queue did not
+	 * land; a failed read, write or rename throws and moves nothing further.
+	 */
+	async keepAsideUnder(
+		oldId: string,
+		newId: string
+	): Promise<{ kind: "moved"; to: string } | { kind: "absent" } | { kind: "held" }> {
+		this.clearTimers(oldId);
+		await this.writePending(oldId);
+		if (this.pending.has(oldId)) return { kind: "held" };
+		const adapter = this.app.vault.adapter;
+		return this.chain(oldId, async () => {
+			const old = await this.findSidecar(oldId);
+			if (!old.found) return { kind: "absent" as const };
+			const target = await this.resolveFor(newId);
+			let to: string;
+			if (target.found) {
+				const st = await adapter.stat(old.path).catch(() => null);
+				to = await this.freeConflictPath(target.path, st?.mtime ?? 0);
+				await adapter.rename(old.path, to);
+			} else {
+				// It becomes the new id's page, so it declares the new id: a
+				// reload under the new path reads the id the note names. Only
+				// that one top-level value changes.
+				const text = await adapter.read(old.path);
+				let raw: Record<string, unknown> | null = null;
+				try {
+					const parsed: unknown = JSON.parse(text.startsWith("\uFEFF") ? text.slice(1) : text);
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) raw = parsed as Record<string, unknown>;
+				} catch {
+					raw = null;
+				}
+				if (raw === null) {
+					// Bytes that do not parse are never rewritten: they are kept
+					// as they are beside where the new page will live, so the
+					// note can follow its id and nothing is lost.
+					const st = await adapter.stat(old.path).catch(() => null);
+					await ensureFolder(adapter, folderOf(target.path));
+					to = await this.freeConflictPath(target.path, st?.mtime ?? 0);
+					await adapter.rename(old.path, to);
+				} else {
+					to = target.path;
+					await ensureFolder(adapter, folderOf(to));
+					raw.pageId = newId;
+					await adapter.write(to, JSON.stringify(raw));
+					await adapter.remove(old.path);
+				}
+			}
+			// The old id's file is gone from where this store pinned it.
+			this.resolved.delete(oldId);
+			this.provisional.delete(oldId);
+			this.displacedProvisional.delete(oldId);
+			this.knownMtime.delete(oldId);
+			this.knownHash.delete(oldId);
+			this.contentCheckedAt.delete(oldId);
+			this.observedMissing.delete(oldId);
+			this.lastWriter.delete(oldId);
+			this.consumedSeq.delete(oldId);
+			return { kind: "moved" as const, to };
+		});
 	}
 
 	/**
@@ -2157,9 +2589,14 @@ export class PageStore {
 				parsed.futureVersion !== undefined ||
 				!surfaceMatches
 			) {
-				// Damage, a newer schema and a legacy canvas page each have an
-				// existing lock that fails closed, and those locks are better
-				// than anything this route could do. Hand it back untouched.
+				// Damage, a newer schema and a legacy canvas page are not adopted
+				// here. Hand it back untouched. At a cold open each has a lock
+				// that fails closed; on a note already open there is none, and
+				// the record stays writable so ink drawn here is not dropped.
+				// The next save's guard then keeps these bytes as
+				// `<id>.conflict-<mtime>.json` before writing this device's page,
+				// and fix ink de-sync lists that copy as a fork
+				// (`scanForForks`).
 				return {
 					kind: "unavailable",
 					why: "the incoming revision is not a clean inline page",
@@ -2366,6 +2803,15 @@ export class PageStore {
 		const data = this.pending.get(pageId);
 		if (!data) return;
 		const writer = this.pendingWriter.get(pageId);
+		// Stamped as it is consumed: anything this writer consumed before it is
+		// now older, whether it is still waiting its turn or already in flight.
+		const seq = ++this.consumeSeq;
+		let byWriter = this.consumedSeq.get(pageId);
+		if (byWriter === undefined) {
+			byWriter = new Map();
+			this.consumedSeq.set(pageId, byWriter);
+		}
+		byWriter.set(writer, seq);
 		// Claimed BEFORE the batch is consumed and before any await, so this
 		// page is never observably quiet while its ink is only in memory - not
 		// during the write, and not while this attempt waits its turn in the
@@ -2380,15 +2826,25 @@ export class PageStore {
 			this.pendingWriter.delete(pageId);
 			this.pendingCovers.delete(pageId);
 			this.clearTimers(pageId); // the batch is consumed, both timers with it
+			// Held for `load` until the attempt ends; see inFlight.
+			let attempts = this.inFlight.get(pageId);
+			if (!attempts) {
+				attempts = [];
+				this.inFlight.set(pageId, attempts);
+			}
+			attempts.push({ seq, data });
 			// Serialize writes so two saves for the same page can't interleave
 			// their tmp/rename dance.
-			await this.chain(pageId, () => this.writeNow(pageId, data, writer, covers));
+			await this.chain(pageId, () => this.writeNow(pageId, data, writer, covers, seq));
 		} finally {
 			// Every outcome, including a throw: a leaked claim would block this
 			// page's live reload for the rest of the session. A failed write
 			// has already put the batch back in `pending` by now, so the guard
 			// is continuous across the handover.
 			this.endOutstandingWrite(pageId);
+			const left = (this.inFlight.get(pageId) ?? []).filter((a) => a.seq !== seq);
+			if (left.length > 0) this.inFlight.set(pageId, left);
+			else this.inFlight.delete(pageId);
 		}
 	}
 
@@ -2448,17 +2904,45 @@ export class PageStore {
 		pageId: string,
 		data: PageData,
 		writer?: PageWriter,
-		coversCarrier?: number
+		coversCarrier?: number,
+		/** When this batch left the queue; see consumedSeq. */
+		seq?: number
+	): Promise<void> {
+		// In flight from here until it settles, whatever the exit; a carrier
+		// written meanwhile names it (savesInFlight).
+		const flight: { stamp: string | null } = { stamp: null };
+		let flights = this.savesInFlight.get(pageId);
+		if (!flights) this.savesInFlight.set(pageId, (flights = new Set()));
+		flights.add(flight);
+		try {
+			await this.writeNowInFlight(flight, pageId, data, writer, coversCarrier, seq);
+		} finally {
+			flights.delete(flight);
+			if (flights.size === 0 && this.savesInFlight.get(pageId) === flights) this.savesInFlight.delete(pageId);
+		}
+	}
+
+	private async writeNowInFlight(
+		flight: { stamp: string | null },
+		pageId: string,
+		data: PageData,
+		writer?: PageWriter,
+		coversCarrier?: number,
+		seq?: number
 	): Promise<void> {
 		const adapter = this.app.vault.adapter;
+		const removalsAtStart = this.removals.get(pageId) ?? 0;
+		let home: string | undefined;
 		// The ink folder is being moved. Nothing may be written until the move
 		// and the repoint are done, or it lands in the folder being emptied.
 		// REQUEUE, synchronously and before any await, so the state is never
 		// the queue's only copy for an instant: it goes straight back into
 		// `pending` (unless something newer is already there) and the ordinary
 		// retry timer brings it back. Not a failure - no retry is counted and
-		// nothing is reported.
+		// nothing is reported. A batch a later one from its writer has already
+		// superseded is not put back: that later one carries everything it had.
 		if (this.migrating) {
+			if (this.superseded(pageId, writer, seq)) return;
 			if (!this.pending.has(pageId)) {
 				this.pending.set(pageId, data);
 				this.pendingWriter.set(pageId, writer);
@@ -2484,6 +2968,7 @@ export class PageStore {
 			// a page that exists in no well-known folder resolves to the
 			// configured one, which is exactly the "never seen before" rule.
 			const { path: final, found } = await this.resolveFor(pageId);
+			home = folderOf(final);
 			// The folder of THAT file. When the page is being served from the
 			// other well-known folder, ensuring the configured one instead
 			// created an empty directory and left the write's own folder
@@ -2508,6 +2993,14 @@ export class PageStore {
 			// on the save queue, never the pen path. A false conflict is
 			// recoverable; a missed one is silent loss.
 			//
+			// MOVE, THEN JUDGE (R5). The guard used to judge the live file in
+			// place and delete it several awaits later: a sync write landing in
+			// between was deleted with no conflict copy.
+			// Now the live file is first moved to a never-taken conflict
+			// name, and the judgement reads THOSE bytes, which nothing else
+			// writes: the bytes judged are the bytes deleted. Reads per save are
+			// unchanged - the content layer already read the whole file.
+			//
 			// The tmp is written BEFORE any of it. The conflict rename below
 			// moves the live file out of the way, and writing after that
 			// meant a kill in between left no live file AND no tmp: the page
@@ -2516,6 +3009,18 @@ export class PageStore {
 			// at the end. Writing first means every instant of this sequence
 			// has a complete copy of the ink somewhere load() already looks.
 			const serialized = serializePage(effective);
+			const stamp = contentStamp(serialized);
+			flight.stamp = stamp;
+			if (!this.ownTmp.has(tmp) && (await adapter.exists(tmp))) {
+				const tst = await adapter.stat(tmp).catch(() => null);
+				const stranded = await this.freeConflictPath(final, tst?.mtime ?? 0);
+				await adapter.rename(tmp, stranded);
+				this.parkConflict(pageId, stranded);
+			}
+			// Marked BEFORE the write: a write that creates the file and then throws
+			// (a full disk) leaves a partial .tmp that is still this store's own, and
+			// the retry overwrites it rather than keeping it as a conflict copy.
+			this.ownTmp.add(tmp);
 			await adapter.write(tmp, serialized);
 			// A blind local file this page has just been taken away from is
 			// preserved beside its new home before anything else touches the
@@ -2524,6 +3029,8 @@ export class PageStore {
 			await this.absorbProvisional(pageId, final);
 			if (await adapter.exists(final)) {
 				const st = await adapter.stat(final).catch(() => null);
+				const aside = await this.freeConflictPath(final, st?.mtime ?? 0);
+				await adapter.rename(final, aside);
 				const known = this.knownMtime.get(pageId);
 				// A stat that FAILS proves nothing, and it used to prove "not
 				// external": the null fell through both checks, and the save
@@ -2535,23 +3042,39 @@ export class PageStore {
 				if (st === null || !external) {
 					const knownHash = this.knownHash.get(pageId);
 					if (knownHash !== undefined) {
-						const cur = await adapter.read(final).catch(() => null);
+						const cur = await adapter.read(aside).catch(() => null);
 						// Unreadable-but-present errs toward preserving it.
 						external = cur === null || contentStamp(cur) !== knownHash;
 					}
 				}
 				if (external) {
-					const kept = await this.freeConflictPath(final, st?.mtime ?? 0);
-					await adapter.rename(final, kept);
 					// NOT announced here (RC4). Everything below can still
 					// throw, and the old message asserted "this session's ink
 					// was saved normally" while the save had not been
 					// attempted. The fact is parked until the rename lands.
-					this.pendingConflict.set(pageId, kept);
+					this.parkConflict(pageId, aside);
+				} else {
+					// This session's own last bytes. A failed delete leaves an
+					// extra copy of them under a conflict name, never a loss, so
+					// it does not fail the save.
+					await adapter.remove(aside).catch((err) => {
+						console.error("[handwriting] could not remove the replaced sidecar", aside, err);
+					});
 				}
 			}
-			if (await adapter.exists(final)) await adapter.remove(final);
+			// Anything at the live path now arrived after the move above: it is
+			// not this session's by definition, so it is kept the same way. A
+			// file landing after this check makes the rename below fail
+			// (Obsidian's adapters refuse an existing destination, "Destination
+			// file already exists!"), and the retry then keeps it.
+			if (await adapter.exists(final)) {
+				const st = await adapter.stat(final).catch(() => null);
+				const kept = await this.freeConflictPath(final, st?.mtime ?? 0);
+				await adapter.rename(final, kept);
+				this.parkConflict(pageId, kept);
+			}
 			await adapter.rename(tmp, final);
+			this.ownTmp.delete(tmp);
 			const st = await adapter.stat(final).catch(() => null);
 			// The page provably lives here now, so a page written with no
 			// prior load pins itself the moment its first save lands.
@@ -2567,7 +3090,7 @@ export class PageStore {
 			// findSidecar hit or a LOAD clears the mark (resolveFor, load).
 			if (!found) this.provisional.add(pageId);
 			if (st) this.knownMtime.set(pageId, st.mtime);
-			this.knownHash.set(pageId, contentStamp(serialized));
+			this.knownHash.set(pageId, stamp);
 			// The save has landed, so a flush carrier it supersedes is stale. A
 			// carrier written after this snapshot was taken holds newer ink and
 			// stays until the save that covers it lands.
@@ -2586,10 +3109,29 @@ export class PageStore {
 			const kept = this.pendingConflict.get(pageId);
 			if (kept !== undefined) {
 				this.pendingConflict.delete(pageId);
-				this.onConflict?.(pageId, kept);
+				for (const path of kept) this.onConflict?.(pageId, path);
 			}
 		} catch (err) {
 			console.error("[handwriting] sidecar write failed", pageId, err);
+			const removalsNow = this.removals.get(pageId) ?? 0;
+			if (removalsNow !== removalsAtStart) {
+				// The note was deleted while this write ran: its payload goes
+				// to the trash, never live. It is the newest state of that
+				// note unless the removal recycled a queued state, which was
+				// drawn after this write started; then it is kept aside,
+				// tagged, so a restore opens the queued state instead.
+				const failures = (this.failures.get(pageId) ?? 0) + 1;
+				const superseded = this.removedWithQueued.get(pageId) === removalsNow;
+				this.recycleFailedWrite(pageId, data, home, WRITE_MAX_RETRIES - failures + 1, superseded ? "superseded" : undefined);
+				return;
+			}
+			// A later batch from this writer has already left the queue: it holds
+			// everything this one did, and its own outcome decides what happens
+			// next (it lands, or it fails and is put back itself). Putting this
+			// one back would land it over that newer save, or take the slot that
+			// newer save needs if it fails. Not counted against the retry budget
+			// either: the write that matters is still in flight. See consumedSeq.
+			if (this.superseded(pageId, writer, seq)) return;
 			// A failed write is NOT durable: keep the state queued (unless a
 			// newer state has already been scheduled), retry a bounded number
 			// of times, then tell the user once. The data also stays in the
@@ -2623,7 +3165,9 @@ export class PageStore {
 				// surviving copy is. The pending entry is deliberately kept:
 				// a later retry that succeeds still owes them the conflict
 				// message, and it will now be a true one.
-				this.onWriteError?.(pageId, String(err), this.pendingConflict.get(pageId));
+				// The first kept copy is named; any others are announced, with it,
+				// when a later retry lands.
+				this.onWriteError?.(pageId, String(err), this.pendingConflict.get(pageId)?.[0]);
 			}
 		}
 	}
@@ -2656,7 +3200,7 @@ export class PageStore {
 			const st = await adapter.stat(stale).catch(() => null);
 			const kept = await this.freeConflictPath(final, st?.mtime ?? 0);
 			await adapter.rename(stale, kept);
-			this.pendingConflict.set(pageId, kept);
+			this.parkConflict(pageId, kept);
 		} catch (err) {
 			console.error("[handwriting] could not preserve a blind local sidecar", pageId, err);
 		}
@@ -2764,6 +3308,7 @@ export class PageStore {
 	}
 
 	async remove(pageId: string): Promise<void> {
+		this.removals.set(pageId, (this.removals.get(pageId) ?? 0) + 1);
 		const adapter = this.app.vault.adapter;
 		// Captured before it is dropped: a stroke scheduled inside the 700ms
 		// debounce (audit-fixes-design.md 5i I1) has not reached disk yet, so
@@ -2772,7 +3317,13 @@ export class PageStore {
 		// the last write - so below it is what gets recycled, not the disk
 		// file.
 		const queued = this.pending.get(pageId);
+		if (queued !== undefined) this.removedWithQueued.set(pageId, this.removals.get(pageId) ?? 0);
 		const queuedCovers = this.pendingCovers.get(pageId);
+		// The stamp of the bytes this session last read or wrote, taken before it
+		// is dropped below: with a save queued, the disk file is removed only if
+		// it is still exactly those bytes (R1).
+		const knownHash = this.knownHash.get(pageId);
+		const carrierWritten = this.carriersWritten.get(pageId);
 		this.pending.delete(pageId);
 		this.pendingWriter.delete(pageId);
 		this.pendingCovers.delete(pageId);
@@ -2783,6 +3334,7 @@ export class PageStore {
 		// The page is gone; a later page under this id is a different page,
 		// and must not be reconciled against a writer that predates it.
 		this.lastWriter.delete(pageId);
+		this.consumedSeq.delete(pageId);
 		// Where it lived goes with it, but the path itself is kept for the
 		// recycle below: this method is what makes the file stop being there.
 		const pinned = this.resolved.get(pageId);
@@ -2830,7 +3382,8 @@ export class PageStore {
 						queued.strokes.length === 0 &&
 						queued.textBoxes.length === 0 &&
 						queued.images.length === 0 &&
-						Object.keys(queued.unknownTop).length === 0;
+						Object.keys(queued.unknownTop).length === 0 &&
+						!holdsChoice(queued);
 					if (!empty) {
 						// Beside the file it replaces, so the generation and
 						// the page it came from stay in one folder.
@@ -2838,11 +3391,23 @@ export class PageStore {
 						await ensureFolder(adapter, this.trashDirIn(home));
 						await adapter.write(await this.freeTrashPath(pageId, home), serializePage(queued));
 					}
-					// Whatever is on disk is now strictly older than the
-					// generation just recycled (or discarded as empty) above -
-					// not a second copy worth keeping, just gone.
+					// The disk file is older than the generation just recycled
+					// ONLY if it is still the bytes this session last read or
+					// wrote. A queued save is exactly what holds the live-reload
+					// poll off, so another device's revision can have synced in
+					// unseen; deleting it lost that device's strokes.
+					// Anything else - another revision, or bytes
+					// that cannot be read - goes to the trash as its own
+					// generation, tagged so a restore never prefers it.
 					if (await adapter.exists(final)) {
-						await adapter.remove(final);
+						const text = await adapter.read(final).catch(() => null);
+						if (text !== null && knownHash !== undefined && contentStamp(text) === knownHash) {
+							await adapter.remove(final);
+						} else {
+							const home = folderOf(final);
+							await ensureFolder(adapter, this.trashDirIn(home));
+							await adapter.rename(final, await this.freeTrashPath(pageId, home, "external"));
+						}
 					}
 				} else if (await adapter.exists(final)) {
 					// Recycle unless the outgoing page is PROVABLY empty.
@@ -2860,7 +3425,8 @@ export class PageStore {
 							parsed.data.strokes.length === 0 &&
 							parsed.data.textBoxes.length === 0 &&
 							parsed.data.images.length === 0 &&
-							Object.keys(parsed.data.unknownTop).length === 0;
+							Object.keys(parsed.data.unknownTop).length === 0 &&
+							!holdsChoice(parsed.data);
 					} catch {
 						/* unreadable → recycle it */
 					}
@@ -2887,18 +3453,112 @@ export class PageStore {
 					this.pendingCovers.set(pageId, queuedCovers);
 				}
 			}
-			// The scratch file beside the page's OWN sidecar, not beside a
+			// The scratch files beside the page's OWN sidecar, not beside a
 			// configured path the page may never have used. Only after a
 			// recycle that landed: when it failed, the .tmp can be the one
 			// copy of the newest strokes.
-			for (const p of final === undefined || !recycled ? [] : [this.tmpFor(final), this.carrierFor(final)]) {
+			//
+			// Recycled, not deleted (R1). A .tmp left by a save that never
+			// replaced the live file, or a flush carrier whose save never
+			// landed - from this session or an earlier one, on a note deleted
+			// without being opened - holds ink no other file has. The one
+			// exception is judged: a carrier this session wrote whose
+			// generation the queued page just recycled above already holds.
+			if (final !== undefined && recycled) {
+				const home = folderOf(final);
+				const tmp = this.tmpFor(final);
+				const carrier = this.carrierFor(final);
 				try {
-					if (await adapter.exists(p)) await adapter.remove(p);
+					if (await adapter.exists(tmp)) {
+						await ensureFolder(adapter, this.trashDirIn(home));
+						await adapter.rename(tmp, await this.freeTrashPath(pageId, home, "tmp"));
+					}
 				} catch (err) {
-					console.error("[handwriting] sidecar remove failed", p, err);
+					console.error("[handwriting] could not recycle an interrupted save", tmp, err);
+				}
+				// The page is gone, so the name is no longer this store's own.
+				// A failed save marked it and only a landed save unmarks it;
+				// left marked, a .tmp another device or process leaves at this
+				// name later skips the stranded-save guard and is overwritten
+				// by the next save to the same id. A .tmp the rename above
+				// could not move is then kept as a conflict copy: kept, not lost.
+				this.ownTmp.delete(tmp);
+				try {
+					if (await adapter.exists(carrier)) {
+						const covered =
+							queued !== undefined &&
+							carrierWritten !== undefined &&
+							queuedCovers !== undefined &&
+							queuedCovers >= carrierWritten;
+						if (covered) {
+							await adapter.remove(carrier);
+						} else {
+							await ensureFolder(adapter, this.trashDirIn(home));
+							const dest = await this.freeTrashPath(pageId, home, "flush");
+							// A recycled generation is a sidecar the user can restore: the
+							// carrier's page, not its wrapper. A carrier that does not
+							// parse keeps its bytes as they are.
+							const parsed = this.parseCarrier(await adapter.read(carrier), pageId);
+							if (parsed !== null) {
+								await adapter.write(dest, serializePage(parsed.page));
+								await adapter.remove(carrier);
+							} else {
+								await adapter.rename(carrier, dest);
+							}
+						}
+					}
+				} catch (err) {
+					console.error("[handwriting] could not recycle a background flush", carrier, err);
 				}
 			}
 		};
 		await this.chain(pageId, run);
+	}
+
+	/**
+	 * A write that failed after its page was removed. The only place for its
+	 * payload is the trash, as a generation of its own beside the page's last
+	 * known home. Never a live file, never `pending`: either one brings a
+	 * deleted note's ink file back. Untagged, it is the newest state and a
+	 * restored note opens it; with `tag`, the removal recycled a newer queued
+	 * state, and the tag keeps a restore from opening this one over it.
+	 *
+	 * Chained on the page's write queue, so it lands after `remove`'s own
+	 * recycle and is the newer generation. The recycle gets the retries the
+	 * write had left, at the write's spacing, so a short failure loses no more
+	 * than it did when the write retried; after the last, the user is told
+	 * once. An empty payload is not written, the same rule as `remove`.
+	 */
+	private recycleFailedWrite(
+		pageId: string,
+		data: PageData,
+		home: string | undefined,
+		retriesLeft: number,
+		tag?: string
+	): void {
+		const empty =
+			data.strokes.length === 0 &&
+			data.textBoxes.length === 0 &&
+			data.images.length === 0 &&
+			Object.keys(data.unknownTop).length === 0 &&
+			!holdsChoice(data);
+		if (empty) return;
+		const adapter = this.app.vault.adapter;
+		const run = async (): Promise<void> => {
+			let folder = home;
+			try {
+				if (folder === undefined) folder = folderOf((await this.findSidecar(pageId)).path);
+				await ensureFolder(adapter, this.trashDirIn(folder));
+				await adapter.write(await this.freeTrashPath(pageId, folder, tag), serializePage(data));
+			} catch (err) {
+				console.error("[handwriting] recycle of a save that failed after its note was deleted failed", pageId, err);
+				if (retriesLeft > 0) {
+					window.setTimeout(() => this.recycleFailedWrite(pageId, data, folder, retriesLeft - 1, tag), WRITE_RETRY_MS);
+				} else {
+					this.onWriteError?.(pageId, String(err));
+				}
+			}
+		};
+		runDetached(this.chain(pageId, run), `recycle a save that failed after its note was deleted ${pageId}`);
 	}
 }

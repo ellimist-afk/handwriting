@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearToolPicked, toolPickedHere } from "./MouseInk";
 import {
 	penContactIntent,
 	releaseTipMode,
 	resetTipModeForTest,
 	setTipMode,
+	setSideButtonErases,
+	sideButtonErasesEnabled,
 	setTipModeListener,
 	tipMode,
 	tipModeHeld,
@@ -175,5 +177,43 @@ describe("penContactIntent - one arbitration for both ink surfaces", () => {
 		expect(penContactIntent(0, -1, "nib")).toBe("ink");
 		expect(penContactIntent(0, -1, "eraser")).toBe("erase");
 		expect(penContactIntent(0, -1, "lasso")).toBe("lasso");
+	});
+});
+
+
+describe("Device side-button choice", () => {
+	beforeEach(resetTipModeForTest);
+	afterEach(resetTipModeForTest);
+
+	it("starts off before device initialization and retains flag-off lasso", () => {
+		expect(sideButtonErasesEnabled()).toBe(false);
+		for (const mode of ["nib", "lasso", "pan", "space"] as const) {
+			expect(penContactIntent(3, 0, mode)).toBe("lasso");
+		}
+	});
+
+	it("Flag-on contact erases without changing the selected toolbar mode", () => {
+		setSideButtonErases(true);
+		for (const mode of ["nib", "eraser", "lasso", "pan", "space"] as const) {
+			setTipMode(mode);
+			const changed = vi.fn();
+			setTipModeListener(changed);
+			expect(penContactIntent(3, 0, mode)).toBe("erase");
+			expect(tipMode()).toBe(mode);
+			expect(changed).not.toHaveBeenCalled();
+		}
+	});
+
+	it("policy change alone preserves tool and leaves toolbar lasso usable", () => {
+		setTipMode("lasso");
+		const changed = vi.fn();
+		setTipModeListener(changed);
+		setSideButtonErases(true);
+		expect(tipMode()).toBe("lasso");
+		expect(changed).not.toHaveBeenCalled();
+		expect(penContactIntent(1, 0, "lasso")).toBe("lasso");
+		expect(penContactIntent(1, 0, "nib")).toBe("ink");
+		setSideButtonErases(false);
+		expect(penContactIntent(3, 0, "nib")).toBe("lasso");
 	});
 });

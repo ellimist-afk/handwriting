@@ -2,15 +2,13 @@
  * THE THREE SETTINGS-SIDE CHANGES OF THE INFINITE CANVAS SETTINGS WORK.
  *
  *   Infinite Canvas   the row's description says what turning it on turns on.
- *   Zoom bar          the row is greyed out while Infinite Canvas is off - the
- *                     zoom bar cannot show without the canvas - and says why.
- *                     Both the definition's `disabled` predicate and the 1.12
- *                     painter that has to honour it are pinned: the painter
- *                     honoured `disabled` on toggles only, so a dropdown row
- *                     marked disabled rendered live and changed a setting the
- *                     user could not see the effect of.
- *   The canvas toggle re-renders the tab, so the Zoom bar row greys the moment
- *                     the canvas is switched off rather than at the next open.
+ *   Zoom bar          the row is always live, canvas on or off. The zoom bar
+ *                     shows per note, and a note can have the canvas on while
+ *                     the global flag is off, so the row must stay usable to
+ *                     turn the bar off. The 1.12 painter still honours a
+ *                     `disabled` dropdown; that is pinned on a synthetic row.
+ *   The canvas toggle re-renders the tab, so a row the canvas decides is redrawn
+ *                     the moment the canvas is switched, not at the next open.
  *
  * Harness as SettingsSimplified.test.ts: `Object.create` on the real plugin and
  * tab, the settings object main.ts builds, nothing about the rows restated here.
@@ -115,39 +113,39 @@ const isOff = (r: Row): boolean => {
 describe("the Infinite Canvas row says what it turns on", () => {
 	it("carries the Infinite Canvas description, word for word", async () => {
 		const tab = await tabFor({});
-		expect(row(tab, "Infinite canvas").desc).toBe("Turns on Infinite canvas. Also turns on zoom bar. Default off.");
+		expect(row(tab, "Infinite canvas").desc).toBe("Let the page grow as you write and scroll. Also turns on the zoom bar. Global setting. A note can override it with handwriting-canvas: true or false in its frontmatter. Default off.");
 	});
 });
 
-describe("the Zoom bar row is greyed out without the canvas", () => {
+describe("the Zoom bar row is live whether the canvas is on or off", () => {
 	it("says what it needs", async () => {
 		const tab = await tabFor({});
-		expect(row(tab, "Zoom bar").desc).toContain("Needs Infinite canvas.");
+		expect(row(tab, "Zoom bar").desc).toContain("Needs Infinite canvas on for the note.");
 	});
 
-	it("is disabled with the canvas off and live with it on", async () => {
+	it("is live with the canvas off", async () => {
 		const off = await tabFor({ extendCanvasWhileScrolling: false });
-		expect(isOff(row(off, "Zoom bar")), "canvas off: the row cannot be used").toBe(true);
+		expect(isOff(row(off, "Zoom bar")), "canvas off: the row stays usable to hide the bar").toBe(false);
+	});
 
+	it("is live with the canvas on", async () => {
 		const on = await tabFor({ extendCanvasWhileScrolling: true });
 		expect(isOff(row(on, "Zoom bar")), "canvas on: the row is live").toBe(false);
 	});
 
 	/**
-	 * The predicate is read at render time, so the row has to be re-read after
-	 * the canvas moves - and it is the SAME tab object, not a fresh load: a
-	 * predicate that closed over the value it saw at definition time would
-	 * pass the two cells above and fail this one.
+	 * The same tab object, not a fresh load, flipped both ways: the row stays live
+	 * after every toggle, so no value the canvas takes can grey it.
 	 */
-	it("follows the canvas toggle on the tab that is already open", async () => {
-		const tab = await tabFor({ extendCanvasWhileScrolling: true });
-		// 1.13 owns the redraw; this cell is about the predicate, not the redraw.
+	it("stays live on the tab that is already open after the canvas toggle flips either way", async () => {
+		const tab = await tabFor({ extendCanvasWhileScrolling: false });
+		// The redraw is not under test here; this cell is about the predicate.
 		(tab as unknown as Record<string, unknown>).update = (): void => {};
 		expect(isOff(row(tab, "Zoom bar"))).toBe(false);
-		tab.setControlValue("extendCanvasWhileScrolling", false);
-		expect(isOff(row(tab, "Zoom bar")), "the canvas went off under the open tab").toBe(true);
 		tab.setControlValue("extendCanvasWhileScrolling", true);
-		expect(isOff(row(tab, "Zoom bar"))).toBe(false);
+		expect(isOff(row(tab, "Zoom bar")), "the canvas went on under the open tab").toBe(false);
+		tab.setControlValue("extendCanvasWhileScrolling", false);
+		expect(isOff(row(tab, "Zoom bar")), "the canvas went off under the open tab").toBe(false);
 	});
 
 	/** Greying a row nothing repaints leaves it live on screen until the tab is reopened. */
@@ -161,30 +159,36 @@ describe("the Zoom bar row is greyed out without the canvas", () => {
 });
 
 /**
- * The 1.12 painter. It honoured `disabled` on toggles and not on dropdowns, and
- * the Zoom bar row is a dropdown: without this the row greys on 1.13 and stays
- * live on 1.12, leaving a control that moves when pressed and changes a setting
- * whose effect is switched off.
+ * The 1.12 painter. It honoured `disabled` on toggles and not on dropdowns, so a
+ * dropdown row marked disabled rendered live. No real row is a disabled dropdown
+ * now, so these cells pin the painter on a synthetic row defined here.
  */
 describe("the legacy painter honours a disabled dropdown", () => {
+	const syntheticDisabled: Row = {
+		name: "Synthetic disabled dropdown",
+		control: { type: "dropdown", key: "syntheticKey", disabled: (): boolean => true, options: { a: "A" } },
+	};
+	const syntheticLive: Row = {
+		name: "Synthetic live dropdown",
+		control: { type: "dropdown", key: "syntheticKey", disabled: (): boolean => false, options: { a: "A" } },
+	};
+
 	it("disables the dropdown of a row whose predicate says so", async () => {
-		const tab = await tabFor({ extendCanvasWhileScrolling: false });
-		const zoom = row(tab, "Zoom bar");
-		expect(zoom.control?.type, "the Zoom bar row is a dropdown, which is the gap").toBe("dropdown");
-		expect(isOff(zoom), "and it is disabled with the canvas off").toBe(true);
+		const tab = await tabFor({});
+		expect(isOff(syntheticDisabled), "the synthetic row is disabled").toBe(true);
 
 		rec.disabled.length = 0;
 		const paint = (tab as unknown as { paint(el: unknown, items: readonly Row[]): void }).paint.bind(tab);
-		paint({ empty: () => {} }, [zoom]);
-		expect(rec.disabled, "the painter disabled the dropdown").toContain("Zoom bar");
+		paint({ empty: () => {} }, [syntheticDisabled]);
+		expect(rec.disabled, "the painter disabled the dropdown").toContain("Synthetic disabled dropdown");
 	});
 
 	/** A live row must stay live: the painter disabling everything would also pass the cell above. */
-	it("leaves the dropdown alone with the canvas on", async () => {
-		const tab = await tabFor({ extendCanvasWhileScrolling: true });
+	it("leaves a live dropdown alone", async () => {
+		const tab = await tabFor({});
 		rec.disabled.length = 0;
 		const paint = (tab as unknown as { paint(el: unknown, items: readonly Row[]): void }).paint.bind(tab);
-		paint({ empty: () => {} }, [row(tab, "Zoom bar")]);
-		expect(rec.disabled).not.toContain("Zoom bar");
+		paint({ empty: () => {} }, [syntheticLive]);
+		expect(rec.disabled).not.toContain("Synthetic live dropdown");
 	});
 });

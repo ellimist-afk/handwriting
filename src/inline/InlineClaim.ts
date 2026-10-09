@@ -76,8 +76,24 @@ export function hasFrontmatterBlock(content: string): boolean {
 	return /^---\r?\n(?:[\s\S]*?\r?\n)?---(?:\r?\n|$)/.test(content);
 }
 
+/**
+ * True when that block holds nothing but blank and comment lines. YAML reads
+ * such a block as empty, so Obsidian's cache reports no frontmatter for it,
+ * exactly as for one it cannot parse; but an id written into it is read like
+ * any other. Refusing the claim there meant ink on the note never saved.
+ */
+export function hasEmptyFrontmatterBlock(content: string): boolean {
+	const m = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/.exec(content);
+	if (!m) return false;
+	return (m[1] ?? "").split(/\r?\n/).every((line) => line.trim() === "" || line.trim().startsWith("#"));
+}
+
 export function claimMarkdown(content: string, pageId: string): ClaimResult {
-	const parsed = parseMarkdownPage(content);
+	// A byte-order mark is not text. Left in front of a new fence, it ended
+	// up at the start of the body, where it hid the note's first line from
+	// Markdown (a `# heading` was no longer a heading). A fence written here
+	// is the file's first byte.
+	const parsed = parseMarkdownPage(content.replace(/^\uFEFF/, ""));
 	// An id no sidecar can be named after (a template placeholder, "my page")
 	// is not a claim: adopting it damage-locked the record and nothing drawn
 	// was ever saved. It is replaced below, like a missing one.

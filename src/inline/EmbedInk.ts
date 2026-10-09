@@ -137,6 +137,13 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 /** Windows whose print swap is already wired; popouts each get their own. */
 const printArmed = new WeakSet<Window>();
 /**
+ * Windows whose print is running now: set when the swap asks for the vector
+ * layer, cleared when it lets go, and when the window closes. An embed that
+ * attaches while its window is printing (its note was still being read) joins
+ * the print; with no print the module never builds a vector layer.
+ */
+const printing = new WeakSet<Window>();
+/**
  * Teardowns for the print listeners, because the WeakSet above cannot survive
  * a plugin reload. Disable and re-enable and the module is evaluated afresh:
  * the set is empty, the listeners are added again, and the previous pair is
@@ -201,6 +208,8 @@ let diagnose: ((via: EmbedInkVia, path: string, waitedMs: number) => void) | nul
  * both, which is why unload is the single place either can be leaked from.
  */
 const pendingWaits = new Set<() => void>();
+/** The note each pending wait will attach for; a rename while it waits moves it. */
+const pendingWaitPaths = new Map<() => void, { path: string }>();
 /**
  * One route-3 MutationObserver per DOCUMENT, shared by every wait on it.
  *
@@ -468,22 +477,100 @@ export function embedInkRootIsEmbed(root: { classList: { contains(cls: string): 
  * one. Editor y=0 is `.cm-content`'s top, which sits below that same header -
  * it is never part of `.cm-content`. Without this, ink drawn under the text
  * in the editor landed under the header instead, in reading view and in
- * print (audit 18 / GitHub #19). Embeds are NOT covered: an embed's root has
+ * print (audit 18 / GitHub #19). An embed's top is NOT covered: its root has
  * no sizer, and whether its Properties header takes height is unmeasured.
  *
  * The root is now the view outside the sizer, so the inset between them has
  * to be added back, and it is not a constant: the sizer is centred, so it
- * moves with the pane's width.
+ * moves with the pane's width. Left is the text column's edge, not the
+ * sizer's (`columnInset`), for a reading view and for an embed alike: one x
+ * law.
  *
- * Null for every other root, whose `0, 0` is already right, and for a sizer
+ * Null for every other root, whose `0, 0` is already right, for an embed
+ * with no column ever measured, and for a sizer
  * with no offset parent - that is a `display: none` subtree, where every
  * offset reads 0, which is a real coordinate rather than a missing one.
  */
-export function embedInkAnchor(root: HTMLElement): { left: number; top: number } | null {
+export function embedInkAnchor(root: HTMLElement, remeasure = false): { left: number; top: number } | null {
 	const sizer = anchorSizer(root);
-	if (!sizer) return printTitleBottom(root);
+	if (!sizer) {
+		if (embedInkRootIsEmbed(root)) {
+			const inset = columnInset(root, null, root, remeasure);
+			if (inset !== null) return { left: inset, top: 0 };
+		}
+		return printTitleBottom(root);
+	}
 	if (sizer.offsetParent !== root) return null;
-	return { left: sizer.offsetLeft, top: sizer.offsetTop + sizerHeaderHeight(sizer) };
+	return {
+		left: sizer.offsetLeft + (columnInset(root, sizer, sizer, remeasure) ?? 0),
+		top: sizer.offsetTop + sizerHeaderHeight(sizer),
+	};
+}
+
+/** Children measured per call, at most; one more rect read for the base. */
+const COLUMN_SAMPLE = 8;
+
+/** Children that are never the text column: the header, the pusher, the footer, our own layers. */
+const NOT_COLUMN = [
+	"mod-header",
+	"markdown-preview-pusher",
+	"mod-footer",
+	"handwriting-embed-ink",
+	SCROLL_RESERVE_CLS,
+];
+
+function isNotColumn(child: Element): boolean {
+	for (const cls of NOT_COLUMN) if (child.classList.contains(cls)) return true;
+	return false;
+}
+
+/** The column inset last measured on each root (see `columnInset`). */
+const lastColumnInset = new WeakMap<HTMLElement, number>();
+
+/**
+ * How far the text column's left edge sits inside `base`, px, or null when it
+ * has never been measured on this root.
+ *
+ * A theme can centre the blocks inside a full-width sizer (Minimal with
+ * readable line length on: 38.6 px), and an embed's text sits
+ * inside its content box (24 px in every theme), so the box's own left is not
+ * the column's. The column is the LARGEST left among the first
+ * `COLUMN_SAMPLE` blocks of `scope`: a table or an image the theme widens
+ * past the text sits further left and is passed over. Both rects are border
+ * boxes on screen, so the scroll reserve's translate, which moves the sizer
+ * and its blocks together, cancels out, and the stock shape (the sizer is the
+ * column) reads 0, not the sizer's offset twice.
+ *
+ * Cost: measured on the first call for a root and on every
+ * anchor-watch tick (`remeasure`), at most `COLUMN_SAMPLE + 1` rect reads;
+ * every other paint takes the memory and reads nothing. A re-rendered embed
+ * is a new root and measures once. Nothing measurable keeps the memory.
+ */
+function columnInset(root: HTMLElement, scope: HTMLElement | null, base: HTMLElement, remeasure: boolean): number | null {
+	const held = lastColumnInset.get(root);
+	if (held !== undefined && !remeasure) return held;
+	// A null scope is an embed's: its blocks sit in the first sizer under it,
+	// or are its own children. That lookup walks the embed, so it is made
+	// here, after the memory, and a paint with a memory makes none.
+	const box = scope ?? root.querySelector<HTMLElement>(".markdown-preview-sizer") ?? root;
+	const children = box.children as ArrayLike<Element> | undefined;
+	if (!children || typeof base.getBoundingClientRect !== "function") return held ?? null;
+	let best = -Infinity;
+	let taken = 0;
+	for (let i = 0; i < children.length && taken < COLUMN_SAMPLE; i++) {
+		const child = children[i];
+		if (!child || typeof child.getBoundingClientRect !== "function") continue;
+		if (isNotColumn(child)) continue;
+		taken++;
+		const rect = child.getBoundingClientRect();
+		if (rect.width <= 0) continue;
+		if (rect.left > best) best = rect.left;
+	}
+	if (best === -Infinity) return held ?? null;
+	const baseLeft = base.getBoundingClientRect().left + (base === root ? root.clientLeft || 0 : 0);
+	const inset = best - baseLeft;
+	lastColumnInset.set(root, inset);
+	return inset;
 }
 
 /**
@@ -532,30 +619,19 @@ function sizerHeaderHeight(sizer: HTMLElement): number {
 /** The header height last measured on each sizer (see `sizerHeaderHeight`). */
 const lastHeaderHeight = new WeakMap<HTMLElement, number>();
 
-function anchorLayer(root: HTMLElement, el: { style: CSSStyleDeclaration }): void {
+function anchorLayer(root: HTMLElement, el: { style: CSSStyleDeclaration }, remeasure = false): void {
 	const origin = layerOrigins.get(root) ?? { x: 0, y: 0 };
-	const sizer = embedInkAnchor(root);
+	const sizer = embedInkAnchor(root, remeasure);
 	// `offsetLeft` does not include the sizer's `translate`, so the scroll reserve is added back here.
 	const at = sizer
 		? anchorSizer(root)
 			? { left: sizer.left + scrollReserveHeld(root), top: sizer.top }
-			: { left: reserveHeld(root), top: sizer.top } // print: below the file-name title
+			: { left: sizer.left + reserveHeld(root), top: sizer.top } // an embed's column; print: below the file-name title
 		: { left: reserveHeld(root), top: 0 };
 	// Through `style`, not `setCssStyles`: the print swap anchors an <svg>,
 	// and Obsidian's helper is an augmentation of HTMLElement.
 	el.style.left = `${at.left + origin.x}px`;
 	el.style.top = `${at.top + origin.y}px`;
-}
-
-/**
- * Pure: how much room a root must be given left of its content so ink `reach`
- * px left of the origin lands inside it, when the root already has `natural`
- * px there of its own. Exactly the shortfall and never more, so a root with
- * room to spare is left as it is.
- */
-export function embedInkLeftShortfall(reach: number, natural: number): number {
-	if (!Number.isFinite(reach) || reach <= 0) return 0;
-	return Math.max(0, reach - Math.max(0, Number.isFinite(natural) ? natural : 0));
 }
 
 interface HeldReserve { prop: string; was: string; priority: string; ours: string; reserve: number }
@@ -765,6 +841,14 @@ export function embedInkChanged(path: string): void {
 			continue;
 		}
 		paint(root, path, strokesFor ? strokesFor(path) : []);
+		// A print is running on this root (its vector layer is the picture and
+		// the canvas is hidden): the vector layer follows the ink too. Asked of
+		// the window, not the layer: the layer goes when the last stroke goes,
+		// and ink that comes back while the print runs needs one built again.
+		const win = root.ownerDocument.defaultView;
+		if (root.querySelector(":scope > svg.handwriting-embed-ink") || (win !== null && printing.has(win))) {
+			printVectorFor(root, path, true);
+		}
 	}
 }
 
@@ -793,6 +877,7 @@ export function embedInkRenamed(oldPath: string, newPath: string): void {
 		layers.set(root, newPath);
 		moved = true;
 	}
+	for (const wait of pendingWaitPaths.values()) if (wait.path === oldPath) wait.path = newPath;
 	const rev = revisions.get(oldPath);
 	if (rev !== undefined) {
 		revisions.set(newPath, Math.max(rev, revisions.get(newPath) ?? 0));
@@ -871,8 +956,11 @@ export function attachEmbedInk(
 ): void {
 	sweepDisconnected();
 	layers.set(root, path);
-	armPrintSwap(root.ownerDocument.defaultView ?? window);
+	const win = root.ownerDocument.defaultView ?? window;
+	armPrintSwap(win);
 	paint(root, path, strokes);
+	// Attached while this window is printing: part of the print, like the rest.
+	if (printing.has(win)) printVectorFor(root, path, true);
 }
 
 /**
@@ -950,6 +1038,7 @@ export function attachEmbedInkOnceReady(
 	let timer: number | null = null;
 	let unwatchBody: (() => void) | null = null;
 	let done = false;
+	const wait = { path };
 
 	const cancel = (): void => {
 		if (done) return;
@@ -961,6 +1050,7 @@ export function attachEmbedInkOnceReady(
 		unwatchBody?.();
 		unwatchBody = null;
 		pendingWaits.delete(cancel);
+		pendingWaitPaths.delete(cancel);
 	};
 
 	/** One attempt. True once a root was found and the wait is over. */
@@ -977,9 +1067,13 @@ export function attachEmbedInkOnceReady(
 		const late = embedInkResolveRoot(el, container);
 		if (!late.root) return false;
 		const waited = Date.now() - started;
+		// The note this wait is for NOW: the vault may have renamed it while the
+		// section was late, and the caller's own strokes() still answers for the
+		// old path.
+		const shown = wait.path;
 		cancel();
-		attachEmbedInk(late.root, path, strokes());
-		diagnose?.(via, path, waited);
+		attachEmbedInk(late.root, shown, shown === path ? strokes() : strokesFor ? strokesFor(shown) : []);
+		diagnose?.(via, shown, waited);
 		return true;
 	};
 
@@ -1002,6 +1096,7 @@ export function attachEmbedInkOnceReady(
 	// Registered before either trigger is armed, so there is no window in
 	// which something is running that teardown cannot reach.
 	pendingWaits.add(cancel);
+	pendingWaitPaths.set(cancel, wait);
 	// The observer first, so a section inserted between here and the first
 	// poll is caught by the cheaper of the two. Watching `body` with a
 	// subtree is broad, but it lives only until the section lands or the
@@ -1074,6 +1169,7 @@ function clearTimer(view: Window | null, handle: number): void {
 function cancelPendingWaits(): void {
 	for (const cancel of [...pendingWaits]) cancel();
 	pendingWaits.clear();
+	pendingWaitPaths.clear();
 	// Cancelling every wait empties the shared observers by itself; this is
 	// the belt on that, so unload stays the single place either collection
 	// can be leaked from even if a canceller was lost.
@@ -1137,9 +1233,11 @@ function watchAnchor(root: HTMLElement): void {
 		const canvas = root.querySelector<HTMLCanvasElement>(":scope > canvas.handwriting-embed-ink");
 		// The room the centring leaves moves with the pane, and the reserve with it.
 		if (canvas) reserveLeft(root);
-		if (canvas) anchorLayer(root, canvas);
+		// The watch tick is where the column is measured again: a
+		// resize or the readable line length toggle moves it, a paint does not.
+		if (canvas) anchorLayer(root, canvas, true);
 		const svg = root.querySelector<SVGSVGElement>(":scope > svg.handwriting-embed-ink");
-		if (svg) anchorLayer(root, svg);
+		if (svg) anchorLayer(root, svg, !canvas);
 	};
 	const ro = new RO(sync);
 	// A replacement need not repaint or resize the view. Observe only the
@@ -1196,7 +1294,10 @@ function watchIfCollapsed(root: HTMLElement, path: string): void {
 		// Re-measure: the marker is what makes `paint` stand down, so drop it
 		// and paint again now the box has a size.
 		root.removeAttribute(MARKER_ATTR);
-		paint(root, path, strokesFor ? strokesFor(path) : []);
+		// The note the root shows NOW: a file-open or a rename moved it while
+		// the watch waited, and the path this watch started with is stale.
+		const shown = layers.get(root) ?? path;
+		paint(root, shown, strokesFor ? strokesFor(shown) : []);
 	});
 	ro.observe(root);
 	sizeWatches.set(root, () => ro.disconnect());
@@ -1227,8 +1328,8 @@ function armPrintSwap(win: Window): void {
 	printArmed.add(win);
 	const disarms: Array<() => void> = [];
 	printDisarms.set(win, disarms);
-	const on = () => usePrintVector(true);
-	const off = () => usePrintVector(false);
+	const on = () => usePrintVector(true, win);
+	const off = () => usePrintVector(false, win);
 	win.addEventListener("beforeprint", on);
 	win.addEventListener("afterprint", off);
 	disarms.push(() => {
@@ -1240,13 +1341,14 @@ function armPrintSwap(win: Window): void {
 	// without ever dispatching beforeprint. Both are idempotent: whichever
 	// arrives first builds the layer and the other finds it already there.
 	const mq = win.matchMedia?.("print");
-	const onMq = (e: MediaQueryListEvent) => usePrintVector(e.matches);
+	const onMq = (e: MediaQueryListEvent) => usePrintVector(e.matches, win);
 	mq?.addEventListener?.("change", onMq);
 	if (mq) disarms.push(() => mq.removeEventListener?.("change", onMq));
 	// A popout closing lets go of its window here, not at plugin unload.
 	// pagehide rather than unload: it fires on every close, and Chromium is
 	// retiring unload.
 	const onClose = () => {
+		printing.delete(win);
 		printDisarms.delete(win);
 		// A window that outlives pagehide (kept for back/forward) arms again
 		// at its next embed.
@@ -1304,57 +1406,73 @@ export function teardownEmbedInk(): void {
 	diagnose = null;
 }
 
-function usePrintVector(on: boolean): void {
+function usePrintVector(on: boolean, win?: Window): void {
 	if (on) printSwaps++;
-	sweepDisconnected();
-	for (const [root, path] of layers) {
-		const canvas = root.querySelector<HTMLCanvasElement>(
-			":scope > canvas.handwriting-embed-ink"
-		);
-		const existing = root.querySelector<SVGSVGElement>(
-			":scope > svg.handwriting-embed-ink"
-		);
-		if (!on) {
-			existing?.remove();
-			canvas?.style.removeProperty("display");
-			// Back on screen: the print's room comes off and a reading view's scroll room returns.
-			if (canvas) {
-				reserveLeft(root);
-				anchorLayer(root, canvas);
-			}
-			continue;
-		}
-		const strokes = strokesFor ? strokesFor(path) : [];
-		const { x, y, w, h } = embedInkBounds(strokes);
-		if (strokes.length === 0 || w <= 0 || h <= 0) continue;
-		layerOrigins.set(root, { x, y });
-		// createElementNS, not createEl: an <svg> built as an HTML element is
-		// an unknown tag that renders nothing.
-		const svg = existing ?? root.ownerDocument.createElementNS(SVG_NS, "svg");
-		svg.setAttribute("class", "handwriting-embed-ink");
-		svg.setAttribute("aria-hidden", "true");
-		svg.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
-		svg.setAttribute("width", `${w}`);
-		svg.setAttribute("height", `${h}`);
-		// Built as elements rather than markup. The content is safe either
-		// way - colours pass through normalizeInkColor and the rest is
-		// formatted numbers - but assigning markup is flagged on sight by
-		// the community review, and building nodes costs nothing here.
-		while (svg.firstChild) svg.removeChild(svg.firstChild);
-		const layers = inkSvgLayers(strokes, PRINT_PAGE_WHITE);
-		if (layers.highlighter.length > 0) {
-			const g = root.ownerDocument.createElementNS(SVG_NS, "g");
-			g.setAttribute("opacity", String(HIGHLIGHTER_ALPHA));
-			for (const run of layers.highlighter) g.appendChild(inkPathEl(root, run));
-			svg.appendChild(g);
-		}
-		for (const run of layers.pen) svg.appendChild(inkPathEl(root, run));
-		if (!existing) root.appendChild(svg);
-		// A print lays the page out at the paper's width, so the room is measured again.
-		reserveLeft(root);
-		anchorLayer(root, svg);
-		canvas?.setCssStyles({ display: "none" });
+	if (win) {
+		if (on) printing.add(win);
+		else printing.delete(win);
 	}
+	sweepDisconnected();
+	for (const [root, path] of layers) printVectorFor(root, path, on);
+}
+
+/**
+ * One root's print layer: built from the ink as it is now, or taken away.
+ * Called for every root when a print starts or ends, for a root whose ink
+ * changes under a print that is running (its canvas is hidden then, so the
+ * vector layer is the picture), and for a root that attaches mid-print.
+ */
+function printVectorFor(root: HTMLElement, path: string, on: boolean): void {
+	const canvas = root.querySelector<HTMLCanvasElement>(
+		":scope > canvas.handwriting-embed-ink"
+	);
+	const existing = root.querySelector<SVGSVGElement>(
+		":scope > svg.handwriting-embed-ink"
+	);
+	if (!on) {
+		existing?.remove();
+		canvas?.style.removeProperty("display");
+		// Back on screen: the print's room comes off and a reading view's scroll room returns.
+		if (canvas) {
+			reserveLeft(root);
+			anchorLayer(root, canvas);
+		}
+		return;
+	}
+	const strokes = strokesFor ? strokesFor(path) : [];
+	const { x, y, w, h } = embedInkBounds(strokes);
+	if (strokes.length === 0 || w <= 0 || h <= 0) {
+		// The last stroke went while the print ran: the vector layer goes too.
+		existing?.remove();
+		return;
+	}
+	layerOrigins.set(root, { x, y });
+	// createElementNS, not createEl: an <svg> built as an HTML element is
+	// an unknown tag that renders nothing.
+	const svg = existing ?? root.ownerDocument.createElementNS(SVG_NS, "svg");
+	svg.setAttribute("class", "handwriting-embed-ink");
+	svg.setAttribute("aria-hidden", "true");
+	svg.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
+	svg.setAttribute("width", `${w}`);
+	svg.setAttribute("height", `${h}`);
+	// Built as elements rather than markup. The content is safe either
+	// way - colours pass through normalizeInkColor and the rest is
+	// formatted numbers - but assigning markup is flagged on sight by
+	// the community review, and building nodes costs nothing here.
+	while (svg.firstChild) svg.removeChild(svg.firstChild);
+	const layers = inkSvgLayers(strokes, PRINT_PAGE_WHITE);
+	if (layers.highlighter.length > 0) {
+		const g = root.ownerDocument.createElementNS(SVG_NS, "g");
+		g.setAttribute("opacity", String(HIGHLIGHTER_ALPHA));
+		for (const run of layers.highlighter) g.appendChild(inkPathEl(root, run));
+		svg.appendChild(g);
+	}
+	for (const run of layers.pen) svg.appendChild(inkPathEl(root, run));
+	if (!existing) root.appendChild(svg);
+	// A print lays the page out at the paper's width, so the room is measured again.
+	reserveLeft(root);
+	anchorLayer(root, svg);
+	canvas?.setCssStyles({ display: "none" });
 }
 
 /** One merged run as an SVG <path>, in the root's own document. */
@@ -1453,8 +1571,11 @@ function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): 
 	if (canvas.width !== backingW || canvas.height !== backingH) {
 		canvas.width = backingW;
 		canvas.height = backingH;
-		canvas.setCssStyles({ width: `${w}px`, height: `${h}px` });
 	}
+	// Every paint, not only the ones that resize the backing store: over the pixel budget the backing store is
+	// scaled to the budget, so ink that grows by the same ratio both ways rounds to the same backing size while
+	// its css box must still follow it.
+	canvas.setCssStyles({ width: `${w}px`, height: `${h}px` });
 	const ctx = canvas.getContext("2d");
 	if (!ctx) return;
 	// Note px, drawn from the layer's own origin: the ink's leftmost and topmost

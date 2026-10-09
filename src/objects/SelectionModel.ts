@@ -114,8 +114,12 @@ export class SelectionModel {
 		imageRectOf: RectProvider = () => null
 	): BBox | null {
 		const boxes: BBox[] = [];
-		for (const stroke of allStrokes) {
-			if (this.strokes.has(stroke.id)) boxes.push(stroke.bbox);
+		// The cost follows the selection, not the note: with no stroke selected
+		// the pass over every stroke would find none.
+		if (this.strokes.size > 0) {
+			for (const stroke of allStrokes) {
+				if (this.strokes.has(stroke.id)) boxes.push(stroke.bbox);
+			}
 		}
 		for (const id of this.boxes) {
 			const r = rectOf(id);

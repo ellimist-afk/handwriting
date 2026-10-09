@@ -56,12 +56,23 @@ export function pointSegmentDistSq(
 	return dx * dx + dy * dy;
 }
 
+/**
+ * How far the eraser circle reaches around a stroke's centre line: the circle's radius plus the stroke's painted
+ * half-width. The ink is painted that far either side of the line, so a circle on painted ink has reached it, and a
+ * cut made at the bare radius leaves the survivors' round caps growing back into the circle. `width / 2` is the
+ * stroke's nominal half-width (a highlighter and uniform ink paint exactly that); pressure can paint a pen wider.
+ */
+function reachOf(stroke: InkStroke, r: number): number {
+	return r + stroke.width / 2;
+}
+
 export function strokeHitsCircle(
 	stroke: InkStroke,
 	cx: number,
 	cy: number,
-	r: number
+	radius: number
 ): boolean {
+	const r = reachOf(stroke, radius);
 	if (!bboxHitsCircle(stroke.bbox, cx, cy, r)) return false;
 	const pts = stroke.points;
 	const rSq = r * r;
@@ -111,21 +122,32 @@ export function splitStrokeByCircle(
 	stroke: InkStroke,
 	cx: number,
 	cy: number,
-	r: number,
+	radius: number,
 	makeId: () => string
 ): InkStroke[] {
 	const pts = stroke.points;
 	if (pts.length === 0) return [];
+	// The centre line is cut where it crosses the ring grown by the painted half-width, so what is left paints clear
+	// of the circle.
+	const r = reachOf(stroke, radius);
 	const rSq = r * r;
+	// A survivor ends ON the ring, and the next sample at the same centre must find that end outside it: a point on
+	// the ring, or a rounding error inside it, is not erased. Without the slack a held eraser would take the whole
+	// segment that ends there on its second pass.
+	const insideSq = rSq - rSq * 1e-9;
 	const inside = (p: InkPoint): boolean => {
 		const dx = p.x - cx;
 		const dy = p.y - cy;
-		return dx * dx + dy * dy <= rSq;
+		return dx * dx + dy * dy < insideSq;
 	};
 	if (pts.length === 1) return inside(pts[0]!) ? [] : [stroke];
 
 	const runs: InkPoint[][] = [];
 	let run: InkPoint[] = [];
+	// Every piece owns its points, copied once the cut is known. The caller keeps the original stroke for undo, and a
+	// later move translates a piece's points in place, so a piece that shared points with the original would drag part
+	// of the original with it. A pass that cuts nothing returns the stroke itself and copies nothing.
+	const own = (p: InkPoint): InkPoint => ({ ...p });
 	let cut = false;
 	const close = (): void => {
 		if (run.length > 0) runs.push(run);
@@ -173,7 +195,8 @@ export function splitStrokeByCircle(
 
 	if (!cut) return [stroke];
 	const out: InkStroke[] = [];
-	for (const points of runs) {
+	for (const raw of runs) {
+		const points = raw.map(own);
 		// A lone survivor still has to be drawable, the same way a tap is.
 		const kept =
 			points.length === 1

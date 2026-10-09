@@ -129,6 +129,17 @@ import {
 import { findScaleFactor, ProbedViewer, probeViewer, wholePageCanvasOf } from "./PdfViewerProbe";
 
 const OVERLAY_CLASS = "handwriting-pdf-ink";
+
+/**
+ * Which strokes an undo's `remove` actually took, keyed by the op's stroke
+ * list (the redo hands back the same list). The redo's `add` puts back
+ * only those: a stroke the undo did not find was erased since, by another
+ * device whose file the sync poll adopted or by another pane, and laying it
+ * back would undo that erase. The note surface keeps the same map in
+ * InkOverlay.applyInkOp.
+ */
+const removedByHistory = new WeakMap<readonly InkStroke[], ReadonlySet<string>>();
+
 /** Put on the COMMITTED canvas while a highlighter is wet. See `dressWet`. */
 const INK_OVER_CLASS = "handwriting-pdf-ink-over";
 /**
@@ -1465,7 +1476,11 @@ export class PdfInkController {
 			}
 		}
 		if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
-		const key = ev.key.toLowerCase();
+		// A layout that types another script (Russian, Greek) reports its own letter in
+		// `key`, so Z and Y read as neither. Only then does the physical key decide; a
+		// Latin layout, however remapped, keeps what `key` says.
+		const typed = ev.key.toLowerCase();
+		const key = /^[a-z]$/.test(typed) ? typed : /^Key[A-Z]$/.test(ev.code ?? "") ? ev.code.slice(3).toLowerCase() : typed;
 		const redo = key === "y" || (key === "z" && ev.shiftKey);
 		if (key !== "z" && key !== "y") return;
 		if (this.historyStep(redo)) {
@@ -1703,6 +1718,10 @@ export class PdfInkController {
 	}
 
 	unmount(): void {
+		// A stroke in flight when the pane closes (a pane or pop-out closed
+		// mid-stroke) is committed and saved, as a window blur commits it; the
+		// router is disposed below, so this is the last moment it can end.
+		this.router?.finishActiveStroke();
 		this.flushEditFrame(false);
 		// A gesture interrupted by the pane closing has applied live ops that
 		// nothing has written yet. Before this batching existed every sample
@@ -1827,6 +1846,14 @@ export class PdfInkController {
 		// after switching files would ask this one to remove ids it has never
 		// heard of - and a gesture caught mid-air is inherited whole.
 		this.resetGestureState();
+		// And the unwritten-change flag, here and not in resetGestureState. At a
+		// switch it belongs to the document being let go of: main.ts has already
+		// released that document's id, so nothing writes it now, and kept, it made
+		// the new document's first gesture write the new file with nothing changed.
+		// Everywhere else resetGestureState runs (an abandoned stroke, teardown,
+		// a viewer rebuild) the document stays, and the flag is what makes the
+		// next gesture end write a live erase or move already in the store.
+		this.liveDirty = false;
 		// A new document is a new wait, so it may say so once more.
 		this.warnedNoId = false;
 		this.warnedInkNotReady = false;
@@ -2909,6 +2936,11 @@ export class PdfInkController {
 		// drop-down chrome closes, the same as a note (StripPenChrome.ts,
 		// §5o) - this surface never called either half of that before.
 		stripPenDown(this.tools);
+		// A pinch the hand was already making ends here, with the gesture it
+		// gives way to: its preview comes off the viewer and its lift fires no
+		// zoom, so the page does not scale or jump under the pen. Here, after
+		// every refusal above, so a contact that never takes leaves it alone.
+		this.pinchBridge.cancel();
 		// And the keyboard comes with it: the router cancelled the mousedown
 		// that would have focused this pane, and Delete/Escape/undo here are a
 		// keydown listener on this root rather than commands, so without this
@@ -3720,16 +3752,25 @@ export class PdfInkController {
 		const inserted: InkStroke[] = [];
 		const insertedAt: number[] = [];
 		const whole = getEraserWholeStrokes();
+		// applyOp splices the pieces into the list AFTER every removal, in
+		// order of position, so a piece's position is where its stroke sat once
+		// the strokes removed before it are gone and the pieces placed before it
+		// are in. Using the stroke's original index instead lifts the pieces one
+		// slot per earlier removal, above ink drawn after them.
+		let taken = 0;
 		for (let at = 0; at < onPage.length; at++) {
 			const stroke = onPage[at]!;
 			if (!hitIds.has(stroke.id)) continue;
 			removed.push(stroke);
 			removedAt.push(at);
-			if (whole) continue; // nothing survives; there are no pieces to put back
-			for (const piece of splitStrokeByCircle(stroke, p.x, p.y, r, newStrokeId)) {
-				inserted.push({ ...piece, page: box.pageNumber });
-				insertedAt.push(at);
+			if (!whole) {
+				// nothing survives a whole-stroke erase; there are no pieces to put back
+				for (const piece of splitStrokeByCircle(stroke, p.x, p.y, r, newStrokeId)) {
+					insertedAt.push(at - taken + inserted.length);
+					inserted.push({ ...piece, page: box.pageNumber });
+				}
 			}
+			taken++;
 		}
 		// Applied, not recorded. The gesture's single history entry is built at
 		// pen-up from the snapshot taken when it started.
@@ -4508,8 +4549,34 @@ export class PdfInkController {
 		// hold ops recorded before the sources went synthetic.
 		if (!this.idle || this.syntheticSources()) return false;
 		this.clearSelection();
-		const op = redo ? this.history.redo() : this.history.undo();
+		let op = redo ? this.history.redo() : this.history.undo();
 		if (!op) return false;
+		if (op.type === "remove") {
+			const here = new Set(this.allStrokes().map((st) => st.id));
+			removedByHistory.set(op.strokes, new Set(op.strokes.filter((st) => here.has(st.id)).map((st) => st.id)));
+		} else if (op.type === "add") {
+			const took = removedByHistory.get(op.strokes);
+			if (took) {
+				const strokes = op.strokes;
+				const pick = (_: unknown, i: number): boolean => took.has(strokes[i]!.id);
+				op = { ...op, strokes: strokes.filter(pick), indices: op.indices?.filter(pick) };
+				// The undo took nothing that is still owed: nothing to write.
+				if (op.strokes.length === 0) {
+					this.refreshStrip();
+					return true;
+				}
+			}
+		} else if (op.type === "replace") {
+			// Whole or not at all, as the note surface does (InkOverlay.applyInkOp).
+			// A stroke this step would take out is gone (another device erased or
+			// split it and the sync poll adopted that): taking only the rest loses
+			// ink, and putting the inserted strokes back lays them over what is there.
+			const here = new Set(this.allStrokes().map((st) => st.id));
+			if (!op.removed.every((st) => here.has(st.id))) {
+				this.refreshStrip();
+				return true;
+			}
+		}
 		if (!this.emitOp(op)) return false;
 		this.refresh();
 		this.refreshStrip();
@@ -4674,6 +4741,20 @@ export class PdfInkController {
 			this.notify("Handwriting: that ink was copied from a note - paste it on a note.");
 			return;
 		}
+		// Ink copied from a longer PDF can name a page this one does not have.
+		// Stored anyway it shows nowhere, and flatten then refuses the whole
+		// document over it, so the paste is refused instead. pdf.js keeps every
+		// page div, so the probe's page list is the document's page count; with
+		// no pages read yet there is nothing to compare against and the paste
+		// goes ahead as before.
+		const pageCount = this.probe()?.pages.length ?? 0;
+		const lastPage = Math.max(...pasted.map((st) => st.page!));
+		if (pageCount > 0 && lastPage > pageCount) {
+			this.notify(
+				`Handwriting: that ink is on page ${lastPage}, and this PDF has ${pageCount} - nothing was pasted.`
+			);
+			return;
+		}
 		this.emit({ type: "add", path: id, strokes: pasted });
 		this.refresh();
 		const n = pasted.length;
@@ -4819,7 +4900,14 @@ export class PdfInkController {
 			// instead of discarding the half-stroke - the same rule the
 			// mid-stroke zoom already follows. The store write is DOM-free,
 			// so the dying scroller costs it nothing.
-			if (this.builder !== null || this.erasing) this.penUp();
+			//
+			// Every gesture, not only a stroke or an erase: pen-down hid the
+			// strip for a pan, a lasso and a space move too, and the router
+			// being replaced below never delivers their lift. `frame` is set
+			// at every pen-down, straight after the strip steps aside, and
+			// only penUp and resetGestureState clear it, so it is the one
+			// field that says a contact is open whatever its mode.
+			if (this.frame !== null || this.builder !== null || this.erasing) this.penUp();
 			this.dropOverlays();
 			this.resetGestureState();
 			this.bindTo(probed.scroller);

@@ -110,7 +110,7 @@ async function sharedPanes() {
 		Object.assign(controller, {
 			history: new PdfInkHistory(), syntheticSources: () => false, onOp,
 			builder: null, erasing: false, dragFrom: null, lassoPts: [], spaceLineY: null,
-			documentId: () => ID, clearSelection() {}, refresh() {}, refreshStrip() {},
+			documentId: () => ID, allStrokes: () => store.strokes(ID), clearSelection() {}, refresh() {}, refreshStrip() {},
 		});
 		return controller;
 	}
@@ -164,7 +164,7 @@ describe("PDF shared-pane history replay", () => {
 		r.expectUniqueWrites();
 	});
 
-	it("partial erase replay preserves already restored pieces and their moved geometry", async () => {
+	it("partial erase replay refuses whole when another pane already took the pieces, and keeps restored pieces and their moved geometry", async () => {
 		const r = await sharedPanes();
 		const original = stroke("original");
 		const pieces = [stroke("left"), stroke("right", 20)];
@@ -173,21 +173,38 @@ describe("PDF shared-pane history replay", () => {
 			type: "replace", path: ID, removed: [original], removedAt: [0], inserted: pieces, insertedAt: [0, 1],
 		});
 		r.gesture(r.b, { type: "remove", path: ID, strokes: pieces, indices: [0, 1] });
+		// The step takes out strokes that are gone, so it does not run at all: the
+		// original does not come back over what the other pane removed.
 		expect(r.a.historyStep(false)).toBe(true);
-		r.expectInk(["original"]);
+		r.expectInk([]);
 		expect(r.b.historyStep(false)).toBe(true);
-		r.expectInk(["left", "right", "original"]);
+		r.expectInk(["left", "right"]);
 		r.onOp({ type: "move", path: ID, strokeIds: ["left"], dx: 45, dy: 12 });
 		const moved = r.store.strokes(ID)[0];
+		// The original is absent, so the redo refuses and the pieces stay as they are.
 		expect(r.a.historyStep(true)).toBe(true);
 		r.expectInk(["left", "right"]);
 		expect(r.store.strokes(ID)[0]).toBe(moved);
 		expect(parsePage(r.saved.get(ID)!, ID).data.strokes[0]!.points[0]).toMatchObject({ x: 45, y: 12 });
+		r.expectUniqueWrites();
+	});
+
+	it("a partial erase another pane has not touched still undoes and redoes cleanly, cycle after cycle", async () => {
+		const r = await sharedPanes();
+		const original = stroke("original");
+		const pieces = [stroke("left"), stroke("right", 20)];
+		const unrelated = stroke("unrelated", 90);
+		r.onOp({ type: "add", path: ID, strokes: [original] });
+		r.gesture(r.a, {
+			type: "replace", path: ID, removed: [original], removedAt: [0], inserted: pieces, insertedAt: [0, 1],
+		});
+		// The other pane draws somewhere else: nothing the erase took out or left is touched.
+		r.gesture(r.b, { type: "add", path: ID, strokes: [unrelated] });
 		for (let cycle = 0; cycle < 8; cycle++) {
 			expect(r.a.historyStep(false)).toBe(true);
-			r.expectInk(["original"]);
+			r.expectInk(["original", "unrelated"]);
 			expect(r.a.historyStep(true)).toBe(true);
-			r.expectInk(["left", "right"]);
+			r.expectInk(["left", "right", "unrelated"]);
 		}
 		r.expectUniqueWrites();
 	});

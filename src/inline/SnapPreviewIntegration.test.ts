@@ -65,10 +65,10 @@ it.each(["pointercancel","lostpointercapture",undefined])("%s ends freehand with
  expect(r.ops.map(op=>op.type)).toEqual(["add"]);
 });
 it("a delayed timer cannot fit a shape at lift",()=>{const r=rig();r.up();vi.advanceTimersByTime(500);expect(shown).toBeNull();expect(r.ops.map(op=>op.type)).toEqual(["add"]);});
-it("authoritative final release filtering can split the snapshot, preserving both freehand pieces",()=>{
+it("a pressure dip drawn after the preview keeps the freehand stroke whole and the ghost is not accepted",()=>{
  const r=rig();vi.advanceTimersByTime(350);expect(shown).not.toBeNull();
- r.builder.add(147,31,0.01,400);r.builder.add(155,31,0.01,415);r.builder.add(159,31,0.5,425);
- r.up();expect(r.ops.map(op=>op.type)).toEqual(["add"]);expect((r.ops[0] as any).strokes).toHaveLength(2);
+ r.raw(147,31,0.01,400);r.raw(155,31,0.01,415);r.raw(159,31,0.5,425);
+ r.up();expect(r.ops.map(op=>op.type)).toEqual(["add"]);expect((r.ops[0] as any).strokes).toHaveLength(1);
 });
 
 it.each(["pointermove","pointerrawupdate"])("unequivocal silent lift via %s accepts the shown candidate",type=>{

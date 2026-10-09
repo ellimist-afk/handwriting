@@ -31,7 +31,7 @@ const proto = HandwritingPlugin.prototype as unknown as Proto;
 function ensureGlobals(): void {
 	const g = globalThis as unknown as { document?: unknown; window?: unknown };
 	g.document ??= {
-		body: { classList: { add: () => {}, toggle: () => {}, contains: () => false } },
+		body: { classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false } },
 	};
 	// persistOwners / checkPageIdentity use window.setTimeout/clearTimeout.
 	// Delegate to the (faked) global timers so vi.advanceTimersByTime drives them.
@@ -52,6 +52,7 @@ interface Harness {
 
 function fakePlugin(initialDisk: Record<string, unknown>, pageIdFor: Map<string, string>): Harness {
 	const plugin = Object.create(HandwritingPlugin.prototype) as Record<string, unknown>;
+	plugin.gatedCommandDefs = new Map();
 	plugin.disk = { ...initialDisk };
 	plugin.writes = [];
 	plugin.loadData = (): Promise<unknown> =>

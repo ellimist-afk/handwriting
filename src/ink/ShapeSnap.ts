@@ -526,13 +526,19 @@ export function snapStroke(stroke: InkStroke, dwellConfirmed = false): InkStroke
 	const result = closed ? classifyClosed(body, gap / (len + gap)) : classifyOpen(body);
 	if (!result) return null;
 	const width = stroke.width;
+	// The figure keeps the weight it was drawn with: the body's median
+	// pressure (the upper one for an even count), not the fixed 0.5 the
+	// generators write, which is three times a light line's width.
+	const sorted = body.map((p) => p.pressure).sort((x, y) => x - y);
+	const pressure = sorted[sorted.length >> 1]!;
+	const points = result.points.map((p) => ({ ...p, pressure }));
 	return {
 		id: newStrokeId(),
 		tool: stroke.tool,
 		color: stroke.color,
 		width,
-		points: result.points,
-		bbox: computeBBox(result.points, width * 2),
+		points,
+		bbox: computeBBox(points, width * 2),
 		createdAt: stroke.createdAt,
 		...(stroke.device === "mouse" ? { device: stroke.device } : {}),
 		...(stroke.widthMode === "uniform" ? { widthMode: stroke.widthMode } : {}),

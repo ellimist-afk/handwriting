@@ -3,7 +3,9 @@
  *
  * It runs the plugin's own ink path rather than a lookalike: StrokeBuilder
  * does the sampling and the release-travel rejection, drawStroke lays the
- * shaped ribbon down, and the width law is the one a note uses. Somebody
+ * shaped ribbon down, and the width law is the one a note uses. A pen's
+ * lift goes through the release filter a note applies; a pen that reports
+ * no pressure is never trimmed, since a mid value stands in for it. Somebody
  * trying this on a Surface or a Boox is feeling the real thing before they
  * install anything.
  *
@@ -49,6 +51,10 @@ class InkDemo {
 	 */
 	private live: InkPoint[] = [];
 	private liveDevice: "mouse" | undefined;
+	/** The device pixel ratio the canvas backing was last sized at. */
+	private backingDpr = 0;
+	/** The contact in flight is a pen: it lifts through the release filter. */
+	private livePen = false;
 	private activeId: number | null = null;
 	private tool: Tool = TOOLS.violet;
 	private frame = 0;
@@ -95,6 +101,7 @@ class InkDemo {
 
 	private resize(): void {
 		const dpr = window.devicePixelRatio || 1;
+		this.backingDpr = dpr;
 		const rect = this.canvas.getBoundingClientRect();
 		this.canvas.width = Math.max(1, Math.round(rect.width * dpr));
 		this.canvas.height = Math.max(1, Math.round(rect.height * dpr));
@@ -118,6 +125,7 @@ class InkDemo {
 		// A mouse has no pressure and its speed says nothing about intent, so
 		// the stroke is marked and the shaped width law stands down for it.
 		this.liveDevice = e.pointerType === "mouse" ? "mouse" : undefined;
+		this.livePen = e.pointerType === "pen";
 		this.builder = new StrokeBuilder(
 			this.tool.tool,
 			this.tool.color,
@@ -147,8 +155,17 @@ class InkDemo {
 
 	private up(e: PointerEvent): void {
 		if (this.activeId !== e.pointerId || !this.builder) return;
-		const done = this.builder.finish();
-		if (done) this.strokes.push(done);
+		// A pen lifts through the same release filter a note applies, so a
+		// light travelling ending is cut off here as it is there. A pen that
+		// reports no pressure is never trimmed: point() gives it a mid value.
+		// A mouse or a finger keeps finish(): its pressure is a constant, so
+		// the filter would cut nothing.
+		if (this.livePen) {
+			this.strokes.push(...this.builder.finishReleaseFiltered());
+		} else {
+			const done = this.builder.finish();
+			if (done) this.strokes.push(done);
+		}
 		this.builder = null;
 		this.live = [];
 		this.activeId = null;
@@ -172,6 +189,13 @@ class InkDemo {
 
 	private paint(): void {
 		const dpr = window.devicePixelRatio || 1;
+		// A window dragged to another monitor changes the ratio and leaves the
+		// canvas box alone, so the observer never fires. The backing is sized
+		// again here, which paints, so the drawing scale and the backing agree.
+		if (dpr !== this.backingDpr) {
+			this.resize();
+			return;
+		}
 		const { ctx } = this;
 		ctx.setTransform(1, 0, 0, 1, 0, 0);
 		ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);

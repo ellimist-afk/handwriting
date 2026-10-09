@@ -58,6 +58,19 @@ export interface InkOpIdentity {
 	pageId?: string;
 }
 
+/**
+ * Where each listed stroke sat, by its neighbours, when it was taken out:
+ * `next[i]` the first stroke after it that stayed, `prev[i]` the last one
+ * before it, null at either end. Putting a stroke back next to the
+ * neighbour it had keeps its depth when another pane has changed the list
+ * in between, which a recorded position number does not (it counts strokes
+ * that may no longer be there).
+ */
+export interface InkOpNeighbours {
+	next?: (string | null)[];
+	prev?: (string | null)[];
+}
+
 export type InkOp =
 	| ({
 			type: "add";
@@ -65,9 +78,23 @@ export type InkOp =
 			strokes: InkStroke[];
 			/** Insert positions for z-order restore; omitted = append. */
 			indices?: number[];
+	  } & InkOpIdentity &
+			InkOpNeighbours)
+	| ({ type: "remove"; path: string; strokes: InkStroke[]; indices: number[] } & InkOpIdentity & InkOpNeighbours)
+	/**
+	 * `from` is the first point of each listed stroke BEFORE this step, so a
+	 * move applies only to strokes that still stand where it expects them: a
+	 * move another pane has already undone, or one whose strokes another step
+	 * shifted, is not applied a second time or to a part.
+	 */
+	| ({
+			type: "move";
+			path: string;
+			strokeIds: string[];
+			dx: number;
+			dy: number;
+			from?: Array<{ x: number; y: number }>;
 	  } & InkOpIdentity)
-	| ({ type: "remove"; path: string; strokes: InkStroke[]; indices: number[] } & InkOpIdentity)
-	| ({ type: "move"; path: string; strokeIds: string[]; dx: number; dy: number } & InkOpIdentity)
 	/**
 	 * Partial erase (v0.13.13): strokes came out and their surviving pieces
 	 * went in, as ONE step. Undo has to put the original back and take the
@@ -181,6 +208,8 @@ export function invertInkOp(op: InkOp): InkOp {
 				pageId: op.pageId,
 				strokes: op.strokes,
 				indices: op.indices ?? [],
+				next: op.next,
+				prev: op.prev,
 			};
 		case "remove":
 			return {
@@ -190,6 +219,8 @@ export function invertInkOp(op: InkOp): InkOp {
 				pageId: op.pageId,
 				strokes: op.strokes,
 				indices: op.indices,
+				next: op.next,
+				prev: op.prev,
 			};
 		case "move":
 			return {
@@ -200,6 +231,7 @@ export function invertInkOp(op: InkOp): InkOp {
 				strokeIds: op.strokeIds,
 				dx: -op.dx,
 				dy: -op.dy,
+				from: op.from?.map((p) => ({ x: p.x + op.dx, y: p.y + op.dy })),
 			};
 		case "replace":
 			return {

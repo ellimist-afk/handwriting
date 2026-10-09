@@ -28,6 +28,7 @@
 
 import { InkStroke } from "../ink/Stroke";
 import { PageData, ParseResult, emptyPage } from "../model/PageData";
+import { ADOPTION_QUIET_MS, ADOPTION_RUN_GAP_MS, ADOPTION_STILL_FAILING } from "../inline/InlineInkStore";
 import type {
 	ExternalAdoptionHeldReason,
 	ExternalAdoptionResult,
@@ -40,6 +41,7 @@ import { timerHost } from "../util/RuntimeScheduler";
 import { familyOf, isPdfInkId } from "./PdfIdentity";
 
 const EMPTY: readonly InkStroke[] = [];
+const MISSING_INK_FILE = "this PDF's ink file is missing.\n\nyour ink is still on screen. your next stroke saves it again.";
 
 /**
  * What the visible ink looks like, for deciding whether a reload changed
@@ -112,11 +114,42 @@ interface PdfClaimStore {
 	remove(id: string): Promise<void>;
 }
 
+/** What retiring a deleted PDF's claim reads from the vault and the sidecars. */
+export interface PdfDeleteContext {
+	store: PdfClaimStore;
+	listPdfPaths: () => string[];
+	familyForPath: (path: string) => Promise<string | null>;
+	graceMs: number;
+	/**
+	 * Let go of a record the retirement loaded, once what it holds is on disk,
+	 * unless a pane shows it. Only the host knows the panes.
+	 */
+	release: (id: string) => void;
+}
+
+/**
+ * Where deletions still in their grace are kept across a restart, and what
+ * retiring a restored one needs. Without it a deletion still in its grace at
+ * quit is forgotten, as it always was.
+ */
+export interface PdfPendingDeleteStore {
+	load(): unknown;
+	save(saved: string | null): void;
+	context(): PdfDeleteContext;
+}
+
+/** One deletion still in its grace, as kept across a restart. */
+interface SavedPendingDelete {
+	path: string;
+	existingPaths: string[];
+}
+
 interface PendingPdfDeletion {
 	existingPaths: Set<string>;
 	listPdfPaths: () => string[];
 	familyForPath: (path: string) => Promise<string | null>;
 	store: PdfClaimStore;
+	release: (id: string) => void;
 	timer: number;
 }
 
@@ -140,6 +173,14 @@ interface PdfRecord {
 	futureLocked: boolean;
 	noticed: boolean;
 	/**
+	 * The other device's ink failing to load, as a note keeps it: the first
+	 * failure of a run, the last one, and whether this run has spoken. See
+	 * noteAdoptionFailure.
+	 */
+	adoptionNoticed: boolean;
+	adoptionFailingSince: number | null;
+	adoptionLastFailureAt: number | null;
+	/**
 	 * One page's strokes while a live erase runs on it; see applyLivePage.
 	 * `slots` are the positions that page's strokes held in `strokes` when the
 	 * gesture began, and `list` is that page as the gesture has left it.
@@ -161,6 +202,9 @@ function freshRecord(): PdfRecord {
 		unreadableLocked: false,
 		futureLocked: false,
 		noticed: false,
+		adoptionNoticed: false,
+		adoptionFailingSince: null,
+		adoptionLastFailureAt: null,
 		live: null,
 		byPage: null,
 	};
@@ -268,6 +312,8 @@ export class PdfInkStore {
 	private byId = new Map<string, PdfRecord>();
 	private host: PdfInkHost | null = null;
 	private pendingDeleted = new Map<string, PendingPdfDeletion>();
+	/** Where the deletions above outlive a restart; none until the plugin attaches one. */
+	private pendingStore: PdfPendingDeleteStore | null = null;
 
 	/**
 	 * Best-effort unload: wait (bounded) for in-flight sidecar reads. A stroke
@@ -303,6 +349,42 @@ export class PdfInkStore {
 	/** No host = session-memory mode, which is how the tests run it. */
 	attachHost(host: PdfInkHost): void {
 		this.host = host;
+	}
+
+	/**
+	 * Deletions that were still in their grace when Obsidian last quit. Each
+	 * one gets its grace again and goes on blocking adoption meanwhile.
+	 * Dropped at quit, as they used to be, the deleted copy's sidecar claimed
+	 * only a path that no longer existed, and the next session handed it -
+	 * ink and all - to the first same-byte file opened, usually the template
+	 * the copy was made from.
+	 */
+	attachPendingDeletes(store: PdfPendingDeleteStore): void {
+		this.pendingStore = store;
+		const context = store.context();
+		let raw = store.load();
+		try {
+			if (typeof raw === "string") raw = JSON.parse(raw);
+		} catch {
+			raw = null;
+		}
+		if (!Array.isArray(raw)) return;
+		for (const entry of raw as unknown[]) {
+			const saved = entry as Partial<SavedPendingDelete> | null;
+			if (typeof saved?.path !== "string" || !Array.isArray(saved.existingPaths)) continue;
+			const existing = saved.existingPaths.filter((p): p is string => typeof p === "string");
+			this.markDeletedPath(saved.path, context, existing);
+		}
+	}
+
+	/** Write the deletions in their grace where the next session will find them. */
+	private savePendingDeletes(): void {
+		if (!this.pendingStore) return;
+		const saved: SavedPendingDelete[] = [...this.pendingDeleted].map(([path, p]) => ({
+			path,
+			existingPaths: [...p.existingPaths],
+		}));
+		this.pendingStore.save(saved.length > 0 ? JSON.stringify(saved) : null);
 	}
 
 	strokes(id: string): readonly InkStroke[] {
@@ -428,6 +510,10 @@ export class PdfInkStore {
 	 * only when there is something new to show.
 	 */
 	async ensureLoaded(id: string): Promise<boolean> {
+		return this.loadRecord(id);
+	}
+
+	private async loadRecord(id: string, recoverUnadopted?: () => void): Promise<boolean> {
 		const rec = this.record(id);
 		// A damaged first read is locked against writes, but a later open may
 		// retry it. Keep the lock until a sound read has actually landed.
@@ -488,6 +574,9 @@ export class PdfInkStore {
 			rec.mutationGeneration++;
 			return persisted.length > 0;
 		} finally {
+			// A reload must recover before queued writes can snapshot the record,
+			// including when the read throws. A valid empty page was adopted too.
+			if (rec.basePage === null) recoverUnadopted?.();
 			rec.load = "yes";
 			rec.loadInFlight = null;
 			settle();
@@ -581,19 +670,24 @@ export class PdfInkStore {
 		// the file has gone rather than merely being unreadable it throws away
 		// the only remaining copy of the ink.
 		const kept = rec.strokes;
+		const keptPage = rec.basePage;
+		let restored = false;
 		rec.mutationGeneration++;
 		rec.load = "no";
 		rec.strokes = [];
 		rec.basePage = null;
-		await this.ensureLoaded(id);
-		if (rec.basePage === null) {
-			// Nothing was read: damaged, future-locked, or the file is gone. Put
-			// the session back. Damaged and future both leave the record locked,
-			// so the file is not touched; if the file vanished, the next save
-			// restores it from what is still on screen.
-			rec.strokes = kept;
-			return false;
-		}
+		await this.loadRecord(id, () => {
+			// No page was adopted. Preserve edits made while reading, with the
+			// current session version winning any repeated stroke ID. Keep the
+			// old page's unknown data and any locks set by the unsuccessful read.
+			materialize(rec);
+			const seen = new Set(rec.strokes.map((s) => s.id));
+			rec.strokes = [...kept.filter((s) => !seen.has(s.id)), ...rec.strokes];
+			rec.basePage = keptPage;
+			rec.mutationGeneration++;
+			restored = true;
+		});
+		if (restored) return false;
 		return inkFingerprint(this.strokes(id)) !== before;
 	}
 
@@ -648,28 +742,33 @@ export class PdfInkStore {
 	 */
 	markDeletedPath(
 		path: string,
-		store: PdfClaimStore,
-		listPdfPaths: () => string[],
-		familyForPath: (path: string) => Promise<string | null>,
-		graceMs: number
+		context: PdfDeleteContext,
+		/** The paths that existed at deletion, when restoring one from an earlier session. */
+		existingAtDeletion?: readonly string[]
 	): void {
 		this.cancelPending(path);
 		const pending: PendingPdfDeletion = {
-			existingPaths: new Set(listPdfPaths()),
-			listPdfPaths,
-			familyForPath,
-			store,
+			existingPaths: new Set(existingAtDeletion ?? context.listPdfPaths()),
+			listPdfPaths: context.listPdfPaths,
+			familyForPath: context.familyForPath,
+			store: context.store,
+			release: context.release,
 			timer: 0,
 		};
 		this.pendingDeleted.set(path, pending);
 		pending.timer = timerHost().setTimeout(() => {
 			runDetached(this.retireDeletedPath(path, pending), `retire PDF ink claim for ${path}`);
-		}, graceMs);
+		}, context.graceMs);
+		this.savePendingDeletes();
 	}
 
-	/** Unload leaves a sync pair unresolved, just as the note grace timer does. */
+	/**
+	 * Unload stops the grace timers but keeps the saved list: the next
+	 * session restores each deletion and gives it its grace again.
+	 */
 	cancelPendingDeletes(): void {
-		for (const path of this.pendingDeleted.keys()) this.cancelPending(path);
+		for (const pending of this.pendingDeleted.values()) timerHost().clearTimeout(pending.timer);
+		this.pendingDeleted.clear();
 	}
 
 	private cancelPending(path: string): void {
@@ -677,9 +776,23 @@ export class PdfInkStore {
 		if (!pending) return;
 		timerHost().clearTimeout(pending.timer);
 		this.pendingDeleted.delete(path);
+		this.savePendingDeletes();
 	}
 
 	private async retireDeletedPath(path: string, pending: PendingPdfDeletion): Promise<void> {
+		// Records loaded here are for PDFs no pane may show. Kept, one stood in
+		// for its sidecar at the next open, and ink another device added
+		// meanwhile was missing. Every one is released at every exit, except a
+		// record this retirement deleted along with its sidecar.
+		const loaded = new Set<string>();
+		try {
+			await this.retireDeletedPathLoading(path, pending, loaded);
+		} finally {
+			for (const id of loaded) pending.release(id);
+		}
+	}
+
+	private async retireDeletedPathLoading(path: string, pending: PendingPdfDeletion, loaded: Set<string>): Promise<void> {
 		if (this.pendingDeleted.get(path) !== pending) return;
 		const now = pending.listPdfPaths();
 		// A same-path recreation is the same claim. It needs no rewrite.
@@ -694,17 +807,22 @@ export class PdfInkStore {
 		}
 		const freshPaths = now.filter((p) => !pending.existingPaths.has(p));
 		const families = new Map<string, string | null>();
+		const unreadableFamilies = new Set<string>();
+		let deferred = false;
 		for (const [id, paths] of claims) {
 			if (!paths.includes(path)) continue;
 			if (this.pendingDeleted.get(path) !== pending) return;
 			let moved = false;
+			let unknown = false;
 			for (const next of freshPaths) {
 				if ([...claims].some(([other, ps]) => other !== id && ps.includes(next))) continue;
-				if (!families.has(next)) {
+				if (!families.has(next) && !unreadableFamilies.has(next)) {
 					try { families.set(next, await pending.familyForPath(next)); }
-					catch { families.set(next, null); }
+					catch { unreadableFamilies.add(next); }
 				}
+				if (unreadableFamilies.has(next)) { unknown = true; continue; }
 				if (families.get(next) !== familyOf(id)) continue;
+				loaded.add(id);
 				await this.ensureLoaded(id);
 				if (this.pendingDeleted.get(path) !== pending) return;
 				if (!this.inkReady(id)) break;
@@ -714,6 +832,9 @@ export class PdfInkStore {
 				break;
 			}
 			if (moved) continue;
+			// A failed read cannot rule out a rename; keep this claim pending.
+			if (unknown) { deferred = true; continue; }
+			loaded.add(id);
 			await this.ensureLoaded(id);
 			if (this.pendingDeleted.get(path) !== pending) return;
 			if (!this.inkReady(id)) continue; // unreadable or future sidecar: leave it alone
@@ -721,14 +842,26 @@ export class PdfInkStore {
 			const left = (rec.claimedPaths ?? paths).filter((p) => p !== path);
 			if (left.length === 0) {
 				await pending.store.remove(id); // never leave [] for legacy adoption
+				// A file with the same bytes can open during that await and adopt
+				// this record (claimPath, then renamePath, which cancels this
+				// deletion). The record is then an open pane's; deleting it took
+				// the ink off that pane's screen. The sidecar is already gone, so
+				// the kept record is written back now, whole, rather than at its
+				// next edit.
+				if (this.pendingDeleted.get(path) !== pending) {
+					const kept = this.byId.get(id);
+					if (kept) this.persist(id, kept);
+					return;
+				}
 				this.byId.delete(id);
+				loaded.delete(id);
 			} else {
 				rec.claimedPaths = left;
 				rec.mutationGeneration++;
 				this.persist(id, rec);
 			}
 		}
-		if (this.pendingDeleted.get(path) === pending) this.cancelPending(path);
+		if (!deferred && this.pendingDeleted.get(path) === pending) this.cancelPending(path);
 	}
 
 	/**
@@ -764,9 +897,18 @@ export class PdfInkStore {
 			prep = await prepare(id, frozen);
 		} catch (err) {
 			console.error("[handwriting] pdf external adoption could not be prepared", id, err);
+			this.noteAdoptionFailure(rec);
 			return adoptionHeld("io-failure");
 		}
-		if (prep.kind === "unavailable") return adoptionHeld("preservation-unavailable");
+		if (prep.kind === "unavailable") {
+			// A missing live file can be sync mid-replace; a note speaks on it
+			// once it persists, and so does a PDF.
+			if (prep.reason === "no-live-sidecar") this.noteAdoptionFailure(rec, MISSING_INK_FILE);
+			return adoptionHeld("preservation-unavailable");
+		}
+		// Every return below follows a round whose disk read succeeded, so a
+		// quiet period armed by an earlier failure does not survive it.
+		rec.adoptionFailingSince = null;
 		if (prep.kind === "stale") return adoptionHeld("stale");
 		if (prep.prepared.pageId !== id) return adoptionHeld("stale");
 
@@ -786,6 +928,7 @@ export class PdfInkStore {
 		}
 
 		accept(prep.prepared);
+		rec.adoptionNoticed = false;
 		rec.basePage = prep.prepared.data;
 		rec.live = null;
 		rec.strokes = prep.prepared.data.strokes.filter((s) => typeof s.page === "number");
@@ -867,6 +1010,32 @@ export class PdfInkStore {
 		rec.claimedPaths = [...kept, newPath];
 		rec.mutationGeneration++;
 		if (rec.basePage !== null || strokeCount(rec) > 0) this.persist(id, rec);
+	}
+
+	/**
+	 * A missing ink file or failed read, said once per run, after the same
+	 * quiet period a note waits (InlineInkStore.noteAdoptionFailure): one
+	 * failure is usually sync mid-transfer and gone a second later; one that
+	 * persists means this PDF has stopped receiving that device's ink.
+	 */
+	private noteAdoptionFailure(rec: PdfRecord, message = ADOPTION_STILL_FAILING): void {
+		if (rec.adoptionNoticed) return;
+		const now = Date.now();
+		if (
+			rec.adoptionFailingSince !== null &&
+			rec.adoptionLastFailureAt !== null &&
+			now - rec.adoptionLastFailureAt > ADOPTION_RUN_GAP_MS
+		) {
+			rec.adoptionFailingSince = null;
+		}
+		rec.adoptionLastFailureAt = now;
+		if (rec.adoptionFailingSince === null) {
+			rec.adoptionFailingSince = now;
+			return;
+		}
+		if (now - rec.adoptionFailingSince < ADOPTION_QUIET_MS) return;
+		rec.adoptionNoticed = true;
+		this.host?.notice(message);
 	}
 
 	private noteOnce(rec: PdfRecord, message: string): void {

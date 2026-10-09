@@ -42,6 +42,13 @@ moving a note keeps its ink. Move the note to another vault without `.handwritin
 and the ink does not follow; the id stays in the frontmatter, so putting the
 sidecar back later reconnects it.
 
+A note's own paper background and Infinite Canvas choice are kept in its
+sidecar, not in its properties. Choosing one on a note you have never inked
+on writes the page id, the same one line the first stroke writes. Notes from
+earlier versions may still carry `handwriting-paper` or `handwriting-canvas`
+lines; they are still read, and each is removed the next time you change that
+choice on that note.
+
 Two other frontmatter keys exist and Handwriting does not add either on its
 own. `handwriting: page` marked a note for the canvas page view, which the
 plugin no longer has; a note carrying it opens as ordinary Markdown, and the
@@ -123,6 +130,10 @@ Stable fields, safe to depend on:
 - `textBoxes` and `images` (`id`, position, size, `z`) - written only by the
   canvas page view, which the plugin no longer has. The format still reads
   and writes both keys
+- `noteCanvas` (boolean, optional) and `notePaper` (`"none"`, `"lines"`,
+  `"grid"` or `"dots"`, optional): the note's own Infinite Canvas and paper
+  background choices. Absent means the note follows the global setting. A
+  value this build does not recognise is kept and written back as found
 
 Internal, and subject to change without a schema bump:
 

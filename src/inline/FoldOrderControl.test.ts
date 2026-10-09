@@ -366,7 +366,7 @@ interface Harness {
 	gripOf(index: number): FakeEl;
 }
 
-function build(): Harness {
+function build(reads: typeof PREVIEW_READS = PREVIEW_READS): Harness {
 	const doc = new FakeDoc();
 	const pane = new FakeEl("div", doc);
 	const applied: string[][] = [];
@@ -382,7 +382,7 @@ function build(): Harness {
 			setStripFoldOrder(saved);
 		},
 		corner: () => "top-right",
-		previewHost: previewStripHost(PREVIEW_READS),
+		previewHost: previewStripHost(reads),
 	});
 	const rows = (): FakeEl[] => pane.all("handwriting-fold-row");
 	const gripOf = (index: number): FakeEl => {
@@ -658,6 +658,20 @@ describe("fold order: the control against a fake tree", () => {
 		expect(h.pane.all("handwriting-fold-grip")).toHaveLength(h.rows().length);
 		const listed = h.rows().map((r) => r.dataset.commandId);
 		for (const face of NEVER_FOLDING_FACES) expect(listed).not.toContain(face.commandId);
+		h.control.destroy();
+	});
+
+	// The live toolbar blends a nib's colour toward the theme's text colour so a black pen in a dark theme (or a white one in a light
+	// theme) never goes invisible. The always-shown row in this preview wears the same two nibs and must read the same way.
+	it("a black pen in the always-shown preview is blended toward the theme's text colour, as on the live toolbar", () => {
+		const h = build({ ...PREVIEW_READS, toolColor: () => "#000000" });
+		const nibs = h.pane.all("handwriting-fold-fixed-btn").filter((b) => b.style.color !== undefined);
+		expect(nibs.length, "premise: the two nibs wear their ink here").toBeGreaterThanOrEqual(2);
+		for (const nib of nibs) {
+			expect(nib.style.color, "premise: the nib is painted from the pen's colour").toContain("#000000");
+			expect(nib.style.color, "blended toward the theme's text colour").toContain("var(--text-normal)");
+			expect(nib.style.color, "not the flat, unblended hex").not.toBe("#000000");
+		}
 		h.control.destroy();
 	});
 

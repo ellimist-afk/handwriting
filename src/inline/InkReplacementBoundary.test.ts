@@ -125,14 +125,27 @@ it.each([false, true])("replace with pieces=%s publishes one complete snapshot a
 	expect(r.overlay.repaintPath).toHaveBeenLastCalledWith(r.path);
 });
 
-it.each(["empty-to-ink", "ink-to-empty", "same-id", "missing-removed"])("%s replacement publishes the final contents", async kind => {
+it.each(["empty-to-ink", "ink-to-empty", "same-id"])("%s replacement publishes the final contents", async kind => {
 	const original = stroke("original");
-	const r = await rig(kind === "empty-to-ink" || kind === "missing-removed" ? [] : [original]);
+	const r = await rig(kind === "empty-to-ink" ? [] : [original]);
 	const inserted = kind === "ink-to-empty" ? [] : [stroke(kind === "same-id" ? "original" : "inserted", 40)];
 	r.overlay.applyInkOp({ type: "replace", path: r.path,
 		removed: kind === "empty-to-ink" ? [] : [original], removedAt: [0], inserted, insertedAt: [0] });
 	boundary(r, ids(inserted));
 	if (inserted.length) expect(r.strokes()[0]).toBe(inserted[0]);
+});
+
+// Revised: this used to be the "missing-removed" row above, which put the inserted stroke in although the stroke
+// it replaces was not there. A replace now applies whole or not at all: with a removed stroke missing (another device
+// erased or split it and the sync poll adopted that), inserting lays ink over what is there, so nothing changes and
+// nothing is saved or announced. ReplaceWholeOrNothing.test.ts has the user's sequence.
+it("a replacement whose removed stroke is missing changes nothing and publishes nothing", async () => {
+	const r = await rig([]);
+	r.overlay.applyInkOp({ type: "replace", path: r.path,
+		removed: [stroke("original")], removedAt: [0], inserted: [stroke("inserted", 40)], insertedAt: [0] });
+	expect(ids(r.strokes())).toEqual([]);
+	expect(r.writes).toEqual([]);
+	expect(r.observed).toEqual([]);
 });
 
 it("replacement history follows rename and publishes only at the current path", async () => {

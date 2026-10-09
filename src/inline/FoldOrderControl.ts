@@ -75,6 +75,7 @@ import { deviceHasTouch } from "./DeviceInput";
 import {
 	MobileTools,
 	NEVER_FOLDING_FACES,
+	nibInkColor,
 	normalizeFoldOrder,
 	stripBuildsButton,
 	stripButtonFace,
@@ -352,7 +353,7 @@ export class FoldOrderControl {
 			// in": the answer is that they ARE coloured, in the colours they are
 			// actually holding, not tinted to look enabled.
 			if (face.inkTool !== undefined) {
-				btn.setCssStyles({ color: this.opts.previewHost.toolColor(face.inkTool) });
+				btn.setCssStyles({ color: nibInkColor(this.opts.previewHost.toolColor(face.inkTool)) });
 			}
 		}
 		// ---- the list ----------------------------------------------------

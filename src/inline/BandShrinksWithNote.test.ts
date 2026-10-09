@@ -29,7 +29,7 @@ const CLIENT_H = 600;
 const CLIENT_W = 800;
 
 function rig(contentHeight: number, scrollTop: number) {
-	const state = { contentHeight, scrollTop, bandTop: 0, bandHeight: 0, hasBand: false, heightReads: 0 };
+	const state = { contentHeight, scrollTop, bandTop: 0, bandHeight: 0, bandTranslateY: 0, hasBand: false, heightReads: 0 };
 	// The extent the browser would lay out. The scroller's own getters use it uncounted, so heightReads counts only
 	// the reads the code under test makes.
 	const extent = (): number => {
@@ -55,6 +55,7 @@ function rig(contentHeight: number, scrollTop: number) {
 			state.hasBand = true;
 			if (styles.top !== undefined) state.bandTop = parseFloat(styles.top);
 			if (styles.height !== undefined) state.bandHeight = parseFloat(styles.height);
+			if (styles.transform !== undefined) state.bandTranslateY = parseFloat(/translate\([^,]+,\s*([-\d.e]+)px\)/.exec(styles.transform)?.[1] ?? "0");
 		},
 	};
 	const overlay = Object.create(InkOverlayPlugin.prototype) as Record<string, unknown>;
@@ -78,7 +79,7 @@ function rig(contentHeight: number, scrollTop: number) {
 	const sync = (): void => {
 		(overlay as unknown as { syncBand(): string }).syncBand();
 	};
-	return { state, scroller, sync };
+	return { state, scroller, sync, overlay };
 }
 
 describe("audit 178: the band gives back the room a shrunk note no longer has", () => {
@@ -114,6 +115,23 @@ describe("audit 178: the band gives back the room a shrunk note no longer has", 
 		const before = r.state.heightReads;
 		r.sync();
 		expect(r.state.heightReads - before, "one band-free read on the frame the note shrank").toBe(2);
+	});
+
+	// bandPlacement puts the band's whole px in top and its fraction in the container's translate.
+	// The band-free probe slides the band away and back; written as a raw top, the restore left the old translate on
+	// and the box sat at top plus the fraction twice until the next band write. The rig models top AND the translate.
+	it("the band-free probe puts a fractional band back where bandPlacement placed it", () => {
+		const r = rig(1800, 1200);
+		const band = { left: 0, top: 1200.5, width: CLIENT_W, height: 600 };
+		const o = r.overlay as unknown as { band: typeof band; bandContentHeight: number; container: { setCssStyles(s: Record<string, string>): void };
+			bandPlacement(l: number, t: number): { left: string; top: string; transform: string }; measureBandFreeHeight(sc: unknown, reported: number): number | null };
+		o.band = band;
+		o.container.setCssStyles(o.bandPlacement(band.left, band.top));
+		const placed = (): number => r.state.bandTop + r.state.bandTranslateY;
+		expect(placed(), "the rig places the band where bandPlacement says").toBeCloseTo(1200.5, 9);
+		o.bandContentHeight = 2000; // the note was longer: this frame is a shrink
+		o.measureBandFreeHeight(r.scroller, 1800);
+		expect(placed(), `after the probe the band's box sits at ${placed()}, its own top is 1200.5`).toBeCloseTo(1200.5, 9);
 	});
 
 	it("control: a note that shrinks with the band clear of its end measures nothing and keeps its band", () => {

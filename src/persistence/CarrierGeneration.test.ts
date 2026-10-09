@@ -186,13 +186,14 @@ describe("a flush carrier survives an older save that lands after it", () => {
 	});
 });
 
-describe("a failed older save, retried, does not take a newer carrier's generation", () => {
+describe("a failed older save does not take a newer carrier's generation", () => {
 	// A is consumed and waits at its .tmp write. B's carrier lands and B's
-	// normal write queues behind A. A fails; `pending` is empty, so the failure
-	// path requeues A. B fails too, after a flushPage has consumed the requeued
-	// A as A2. A2 lands. A2's payload never held b1, so it must not remove the
-	// carrier that is b1's only durable copy.
-	it("A fails, B fails, A's retry lands: B's carrier is still on disk and a fresh store can recover b1", async () => {
+	// normal write queues behind A. A fails. Before R6
+	// the failure path put A back because `pending` was empty, and A's retry
+	// could land over B or remove the carrier that is b1's only durable copy.
+	// Now B has already left the queue, so A is superseded and not put back.
+	// B fails too and is put back. Whatever lands, b1 must survive a freeze.
+	it("A fails, B fails: A is not retried, the carrier keeps b1 until B's own retry lands, and a fresh store can recover b1", async () => {
 		fake.files.set(LIVE, serializePage(pageWith("a0")));
 		fake.mtimes.set(LIVE, ++fake.clock);
 		const store = new PageStore({ vault: { adapter: fake } }, ".handwriting");
@@ -208,28 +209,20 @@ describe("a failed older save, retried, does not take a newer carrier's generati
 		await settle();
 		expect(idsIn(fake.files.get(CARRIER)), "precondition: the carrier holds B").toEqual(["a0", "a1", "b1"]);
 
-		// A fails and is requeued; B's normal write starts and waits at its .tmp.
+		// A fails and is not put back; B's normal write starts and waits at its .tmp.
 		held[0]!.fail();
 		await saveA;
 		for (let i = 0; i < 20 && held.length < 2; i++) await settle();
 		expect(held, "precondition: B's .tmp write is in flight").toHaveLength(2);
 
-		// The requeued A is consumed as A2 and queues behind B.
-		const retryA = store.flushPage("p1");
-		await settle();
-
-		// B fails and is requeued; A2 reaches its .tmp and lands.
+		// B fails and is put back. A flush now writes B again, never A.
 		held[1]!.fail();
-		for (let i = 0; i < 20 && held.length < 3; i++) await settle();
-		expect(held, "precondition: A2's .tmp write is in flight").toHaveLength(3);
-		held[2]!.release();
-		await retryA;
-		await settle();
-		expect(idsIn(fake.files.get(LIVE)), "precondition: A2 is live").toEqual(["a0", "a1"]);
-		expect(held, "precondition: B's retry has not started").toHaveLength(3);
+		for (let i = 0; i < 5; i++) await settle();
+		expect(held, "A was retried after B had left the queue").toHaveLength(2);
+		expect(idsIn(fake.files.get(LIVE)), "precondition: the live file still holds a0").toEqual(["a0"]);
 
 		// Freeze before B retries.
-		expect.soft(idsIn(fake.files.get(CARRIER)), "A2's completion removed the carrier holding b1").toEqual(["a0", "a1", "b1"]);
+		expect.soft(idsIn(fake.files.get(CARRIER)), "the carrier holding b1 was removed").toEqual(["a0", "a1", "b1"]);
 		const { loaded, onDisk } = await restartFrom(fake);
 		expect(
 			loaded.includes("b1") || onDisk.some((ids) => ids.includes("b1")),
@@ -238,9 +231,9 @@ describe("a failed older save, retried, does not take a newer carrier's generati
 
 		// Control: B's own retry lands, and it removes the carrier it covers.
 		const retryB = store.flushPage("p1");
-		for (let i = 0; i < 20 && held.length < 4; i++) await settle();
-		expect(held, "precondition: B's retry reached its .tmp").toHaveLength(4);
-		held[3]!.release();
+		for (let i = 0; i < 20 && held.length < 3; i++) await settle();
+		expect(held, "precondition: B's retry reached its .tmp").toHaveLength(3);
+		held[2]!.release();
 		await retryB;
 		await settle();
 		expect(idsIn(fake.files.get(LIVE))).toEqual(["a0", "a1", "b1"]);
@@ -249,14 +242,14 @@ describe("a failed older save, retried, does not take a newer carrier's generati
 });
 
 describe("an older save held for an ink-folder move does not take a newer carrier's generation", () => {
-	// The same loss as the failed-retry case, through the folder-move door.
-	// X is in flight; A is consumed and waits behind X; B's carrier lands and
-	// B waits behind A. The folder move starts. X lands; A reaches writeNow,
-	// is held for the move and goes back into `pending`; B is held too, but
-	// `pending` already holds A, so b1 is now only in the carrier. After the
-	// move, A's retry lands. A never held b1, so it must not remove the
-	// carrier.
-	it("A held for the move, retried after it: B's carrier is still on disk and a fresh store can recover b1", async () => {
+	// The same loss through the folder-move door. X is in flight; A is consumed
+	// and waits behind X; B's carrier lands and B waits behind A. The folder
+	// move starts. X lands; A reaches writeNow and is held for the move. Before
+	// R6 A went back into `pending` and B, held too, found the slot taken, so
+	// b1 was only in the carrier and A's retry after the move could remove it.
+	// Now A is superseded by B and is not put back; B is. b1 must survive a
+	// freeze at every point, and B's retry is what lands.
+	it("A and B held for the move: only B is retried after it, the carrier keeps b1 until B lands, and a fresh store can recover b1", async () => {
 		fake.files.set(LIVE, serializePage(pageWith("a0")));
 		fake.mtimes.set(LIVE, ++fake.clock);
 		const store = new PageStore({ vault: { adapter: fake } }, ".handwriting");
@@ -283,22 +276,30 @@ describe("an older save held for an ink-folder move does not take a newer carrie
 		expect(idsIn(fake.files.get(LIVE)), "precondition: X is live").toEqual(["a0", "a1"]);
 		expect(held, "precondition: neither A nor B reached its .tmp").toHaveLength(1);
 
-		// The move ends; A's retry reaches its .tmp and lands.
-		store.releaseWrites();
-		const retryA = store.flushPage("p1");
-		for (let i = 0; i < 20 && held.length < 2; i++) await settle();
-		expect(held, "precondition: A's retry reached its .tmp").toHaveLength(2);
-		held[1]!.release();
-		await retryA;
-		await settle();
-		expect(idsIn(fake.files.get(LIVE)), "precondition: A is live").toEqual(["a0", "a1", "a2"]);
-
-		expect.soft(idsIn(fake.files.get(CARRIER)), "A's held retry removed the carrier holding b1").toEqual([
+		// Freeze during the move.
+		expect.soft(idsIn(fake.files.get(CARRIER)), "the carrier holding b1 was removed").toEqual([
 			"a0",
 			"a1",
 			"a2",
 			"b1",
 		]);
+		const during = await restartFrom(fake);
+		expect(
+			during.loaded.includes("b1") || during.onDisk.some((ids) => ids.includes("b1")),
+			"b1 is in no file after a restart during the move"
+		).toBe(true);
+
+		// The move ends; the one retry is B's.
+		store.releaseWrites();
+		const retry = store.flushPage("p1");
+		for (let i = 0; i < 20 && held.length < 2; i++) await settle();
+		expect(held, "precondition: one retry reached its .tmp").toHaveLength(2);
+		held[1]!.release();
+		await retry;
+		await settle();
+		expect(idsIn(fake.files.get(LIVE)), "the held older A was retried instead of B").toEqual(["a0", "a1", "a2", "b1"]);
+		expect(held, "a second retry ran after B landed").toHaveLength(2);
+		expect(fake.files.has(CARRIER), "B landed and left the carrier it made durable").toBe(false);
 		const { loaded, onDisk } = await restartFrom(fake);
 		expect(
 			loaded.includes("b1") || onDisk.some((ids) => ids.includes("b1")),

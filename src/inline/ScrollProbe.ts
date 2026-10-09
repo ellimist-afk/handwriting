@@ -210,7 +210,36 @@ interface CommitEntry {
 	topEl: string;
 }
 
+/**
+ * One per stroke, at the lift, before the live layers are cleared: the scale
+ * the overlay measured, the scale its backing and live-canvas grids were built
+ * from, the backing, and the two live canvases' grids and backing sizes. A wet tile of
+ * 1 x 1 is off (every pen event drew into the full wet canvas); a tail the size
+ * of the band is a full-size layer.
+ */
+interface LayersEntry {
+	kind: "layers";
+	t: number;
+	cssScale: number;
+	rasterScale: number;
+	backing: number;
+	tileW: number;
+	tileH: number;
+	/** The wet tile's pixel grid; null = none, so no tile. */
+	tileGrid: number | null;
+	tailW: number;
+	tailH: number;
+	/** The tail's pixel grid; null = none, so no compact tile. */
+	tailGrid: number | null;
+	tailMode: string;
+	bandW: number;
+	bandH: number;
+	/** The window's devicePixelRatio at the lift; absent on an entry pushed without it. */
+	dpr?: number;
+}
+
 type ProbeEntry =
+	| LayersEntry
 	| WheelEntry
 	| ScrollEntry
 	| SchedEntry
@@ -377,6 +406,11 @@ export function scrollProbeCommit(g: Omit<CommitEntry, "kind" | "t">): void {
 	push({ kind: "commit", t: performance.now(), ...g });
 }
 
+export function scrollProbeLayers(g: Omit<LayersEntry, "kind" | "t">): void {
+	if (!diagnosticsEnabled()) return;
+	push({ kind: "layers", t: performance.now(), ...g });
+}
+
 
 /** Pure, unit-tested: does this bbox intersect the camera viewport? */
 export function bboxVisibleInViewport(
@@ -416,11 +450,14 @@ function fmtCamDelta(dx: number | undefined, dy: number | undefined): string {
 	return dx === undefined || dy === undefined ? "-" : `(${dx.toExponential(2)},${dy.toExponential(2)})`;
 }
 
-export function formatScrollProbe(): string {
+export function formatScrollProbe(build?: { version: string; sourceTree: string }): string {
+	// sourceTree is the existing canonical build-input digest, or unverified
+	// for development builds. It is not a claim about a verified Git tree.
+	const header = `Handwriting scroll probe: version=${build?.version ?? "unknown"} build=${build?.sourceTree ?? "unverified"}`;
 	if (entries.length === 0) {
-		return diagnosticsEnabled()
-			? "Handwriting scroll probe: no samples. Scroll (touchpad and touchscreen), draw, then copy again."
-			: `Handwriting scroll probe: no samples. ${DIAG_OFF_NOTE}`;
+		return `${header}\n${diagnosticsEnabled()
+			? "no samples. Scroll (touchpad and touchscreen), draw, then copy again."
+			: `no samples. ${DIAG_OFF_NOTE}`}`;
 	}
 
 	// ---- summary ------------------------------------------------------------
@@ -446,6 +483,9 @@ export function formatScrollProbe(): string {
 	let commitsUnpainted = 0;
 	let maxCommitDrift = 0;
 	let downs = 0;
+	let layerStrokes = 0;
+	let tileOff = 0;
+	let tailFull = 0;
 	for (const e of entries) {
 		switch (e.kind) {
 			case "wheel":
@@ -483,6 +523,11 @@ export function formatScrollProbe(): string {
 			case "pendown":
 				downs++;
 				break;
+			case "layers":
+				layerStrokes++;
+				if (e.tileW <= 1 && e.tileH <= 1) tileOff++;
+				if (e.tailW >= e.bandW && e.tailH >= e.bandH) tailFull++;
+				break;
 			case "commit": {
 				commits++;
 				if (!e.visible) commitsInvisible++;
@@ -495,7 +540,8 @@ export function formatScrollProbe(): string {
 		}
 	}
 	const lines: string[] = [
-		`Handwriting scroll probe: ${entries.length} event(s)`,
+		header,
+		`${entries.length} event(s)`,
 		"",
 		"SUMMARY",
 		`  wheel events            : ${wheels}  (|deltaX| total ${wheelDx.toFixed(1)}, max ${wheelDxMax.toFixed(1)}, ctrl held on ${wheelCtrl})`,
@@ -507,6 +553,7 @@ export function formatScrollProbe(): string {
 		`  repaints                : ${repaints}  (max request→run wait ${repaintWaitMax.toFixed(1)}ms)`,
 		`  spacer/axis mutations   : ${extents}`,
 		`  pen-downs / commits     : ${downs} / ${commits}`,
+		`  live layers per stroke  : ${layerStrokes} stroke(s), wet tile off in ${tileOff}, tail full size in ${tailFull}`,
 		`  commits NOT intersecting the viewport at commit time: ${commitsInvisible}` +
 			(commitsInvisible > 0 ? "   *** accepted-but-invisible: render path ***" : ""),
 		"",
@@ -566,6 +613,14 @@ export function formatScrollProbe(): string {
 			case "pendown":
 				lines.push(
 					`${at}  PENDOWN  client(${e.clientX.toFixed(1)},${e.clientY.toFixed(1)}) note(${e.noteX.toFixed(1)},${e.noteY.toFixed(1)}) cam=(${e.camX.toFixed(2)},${e.camY.toFixed(2)}) scroll=(${e.scrollLeft},${e.scrollTop}) rect=(${e.rectLeft.toFixed(2)},${e.rectTop.toFixed(2)}) canvas=${e.cssW.toFixed(0)}x${e.cssH.toFixed(0)} scale=${e.scale} spacer=(${e.spacerLeft},${e.spacerTop}) axisPatched=${e.axisPatched} scrollWH=${e.scrollWidth}x${e.scrollHeight} clientWH=${e.clientWidth}x${e.clientHeight} lastWheel=${fmtAge(e.sinceWheelMs)} lastScroll=${fmtAge(e.sinceScrollMs)}`
+				);
+				break;
+			case "layers":
+				lines.push(
+					`${at}  LAYERS   cssScale=${e.cssScale} raster=${e.rasterScale} backing=${e.backing} tile=${e.tileW}x${e.tileH} tileGrid=${e.tileGrid ?? "none"} tail=${e.tailW}x${e.tailH} tailGrid=${e.tailGrid ?? "none"} tailMode=${e.tailMode} band=${e.bandW}x${e.bandH}` +
+						(e.dpr !== undefined ? ` dpr=${e.dpr}` : "") +
+						(e.tileW <= 1 && e.tileH <= 1 ? "  tile OFF" : "") +
+						(e.tailW >= e.bandW && e.tailH >= e.bandH ? "  tail FULL" : "")
 				);
 				break;
 			case "commit":

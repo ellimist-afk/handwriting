@@ -29,6 +29,7 @@ export function paperProbe(css: string) {
 		workspace: { getLeavesOfType: () => leaves, on: (event: string, cb: (...args: any[]) => void) => events.set(event, cb), onLayoutReady: (cb: () => void) => cb() },
 		metadataCache: { getFileCache: (file: TFile) => cache.get(file), on: (event: string, cb: (...args: any[]) => void) => events.set(event, cb) },
 		fileManager: { processFrontMatter: () => { writes++; } },
+		vault: { getAbstractFileByPath: (path: string) => [a, b, c].find(file => file.path === path) ?? null },
 	} as unknown as App;
 	const paper = new NotePaper(app, () => {});
 	paper.start({ registerEvent: () => {}, register: () => {} } as unknown as Plugin);

@@ -40,7 +40,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InlinePenRouter } from "./InlinePenRouter";
-import { harness, installFakeWindow, penEvent } from "../../test/routerHarness";
+import { harness as baseHarness, installFakeWindow, penEvent } from "../../test/routerHarness";
 
 let uninstallWindow: () => void = () => {};
 beforeAll(() => {
@@ -48,6 +48,21 @@ beforeAll(() => {
 });
 afterAll(() => {
 	uninstallWindow();
+});
+
+/**
+ * Every router a test builds is disposed after it. Palm rejection reads every
+ * live router (one writing hand across panes), so a router left behind with a
+ * stroke still down would block the next test's touches.
+ */
+const built: InlinePenRouter[] = [];
+function harness(): ReturnType<typeof baseHarness> {
+	const h = baseHarness();
+	built.push(h.router);
+	return h;
+}
+afterEach(() => {
+	for (const r of built.splice(0)) r.dispose();
 });
 
 /** Mirrors `OWNERSHIP_TAIL_MS` in InlinePenRouter.ts, which does not export it. */

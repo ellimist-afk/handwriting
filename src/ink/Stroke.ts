@@ -39,6 +39,15 @@ export interface InkStroke {
 	/** Geometry generation used for newly-authored pressure-aware ink. */
 	pressureProfile?: PressureProfile;
 	/**
+	 * The pressure setting the stroke was written under. A stroke that carries
+	 * it is painted, cached and exported under that value whatever the switch
+	 * says now; absent, the switch decides, as it always has. The profile
+	 * still picks the width law; this only says whether pressure moves width
+	 * inside it. Any other value in a file reads as absent and is written back
+	 * as found.
+	 */
+	pressureSensitivity?: "on" | "off";
+	/**
 	 * Present only for mouse-drawn strokes (v0.13.16). A mouse has no
 	 * pressure and its speed says nothing about intent, so the shaped width
 	 * law (velocity thinning, taper) does not apply to it - at mouse speeds

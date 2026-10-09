@@ -2,46 +2,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parsePage, serializePage } from "./PageData";
 
 /**
- * A CHARACTERISATION FILE. IT PINS BEHAVIOUR THAT IS WRONG.
+ * A MISSING createdAt READS THE SAME ON EVERY LOAD.
  *
- * DO NOT DELETE THIS BECAUSE IT LOOKS BROKEN. The `it.fails` cases state what
- * the decoder SHOULD do and record that today it does not; the green ones quote
- * what it ACTUALLY does. **A fix turns both kinds red on purpose**, so whoever
- * fixes it comes back here and re-pins deliberately.
- *
- * THE DEFECT. `migratePageData` reads a stroke's creation time as
+ * THIS FILE USED TO PIN BEHAVIOUR THAT WAS WRONG, and it says so because a
+ * reader three weeks from now may find an old createdAt ordering argument that
+ * leans on it. `migratePageData` read a stroke's creation time as
  *
  *     createdAt: num(s.createdAt) ?? Date.now(),
  *
- * so a stroke whose `createdAt` is absent or unreadable is stamped with the
- * time of THE LOAD. **That default is nondeterministic.** Every other silent
- * default in this parser is wrong but STABLE - a width of 320 is wrong the same
- * way on every load, so a comparison built on it at least compares like with
- * like. **This one is wrong differently every time**: the same bytes produce a
- * different model on every load, and two devices opening one synced file
- * disagree about when its ink was drawn.
+ * so a stroke whose `createdAt` was absent or unreadable was stamped with the
+ * time of THE LOAD: the same bytes gave a different model on every load, and
+ * two devices opening one synced file disagreed about when its ink was drawn.
+ * The fallback is now a fixed 0. It is wrong the same way on
+ * every load, which is the property that matters here: a comparison built on
+ * it compares like with like.
  *
- * WHAT IT BREAKS DOWNSTREAM, written here rather than left in a side channel
- * because that is where a reader three weeks from now will be standing:
- * **`createdAt` ordering is used as EVIDENCE.** A fork analysis on 2026-09-08
- * used createdAt ordering as measured proof that no ink was lost in a sync
- * incident. Any such argument is only as sound as the field, and for a stroke
- * that reached this branch the field was invented at load time - so an ordering
- * over those strokes says when they were PARSED, not when they were drawn.
- * **Check this test before trusting a createdAt ordering.**
+ * WHAT STAYS TRUE: a `createdAt` ordering over strokes that reached the
+ * fallback says nothing about when they were drawn, before and after the fix.
+ * Check this file before trusting one. Nothing outside tests orders or draws by
+ * the field.
  *
- * WHAT THIS FILE DELIBERATELY DOES NOT ASSERT. It does not claim the fix should
- * raise `damaged`. An ABSENT `createdAt` is indistinguishable from a sidecar
- * written before the field existed, and nothing in the format records which
- * fields a file was written with - `schemaVersion` is per FILE, not per field.
- * Calling absence damage would flag ordinary old files, which is the failure the
- * container-loss slice was careful to avoid. A deterministic fallback and a
- * damage verdict are both defensible and it is not a runner's call.
+ * WHAT THIS FILE DELIBERATELY DOES NOT ASSERT. It does not claim the parser
+ * should raise `damaged`. An ABSENT `createdAt` is indistinguishable from a
+ * sidecar written before the field existed, and nothing in the format records
+ * which fields a file was written with - `schemaVersion` is per FILE, not per
+ * field. Calling absence damage would flag ordinary old files.
  *
- * THE KNOWN-FAILING IDIOM is `it.fails`, following `PageStoreTwoDocuments.test.ts`
- * which established it here. Its known cost is that it passes on ANY error
- * escaping the body, including a broken harness - so everything the failing
- * cases rest on is asserted first, in the green tests below.
+ * The two cases that were `it.fails` are plain cases now. The characterisation
+ * cases that quoted the clock-stamped value are re-pinned to 0.
  */
 
 const PAGE_ID = "createdat-nondeterminism";
@@ -82,10 +70,10 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-describe("a stroke with no createdAt is stamped with the time of the load", () => {
-	// The setup proof, green and first: `it.fails` passes on ANY escaping error,
-	// so a fixture that had stopped reproducing would hide the defect instead of
-	// reporting it. Break any of this and these go red.
+describe("a stroke with no createdAt reads the fixed fallback, not the time of the load", () => {
+	// The setup proof, green and first: the cases below rest on the clock being
+	// frozen, one stroke loading and a real createdAt being kept exactly. Break
+	// any of this and these go red.
 	it("the harness holds: the clock is frozen, one stroke loads, and a REAL createdAt is kept exactly", () => {
 		const kept = parseAt(T1, sidecarWith(12345));
 		expect(kept.data.strokes).toHaveLength(1);
@@ -94,50 +82,42 @@ describe("a stroke with no createdAt is stamped with the time of the load", () =
 		expect(kept.data.strokes[0]!.createdAt).toBe(12345);
 		expect(kept.damaged).toBeFalsy();
 
-		// And with the field absent, the value is the CLOCK - not the file.
-		expect(parseAt(T1, sidecarWithout()).data.strokes[0]!.createdAt).toBe(T1);
-		expect(parseAt(T2, sidecarWithout()).data.strokes[0]!.createdAt).toBe(T2);
+		// And with the field absent, the value is the fixed fallback - not the
+		// clock, not the file.
+		expect(parseAt(T1, sidecarWithout()).data.strokes[0]!.createdAt).toBe(0);
+		expect(parseAt(T2, sidecarWithout()).data.strokes[0]!.createdAt).toBe(0);
 	});
 
-	// WHAT IT ACTUALLY PRODUCES, received values quoted, so the magnitude is
-	// visible here and not only in a report.
-	it("characterises the non-determinism: identical bytes, two loads, two different models", () => {
+	// WHAT IT PRODUCES NOW, received values quoted.
+	it("is deterministic: identical bytes, two loads at two clocks, one model", () => {
 		const bytes = sidecarWithout();
 		const first = parseAt(T1, bytes).data.strokes[0]!.createdAt;
 		const second = parseAt(T2, bytes).data.strokes[0]!.createdAt;
 
-		expect(first).toBe(1_000_000_000_000);
-		expect(second).toBe(2_000_000_000_000);
-		// The whole defect in one line: same input, different output.
-		expect(first).not.toBe(second);
-		// And it tracks the clock exactly, which is what makes it unbounded
-		// rather than merely wrong - the gap is however long apart the loads are.
-		expect(second - first).toBe(T2 - T1);
-
-		// Nothing warns. The file loads clean and the next save writes the
-		// invented time back over it as though it were the real one.
+		expect(first).toBe(0);
+		expect(second).toBe(0);
+		// The file still loads clean: nothing warns, and none should.
 		expect(parseAt(T1, bytes).damaged).toBeFalsy();
 	});
 
-	// The consequence, and the reason it is not merely cosmetic: two devices
-	// that open the same synced file and save it write DIFFERENT bytes.
-	it("characterises the divergence: re-serialising the same file twice gives different bytes", () => {
+	// The consequence that mattered: two devices that open the same synced file
+	// and save it now write the SAME bytes.
+	it("re-serialising the same file twice gives the same bytes, each with createdAt 0", () => {
 		const bytes = sidecarWithout();
 		const outA = serializePage(parseAt(T1, bytes).data);
 		const outB = serializePage(parseAt(T2, bytes).data);
-		expect(outA).not.toBe(outB);
-		expect(outA).toContain(`"createdAt":${T1}`);
-		expect(outB).toContain(`"createdAt":${T2}`);
+		expect(outA).toBe(outB);
+		expect(outA).toContain('"createdAt":0');
 	});
 
-	it.fails("the same bytes parse to the same model however far apart the loads are", () => {
+	it("the same bytes parse to the same model however far apart the loads are", () => {
 		const bytes = sidecarWithout();
 		expect(parseAt(T2, bytes).data.strokes[0]!.createdAt).toBe(
 			parseAt(T1, bytes).data.strokes[0]!.createdAt
 		);
 	});
 
-	it.fails("loading and re-saving one file twice produces identical bytes", () => {
+	it("loading and re-saving one file twice produces identical bytes", () => {
 		const bytes = sidecarWithout();
 		expect(serializePage(parseAt(T2, bytes).data)).toBe(serializePage(parseAt(T1, bytes).data));
 	});

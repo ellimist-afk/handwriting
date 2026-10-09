@@ -10,6 +10,7 @@ import { FakeAdapter, gate } from "./FakeAdapter";
 import { isLiveSidecarName } from "./InkFolder";
 import { emptyPage, parsePage, serializePage, type PageData } from "../model/PageData";
 import { PdfInkStore } from "../pdf/PdfInkStore";
+import { ADOPTION_QUIET_MS, ADOPTION_STILL_FAILING } from "../inline/InlineInkStore";
 import { installLiveReloadPoll } from "../testUtils/LiveReloadTestHarness";
 import type { InkStroke } from "../ink/Stroke";
 
@@ -30,6 +31,7 @@ const hostRegistration = source.slice(hostStart, hostEnd + hostEndMarker.length)
 expect(hostRegistration.match(/this\.pdfStore\.attachHost\(/g)).toHaveLength(1);
 const installPdfPersistenceHost = new Function(
 	"Notice",
+	"blockNotice",
 	transformSync(hostRegistration, { loader: "ts", target: "es2022" }).code
 );
 
@@ -90,7 +92,7 @@ function pair(adapter: FakeAdapter): { outgoing: string; incoming: string } {
 
 function attachProductionHost(ink: PdfInkStore, disk: PageStore): void {
 	class SilentNotice { constructor(_message: string) {} }
-	installPdfPersistenceHost.call({ pdfStore: ink, store: disk }, SilentNotice);
+	installPdfPersistenceHost.call({ pdfStore: ink, store: disk }, SilentNotice, (m: string) => new SilentNotice(m));
 }
 
 function pollBridge(
@@ -577,5 +579,69 @@ describe("every non-adopted PDF outcome retains replacement authority", () => {
 				value: realCrypto,
 			});
 		}
+	});
+});
+
+describe("a PDF whose ink keeps failing to load from the other device says so once, as a note does", () => {
+	/** The production PDF host with its notices kept, on a settled PDF record. */
+	async function noticedRig() {
+		// What reaches the screen, and by which call: a notice of blocks must go
+		// through blockNotice, which shows each block on its own line.
+		const notices: string[] = [];
+		class KeptNotice {
+			constructor(message: string) {
+				notices.push(`plain: ${message}`);
+			}
+		}
+		const keptBlockNotice = (message: string) => void notices.push(message);
+		const adapter = new FakeAdapter();
+		adapter.externalWrite(PATH, serializePage(pdfPage(["base", "page-two"])));
+		const disk = new PageStore({ vault: { adapter } });
+		const ink = new PdfInkStore();
+		installPdfPersistenceHost.call({ pdfStore: ink, store: disk }, KeptNotice, keptBlockNotice);
+		await ink.ensureLoaded(PDF_ID);
+		ink.commit(PDF_ID, stroke("mine", 2, "pen", 123));
+		await disk.flush();
+		const root = { isConnected: true };
+		const controller = { idle: true, refresh: vi.fn() };
+		return { adapter, disk, ink, notices, controller, poll: pollBridge(ink, disk, root, controller) };
+	}
+
+	it("control: one failed round says nothing", async () => {
+		const r = await noticedRig();
+		r.adapter.files.delete(PATH);
+		r.adapter.mtimes.delete(PATH);
+		await r.poll.tick();
+		expect(r.notices).toEqual([]);
+	});
+
+	it("control: failed rounds inside the quiet period say nothing however many there are", async () => {
+		const r = await noticedRig();
+		r.adapter.files.delete(PATH);
+		r.adapter.mtimes.delete(PATH);
+		for (let i = 0; i < 4; i++) {
+			await r.poll.tick();
+			await vi.advanceTimersByTimeAsync(Math.floor(ADOPTION_QUIET_MS / 5));
+		}
+		expect(r.notices, "the notice came before the quiet period ran out").toEqual([]);
+	});
+
+	it("a live ink file absent past the quiet period is announced once, and the PDF keeps its ink", async () => {
+		const r = await noticedRig();
+		const before = JSON.stringify(r.ink.strokes(PDF_ID));
+		r.adapter.files.delete(PATH);
+		r.adapter.mtimes.delete(PATH);
+		await r.poll.tick();
+		expect(r.notices, "precondition: the first failure is quiet").toEqual([]);
+		await vi.advanceTimersByTimeAsync(ADOPTION_QUIET_MS + 1_000);
+		await r.poll.tick();
+		expect(r.notices, "a PDF whose ink keeps failing to load says nothing").toEqual(["this PDF's ink file is missing.\n\nyour ink is still on screen. your next stroke saves it again."]);
+		await vi.advanceTimersByTimeAsync(ADOPTION_QUIET_MS + 1_000);
+		await r.poll.tick();
+		expect(r.notices, "the notice repeated").toEqual(["this PDF's ink file is missing.\n\nyour ink is still on screen. your next stroke saves it again."]);
+		// The absence is only ever told, never acted on: the PDF's ink and its
+		// panes are exactly as they were.
+		expect(JSON.stringify(r.ink.strokes(PDF_ID)), "an absent ink file changed the PDF's strokes").toBe(before);
+		expect(r.controller.refresh, "an absent ink file refreshed the PDF's panes").not.toHaveBeenCalled();
 	});
 });
