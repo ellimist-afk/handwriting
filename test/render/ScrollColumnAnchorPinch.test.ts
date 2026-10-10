@@ -668,8 +668,13 @@ it("committed ink stays on the text column at an external scale of 0.8", async (
 // - PAINTED AGAINST ITS OWN RECT: the mark's centre in the screenshot against the backing's centre mapped through the
 //   committed canvas's getBoundingClientRect. Both are the same block, so the block's own centre residual cancels.
 // - AGAINST ITS TEXT: the mark 60 px into the column keeps the text's left edge in the image, and the ink-to-text
-//   distance on each preview frame is read against the rest frame's (textRel). The settle re-rasters the block and
-//   moves its thresholded centre, so its textRel is printed, not asserted.
+//   distance on each frame against the rest frame's (textRel) is printed, not asserted. A READING ONLY: the text's
+//   left edge is the first dark column of its glyphs, whose side bearing scales with the zoom and depends on the
+//   machine's font. The Linux runner's 0.6 em monospace reads 1.75 to 3 device px where Consolas reads under 1, and
+//   HW_SCPX_FONT_PLANT="Courier New" turns the Windows own-rect and column readings into the Linux ones and moves
+//   the glyph reading the same way, less far. The ink is
+//   anchored to the text's layout box, which no font moves: the own-rect read above and the column check every
+//   pane frame gets in pixelRegime carry the claim. The text's left edge must still be found.
 // The DOM column offset is printed with every frame and not asserted here.
 it("committed ink is painted where its own box says and stays on its text at an external scale of 0.8, zoomed in past 1", async () => {
 	const out: any = await pixelRegime(true, true, { external: 0.8, markInset: 60, backing: true });
@@ -681,7 +686,6 @@ it("committed ink is painted where its own box says and stays on its text at an 
 		console.log(`SCPX-OWN-BOX ${f.label} painted-minus-own-rect=${own === null ? "null" : own.toFixed(2)} textRel=${f.textRelOffDevice === null ? "null" : f.textRelOffDevice.toFixed(2)} column=${f.offDevice === null ? "null" : f.offDevice.toFixed(2)}`);
 		expect.soft(own === null ? Infinity : Math.abs(own), `${f.label}: ink painted ${own === null ? "unread" : own.toFixed(2)} device px from where its own rect maps it`).toBeLessThanOrEqual(1);
 		expect.soft(f.textLeftX, `${f.label}: the text's left edge is not in the image`).not.toBeNull();
-		if (f.before.preview) expect.soft(f.textRelOffDevice === null ? Infinity : Math.abs(f.textRelOffDevice), `${f.label}: ink against its text ${f.textRelOffDevice === null ? "unread" : f.textRelOffDevice.toFixed(2)} device px from the rest frame's`).toBeLessThanOrEqual(1);
 	}
 }, 300_000);
 

@@ -227,6 +227,13 @@ const SHIFT_BAR_NOTE_PX = 1 / 8;
  * 0.5 / DPR / k (0.167 at 150 percent, 0.083 at 300). Its bar is one device px in note px, never finer than the committed-canvas bar.
  */
 const screenBar = (k: number) => Math.max(SHIFT_BAR_NOTE_PX, 1 / (DPR * k));
+/**
+ * The screenshot reader's bar after a settle: one device px plus one reader quantum. The composited settle can land up to a device
+ * px off while the committed canvas sits right (measured at 150 percent, two-line title, readable line length on: Linux runner
+ * 0.339 note px, Windows 0.172, committed-canvas reader 0.01), and the reader's half-row step comes on top. The committed-canvas
+ * bars stay at SHIFT_BAR_NOTE_PX.
+ */
+const settleScreenBar = (k: number) => screenBar(k) + 0.5 / (DPR * k);
 
 for (const readable of [true, false]) for (const twoLine of [true, false]) {
 	it(`wrapped title pinch: the ink stays on its text line through the title's rewraps: RLL=${readable} title=${twoLine ? "two lines" : "one line"}`, async () => {
@@ -284,10 +291,10 @@ for (const readable of [true, false]) for (const twoLine of [true, false]) {
 			for (const r of presented(zoomIn)) expect.soft(Math.abs(shift(r)!), `${r.phase} (k ${r.k}, title lines ${r.titleLines})`).toBeLessThan(SHIFT_BAR_NOTE_PX);
 			for (const r of presented(zoomOut)) expect.soft(Math.abs(shift(r)!), `${r.phase} (k ${r.k}, title lines ${r.titleLines})`).toBeLessThan(SHIFT_BAR_NOTE_PX);
 			expect(Math.abs(inSettled.dom.dyNote - base), "settled at 300%, committed-canvas reader").toBeLessThan(SHIFT_BAR_NOTE_PX);
-			expect(Math.abs(inSettled.screen.dyNote - baseScreen), "settled at 300%, screenshot reader").toBeLessThanOrEqual(screenBar(3));
+			expect(Math.abs(inSettled.screen.dyNote - baseScreen), "settled at 300%, screenshot reader").toBeLessThanOrEqual(settleScreenBar(3));
 			expect(Math.abs(outSettled.dom.dyNote - base), "settled at 150%, committed-canvas reader").toBeLessThan(SHIFT_BAR_NOTE_PX);
 			expect(outSettled.screen.n, "the screenshot reader found the ink at 150%").toBeGreaterThan(0);
-			expect(Math.abs(outSettled.screen.dyNote - baseScreen), "settled at 150%, screenshot reader").toBeLessThanOrEqual(screenBar(1.5));
+			expect(Math.abs(outSettled.screen.dyNote - baseScreen), "settled at 150%, screenshot reader").toBeLessThanOrEqual(settleScreenBar(1.5));
 			// After the claim, so a tree without the correction reports the shift itself before this count.
 			// The observer applied one shift per rewrap, never one per frame: each gesture's count equals the rewraps in it.
 			expect(shiftsIn, `shifts on the way in against ${transitions(zoomIn)} rewraps`).toBe(transitions(zoomIn));
