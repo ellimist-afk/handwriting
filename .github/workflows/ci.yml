@@ -84,6 +84,21 @@ jobs:
       - name: rendered geometry
         if: matrix.node == 22
         run: npm run test:render
+        env:
+          HW_RENDER_SET: geometry
+
+      # The render files in CI_TIMING_RENDER_FILES (test/ciBounds.ts) measure
+      # what the machine's clock decides: frames delivered, when pen and touch
+      # events land, how long a main-thread task runs. The hosted runner sets
+      # all of that by its own load, so these cells run here on every push and
+      # print their readings, and a red in this step is read and recorded but
+      # never blocks. The package gate runs them all on a real machine.
+      - name: rendered timing (printed, never blocks)
+        if: matrix.node == 22
+        continue-on-error: true
+        run: npm run test:render
+        env:
+          HW_RENDER_SET: timing
 
       # esbuild directly, not `npm run build` (which is `tsc -noEmit &&
       # esbuild...`): the typecheck step above already ran tsc over the same

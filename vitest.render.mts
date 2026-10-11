@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
+import { CI_TIMING_RENDER_FILES } from "./test/ciBounds";
 
 /**
  * The rendered-geometry suite, kept OUT of the default run on purpose.
@@ -10,7 +11,17 @@ import { defineConfig } from "vitest/config";
  * counts are untouched. The cost is that a suite nobody invokes is a suite
  * nobody runs, which is why it is one npm script (`npm run test:render`) and
  * not a script in `scripts/` that prints numbers and asserts nothing.
+ *
+ * HW_RENDER_SET picks the files. "geometry": every render file except the
+ * timing list in test/ciBounds.ts. "timing": that list only. Unset or any
+ * other value: every render file, so the local gate and review runs are as
+ * before. CI runs the two sets as two steps.
  */
+const timing = CI_TIMING_RENDER_FILES.map(f => `test/render/${f}`);
+const set = process.env.HW_RENDER_SET;
+const include = set === "timing" ? timing : ["test/render/**/*.test.ts"];
+const exclude = set === "geometry" ? timing : [];
+
 export default defineConfig({
 	resolve: {
 		// Same reason as the main config: the `obsidian` package ships types
@@ -20,7 +31,8 @@ export default defineConfig({
 		},
 	},
 	test: {
-		include: ["test/render/**/*.test.ts"],
+		include,
+		exclude: [...configDefaults.exclude, ...exclude],
 		// Same reason as the main config: vitest empties a `.css` import
 		// unless it matches css.include, and a `?raw` id still ends in
 		// `.css?raw`. The harness injects the real stylesheet, so this is

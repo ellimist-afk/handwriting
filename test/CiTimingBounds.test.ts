@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { CI_TIMING_FACTOR, onCi, timingBound } from "./ciBounds";
+import { CI_TIMING_FACTOR, CI_TIMING_RENDER_FILES, onCi, timingBound } from "./ciBounds";
 
 /**
  * The scroll-cost render cells assert millisecond bounds written for Alan's Windows machine (2 ms a repaint, 5 ms a band
@@ -53,5 +53,20 @@ describe("the scroll-cost render cells take their millisecond bounds from the he
 		expect(importedAtTop(scrollCostInk), "timingBound is imported by the test module, above the page source").toBe(true);
 		expect(scrollCostInk).toContain("x.paintMs >= timingBound(3)");
 		expect(scrollCostInk).not.toMatch(/x\.paintMs >= 3\b/);
+	});
+});
+
+describe("the render files CI prints but does not block on are a pinned list", () => {
+	const here = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
+
+	it("the list has no duplicates, and every name is a .test.ts file that exists under test/render", () => {
+		expect(CI_TIMING_RENDER_FILES.length, "the list is empty").toBeGreaterThan(0);
+		expect(new Set(CI_TIMING_RENDER_FILES).size, "a name is listed twice").toBe(CI_TIMING_RENDER_FILES.length);
+		expect(CI_TIMING_RENDER_FILES.filter(f => !f.endsWith(".test.ts")), "names that are not .test.ts files").toEqual([]);
+		expect(CI_TIMING_RENDER_FILES.filter(f => !existsSync(here(`./render/${f}`))), "names with no file under test/render").toEqual([]);
+	});
+
+	it("the render config reads HW_RENDER_SET to pick the set", () => {
+		expect(readFileSync(here("../vitest.render.mts"), "utf8")).toContain("HW_RENDER_SET");
 	});
 });

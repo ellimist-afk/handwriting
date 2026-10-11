@@ -19,3 +19,23 @@ export function onCi(env: Record<string, string | undefined> = process.env): boo
 export function timingBound(ms: number, env: Record<string, string | undefined> = process.env): number {
 	return onCi(env) ? ms * CI_TIMING_FACTOR : ms;
 }
+
+/**
+ * The render files whose inputs are the machine's clock: how many frames it delivers, when pen and touch events land,
+ * how long a main-thread task runs. The hosted runner sets all three by its own load, so CI runs these in a separate
+ * step that prints and never blocks (HW_RENDER_SET=timing in vitest.render.mts); the geometry step runs every other
+ * render file. Locally, with HW_RENDER_SET unset, every render file runs as before, and the package gate runs these on
+ * a real machine.
+ */
+export const CI_TIMING_RENDER_FILES: readonly string[] = [
+	// The bounce cells count spring frames; a loaded runner delivers fewer of them.
+	"PanBakeRepaint.test.ts",
+	// The save on a 9 MB page outlasts the fixture's pen-up gap when the main thread is slow.
+	"SaveStallPenDown.test.ts",
+	// The fling is wall-clock physics; with few frames the band moves fewer, longer times.
+	"ScrollCostInk.test.ts",
+	// The pen events go in by wall clock; the stroke's bottom row sits at the ink threshold on a slow raster.
+	"ScaleSnapLift.test.ts",
+	// The pen stroke goes in by wall clock; its bottom row sits at the ink threshold on a slow raster, as in ScaleSnapLift.
+	"GridFallbackPixels.test.ts",
+];
