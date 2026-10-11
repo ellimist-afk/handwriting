@@ -82,6 +82,7 @@ jobs:
       # here as its own step. Hard fail rather than skip on missing browser -
       # a guard nobody runs is a guard that is right and unread.
       - name: rendered geometry
+        if: matrix.node == 22
         run: npm run test:render
 
       # esbuild directly, not `npm run build` (which is `tsc -noEmit &&
