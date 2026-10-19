@@ -265,10 +265,8 @@ thank you for using my plugin.
 
 CC BY-NC-ND 4.0
 
-disclaimer: ai assistance was used in this project.
-
 ## why i built this
 
-back in uni i remember taking biochem notes on a Surface Pro 4. drawing structures and typing labels on the same OneNote page felt like literal magic. I want the same experience, but in Obsidian.
+back in uni i remember taking biochem notes on a Surface Pro 4. drawing structures and typing labels on the same OneNote page felt like literal magic. it has been more than 10 years since those halcyon days. I'm driven to try and recreate that same magic again, but in Obsidian. I very much hope you find my plugin useful.
 
 Handwriting is designed for students, educators, engineers, artists, or anyone who needs to handwrite and type in Obsidian.
