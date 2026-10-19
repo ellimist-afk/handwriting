@@ -16,7 +16,7 @@ a note you never inked on is never modified.
 
 ## what it does
 
-Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
+Here's a demonstration of some of the features: https://youtu.be/uWcOWixkxEk
 
 ### right now you can
 
@@ -43,6 +43,7 @@ Here's a demonstration of some of the features: https://youtu.be/TUeniA9BZcc
 * true infinite canvas
 * ink works in embeds
 * handwriting to shape snap
+* works on slides
 
 ### works on
 
@@ -82,11 +83,15 @@ https://community.obsidian.md/plugins/handwriting
 
 ## using it
 
+### settings
+
 **most of Handwriting's options live in Settings > Handwriting.** 
 
 ### toolbar
 
-the toolbar sits top right by default. you can drag and drop the toolbar. there are nine spots to choose from. can also be changed in Handwriting settings.
+the toolbar sits top right by default. you can drag and drop the toolbar. you can also collapse it by tapping the arrow. there are nine spots to choose from. location and visibility can also be changed in Handwriting settings.
+
+<img width="1125" height="78" alt="toolbarhiandwritng" src="https://github.com/user-attachments/assets/bbc58b06-8eb3-4fb8-ac37-5dc76ff40fc5" />
 
 ### escape
 
@@ -100,15 +105,21 @@ tap the pen, highlighter, or eraser again while it is selected to open its contr
 
 ### keyboard button
 
-the keyboard button disables pen input so a tap can place the caret and open the on-screen keyboard. tap it again to get the pen back. `Handwriting: Pen on / off` does the same from the command palette.
+the keyboard button disables pen input so a tap can place the caret and open the on-screen keyboard. this may be useful for viewing pdfs. tap it again to get the pen back. `Handwriting: Pen on / off` does the same from the command palette.
 
 <img width="142" height="128" alt="image" src="https://github.com/user-attachments/assets/532abd8e-9036-4ff8-a455-d94838432ae5" />
 
+### pen side button
+
+you can change what the side button does. this is useful for android and S pen users. the choices are lasso (default) and eraser (hold to erase OneNote style). can find this option in Handwriting settings.
+
 ### paper and infinite canvas
 
-you can turn infinite canvas or paper backgrounds on/off individually with the buttons in the top right:
+you can turn infinite canvas or paper backgrounds on/off individually per-note with the buttons in the top right:
 
 <img width="518" height="236" alt="image_3" src="https://github.com/user-attachments/assets/49b574cb-bdb9-49b3-ac4e-d7f74804b833" />
+
+you can also change it via the three dot menu in the top right. But the buttons are easier. there is no difference between the two ways, frontend speaking
 
 you may also find the global option in the Handwriting settings menu. `Handwriting: Paper: none / lines / grid / dots` in the command palette cycles through the paper backgrounds.
 
@@ -137,34 +148,47 @@ the commands are hidden by default because their sheer number makes other Handwr
 
 hold the pen still for about a third of a second at the end of a stroke to snap it into a line, triangle, rectangle, circle or ellipse.
 
+<img width="1212" height="974" alt="ghostsnap" src="https://github.com/user-attachments/assets/c025f4de-d102-404b-85c1-d967afd9d101" />
+
 with a mouse, pause at the end of a stroke and select Snap.
+
+### lasso and snip
+
+you can lasso ink to move or copy and paste it anywhere in the note, or across different notes. You can also use `Handwriting: Snip the selection to an image` to save what you lassoed as a png next to the file and copy a link to it to your clipboard, so you can paste it into a note.
 
 ### boox and e-ink users
 
-turn on Boox mode in Settings > Handwriting > E-ink.
+if you're having latency issues on a Boox device, try turning on Boox mode in Handwriting's settings near the bottom of the menu. it might help a little.
 
 every redraw costs on e-ink, so it turns off smoothing, the pen reticle and animations, and sizes prediction for e-ink delay. your old settings come back when you turn it off.
 
-### exporting
+### pdfs and exporting
 
-these are all in the command palette:
+you can annotate pdfs. same toolbar. same tools
 
 * `Handwriting: Export ink as SVG (drawing only)` and `Handwriting: Export ink as PDF (drawing only)` export the drawing by itself, cropped to the ink, with no background
 * `Handwriting: Flatten ink into a copy of this PDF` draws the ink into a copy of the pdf so anyone can open it
-* `Handwriting: Snip the selection to an image` turns a lasso selection into an image, on notes and pdfs
+
+you can also use the native Obsidian Export to PDF command. the page is shrunk to fit the paper export, so your ink should stay on its words. warning: text can come out a little smaller than a plain export.
+
+### ink works on slides too
+
+`Handwriting: Toggle slides ink` turns it on while you present.
+
+* `Handwriting: Presentation: undo ink` and `Presentation: redo ink`
+* `Handwriting: Clear ink on this slide`
+* `Handwriting: Clear all presentation ink`
+
+### ink color
+
+two settings in Settings > Handwriting decide how ink looks against the background.
+
+* **Ink color on PDFs** darkens or lightens your ink, or leaves it alone. default is darken.
+* **Ink color when exporting** keeps pen ink readable in exports, prints and snips. default is automatic.
 
 ### resetting a note
 
 `Handwriting: Delete all ink on this note` and `Handwriting: Delete all ink on this PDF` are in the command palette. running these commands will still save a copy of your ink and also you can undo the action with ctrl+z
-
-### if the line looks wrong
-
-two settings in Settings > Handwriting > Pen change how the line is drawn. both are on by default.
-
-* **Ink prediction** draws a little ahead of the pen to hide latency. turn it off if the line runs ahead of the nib or flicks past sharp corners.
-* **Ink smoothing** thins the line when you move fast and tapers each end. turn it off for a stroke that follows the pen more literally.
-
-pressure sensitivity is in the same place, with a recalibrate button next to it.
 
 ---
 
@@ -267,6 +291,6 @@ CC BY-NC-ND 4.0
 
 ## why i built this
 
-back in uni i remember taking biochem notes on a Surface Pro 4. drawing structures and typing labels on the same OneNote page felt like literal magic. it has been more than 10 years since those halcyon days. I'm driven to try and recreate that same magic again, but in Obsidian. I very much hope you find my plugin useful.
+back in uni i remember taking biochem notes on a Surface Pro 4. drawing structures and typing labels on the same OneNote page felt like literal magic. it has been more than 10 years since those halcyon days. i'm driven to try and recreate that same magic again, but in Obsidian. i hope you find my plugin useful.
 
 Handwriting is designed for students, educators, engineers, artists, or anyone who needs to handwrite and type in Obsidian.
