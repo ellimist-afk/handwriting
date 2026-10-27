@@ -300,7 +300,9 @@ window.inkStaysOnItsLine = {
 			await wait(gapMs);
 			const frames = await quiet();
 			await scrollToInk();
-			rows.push({ ...sample("settled", dir, i), quietFrames: frames });
+			// As scrollTrip: a measure cycle draws the lines at the new scroll before the settled sample reads them.
+			const idle = await idleMeasures();
+			rows.push({ ...sample("settled", dir, i), quietFrames: frames, idle });
 		}
 		return rows;
 	},
@@ -328,7 +330,10 @@ window.inkStaysOnItsLine = {
 		const line = anchorLine - above, from = doc.line(line).from;
 		const growAt = grow > 0 ? doc.line(anchorLine - grow).from : -1;
 		const heightOf = (pos) => { const b = view.lineBlockAt(pos); return (b.bottom - b.top) / rig.overlay.cssScale; };
-		const grownBefore = growAt >= 0 ? heightOf(growAt) : null;
+		// Both heights MEASURED, never CodeMirror's estimate: the line is inside the drawn viewport and a measure cycle has run.
+		const drawnAt = (pos) => pos >= view.viewport.from && pos <= view.viewport.to;
+		if (growAt >= 0) await idleMeasures();
+		const grownBefore = growAt >= 0 ? heightOf(growAt) : null, grownBeforeDrawn = growAt >= 0 ? drawnAt(growAt) : null;
 		const tr = view.state.update({ changes: { from, insert: text + "\\n\\n" }, effects: growAt >= 0 ? growLine.of(growAt) : [], userEvent: "input.type" });
 		rig.anchor.map(tr.changes);
 		const lineHBefore = view.defaultLineHeight, paintsBefore = rig.paints;
@@ -340,8 +345,11 @@ window.inkStaysOnItsLine = {
 		await scrollToInk();
 		// The typed block as measured after the settle: the paragraph's line and the blank line after it, in note px.
 		const top = (n) => view.lineBlockAt(view.state.doc.line(n).from).top;
-		const grewNote = growAt >= 0 ? heightOf(tr.changes.mapPos(growAt)) - grownBefore : null;
-		return [seen, { ...sample("settled", "typed", 1), idle, insertedAt: line, blockNote: (top(line + 2) - top(line)) / rig.overlay.cssScale, lineHBefore, paintsBefore, grewNote }];
+		if (growAt >= 0) await idleMeasures();
+		const grownAt = growAt >= 0 ? tr.changes.mapPos(growAt) : -1;
+		const grownAfter = growAt >= 0 ? heightOf(grownAt) : null, grownAfterDrawn = growAt >= 0 ? drawnAt(grownAt) : null;
+		const grewNote = growAt >= 0 ? grownAfter - grownBefore : null;
+		return [seen, { ...sample("settled", "typed", 1), idle, insertedAt: line, blockNote: (top(line + 2) - top(line)) / rig.overlay.cssScale, lineHBefore, paintsBefore, grewNote, grownBefore, grownAfter, grownBeforeDrawn, grownAfterDrawn }];
 	},
 	/**
 	 * Lasso: a loop round the ink, then the selection dragged down by the distance from its words to the start of the line that
@@ -509,7 +517,7 @@ function line(r: any): string {
 		`anchor L${r.anchorLine} dy ${f(r.dy)} shownTop ${f(r.shownTop)} canvas ${f(r.canvasTop)}-${f(r.canvasBottom)} | sig ${f(r.sigW)}/${f(r.sigFont)} ` +
 		`anchorSig ${f(r.anchorW)}/${f(r.anchorFont)} clientW ${f(r.clientW)} rectW ${f(r.rectW)} font ${r.fontCss} fontZoom ${f(r.fontZoom, 4)} paints ${r.paints}` +
 		` saves ${r.saves}` + (r.lineHBefore === undefined ? "" : ` | lineH before ${f(r.lineHBefore)} paints before ${r.paintsBefore}`) +
-		(typeof r.grewNote === "number" ? ` grew ${f(r.grewNote)}` : "") +
+		(typeof r.grewNote === "number" ? ` grew ${f(r.grewNote)} (measured ${f(r.grownBefore)} to ${f(r.grownAfter)}, drawn ${r.grownBeforeDrawn}/${r.grownAfterDrawn})` : "") +
 		(r.phase === "dropped" ? ` | target L${r.targetLine} selected ${r.selected} grabbed ${r.grabbed} drag ${f(r.dragPx)} jump ${f(r.jump)} top "${r.topRow}"` : "") +
 		(r.wordsLine === undefined ? "" : ` | words L${r.wordsLine} cut ${r.cut} moving ${r.moving} did ${r.did}`);
 }
@@ -550,7 +558,8 @@ function judgePlain(name: string, rows: any[], fails: string[]): void {
 function judgeGrown(name: string, rows: any[], fails: string[]): void {
 	judgeTyped(name, rows, fails);
 	const rest = rows[0], typed = rows.find(r => r.dir === "typed");
-	if (!typed || typeof typed.grewNote !== "number" || typed.grewNote < GREW_MIN_NOTE) { fails.push(`${name}: premise: the line above grew ${f(typed?.grewNote)} note px, not ${GREW_MIN_NOTE} or more`); return; }
+	if (!typed || typed.grownBeforeDrawn !== true || typed.grownAfterDrawn !== true) { fails.push(`${name}: premise: the growing line was not drawn at both reads (before ${typed?.grownBeforeDrawn}, after ${typed?.grownAfterDrawn}), so a height is an estimate`); return; }
+	if (typeof typed.grewNote !== "number" || typed.grewNote < GREW_MIN_NOTE) { fails.push(`${name}: premise: the line above grew ${f(typed?.grewNote)} note px (measured ${f(typed.grownBefore)} to ${f(typed.grownAfter)}), not ${GREW_MIN_NOTE} or more`); return; }
 	if (typeof typed.inkDoc !== "number" || Math.abs(typed.inkDoc - rest.inkDoc - typed.grewNote) > 1)
 		fails.push(`${name}: the ink moved ${f(typed.inkDoc - rest.inkDoc)} note px in the page, not with the line above it, which grew ${f(typed.grewNote)}`);
 }

@@ -411,8 +411,10 @@ it("a pinch to 0.019 settles at the ten-percent floor, and Fit's commit at 0.019
  * commit, each read back as the settled scale.
  */
 it("after Fit to 5%, a pinch in to 7% settles, a pinch out to 6% leaves 7%, and from 12% a pinch out stops at 10%", async () => {
-	const r = await arm("bandCost", 0.05, { fitCommit: true, fitThenPinch: [0.07, 0.06, 0.12, 0.05] } as any);
-	const steps = (r as { fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null; bounceSyncs: number; bounceResized: number; bounceMoved: number }[] }).fitPinchSteps;
+	// HW_PLANT_BAND_LOOP=1 plants the regrowth loop's mechanism in the rig (the ease width recomputed per sync from the rect's
+	// cssScale); the same-inputs rule below must go red on it.
+	const r = await arm("bandCost", 0.05, { fitCommit: true, fitThenPinch: [0.07, 0.06, 0.12, 0.05], plantRectEase: !!process.env.HW_PLANT_BAND_LOOP } as any);
+	const steps = (r as { fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null; bounceSyncs: number; bounceResized: number; bounceMoved: number; sameInputResizes: number; syncs: unknown[] }[] }).fitPinchSteps;
 	note(`FITFLOOR steps=${JSON.stringify(steps)}`);
 	expect(steps.map(s => s.target)).toEqual([0.07, 0.06, 0.12, 0.05]);
 	const settled = [0.07, 0.07, 0.12, 0.1];
@@ -420,12 +422,14 @@ it("after Fit to 5%, a pinch in to 7% settles, a pinch out to 6% leaves 7%, and 
 		expect(s.pinchScaleNow, `step ${i} ${s.from} -> ${s.target} committed`).toBeCloseTo(settled[i]!, 9);
 		// cssScale is measured back from the container's rect over its offset width.
 		expect(Math.abs(s.cssScale - settled[i]!), `step ${i} ${s.from} -> ${s.target} settled cssScale ${s.cssScale}`).toBeLessThanOrEqual(2 * settled[i]! / (s.offsetWidth ?? 1));
-		// A settle's ease moves the band at most once: the band is sized for the whole ease when it starts.
-		expect(s.bounceSyncs, `step ${i} ${s.from} -> ${s.target}: band moves while the ease plays`).toBeLessThanOrEqual(1);
+		// The band is sized for the whole ease when it starts: no sync while the ease plays resizes it from the same inputs
+		// as the sync before it (the regrowth loop, 1821 resizes in one ease at 7%). A second sync after the settle's own
+		// correction moved the scroll or the extent reads new inputs and is allowed; every sync is recorded in the row.
+		expect(s.sameInputResizes, `step ${i} ${s.from} -> ${s.target}: band resized from unchanged inputs while the ease plays (${JSON.stringify(s.syncs)})`).toBe(0);
 	});
 	// The pinch in from Fit's 5% eases the page back from right of its edge over scroll to its left: the band is resized
-	// once for that ease, and only once.
-	expect(steps[0]!.bounceResized, `step 0 ${steps[0]!.from} -> ${steps[0]!.target}: band resizes while the ease plays (${JSON.stringify(steps.map(s => [s.bounceResized, s.bounceMoved]))})`).toBe(1);
+	// for that ease.
+	expect(steps[0]!.bounceResized, `step 0 ${steps[0]!.from} -> ${steps[0]!.target}: band resizes while the ease plays (${JSON.stringify(steps.map(s => [s.bounceResized, s.bounceMoved]))})`).toBeGreaterThanOrEqual(1);
 });
 
 /**

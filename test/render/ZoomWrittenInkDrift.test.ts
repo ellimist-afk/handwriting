@@ -4,6 +4,7 @@ import { chromium, type Browser } from "playwright";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { installLiveReloadPollScript } from "../../src/testUtils/LiveReloadTestHarness";
+import { withoutLineAnchor } from "./storedInk";
 const root=fileURLToPath(new URL("../../",import.meta.url));
 let browser:Browser, bundle:string;
 beforeAll(async()=>{browser=await chromium.launch({headless:true});bundle=(await build({entryPoints:[root+"test/render/zoomWrittenInkPage.ts"],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:root+"test/render/iphoneObsidianStub.ts"}})).outputFiles[0]!.text;});
@@ -35,7 +36,9 @@ describe("zoomed pen capture uses the physical text anchor",()=>{
    expect(result.scale).toBeCloseTo(scale,3);
    expect(result.scroll.left).toBeGreaterThan(0);expect(result.scroll.top).toBeGreaterThan(0);
    expect(first.x).toBeCloseTo(400,1);expect.soft(first.y).toBeCloseTo(200,1);
-   expect(result.strokes[0]).toEqual(initial.strokes[0]);
+   // The old-ink pass may anchor the old stroke before this read, by design (LineAnchor anchorMeasured, once the editor is
+   // quiet); the anchor is the one field dropped. Points, bbox, colour and id stay exact.
+   expect(withoutLineAnchor([result.strokes[0]])).toEqual(withoutLineAnchor([initial.strokes[0]]));
    const stableOld=(r:any)=>{expect(r.black.count).toBeGreaterThan(0);for(const key of ["minX","minY","maxX","maxY"] as const)expect(Math.abs(r.black[key]-initial.pixels.black[key])).toBeLessThan(1);};
    stableOld(result.pixels);
    const raster=await page.evaluate(()=>(window as any).zoomDrift.raster());stableOld(raster);

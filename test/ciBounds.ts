@@ -38,4 +38,8 @@ export const CI_TIMING_RENDER_FILES: readonly string[] = [
 	"ScaleSnapLift.test.ts",
 	// The pen stroke goes in by wall clock; its bottom row sits at the ink threshold on a slow raster, as in ScaleSnapLift.
 	"GridFallbackPixels.test.ts",
+	// A millisecond bound on the first wet frame after pen-down; the runner measured 10.5 and 16.7 ms against 8 (1.4.24 push).
+	"WetAllocLatency.test.ts",
+	// The read waits up to 8 s of frames for a crisp one; the runner's software raster delivered none in 8 s (1.4.24 push).
+	"ZoomOutStandInWiggle.arm.test.ts",
 ];

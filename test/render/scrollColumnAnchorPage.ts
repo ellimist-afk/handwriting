@@ -496,8 +496,8 @@ const VISIBLE_PX = 0.5;
  * each frame. None of that geometry exists in the pinch-1.0 arms, which is why
  * those came back clean.
  */
-async function run(readable: boolean, plant: Plant = "none", pinch = 1, centringTheme = false, offsetDisabled = false, startScrollTop = 0, zoomTo = 0.25, lagOptions?: { axis: "x" | "y" | "both"; routed?: boolean; far?: boolean; rapid?: boolean; infiniteCanvas?: boolean; frames?: number; distance?: number; pixels?: boolean; farVisual?: number; host?: boolean; zoomCycles?: number; fitCommit?: boolean; fitThenPinch?: number[]; z10?: boolean; z10TransformHost?: boolean; z10PlantLimit?: number; z10External?: number; z10ResizeBy?: number }) {
-	const fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null; bounceSyncs: number; bounceResized: number; bounceMoved: number }[] = [];
+async function run(readable: boolean, plant: Plant = "none", pinch = 1, centringTheme = false, offsetDisabled = false, startScrollTop = 0, zoomTo = 0.25, lagOptions?: { axis: "x" | "y" | "both"; routed?: boolean; far?: boolean; rapid?: boolean; infiniteCanvas?: boolean; frames?: number; distance?: number; pixels?: boolean; farVisual?: number; host?: boolean; zoomCycles?: number; fitCommit?: boolean; fitThenPinch?: number[]; z10?: boolean; z10TransformHost?: boolean; z10PlantLimit?: number; z10External?: number; z10ResizeBy?: number; plantRectEase?: boolean }) {
+	const fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null; bounceSyncs: number; bounceResized: number; bounceMoved: number; sameInputResizes: number; syncs: { r: string; inputs: number[]; band: number[] | null }[] }[] = [];
 	if (lagOptions) Object.assign(Platform, { isMobile: false, isDesktop: true, isIosApp: false, isDesktopApp: true, isMobileApp: false, isPhone: false, isWin: true });
 	if (centringTheme) installCentringTheme();
 	if (plant === "minimal") installMinimalTheme();
@@ -597,17 +597,36 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			// recording what each settled at (below 10% zoom-out is locked).
 			// Band syncs that move or resize the band while a bounce plays. Past a bound the count is a loop: the guard stops
 			// calling through, so the cell reads the count on its assertion instead of losing the renderer.
-			let bounceSyncs = 0, bounceResized = 0, bounceMoved = 0;
+			// Each counted sync records bandFor's inputs and the band it placed. Two syncs whose inputs differ are the settle
+			// correcting its own scroll or extent, by design; a resize from the SAME inputs as the previous counted sync is
+			// the loop of the band-regrowth lane (a width recomputed per sync from a cssScale read back from the rect).
+			let bounceSyncs = 0, bounceResized = 0, bounceMoved = 0, sameInputResizes = 0;
+			let syncRecords: { r: string; inputs: number[]; band: number[] | null }[] = [];
 			const sync = overlay.syncBand.bind(overlay);
 			overlay.syncBand = () => {
 				if (overlay.bounceState && bounceSyncs > 100) return "none";
+				const s = overlay.view.scrollDOM;
+				const inputs = [s.scrollLeft, s.scrollTop, s.clientWidth, s.clientHeight, overlay.bandFreeScrollWidth ?? s.scrollWidth, s.scrollHeight, overlay.cssScale];
+				// PLANT (lagOptions.plantRectEase): the ease width recomputed at every sync from the cssScale the container's
+				// rect reports, the regrowth loop's mechanism. The rule below must go red on it.
+				const bounce = overlay.bounceState;
+				if (lagOptions.plantRectEase && bounce && overlay.container) {
+					const c = overlay.container as HTMLElement, rectScale = c.getBoundingClientRect().width / c.offsetWidth;
+					if (rectScale > 0) overlay.bandEase = { bounce, x: Math.sign(bounce.fromX) * Math.ceil(Math.abs(bounce.fromX) / rectScale), y: Math.sign(bounce.fromY) * Math.ceil(Math.abs(bounce.fromY) / rectScale) };
+				}
 				const r = sync();
-				if (r !== "none" && overlay.bounceState) { bounceSyncs++; if (r === "resized") bounceResized++; else bounceMoved++; }
+				if (r !== "none" && overlay.bounceState) {
+					const prev = syncRecords[syncRecords.length - 1];
+					if (r === "resized" && prev && prev.inputs.every((v, i) => v === inputs[i])) sameInputResizes++;
+					const b = overlay.band;
+					syncRecords.push({ r, inputs, band: b ? [b.left, b.top, b.width, b.height] : null });
+					bounceSyncs++; if (r === "resized") bounceResized++; else bounceMoved++;
+				}
 				return r;
 			};
 			for (const target of lagOptions.fitThenPinch ?? []) {
 				await settle(10);
-				bounceSyncs = 0; bounceResized = 0; bounceMoved = 0;
+				bounceSyncs = 0; bounceResized = 0; bounceMoved = 0; sameInputResizes = 0; syncRecords = [];
 				const r = pane.getBoundingClientRect();
 				const focal = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 				const from = overlay.pinchScaleNow;
@@ -615,7 +634,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 				overlay.pinch("move", target / from, focal);
 				overlay.pinch("end", target / from, focal);
 				await settle(10);
-				fitPinchSteps.push({ from, target, pinchScaleNow: overlay.pinchScaleNow, cssScale: overlay.cssScale, offsetWidth: overlay.container ? (overlay.container as HTMLElement).offsetWidth : null, bounceSyncs, bounceResized, bounceMoved });
+				fitPinchSteps.push({ from, target, pinchScaleNow: overlay.pinchScaleNow, cssScale: overlay.cssScale, offsetWidth: overlay.container ? (overlay.container as HTMLElement).offsetWidth : null, bounceSyncs, bounceResized, bounceMoved, sameInputResizes, syncs: syncRecords });
 			}
 		} else {
 			const r = pane.getBoundingClientRect();
