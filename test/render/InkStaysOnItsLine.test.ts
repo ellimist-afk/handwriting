@@ -332,8 +332,16 @@ window.inkStaysOnItsLine = {
 		const heightOf = (pos) => { const b = view.lineBlockAt(pos); return (b.bottom - b.top) / rig.overlay.cssScale; };
 		// Both heights MEASURED, never CodeMirror's estimate: the line is inside the drawn viewport and a measure cycle has run.
 		const drawnAt = (pos) => pos >= view.viewport.from && pos <= view.viewport.to;
+		// Rows of the line at pos, counted from its client rects as rowAt counts them; null when the line is not drawn.
+		const rowsOf = (pos) => {
+			const at = view.domAtPos(view.state.doc.lineAt(pos).from), el = at.node.nodeType === 1 ? at.node : at.node.parentElement, l = el && el.closest(".cm-line");
+			if (!l) return null;
+			const r = document.createRange(), rows = []; r.selectNodeContents(l);
+			for (const q of r.getClientRects()) { if (q.height < 1) continue; const c = (q.top + q.bottom) / 2; if (!rows.some(v => Math.abs(v - c) < 4)) rows.push(c); }
+			return rows.length;
+		};
 		if (growAt >= 0) await idleMeasures();
-		const grownBefore = growAt >= 0 ? heightOf(growAt) : null, grownBeforeDrawn = growAt >= 0 ? drawnAt(growAt) : null;
+		const grownBefore = growAt >= 0 ? heightOf(growAt) : null, grownBeforeDrawn = growAt >= 0 ? drawnAt(growAt) : null, grownRowsBefore = growAt >= 0 ? rowsOf(growAt) : null;
 		const tr = view.state.update({ changes: { from, insert: text + "\\n\\n" }, effects: growAt >= 0 ? growLine.of(growAt) : [], userEvent: "input.type" });
 		rig.anchor.map(tr.changes);
 		const lineHBefore = view.defaultLineHeight, paintsBefore = rig.paints;
@@ -347,9 +355,9 @@ window.inkStaysOnItsLine = {
 		const top = (n) => view.lineBlockAt(view.state.doc.line(n).from).top;
 		if (growAt >= 0) await idleMeasures();
 		const grownAt = growAt >= 0 ? tr.changes.mapPos(growAt) : -1;
-		const grownAfter = growAt >= 0 ? heightOf(grownAt) : null, grownAfterDrawn = growAt >= 0 ? drawnAt(grownAt) : null;
+		const grownAfter = growAt >= 0 ? heightOf(grownAt) : null, grownAfterDrawn = growAt >= 0 ? drawnAt(grownAt) : null, grownRowsAfter = growAt >= 0 ? rowsOf(grownAt) : null;
 		const grewNote = growAt >= 0 ? grownAfter - grownBefore : null;
-		return [seen, { ...sample("settled", "typed", 1), idle, insertedAt: line, blockNote: (top(line + 2) - top(line)) / rig.overlay.cssScale, lineHBefore, paintsBefore, grewNote, grownBefore, grownAfter, grownBeforeDrawn, grownAfterDrawn }];
+		return [seen, { ...sample("settled", "typed", 1), idle, insertedAt: line, blockNote: (top(line + 2) - top(line)) / rig.overlay.cssScale, lineHBefore, paintsBefore, grewNote, grownBefore, grownAfter, grownBeforeDrawn, grownAfterDrawn, grownRowsBefore, grownRowsAfter }];
 	},
 	/**
 	 * Lasso: a loop round the ink, then the selection dragged down by the distance from its words to the start of the line that
@@ -433,7 +441,9 @@ const DSF = 2;
 const LINE_PX = 39;
 // The growth the grown cell needs before it judges: ten times its 1 note px check. A level-1 heading in Minimal grows a
 // body line by about 19.5 note px at this font, under half a line, so a whole line is not asked for.
-const GREW_MIN_NOTE = 10;
+// One row at body size (39 px line box) to one row at heading size (1.618em at line-height 1.2, about 50 px): the growth is the
+// line box, not the glyphs, so it holds on any font. Five times judgeGrown's 1 px tolerance.
+const GREW_MIN_NOTE = 5;
 const WINDOW = "1440,960";
 // Alan's note has Infinite Canvas on through its ink file, not the global setting. The rig turns the global on;
 // canvasForNote resolves the same canvas mode either way, so the overlay under test is the same.
@@ -456,8 +466,10 @@ function filler(n: number, seed: number): string {
 	while (out.length < n) { out += (out ? " " : "") + WORDS[i % WORDS.length]; i += 7; }
 	return out.slice(0, n).replace(/ $/, "x");
 }
-function syntheticNote(): string {
+/** short: line numbers whose text is replaced by a 16-character line, one row at body and at heading size on any font. */
+function syntheticNote(short: readonly number[] = []): string {
 	return SHAPE.map((shape, i) => {
+		if (short.includes(i + 1)) return filler(16, i);
 		if (shape === "_") return "";
 		if (shape === "-") return "---";
 		const h = /^h(\d)\.(\d+)$/.exec(shape);
@@ -486,7 +498,7 @@ afterAll(async () => {
 	if (process.env.HW_INK_LINE_REPORT) writeFileSync(process.env.HW_INK_LINE_REPORT, JSON.stringify(report, null, 1));
 });
 
-async function openPage(b: Browser): Promise<{ page: Page; m: any; errors: string[] }> {
+async function openPage(b: Browser, text = syntheticNote()): Promise<{ page: Page; m: any; errors: string[] }> {
 	const page = await (await b.newContext({ viewport: null })).newPage();
 	const errors: string[] = [];
 	page.on("pageerror", e => errors.push(String(e.message).slice(0, 200)));
@@ -496,17 +508,17 @@ async function openPage(b: Browser): Promise<{ page: Page; m: any; errors: strin
 	await page.setContent('<!doctype html><body class="theme-dark" style="margin:0"></body>');
 	await page.addStyleTag({ content: css + REAL_OBSIDIAN_CSS + INLINE_TITLE_CSS + MINIMAL });
 	await page.addScriptTag({ content: script });
-	const m = await page.evaluate(o => (window as any).inkStaysOnItsLine.mount(o), { ...MOUNT, text: syntheticNote() });
+	const m = await page.evaluate(o => (window as any).inkStaysOnItsLine.mount(o), { ...MOUNT, text });
 	return { page, m, errors };
 }
-async function mounted(): Promise<{ page: Page; m: any; errors: string[] }> {
+async function mounted(text?: string): Promise<{ page: Page; m: any; errors: string[] }> {
 	if (!browser) {
 		browser = await chromium.launch({ headless: true, args: [`--force-device-scale-factor=${DSF}`, `--window-size=${WINDOW}`] });
 		// The warm-up page: the first page a browser opens starts with a different line-height estimate.
 		const warm = await openPage(browser);
 		await warm.page.context().close();
 	}
-	return openPage(browser);
+	return openPage(browser, text);
 }
 const call = (p: Page, method: string, ...args: unknown[]) => p.evaluate(([n, a]) => (window as any).inkStaysOnItsLine[n](...a), [method, args] as const) as Promise<any[]>;
 
@@ -517,7 +529,7 @@ function line(r: any): string {
 		`anchor L${r.anchorLine} dy ${f(r.dy)} shownTop ${f(r.shownTop)} canvas ${f(r.canvasTop)}-${f(r.canvasBottom)} | sig ${f(r.sigW)}/${f(r.sigFont)} ` +
 		`anchorSig ${f(r.anchorW)}/${f(r.anchorFont)} clientW ${f(r.clientW)} rectW ${f(r.rectW)} font ${r.fontCss} fontZoom ${f(r.fontZoom, 4)} paints ${r.paints}` +
 		` saves ${r.saves}` + (r.lineHBefore === undefined ? "" : ` | lineH before ${f(r.lineHBefore)} paints before ${r.paintsBefore}`) +
-		(typeof r.grewNote === "number" ? ` grew ${f(r.grewNote)} (measured ${f(r.grownBefore)} to ${f(r.grownAfter)}, drawn ${r.grownBeforeDrawn}/${r.grownAfterDrawn})` : "") +
+		(typeof r.grewNote === "number" ? ` grew ${f(r.grewNote)} (measured ${f(r.grownBefore)} to ${f(r.grownAfter)}, rows ${r.grownRowsBefore}/${r.grownRowsAfter}, drawn ${r.grownBeforeDrawn}/${r.grownAfterDrawn})` : "") +
 		(r.phase === "dropped" ? ` | target L${r.targetLine} selected ${r.selected} grabbed ${r.grabbed} drag ${f(r.dragPx)} jump ${f(r.jump)} top "${r.topRow}"` : "") +
 		(r.wordsLine === undefined ? "" : ` | words L${r.wordsLine} cut ${r.cut} moving ${r.moving} did ${r.did}`);
 }
@@ -558,7 +570,8 @@ function judgePlain(name: string, rows: any[], fails: string[]): void {
 function judgeGrown(name: string, rows: any[], fails: string[]): void {
 	judgeTyped(name, rows, fails);
 	const rest = rows[0], typed = rows.find(r => r.dir === "typed");
-	if (!typed || typed.grownBeforeDrawn !== true || typed.grownAfterDrawn !== true) { fails.push(`${name}: premise: the growing line was not drawn at both reads (before ${typed?.grownBeforeDrawn}, after ${typed?.grownAfterDrawn}), so a height is an estimate`); return; }
+	if (!typed || typed.grownRowsBefore !== 1 || typed.grownRowsAfter !== 1) { fails.push(`${name}: premise: the growing line is ${typed?.grownRowsBefore} rows before and ${typed?.grownRowsAfter} after, not one and one`); return; }
+	if (typed.grownBeforeDrawn !== true || typed.grownAfterDrawn !== true) { fails.push(`${name}: premise: the growing line was not drawn at both reads (before ${typed?.grownBeforeDrawn}, after ${typed?.grownAfterDrawn}), so a height is an estimate`); return; }
 	if (typeof typed.grewNote !== "number" || typed.grewNote < GREW_MIN_NOTE) { fails.push(`${name}: premise: the line above grew ${f(typed?.grewNote)} note px (measured ${f(typed.grownBefore)} to ${f(typed.grownAfter)}), not ${GREW_MIN_NOTE} or more`); return; }
 	if (typeof typed.inkDoc !== "number" || Math.abs(typed.inkDoc - rest.inkDoc - typed.grewNote) > 1)
 		fails.push(`${name}: the ink moved ${f(typed.inkDoc - rest.inkDoc)} note px in the page, not with the line above it, which grew ${f(typed.grewNote)}`);
@@ -618,14 +631,16 @@ const CELLS = [
 	{ name: "no zoom, scroll up through the never-drawn lines to the top and back", steps: [["scrollTrip", 400]], judge: judgeOnLine, reach: null, saves: false },
 	{ name: "a wrapped paragraph typed three lines above the ink", steps: [["typeAbove", 3, TYPED]], judge: judgeTyped, reach: null, saves: true },
 	{ name: "a short plain line typed three lines above the ink", steps: [["typeAbove", 3, PLAIN]], judge: judgePlain, reach: null, saves: true },
-	{ name: "a wrapped paragraph typed three lines above the ink while the paragraph five lines above it becomes a heading", steps: [["typeAbove", 3, TYPED, 5]], judge: judgeGrown, reach: null, saves: true },
+	// Line 69, five lines above the ink, is a short line here, so the heading it becomes is one row as the line was.
+	{ name: "a wrapped paragraph typed three lines above the ink while the line five lines above it becomes a heading", steps: [["typeAbove", 3, TYPED, 5]], judge: judgeGrown, reach: null, saves: true, short: [69] },
 	{ name: "the stroke lasso-moved ten lines down, then ctrl+wheel zoom out to about 50 percent and back in notches", steps: [["lassoDown", 10], ["notches", 50, 7], ["notches", -50, 7]], judge: judgeMoved, reach: (k: number) => k <= 0.55, saves: false },
 	{ name: "insert space opening two lines above the ink, then its undo and its redo", steps: [["spaceUndoRedo", 2]], judge: judgeSpaced, reach: null, saves: false },
 ] as const;
 for (const cell of CELLS) it(`${cell.name}: the ink stays on the words it was written on, and typing never moves it`, async () => {
 	const fails: string[] = [], runs: any[][] = [];
 	for (const mountName of ["A", "B"]) {
-		const { page, m, errors } = await mounted();
+		const short = (cell as { short?: readonly number[] }).short;
+		const { page, m, errors } = await mounted(short ? syntheticNote(short) : undefined);
 		try {
 			const out: any[][] = [];
 			for (const [method, ...args] of cell.steps) out.push(await call(page, method, ...args));
