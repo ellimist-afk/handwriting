@@ -94,14 +94,15 @@ const markdownLines = EditorView.decorations.compute(["doc"], state => {
 	}
 	return b.finish();
 });
-// One line made a level-1 heading by an effect, with no change to its text: a line above the ink that grows in the same
-// update as typing, as a Live Preview line does when the cursor leaves it.
+// A decoration doubles its line height, as a styled heading changes it: one line above the ink grows in the same update as
+// typing, as a Live Preview line does when the cursor leaves it. The rig owns the class (the theme's h1 is not borrowed): the
+// font is unchanged, so nothing rewraps, and the growth is LINE_PX exactly on any font or theme.
 const growLine = StateEffect.define();
 const grownLine = StateField.define({
 	create: () => Decoration.none,
 	update(deco, tr) {
 		deco = deco.map(tr.changes);
-		for (const e of tr.effects) if (e.is(growLine)) deco = Decoration.set([Decoration.line({ class: "HyperMD-header HyperMD-header-1" }).range(tr.changes.mapPos(e.value))]);
+		for (const e of tr.effects) if (e.is(growLine)) deco = Decoration.set([Decoration.line({ class: "ink-stays-grown" }).range(tr.changes.mapPos(e.value))]);
 		return deco;
 	},
 	provide: f => EditorView.decorations.from(f),
@@ -242,7 +243,7 @@ window.inkStaysOnItsLine = {
 		pane.style.cssText = "position:relative;margin-left:" + o.hostLeft + "px;margin-top:" + o.hostTop + "px;width:" + o.paneW + "px;height:" + o.paneH + "px;overflow:hidden";
 		const view = new EditorView({ parent: pane, state: EditorState.create({ doc: o.text, extensions: [history(), EditorView.lineWrapping, lineNumbers(), markdownLines, grownLine,
 			editorInfoField.init(() => ({ app: { commands: { executeCommandById: () => false } }, file: { path }, editor: {} })), inkOverlayExtension(),
-			EditorView.theme({ "&": { width: o.paneW + "px", height: o.paneH + "px" }, ".cm-scroller": { overflowY: "auto", overflowX: "hidden" }, ".cm-content": { fontSize: FONT_PX + "px", lineHeight: LINE_PX + "px" } })] }) });
+			EditorView.theme({ "&": { width: o.paneW + "px", height: o.paneH + "px" }, ".cm-scroller": { overflowY: "auto", overflowX: "hidden" }, ".cm-content": { fontSize: FONT_PX + "px", lineHeight: LINE_PX + "px" }, ".cm-line.ink-stays-grown": { lineHeight: 2 * LINE_PX + "px !important" } })] }) });
 		const sizer = installSizer(view);
 		const title = document.createElement("div"); title.className = "inline-title"; title.setAttribute("contenteditable", "true"); title.textContent = "Untitled 2";
 		sizer.insertBefore(properties(), sizer.firstChild);
@@ -439,11 +440,6 @@ declare const process: { env: Record<string, string | undefined> };
 const MINIMAL = readFileSync(fileURLToPath(new URL("./fixtures/minimal-9.0.2-theme.css", import.meta.url)), "utf8");
 const DSF = 2;
 const LINE_PX = 39;
-// The growth the grown cell needs before it judges: ten times its 1 note px check. A level-1 heading in Minimal grows a
-// body line by about 19.5 note px at this font, under half a line, so a whole line is not asked for.
-// One row at body size (39 px line box) to one row at heading size (1.618em at line-height 1.2, about 50 px): the growth is the
-// line box, not the glyphs, so it holds on any font. Five times judgeGrown's 1 px tolerance.
-const GREW_MIN_NOTE = 5;
 const WINDOW = "1440,960";
 // Alan's note has Infinite Canvas on through its ink file, not the global setting. The rig turns the global on;
 // canvasForNote resolves the same canvas mode either way, so the overlay under test is the same.
@@ -572,7 +568,7 @@ function judgeGrown(name: string, rows: any[], fails: string[]): void {
 	const rest = rows[0], typed = rows.find(r => r.dir === "typed");
 	if (!typed || typed.grownRowsBefore !== 1 || typed.grownRowsAfter !== 1) { fails.push(`${name}: premise: the growing line is ${typed?.grownRowsBefore} rows before and ${typed?.grownRowsAfter} after, not one and one`); return; }
 	if (typed.grownBeforeDrawn !== true || typed.grownAfterDrawn !== true) { fails.push(`${name}: premise: the growing line was not drawn at both reads (before ${typed?.grownBeforeDrawn}, after ${typed?.grownAfterDrawn}), so a height is an estimate`); return; }
-	if (typeof typed.grewNote !== "number" || typed.grewNote < GREW_MIN_NOTE) { fails.push(`${name}: premise: the line above grew ${f(typed?.grewNote)} note px (measured ${f(typed.grownBefore)} to ${f(typed.grownAfter)}), not ${GREW_MIN_NOTE} or more`); return; }
+	if (typeof typed.grewNote !== "number" || Math.abs(typed.grewNote - LINE_PX) > 1) { fails.push(`${name}: premise: the line above grew ${f(typed?.grewNote)} note px (measured ${f(typed.grownBefore)} to ${f(typed.grownAfter)}), not ${LINE_PX} within 1`); return; }
 	if (typeof typed.inkDoc !== "number" || Math.abs(typed.inkDoc - rest.inkDoc - typed.grewNote) > 1)
 		fails.push(`${name}: the ink moved ${f(typed.inkDoc - rest.inkDoc)} note px in the page, not with the line above it, which grew ${f(typed.grewNote)}`);
 }
@@ -631,8 +627,8 @@ const CELLS = [
 	{ name: "no zoom, scroll up through the never-drawn lines to the top and back", steps: [["scrollTrip", 400]], judge: judgeOnLine, reach: null, saves: false },
 	{ name: "a wrapped paragraph typed three lines above the ink", steps: [["typeAbove", 3, TYPED]], judge: judgeTyped, reach: null, saves: true },
 	{ name: "a short plain line typed three lines above the ink", steps: [["typeAbove", 3, PLAIN]], judge: judgePlain, reach: null, saves: true },
-	// Line 69, five lines above the ink, is a short line here, so the heading it becomes is one row as the line was.
-	{ name: "a wrapped paragraph typed three lines above the ink while the line five lines above it becomes a heading", steps: [["typeAbove", 3, TYPED, 5]], judge: judgeGrown, reach: null, saves: true, short: [69] },
+	// Line 69, five lines above the ink, is a short line here: one row before and after its line height doubles.
+	{ name: "a wrapped paragraph typed three lines above the ink while a decoration doubles the line height five lines above it, as a styled heading changes it", steps: [["typeAbove", 3, TYPED, 5]], judge: judgeGrown, reach: null, saves: true, short: [69] },
 	{ name: "the stroke lasso-moved ten lines down, then ctrl+wheel zoom out to about 50 percent and back in notches", steps: [["lassoDown", 10], ["notches", 50, 7], ["notches", -50, 7]], judge: judgeMoved, reach: (k: number) => k <= 0.55, saves: false },
 	{ name: "insert space opening two lines above the ink, then its undo and its redo", steps: [["spaceUndoRedo", 2]], judge: judgeSpaced, reach: null, saves: false },
 ] as const;
