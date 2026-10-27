@@ -46,6 +46,8 @@ vi.mock("obsidian", async (importOriginal) => {
 
 import HandwritingPlugin from "./main";
 import mainSource from "./main.ts?raw";
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+import onloadSource from "./PluginOnload.ts?raw";
 
 const proto = HandwritingPlugin.prototype as unknown as {
 	loadSettings(this: unknown): Promise<void>;
@@ -213,7 +215,7 @@ describe("the iPad Scribble warning lifecycle", () => {
 	it("is invoked from the post-layout one-launch notice callback", () => {
 		const wiring = "this.showWhatsNewIfDue();\n\t\t\tthis.showScribbleHintIfDue();";
 		expect(
-			mainSource.replace(/\r\n/g, "\n").split(wiring),
+			[mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n").split(wiring),
 			"the Scribble warning is no longer wired after layout"
 		).toHaveLength(2);
 	});

@@ -49,6 +49,8 @@ vi.mock("obsidian", async (importOriginal) => {
 
 import HandwritingPlugin from "./main";
 import mainSource from "./main.ts?raw";
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+import onloadSource from "./PluginOnload.ts?raw";
 import { recordPresentAge, resetLatencyEstimate } from "./ink/LatencyEstimate";
 import { resetEinkHint } from "./ink/EinkHint";
 
@@ -388,7 +390,7 @@ describe("the e-ink hint's lifecycle", () => {
 		const REGISTRATION =
 			"this.registerInterval(window.setInterval(() => this.checkEinkHint(), 10_000));";
 		expect(
-			mainSource.replace(/\r\n/g, "\n").split(REGISTRATION),
+			[mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n").split(REGISTRATION),
 			"the registration this case executes is no longer in main.ts"
 		).toHaveLength(2);
 

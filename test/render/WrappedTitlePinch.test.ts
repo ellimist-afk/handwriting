@@ -35,7 +35,7 @@
  * Plant: HW_Z15_PLANT_NO_OBSERVER=1 builds the overlay with the observer never observing.
  */
 import { beforeAll, afterAll, it, expect } from "vitest";
-import { build } from "esbuild";
+import { build, type Plugin } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
@@ -66,6 +66,8 @@ import { setPenInk } from "../../src/inline/PenInk";
 import { installObsidianDom } from "./obsidianDom";
 import { editorInfoField } from "./iphoneObsidianStub";
 import { parsePage, serializePage } from "../../src/model/PageData";
+import { setDiagnosticsEnabled } from "../../src/diag/DiagSwitch";
+import { clearScrollProbe, formatScrollProbe } from "../../src/inline/ScrollProbe";
 
 installObsidianDom();
 const ids = new Map(), sidecars = new Map();
@@ -165,6 +167,23 @@ window.wrappedTitle = {
 		return rows;
 	},
 	sample,
+	/**
+	 * K1 :324 ANCHOR PATH. The settle's y comes from paintedTop only where the pinch constraint has no geometry (canvas on; the
+	 * canvas-off pinch is ignored, InkOverlayPinch.ts:66). refreshPinchConstraint runs as written, then its geometry is dropped
+	 * whole, so both axes take the anchor path together, as they do in the code. commitCameraScale is wrapped to read the
+	 * content's top against the pane just before and just after the commit. Diagnostics on, so the settle's own commit line names
+	 * the path it took.
+	 */
+	anchorPath() {
+		const o = rig.overlay, refresh = o.refreshPinchConstraint, commit = o.commitCameraScale, hits = { refresh: 0, commits: [] };
+		if (typeof refresh !== "function" || typeof commit !== "function") throw new Error("anchor path: overlay methods missing");
+		o.refreshPinchConstraint = function (...a) { const r = refresh.apply(this, a); const c = this.pinchAnchor && this.pinchAnchor.constraint; if (c) { c.geometry = null; hits.refresh++; } return r; };
+		const rel = () => rig.view.contentDOM.getBoundingClientRect().top - rig.pane.getBoundingClientRect().top;
+		o.commitCameraScale = function (...a) { const before = rel(), k0 = this.pinchScaleNow; const r = commit.apply(this, a); hits.commits.push({ k0, k1: this.pinchScaleNow, before, after: rel(), committed: r }); return r; };
+		rig.anchorHits = hits; setDiagnosticsEnabled(true); clearScrollProbe();
+		return true;
+	},
+	anchorRead() { return { hits: rig.anchorHits, lines: formatScrollProbe().split("\\n").filter(l => l.includes("settle commit path")) }; },
 	/** After a wait in real time, not frames: the deferred repaint runs on a timer. */
 	async later(ms, phase) { await new Promise(r => setTimeout(r, ms)); await settle(4); return sample(phase); },
 	/** Screenshot pixels (PNG as base64 from the test), magenta centre in client px, inside the pane and within 120 px of the text line; whole counts magenta anywhere in the pane. */
@@ -189,18 +208,28 @@ const record: unknown[] = [];
 
 beforeAll(async () => {
 	let planted = 0;
+	const k1Plant: Plugin[] = process.env.HW_K1_PLANT === "paintedtop" ? [{ name: "k1-paintedtop", setup(builder) {
+		// K1 :324 plant: the residual's y back into paintedTop, as at 0699088c.
+		builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlayPinch\.ts$/ }, args => {
+			const from = "const paintedTop = anchor.scrollTop;";
+			const text = readFileSync(args.path, "utf8");
+			if (text.split(from).length !== 2) throw new Error("k1 paintedtop plant: anchor not found once");
+			planted++;
+			return { loader: "ts", contents: text.replace(from, "const paintedTop = anchor.scrollTop + (residual && residual.top === anchor.scrollTop ? residual.y : 0);") };
+		});
+	} }] : [];
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "wrappedTitlePinchPage.ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: process.env.HW_Z15_PLANT_NO_OBSERVER ? [{ name: "z15-no-observer", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlayPanSettle\.ts$/ }, args => {
 				const from = "for (const block of blocks) observer.observe(block);";
 				const text = readFileSync(args.path, "utf8");
 				if (text.split(from).length !== 2) throw new Error("z15 plant: anchor not found once");
 				planted++;
 				return { loader: "ts", contents: text.replace(from, "void blocks;") };
 			});
-		} }] : [] });
-	if (process.env.HW_Z15_PLANT_NO_OBSERVER && !planted) throw new Error("z15 plant requested but never applied");
+		} }] : k1Plant });
+	if ((process.env.HW_Z15_PLANT_NO_OBSERVER || k1Plant.length) && !planted) throw new Error("plant requested but never applied");
 	script = b.outputFiles[0]!.text;
 	browser = await chromium.launch({ headless: true });
 }, 180_000);
@@ -302,3 +331,61 @@ for (const readable of [true, false]) for (const twoLine of [true, false]) {
 		} finally { await page.close(); }
 	}, 180_000);
 }
+/**
+ * K1, THE ANCHOR PATH ON Y. The settle's y target comes from paintedTop wherever the pinch
+ * constraint has no geometry. The geometry path already keeps the whole scroll on y, where adding the residual moved the ink off its text
+ * line by the residual's translate (0.167 note px at the 150 percent settle); paintedTop keeps the whole scroll by the same rule.
+ * The cell forces the geometry null whole (anchorPath), so both settles take the anchor path, and asserts that from the settle's
+ * own commit line. Readable line length on, two-line title, in to 300 percent and settle, out to 150 percent and settle.
+ * Bars: the content's top against the pane does not move across either commit; the ink against its text line within
+ * SHIFT_BAR_NOTE_PX on the committed-canvas reader and settleScreenBar(k) on the screenshot reader, at both settles.
+ * Plant: HW_K1_PLANT=paintedtop puts the residual's y back into paintedTop; the ink bar at the 150 percent settle must red.
+ */
+it("anchor path: with the pinch constraint's geometry dropped, the settle keeps the whole scroll on y and the ink stays on its text line: RLL=true title=two lines", async () => {
+	const page = await browser.newPage({ viewport: { width: 1800, height: 900 }, deviceScaleFactor: DPR, hasTouch: true });
+	const errors: string[] = [];
+	page.on("pageerror", e => errors.push(String(e.message).slice(0, 200)));
+	try {
+		await page.setContent('<!doctype html><body style="margin:0"></body>');
+		await page.addStyleTag({ content: css + REAL_OBSIDIAN_CSS + INLINE_TITLE_CSS });
+		await page.addScriptTag({ content: script });
+		const mounted = await call(page, "mount", true, true) as any;
+		expect(mounted.strokes, "the stroke committed").toBe(1);
+		expect(mounted.titleLines, "the title wraps as set up").toBe(2);
+		const natural = { dom: mounted.natural, screen: await screen(page) as any };
+		await call(page, "anchorPath");
+		const zoomIn = await call(page, "pinch", 3, 30, "in") as any[];
+		const inSettled = { dom: zoomIn.at(-1), screen: await screen(page) as any };
+		const zoomOut = await call(page, "pinch", 1.5, 30, "out") as any[];
+		const outSettled = { dom: zoomOut.at(-1), screen: await screen(page) as any };
+		const read = await call(page, "anchorRead") as any;
+		const base = natural.dom.dyNote as number, baseScreen = natural.screen.dyNote as number;
+		const r3 = (v: number) => Math.round(v * 1000) / 1000;
+		const commits = read.hits.commits.map((c: any) => ({ k0: c.k0, k1: c.k1, committed: c.committed, contentPaneChange: r3(c.after - c.before) }));
+		const late = read.lines.map((l: string) => (/ late (-?[\d.]+),(-?[\d.]+)/.exec(l) ?? [])[2] ?? null);
+		const cell = { anchorPath: true, plant: process.env.HW_K1_PLANT ?? "", natural, zoomIn, inSettled, zoomOut, outSettled, refreshHits: read.hits.refresh, commits, lines: read.lines, errors };
+		record.push(cell);
+		// eslint-disable-next-line no-console
+		console.log("K1-ANCHOR " + JSON.stringify({ plant: cell.plant, refreshHits: read.hits.refresh, commits, lines: read.lines.map((l: string) => l.slice(l.indexOf("settle commit path"), l.indexOf("settle commit path") + 120)),
+			inSettledShiftDom: r3(inSettled.dom.dyNote - base), inSettledShiftScreen: r3(inSettled.screen.dyNote - baseScreen),
+			outSettledShiftDom: r3(outSettled.dom.dyNote - base), outSettledShiftScreen: outSettled.screen.n ? r3(outSettled.screen.dyNote - baseScreen) : null }));
+
+		expect(errors).toEqual([]);
+		expect(inSettled.dom.k, "the pinch reached 300%").toBeCloseTo(3, 6);
+		expect(outSettled.dom.k, "the pinch came back to 150%").toBeCloseTo(1.5, 6);
+		// REACH: the wrapper ran, and both settles' own commit lines say the anchor path on both axes. No line is void, not green.
+		expect(read.hits.refresh, "the geometry was dropped").toBeGreaterThan(0);
+		expect(read.lines.length, "one commit line per settle").toBe(2);
+		for (const l of read.lines) expect(l, "the settle took the anchor path on both axes").toContain("settle commit path anchor,anchor");
+		for (const y of late) expect(y, "no scroll taken after the last preview frame on y").toBe("0.00");
+		expect(commits.length, "both settles committed").toBe(2);
+		for (const c of commits) expect(c.committed, "the commit was taken").toBe(true);
+		// THE CLAIM.
+		for (const c of commits) expect.soft(Math.abs(c.contentPaneChange), `content against pane across the commit at k ${c.k0}: ${c.contentPaneChange} px`).toBeLessThan(0.0005);
+		expect.soft(Math.abs(inSettled.dom.dyNote - base), "settled at 300%, committed-canvas reader").toBeLessThan(SHIFT_BAR_NOTE_PX);
+		expect.soft(Math.abs(inSettled.screen.dyNote - baseScreen), "settled at 300%, screenshot reader").toBeLessThanOrEqual(settleScreenBar(3));
+		expect.soft(Math.abs(outSettled.dom.dyNote - base), "settled at 150%, committed-canvas reader").toBeLessThan(SHIFT_BAR_NOTE_PX);
+		expect(outSettled.screen.n, "the screenshot reader found the ink at 150%").toBeGreaterThan(0);
+		expect.soft(Math.abs(outSettled.screen.dyNote - baseScreen), "settled at 150%, screenshot reader").toBeLessThanOrEqual(settleScreenBar(1.5));
+	} finally { await page.close(); }
+}, 180_000);

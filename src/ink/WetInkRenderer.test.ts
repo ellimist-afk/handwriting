@@ -3,6 +3,7 @@ import { WetInkRenderer } from "./WetInkRenderer";
 import { flattenStrokeShaped, setInkShaping } from "./InkShape";
 import type { CameraState } from "../camera/coordinates";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN, widthForPressure } from "./PenStyle";
+import type { InkPoint } from "./Stroke";
 
 /**
  * A 2d context that answers every call with a no-op and remembers clearRect.
@@ -32,6 +33,254 @@ function fakeCanvas(): { canvas: HTMLCanvasElement; clears: Rect[] } {
 
 const cam: CameraState = { x: 100, y: 200, zoom: 2 };
 const style = DEFAULT_PEN;
+
+/**
+ * Records paths in the renderer's logical CSS/layout coordinates. This checks
+ * per-draw geometry and lifecycle, not backing pixels or compositor damage.
+ * Canvas clipping never shrinks the recorded path: a small clip must not hide
+ * an oversized path submission. The independent renderer tests cover backing
+ * transforms; this recorder retains the transform for device-alignment reads.
+ * The independent browser fixture owns those acceptance measurements.
+ */
+function pathCanvas() {
+	interface Box { x0: number; y0: number; x1: number; y1: number }
+	const paints: Box[] = [];
+	const clears: Rect[] = [];
+	const calls: Array<readonly unknown[]> = [];
+	let path: Box | undefined;
+	let throwOnPaint = false;
+	let transform = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+	let clip: Box | undefined;
+	const states: Array<{ transform: typeof transform; clip: Box | undefined }> = [];
+	const include = (x: number, y: number) => {
+		path = path
+			? { x0: Math.min(path.x0, x), y0: Math.min(path.y0, y), x1: Math.max(path.x1, x), y1: Math.max(path.y1, y) }
+			: { x0: x, y0: y, x1: x, y1: y };
+	};
+	const paint = (padding: number) => {
+		if (throwOnPaint) throw new Error("paint refused");
+		if (path) paints.push({ x0: path.x0 - padding, y0: path.y0 - padding, x1: path.x1 + padding, y1: path.y1 + padding });
+	};
+	const ctx = {
+		get canvas() { return canvas; },
+		fillStyle: "", strokeStyle: "", lineWidth: 1, lineCap: "butt", lineJoin: "miter",
+		beginPath() { calls.push(["beginPath"]); path = undefined; },
+		moveTo(x: number, y: number) { calls.push(["moveTo", x, y]); include(x, y); },
+		lineTo(x: number, y: number) { calls.push(["lineTo", x, y]); include(x, y); },
+		rect(x: number, y: number, width: number, height: number) {
+			calls.push(["rect", x, y, width, height]); include(x, y); include(x + width, y + height);
+		},
+		clip() {
+			calls.push(["clip"]);
+			if (path) clip = clip
+				? { x0: Math.max(clip.x0, path.x0), y0: Math.max(clip.y0, path.y0), x1: Math.min(clip.x1, path.x1), y1: Math.min(clip.y1, path.y1) }
+				: { ...path };
+		},
+		quadraticCurveTo(cx: number, cy: number, x: number, y: number) {
+			calls.push(["quadraticCurveTo", cx, cy, x, y]); include(cx, cy); include(x, y);
+		},
+		arc(x: number, y: number, r: number, a0: number, a1: number, anticlockwise?: boolean) {
+			calls.push(["arc", x, y, r, a0, a1, anticlockwise]);
+			const tau = Math.PI * 2;
+			const mod = (a: number) => ((a % tau) + tau) % tau;
+			const delta = anticlockwise ? a0 - a1 : a1 - a0;
+			const sweep = Math.abs(delta) >= tau ? tau : mod(delta);
+			include(x + r * Math.cos(a0), y + r * Math.sin(a0));
+			include(x + r * Math.cos(a1), y + r * Math.sin(a1));
+			for (const angle of [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2]) {
+				if (mod(anticlockwise ? a0 - angle : angle - a0) <= sweep + 1e-12) {
+					include(x + r * Math.cos(angle), y + r * Math.sin(angle));
+				}
+			}
+		},
+		closePath() { calls.push(["closePath"]); },
+		fill() { calls.push(["fill"]); paint(0); },
+		stroke() { calls.push(["stroke"]); paint(this.lineWidth / 2); },
+		clearRect(...rect: Rect) { calls.push(["clearRect", ...rect]); clears.push(rect); },
+		setTransform(a: number, b: number, c: number, d: number, e: number, f: number) {
+			calls.push(["setTransform", a, b, c, d, e, f]); transform = { a, b, c, d, e, f };
+		},
+		getTransform() { return { ...transform }; },
+		save() { calls.push(["save"]); states.push({ transform: { ...transform }, clip: clip && { ...clip } }); },
+		restore() {
+			calls.push(["restore"]);
+			const state = states.pop();
+			if (state) { transform = state.transform; clip = state.clip; }
+		},
+		drawImage(_image: unknown, x: number, y: number) { calls.push(["drawImage", x, y]); },
+		getContextAttributes() { return { desynchronized: false }; },
+	};
+	const canvas = { width: 120000, height: 120000, getContext: () => ctx } as unknown as HTMLCanvasElement;
+	const wet = new WetInkRenderer(canvas, false);
+	wet.beforeWrite = () => { calls.push(["beforeWrite"]); };
+	return { wet, ctx, paints, clears, calls, get clip() { return clip; }, refusePaint() { throwOnPaint = true; } };
+}
+
+describe("WetInkRenderer bounded draw entry points", () => {
+	afterEach(() => setInkShaping(true));
+	const camera: CameraState = { x: 1000, y: -2000, zoom: 1 };
+	const point = (x: number, y = 0, t = 0): InkPoint => ({ x: camera.x + x, y: camera.y + y, pressure: 0.8, t });
+	const bounded = (paints: ReturnType<typeof pathCanvas>["paints"]) => {
+		expect(paints.length, "the public wet operation must actually paint").toBeGreaterThan(0);
+		for (const box of paints) {
+			expect(box.x1 - box.x0, "each emitted draw, including nib width, fits the layout limit").toBeLessThanOrEqual(16000);
+			expect(box.y1 - box.y0, "both axes are bounded").toBeLessThanOrEqual(16000);
+		}
+	};
+	const coversX = (paints: ReturnType<typeof pathCanvas>["paints"], from: number, to: number) => {
+		let covered = from;
+		for (const box of [...paints].sort((a, b) => a.x0 - b.x0)) {
+			if (box.x1 < from || box.x0 > to) continue;
+			expect(box.x0, "splitting must not leave a gap along this straight stroke").toBeLessThanOrEqual(covered + 1e-6);
+			covered = Math.max(covered, box.x1);
+		}
+		expect(covered, "the actual final sample remains covered").toBeGreaterThanOrEqual(to);
+	};
+
+	it("does not hide oversized submitted geometry behind a small Canvas clip", () => {
+		const rec = pathCanvas();
+		rec.ctx.save();
+		rec.ctx.beginPath();
+		rec.ctx.rect(0, 0, 10, 10);
+		rec.ctx.clip();
+		rec.ctx.beginPath();
+		rec.ctx.moveTo(0, 5);
+		rec.ctx.lineTo(20000, 5);
+		rec.ctx.stroke();
+		expect(rec.paints[0]!.x1 - rec.paints[0]!.x0).toBeGreaterThan(16000);
+		expect(rec.clip).toEqual({ x0: 0, y0: 0, x1: 10, y1: 10 });
+		rec.ctx.restore();
+		expect(rec.clip).toBeUndefined();
+	});
+
+	it.each([false, true])("records full-disc extrema with anticlockwise=%s", anticlockwise => {
+		const { ctx, paints } = pathCanvas();
+		for (const end of [Math.PI * 2, -Math.PI * 2]) {
+			ctx.beginPath();
+			ctx.arc(3, 5, 10, 0, end, anticlockwise);
+			ctx.fill();
+		}
+		expect(paints).toEqual([
+			{ x0: -7, y0: -5, x1: 13, y1: 15 },
+			{ x0: -7, y0: -5, x1: 13, y1: 15 },
+		]);
+	});
+
+	it("records only the swept arc, including crossed cardinal extrema", () => {
+		const { ctx, paints } = pathCanvas();
+		ctx.beginPath();
+		ctx.arc(0, 0, 10, -Math.PI / 4, Math.PI / 4);
+		ctx.fill();
+		expect(paints[0]!.x0).toBeCloseTo(Math.sqrt(50));
+		expect(paints[0]!.x1).toBe(10);
+		expect(paints[0]!.y0).toBeCloseTo(-Math.sqrt(50));
+		expect(paints[0]!.y1).toBeCloseTo(Math.sqrt(50));
+		ctx.beginPath();
+		ctx.arc(0, 0, 10, Math.PI / 4, -Math.PI / 4, true);
+		ctx.fill();
+		expect(paints[1]).toEqual(paints[0]);
+	});
+
+	it("bounds a single sparse raw segment without losing its far endpoint", () => {
+		const { wet, paints } = pathCanvas();
+		wet.beginStroke(point(0), style);
+		wet.appendPoint(camera, style, point(54000, 0, 10));
+		bounded(paints);
+		coversX(paints, 0, 54000);
+	});
+
+	it("bounds the raw ribbon branch when smoothing is disabled", () => {
+		setInkShaping(false);
+		const { wet, paints } = pathCanvas();
+		wet.smooth = true;
+		wet.beginStroke(point(0), style);
+		wet.appendPoint(camera, style, point(54000, 0, 10));
+		bounded(paints);
+		coversX(paints, 0, 54000);
+		expect(wet.head()).toBeUndefined();
+	});
+
+	it("bounds a settled smoothed strip without resetting its live head", () => {
+		const { wet, paints } = pathCanvas();
+		wet.smooth = true;
+		wet.beginStroke(point(0), style);
+		wet.appendPoint(camera, style, point(40000, 0, 10));
+		paints.length = 0;
+		wet.appendPoint(camera, style, point(80000, 0, 20));
+		bounded(paints);
+		coversX(paints, 20000, 60000);
+		expect(wet.head()).toEqual({ from: { x: 61000, y: -2000 }, to: { x: 81000, y: -2000 }, pressure: 0.8 });
+	});
+
+	it("bounds the pen-up closing strip and keeps its final nib width", () => {
+		const { wet, paints } = pathCanvas();
+		wet.smooth = true;
+		wet.shape = true;
+		wet.beginStroke(point(0), style);
+		wet.appendPoint(camera, style, point(60000, 0, 10));
+		const width = wet.liveHalfWidth(style, 0.8);
+		paints.length = 0;
+		wet.finishStroke(camera, style);
+		bounded(paints);
+		coversX(paints, 30000, 60000);
+		expect(wet.liveHalfWidth(style, 0.8)).toBe(width);
+	});
+
+	it("bounds both axes of a long diagonal highlighter strip", () => {
+		const { wet, paints } = pathCanvas();
+		wet.smooth = true;
+		wet.beginStroke(point(0), HIGHLIGHTER_PEN, true);
+		wet.appendPoint(camera, HIGHLIGHTER_PEN, point(50000, 60000, 10));
+		wet.finishStroke(camera, HIGHLIGHTER_PEN);
+		bounded(paints);
+		expect(Math.max(...paints.map(p => p.x1))).toBeGreaterThanOrEqual(50000);
+		expect(Math.max(...paints.map(p => p.y1))).toBeGreaterThanOrEqual(60000);
+	});
+
+	it("applies the limit after the camera projection, including width", () => {
+		const { wet, paints } = pathCanvas();
+		wet.beginStroke(point(0), style);
+		wet.appendPoint({ ...camera, zoom: 2 }, style, point(9000, 0, 10));
+		bounded(paints);
+		coversX(paints, 0, 18000);
+	});
+
+	it("keeps a below-limit raw draw's exact path and calls beforeWrite first", () => {
+		const { wet, paints, calls } = pathCanvas();
+		wet.beginStroke(point(10, 20), style);
+		wet.appendPoint(camera, style, point(30, 40, 10));
+		expect(calls).toEqual([["beforeWrite"], ["beginPath"], ["moveTo", 10, 20], ["lineTo", 30, 40], ["stroke"]]);
+		expect(paints).toHaveLength(1);
+	});
+
+	it("carries the entire dirty union and clears it once after a long stroke", () => {
+		const { wet, clears, calls } = pathCanvas();
+		wet.noteBackingCleared();
+		wet.beginStroke(point(100, 100), style);
+		wet.appendPoint(camera, style, point(54100, 100, 10));
+		wet.carry(20, 30);
+		wet.clearStroke(120000, 120000);
+		expect(clears).toHaveLength(1);
+		const [x, y, width, height] = clears[0]!;
+		expect(x).toBeLessThan(120);
+		expect(x + width).toBeGreaterThan(54120);
+		expect(y).toBeLessThan(130);
+		expect(y + height).toBeGreaterThan(130);
+		expect(calls[calls.length - 2]).toEqual(["beforeWrite"]);
+		expect(wet.provenBlank).toBe(true);
+	});
+
+	it("never declares blank after an interrupted paint followed by a partial stroke clear", () => {
+		const { wet, refusePaint } = pathCanvas();
+		wet.noteBackingCleared();
+		wet.beginStroke(point(100, 100), style);
+		wet.appendPoint(camera, style, point(200, 100, 10));
+		refusePaint();
+		expect(() => wet.appendPoint(camera, style, point(54200, 100, 20))).toThrow("paint refused");
+		wet.clearStroke(120000, 120000);
+		expect(wet.provenBlank).toBe(false);
+	});
+});
 
 describe("WetInkRenderer.clearStroke", () => {
 	it("clears the whole canvas when nothing was drawn", () => {

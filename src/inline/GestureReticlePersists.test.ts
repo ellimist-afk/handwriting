@@ -104,6 +104,12 @@ interface Rig {
 	/** The router's rect re-measure, which a pan leaves stale until it runs. */
 	refreshRectSpy: ReturnType<typeof vi.fn>;
 	setTimeoutSpy: ReturnType<typeof vi.fn>;
+	/**
+	 * Each watchdog refresh. The watchdog keeps one timer and re-arms it for
+	 * the rest of the second when it fires, so a refresh stamps the hover time
+	 * and sets no timer of its own; counting timers no longer counts refreshes.
+	 */
+	armSpy: ReturnType<typeof vi.spyOn>;
 	clearTimeoutSpy: ReturnType<typeof vi.fn>;
 	proto: Proto;
 }
@@ -188,6 +194,7 @@ function makeRig(): Rig {
 			classList: {
 				add: (c: string) => void scrollerClasses.add(c),
 				remove: (c: string) => void scrollerClasses.delete(c),
+				contains: (c: string) => scrollerClasses.has(c),
 			},
 			scrollLeft: 0,
 			scrollTop: 0,
@@ -221,8 +228,10 @@ function makeRig(): Rig {
 	inst.filePath = (): string | null => null;
 
 	const proto = InkOverlayPlugin.prototype as unknown as Proto;
+	const armSpy = vi.spyOn(inst as unknown as { armHoverWatchdog(): void }, "armHoverWatchdog");
 	return {
 		inst,
+		armSpy,
 		cursorStyle,
 		scrollerClasses,
 		refreshRectSpy,
@@ -252,15 +261,15 @@ describe("the note surface's reticle stays alive through lasso and space, and st
 		// The pen approached and hovered first, exactly as it would on
 		// real hardware before ever touching down.
 		rig.proto.showPenCursor.call(rig.inst, sample(10, 10));
-		rig.setTimeoutSpy.mockClear();
+		rig.armSpy.mockClear();
 		setTipMode("lasso");
 
 		rig.proto.penDown.call(rig.inst, sample(200, 200), evAt(200, 200));
-		expect(rig.setTimeoutSpy, "pen-down did not refresh the reticle").toHaveBeenCalledTimes(1);
+		expect(rig.armSpy, "pen-down did not refresh the reticle").toHaveBeenCalledTimes(1);
 		expect(reticleShown(rig.cursorStyle)).toBe(true);
 
 		rig.proto.penRaw.call(rig.inst, [sample(210, 205), sample(215, 208)], evAt(215, 208));
-		expect(rig.setTimeoutSpy, "the raw batch did not refresh the reticle").toHaveBeenCalledTimes(2);
+		expect(rig.armSpy, "the raw batch did not refresh the reticle").toHaveBeenCalledTimes(2);
 		expect(reticleShown(rig.cursorStyle)).toBe(true);
 
 		rig.proto.penUp.call(rig.inst);
@@ -275,7 +284,7 @@ describe("the note surface's reticle stays alive through lasso and space, and st
 		rig.proto.showPenCursor.call(rig.inst, sample(10, 10));
 		expect(reticleShown(rig.cursorStyle)).toBe(true);
 		expect(rig.scrollerClasses.has(PEN_HOVER_CLASS)).toBe(true);
-		rig.setTimeoutSpy.mockClear();
+		rig.armSpy.mockClear();
 		setTipMode("pan");
 
 		rig.proto.penDown.call(rig.inst, sample(200, 200), evAt(200, 200));
@@ -289,7 +298,7 @@ describe("the note surface's reticle stays alive through lasso and space, and st
 			"`cursor: none` was left on the scroller under the grabbing hand"
 		).toBe(false);
 		expect(
-			rig.setTimeoutSpy,
+			rig.armSpy,
 			"a watchdog was armed for a reticle that is not on screen"
 		).not.toHaveBeenCalled();
 
@@ -369,15 +378,15 @@ describe("the note surface's reticle stays alive through lasso and space, and st
 	it("space: pen-down and the next raw batch each re-arm the watchdog, and pen-up hides it", () => {
 		const rig = makeRig();
 		rig.proto.showPenCursor.call(rig.inst, sample(10, 10));
-		rig.setTimeoutSpy.mockClear();
+		rig.armSpy.mockClear();
 		setTipMode("space");
 
 		rig.proto.penDown.call(rig.inst, sample(200, 100), evAt(200, 100));
-		expect(rig.setTimeoutSpy, "pen-down did not refresh the reticle").toHaveBeenCalledTimes(1);
+		expect(rig.armSpy, "pen-down did not refresh the reticle").toHaveBeenCalledTimes(1);
 		expect(reticleShown(rig.cursorStyle)).toBe(true);
 
 		rig.proto.penRaw.call(rig.inst, [sample(200, 140)], evAt(200, 140));
-		expect(rig.setTimeoutSpy, "the raw batch did not refresh the reticle").toHaveBeenCalledTimes(2);
+		expect(rig.armSpy, "the raw batch did not refresh the reticle").toHaveBeenCalledTimes(2);
 		expect(reticleShown(rig.cursorStyle)).toBe(true);
 
 		rig.proto.penUp.call(rig.inst);
@@ -428,13 +437,13 @@ describe("the note surface's reticle is exempt from the watchdog under a mouse",
 		rig.proto.showPenCursor.call(rig.inst, sample(10, 10), "mouse");
 
 		expect(reticleShown(rig.cursorStyle)).toBe(true);
-		expect(rig.setTimeoutSpy, "a mouse was given the pen's hover watchdog").not.toHaveBeenCalled();
+		expect(rig.armSpy, "a mouse was given the pen's hover watchdog").not.toHaveBeenCalled();
 	});
 
 	it("and neither does it get one mid-lasso, where the wrapper passes no pointerType", () => {
 		const rig = makeRig();
 		rig.proto.showPenCursor.call(rig.inst, sample(10, 10), "mouse");
-		rig.setTimeoutSpy.mockClear();
+		rig.armSpy.mockClear();
 		setTipMode("lasso");
 
 		rig.proto.penDown.call(rig.inst, sample(200, 200), evAt(200, 200, "mouse"));
@@ -442,7 +451,7 @@ describe("the note surface's reticle is exempt from the watchdog under a mouse",
 
 		expect(reticleShown(rig.cursorStyle), "the ring went out under a mouse mid-drag").toBe(true);
 		expect(
-			rig.setTimeoutSpy,
+			rig.armSpy,
 			"a mouse mid-lasso was armed with a watchdog that will hide its ring"
 		).not.toHaveBeenCalled();
 	});
@@ -453,7 +462,7 @@ describe("the note surface's reticle is exempt from the watchdog under a mouse",
 		// the middle of the mouse gesture that replaced it.
 		const rig = makeRig();
 		rig.proto.showPenCursor.call(rig.inst, sample(10, 10), "pen");
-		expect(rig.setTimeoutSpy).toHaveBeenCalledTimes(1);
+		expect(rig.armSpy).toHaveBeenCalledTimes(1);
 
 		rig.proto.showPenCursor.call(rig.inst, sample(12, 12), "mouse");
 
@@ -467,15 +476,15 @@ describe("the note surface's reticle is exempt from the watchdog under a mouse",
 		// A whole mouse gesture, so `mouseStroke` is set and never cleared.
 		rig.proto.penDown.call(rig.inst, sample(200, 200), evAt(200, 200, "mouse"));
 		rig.proto.penUp.call(rig.inst);
-		rig.setTimeoutSpy.mockClear();
+		rig.armSpy.mockClear();
 
 		rig.proto.showPenCursor.call(rig.inst, sample(10, 10), "pen");
-		expect(rig.setTimeoutSpy, "the pen inherited the mouse's exemption").toHaveBeenCalledTimes(1);
+		expect(rig.armSpy, "the pen inherited the mouse's exemption").toHaveBeenCalledTimes(1);
 
 		// And a pen gesture writes the field back, so its own wrappers arm too.
 		rig.proto.penDown.call(rig.inst, sample(200, 200), evAt(200, 200, "pen"));
 		rig.proto.penRaw.call(rig.inst, [sample(210, 205)], evAt(210, 205, "pen"));
-		expect(rig.setTimeoutSpy).toHaveBeenCalledTimes(3);
+		expect(rig.armSpy).toHaveBeenCalledTimes(3);
 	});
 });
 
@@ -539,6 +548,7 @@ describe("the note surface's reticle goes away when mouse ink is switched off un
 				classList: {
 					add: (c: string) => void scrollerClasses.add(c),
 					remove: (c: string) => void scrollerClasses.delete(c),
+					contains: (c: string) => scrollerClasses.has(c),
 				},
 				setCssStyles: noop,
 				style: { removeProperty: noop },
@@ -616,6 +626,10 @@ describe("the note surface's reticle is shown and hidden by one flag, not by a s
 		rig.proto.showPenCursor.call(rig.inst, sample(10, 10));
 		setCssStyles.mockClear();
 
+		// A refresh follows a zoom change; 4x takes the nib past the ring's
+		// 6 px floor. At the same zoom and place the ring already wears every
+		// value, and the reticle writes only what changed.
+		rig.inst.cssScale = 4;
 		rig.proto.refreshPenCursor.call(rig.inst);
 		expect(setCssStyles, "a refresh of a showing ring did not repaint it").toHaveBeenCalled();
 

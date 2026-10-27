@@ -14,6 +14,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import commandsSource from "../commands/RegisterCommands.ts?raw";
 import {
 	getPenToolsMode,
 	markPenHardwareSeen,
@@ -27,7 +28,8 @@ import {
 import { setNoteZoomControlsMode } from "../inline/NoteZoomControlsMode";
 import { routineNoticesVisible } from "../diag/RoutineNotices";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+const source = [mainSource, commandsSource].join("\n").replace(/\r\n/g, "\n");
 const START = '\t\tthis.addCommand({\n\t\t\tid: "toolbar-zoom-bar-toggle",';
 const END = "\n\t\t});";
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
-import mainSource from "../main.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
 import {
 	PageStore,
 	recoverExactPage,
@@ -18,7 +18,7 @@ const PDF_ID = "pdf-a1b2c3d4";
 const PATH = `.handwriting/${PDF_ID}.json`;
 
 // Execute the production host object rather than reconstructing its callbacks.
-const source = mainSource.replace(/\r\n/g, "\n");
+const source = pluginSettingsSource.replace(/\r\n/g, "\n");
 const hostStartMarker = "\t\tthis.pdfStore.attachHost({";
 // The registration is one statement; it ends at its own closing line.
 const hostEndMarker = "\n\t\t});\n";

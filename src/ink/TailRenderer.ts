@@ -609,10 +609,14 @@ export class TailRenderer {
 	}
 
 	/** Actual stroke paths, never a union box or a stored color change. Hover
-	 * reuses geometry; offscreen strokes are rejected before path construction. */
-	drawSpaceStroke(cam:CameraState,stroke:InkStroke,color:string,width:number,height:number,cssScale:number):boolean {
-		if(!this.spaceStrokeOnScreen(cam,stroke,width,height,cssScale))return false;
-		this.markPaint();
+	 * reuses geometry; offscreen strokes are rejected before path construction.
+	 * `into`: draw on that context instead of this layer (the insert space drag's
+	 * picture of the moving ink), the same look; this layer is left as it is. The
+	 * caller has culled (the context's transform may move the rows it holds), so
+	 * only an empty stroke is refused. */
+	drawSpaceStroke(cam:CameraState,stroke:InkStroke,color:string,width:number,height:number,cssScale:number,into?:CanvasRenderingContext2D):boolean {
+		if(into?!stroke.points.length:!this.spaceStrokeOnScreen(cam,stroke,width,height,cssScale))return false;
+		if(!into)this.markPaint();
 		let cached=this.spacePaths.get(stroke);
 		const rev=strokeRev(stroke);
 		if(!cached||cached.rev!==rev){
@@ -622,20 +626,23 @@ export class TailRenderer {
 			if(points.length===1)path.lineTo(points[0]!.x+.001,points[0]!.y);
 			cached={rev,path};this.spacePaths.set(stroke,cached);
 		}
-		const ctx=this.ctx;
+		const ctx=into??this.ctx;
 		ctx.save();ctx.translate(-cam.x*cam.zoom,-cam.y*cam.zoom);ctx.scale(cam.zoom,cam.zoom);
 		ctx.strokeStyle=color;ctx.globalAlpha=.65;ctx.lineWidth=Math.max(stroke.width,4/(cssScale*cam.zoom));
 		ctx.lineCap="round";ctx.lineJoin="round";ctx.setLineDash([]);ctx.stroke(cached.path);ctx.restore();
-		this.dirty=null;
+		if(!into)this.dirty=null;
 		return true;
 	}
 
 	/** Small physical-size label/tick, including the exact rounded landing.
-	 * Keep origin and landing labels on opposite sides when their Y agrees. */
-	drawSpaceLabel(cam:CameraState,yWorld:number,label:string,color:string,cssScale:number,landing=false):void {
+	 * Keep origin and landing labels on opposite sides when their Y agrees.
+	 * `left` is where the visible pane begins, in this canvas's css px: on a
+	 * note that scrolls sideways the canvas reaches past the pane's left edge,
+	 * and a label drawn from the canvas's own edge began off screen. */
+	drawSpaceLabel(cam:CameraState,yWorld:number,label:string,color:string,cssScale:number,landing=false,left=0):void {
 		this.markPaint();
 		const ctx=this.ctx,y=(yWorld-cam.y)*cam.zoom;
-		ctx.save();ctx.translate(0,y);ctx.scale(1/cssScale,1/cssScale);
+		ctx.save();ctx.translate(left,y);ctx.scale(1/cssScale,1/cssScale);
 		ctx.font="12px sans-serif";ctx.fillStyle=color;ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash([]);
 		if(landing){ctx.beginPath();ctx.moveTo(8,-4);ctx.lineTo(8,4);ctx.moveTo(8,0);ctx.lineTo(30,0);ctx.stroke();}
 		ctx.fillText(label,landing?36:8,landing?16:-7);ctx.restore();this.dirty=null;

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
-import mainSource from "../main.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { emptyPage, parsePage, serializePage } from "../model/PageData";
@@ -14,7 +14,7 @@ const MISSING_MESSAGE = "this PDF's ink file is missing.\n\nyour ink is still on
 
 // Exercise the callbacks installed by the plugin, including its block notice
 // and the real PageStore save, rather than replacing persistence with a spy.
-const source = mainSource.replace(/\r\n/g, "\n");
+const source = pluginSettingsSource.replace(/\r\n/g, "\n");
 const hostStartMarker = "\t\tthis.pdfStore.attachHost({";
 const hostEndMarker = "\n\t\t});\n";
 expect(source.split(hostStartMarker)).toHaveLength(2);

@@ -29,10 +29,46 @@ describe("DamageLedger", () => {
 		expect(d.take()).toBe("all");
 	});
 
-	it("too many rects coalesce into everything", () => {
+	// A stroke eraser zoomed out takes more than twelve strokes in one frame. Going to "all" there redrew every stroke on
+	// screen by path; one rect around them all repaints only the place that changed.
+	it("the thirteenth rect coalesces into one union rect covering every input, not everything", () => {
+		const d = new DamageLedger();
+		d.take();
+		const inputs = Array.from({ length: 13 }, (_, i) => ({ x: i * 100 - 300, y: (i % 3) * 50, width: 10 + i, height: 20 }));
+		for (const r of inputs) d.addRect(r);
+		expect(d.isAll).toBe(false);
+		expect(d.isEmpty).toBe(false);
+		const out = d.take();
+		expect(out).not.toBe("all");
+		const rects = out as { x: number; y: number; width: number; height: number }[];
+		expect(rects).toHaveLength(1);
+		const u = rects[0]!;
+		for (const r of inputs) {
+			expect(u.x).toBeLessThan(r.x);
+			expect(u.y).toBeLessThan(r.y);
+			expect(u.x + u.width).toBeGreaterThan(r.x + r.width);
+			expect(u.y + u.height).toBeGreaterThan(r.y + r.height);
+		}
+		// Padded like any rect, and no larger than the inputs' padded hull.
+		expect(u).toEqual({ x: -304, y: -4, width: 1200 + 22 + 8, height: 100 + 20 + 8 });
+		expect(d.take()).toEqual([]);
+	});
+
+	it("rects after the union keep growing it, and twelve rects stay separate", () => {
 		const d = new DamageLedger();
 		d.take();
 		for (let i = 0; i < 20; i++) d.addRect({ x: i * 100, y: 0, width: 1, height: 1 });
+		const out = d.take();
+		expect(out).toEqual([{ x: -4, y: -4, width: 1900 + 1 + 8, height: 1 + 8 }]);
+		for (let i = 0; i < 12; i++) d.addRect({ x: i * 100, y: 0, width: 1, height: 1 });
+		expect(d.take()).toHaveLength(12);
+	});
+
+	it("addAll after a union still gives everything", () => {
+		const d = new DamageLedger();
+		d.take();
+		for (let i = 0; i < 13; i++) d.addRect({ x: i * 100, y: 0, width: 1, height: 1 });
+		d.addAll();
 		expect(d.take()).toBe("all");
 	});
 

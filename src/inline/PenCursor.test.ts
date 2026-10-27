@@ -29,51 +29,30 @@
  * no real reveal site and no real stylesheet rule stops being seen; what stops
  * being seen is one that was only ever a sentence. Nothing here pins a
  * documented REASON, so no assertion is left reading raw.
+ *
+ * `InkOverlay.ts` is no longer scanned at all. Its cursor reveals run on a
+ * real overlay mounted all the way (`mountRig.test.util.ts`), and the pan
+ * drag's reticle and grabbing hand are proved by `GestureReticlePersists.test.ts`,
+ * which drives the real `penDown`, `penRaw` and `penUp`. The stylesheet and the
+ * pdf surface are still read as code here.
  */
 
 import { describe, expect, it } from "vitest";
 import { MIN_CURSOR_VISUAL_PX } from "./PenCursor";
-import overlaySrc from "./InkOverlay.ts?raw";
-import pdfSrc from "../pdf/PdfInkController.ts?raw";
 import css from "../../styles.css?raw";
 import { codeOnly } from "../CodeOnly";
+import { mountOverlay } from "./mountRig.test.util";
+import { setTipMode, type TipMode } from "./TipMode";
+import { surfaceCode } from "./surfaceFiles.testutil";
 
-function overlaySource(): string {
-	return codeOnly(overlaySrc);
-}
+const ALL_TS = import.meta.glob("/src/**/*.ts", {
+	query: "?raw",
+	eager: true,
+	import: "default",
+}) as Record<string, string>;
 
 function cursorCss(): string {
 	return codeOnly(css);
-}
-
-/**
- * The cursor's style-writing sites in a piece of overlay source, comments
- * excluded. A pure function so the fixtures at the bottom can attack it with
- * a string rather than by editing the real overlay and putting it back.
- */
-function cursorStyleBlocks(src: string): string[] {
-	return codeOnly(src).match(/(penCursorEl|eraserEl)\.setCssStyles\(\{[^}]*\}/gs) ?? [];
-}
-
-/**
- * The pan branch of `penRaw`, as CODE, sliced out of a piece of overlay
- * source. Pure, so the fixtures at the bottom can attack it with a string.
- *
- * Every way of failing to find it THROWS rather than returning an empty
- * slice. An empty string satisfies every "does not contain" assertion there
- * is, so a rename that quietly stopped finding the branch would leave the
- * source check below passing over an overlay that had gone back to painting
- * the ring mid-pan - which is this file's own header, one defect later.
- */
-function panMoveBranch(src: string): string {
-	const code = codeOnly(src);
-	const raw = code.indexOf("private penRaw(");
-	if (raw < 0) throw new Error("InkOverlay has no penRaw to read");
-	const start = code.indexOf('if (this.mode === "pan") {', raw);
-	if (start < 0) throw new Error("penRaw has no pan branch");
-	const end = code.indexOf("return;", start);
-	if (end < 0) throw new Error("penRaw's pan branch never returns");
-	return code.slice(start, end);
 }
 
 /**
@@ -217,17 +196,53 @@ describe("the cursors have to be shown with a real display value", () => {
 	// declaration, so the element fell back to the stylesheet and neither the
 	// pen reticle nor the eraser ring ever appeared on screen. They were
 	// positioned and sized correctly every frame, invisibly.
-	const source = overlaySource();
 
 	it("never uses an empty display string to reveal a cursor", () => {
-		// Code, not text. The anti-vacuity count below is the half comments
-		// used to prop up: read raw, two `// was: …` lines kept it above zero
-		// over an overlay with no reveal sites left at all.
-		const showBlocks = cursorStyleBlocks(source);
-		expect(showBlocks.length).toBeGreaterThan(0);
-		for (const block of showBlocks) {
-			if (!block.includes("display")) continue;
-			expect(block).not.toMatch(/display:\s*""/);
+		// Run, not read: a real overlay, mounted all the way, shows each cursor
+		// through its own method, and each element's style record is asked what
+		// display it was given. The reticle is shown by opacity on a layer that
+		// stays display: block; the eraser ring is shown by display itself.
+		//
+		// The reticle is painted by a different branch for every tip mode (the
+		// nib's dot, the eraser-mode radius, the lasso and pan rings, the
+		// insert-space bar), and each branch writes its own style block. The
+		// scan this replaced read every one of those blocks, so every mode is
+		// shown here: a reveal written into any one branch is caught in that
+		// mode, not only in the nib's.
+		const m = mountOverlay("pen-cursor-display.md");
+		try {
+			const o = m.o as Record<string, unknown> & {
+				showPenCursor(s: unknown, pointerType?: string): void;
+				hidePenCursor(): void;
+				showEraserCursor(s: unknown): void;
+			};
+			const sample = { x: 40, y: 40, pressure: 0.5, t: 0 };
+			const pen = (o.penCursorEl as { style: Record<string, string> }).style;
+			const eraser = (o.eraserEl as { style: Record<string, string> }).style;
+
+			expect(pen.display, "the reticle was created without a real display value").toBe("block");
+			o.showPenCursor(sample, "pen");
+			expect(Number(pen.opacity), "precondition: the reticle really was shown").toBeGreaterThan(0);
+			expect(pen.display, "showing the reticle left it without a real display value").toBe("block");
+			o.hidePenCursor();
+			o.showPenCursor(sample, "pen");
+			expect(pen.display, "showing the reticle again left it without a real display value").toBe("block");
+
+			const modes: readonly TipMode[] = ["nib", "eraser", "lasso", "space", "pan"];
+			for (const mode of modes) {
+				setTipMode(mode);
+				o.hidePenCursor();
+				expect(Number(pen.opacity), `precondition: the reticle was hidden before the ${mode} tip showed it`).toBe(0);
+				o.showPenCursor(sample, "pen");
+				expect(Number(pen.opacity), `the ${mode} tip did not show the reticle`).toBeGreaterThan(0);
+				expect(pen.display, `the ${mode} tip showed the reticle without a real display value`).toBe("block");
+			}
+
+			o.showEraserCursor(sample);
+			expect(eraser.display, "the eraser ring was shown with an empty display string").toBe("block");
+		} finally {
+			setTipMode("nib");
+			m.destroy();
 		}
 	});
 
@@ -271,34 +286,13 @@ describe("the pan drag's reticle rule", () => {
 });
 
 describe("the pan drag's move handler positions nothing, and the hand is on the scroller", () => {
-	it("penRaw's pan branch scrolls and does not touch the reticle", () => {
-		// BOTH ENDS. The positive half proves the slice really is the move
-		// handler - `panMove` is the line that scrolls the overlay out from
-		// under the frozen rect, which is what made the ring fly - and the
-		// negative half is the rule: nothing in here positions a cursor.
-		const branch = panMoveBranch(overlaySrc);
-
-		expect(branch, "the slice is not penRaw's pan branch at all").toContain(
-			"this.panMove(ev)"
-		);
-		expect(branch, "a reticle call came back into the pan drag's move handler").not.toMatch(
-			/show\w*Cursor\(/
-		);
-		expect(branch, "the pan drag's move handler writes the reticle element").not.toContain(
-			"penCursorEl"
-		);
-	});
-
-	it("the overlay both puts the grabbing hand on and takes it off", () => {
-		// Also both ends: a class added and never removed strands
-		// `cursor: grabbing` on the scroller for the rest of the session.
-		const source = overlaySource();
-
-		expect(source).toContain("classList.add(PAN_DRAG_CLASS)");
-		expect(source, "nothing takes the grabbing hand off again").toContain(
-			"classList.remove(PAN_DRAG_CLASS)"
-		);
-	});
+	// The overlay's halves of this rule run in GestureReticlePersists.test.ts:
+	// "pan: pen-down puts the reticle away for the grabbing hand, the raw batch
+	// leaves it away, and pen-up brings it back under the pointer" drives the
+	// real penDown, penRaw and penUp, and asserts the ring stays down through the
+	// drag and the grabbing-hand class goes on and comes off; "pan: nothing can
+	// paint the ring mid-drag, not even a direct showPenCursor" closes the rest.
+	// What stays here is the stylesheet half and the pdf surface.
 
 	it("the stylesheet gives the drag a cursor, and the rule that makes it necessary is still there", () => {
 		// Hiding the reticle without this leaves the surface with NO pointer
@@ -328,7 +322,7 @@ describe("the pan drag's move handler positions nothing, and the hand is on the 
 		expect(scrollerCursorFor(css, "handwriting-pdf-hover")).toBe("none");
 		// Both ends again: a class added and never removed strands `cursor:
 		// grabbing` over the viewer for the rest of the session.
-		const pdf = codeOnly(pdfSrc);
+		const pdf = surfaceCode("pdf", ALL_TS);
 		expect(pdf).toContain('classList.add("handwriting-pdf-pan-drag")');
 		expect(pdf, "nothing takes the grabbing hand off the pdf viewer again").toContain(
 			'classList.remove("handwriting-pdf-pan-drag")'
@@ -344,34 +338,6 @@ describe("the pan drag's move handler positions nothing, and the hand is on the 
 describe("both scans read code, not the sentences beside it", () => {
 	// Fixtures. Without them a green run above is only a coincidence, which is
 	// the failure this whole family is named for.
-	const REVEAL = '\t\tthis.penCursorEl.setCssStyles({\n\t\t\tdisplay: "block",\n\t\t});\n';
-
-	it("finds a real reveal site", () => {
-		// Anti-vacuity for the fixtures themselves.
-		expect(cursorStyleBlocks(REVEAL)).toHaveLength(1);
-	});
-
-	it("still catches a real reveal site using the empty-string form", () => {
-		// The assertion's original job, unchanged by reading code.
-		const buggy = '\t\tthis.penCursorEl.setCssStyles({ display: "" });\n';
-		expect(cursorStyleBlocks(buggy)[0]).toMatch(/display:\s*""/);
-	});
-
-	it("does NOT count a reveal site that survives only as a comment", () => {
-		// THE DEFEAT, verbatim: the shape a refactor leaves behind.
-		const moved =
-			'\t\t// moved into hideCursorEl(); was:\n\t\t//   this.penCursorEl.setCssStyles({ display: "none" })\n\t\tthis.hideCursorEl(this.penCursorEl);\n';
-		expect(cursorStyleBlocks(moved)).toEqual([]);
-	});
-
-	it("does NOT fire on a comment that quotes the buggy form while explaining it", () => {
-		// The loud direction, and the likeliest comment anyone would write
-		// here: the fix's own explanation contains the thing it forbids.
-		const explained =
-			'\t/**\n\t * Both cursors were "shown" with setCssStyles({ display: "" }), which\n\t * REMOVES the declaration, so they fell back to display: none.\n\t */\n';
-		expect(cursorStyleBlocks(explained)).toEqual([]);
-	});
-
 	it("does NOT accept a retired copy of the stylesheet default", () => {
 		const live = ".handwriting-pen-cursor,\n.handwriting-eraser-cursor {\n\tdisplay: none;\n}\n";
 		expect(penCursorDefaultsToHidden(live)).toBe(true);
@@ -390,57 +356,6 @@ describe("both scans read code, not the sentences beside it", () => {
 	it("does NOT accept it from a hover-state rule that merely extends the class", () => {
 		const hoverOnly = ".handwriting-pen-cursor.handwriting-pen-hover-space {\n\tdisplay: none;\n}\n";
 		expect(penCursorDefaultsToHidden(hoverOnly)).toBe(false);
-	});
-
-	// Fixtures for the pan-drag scans, same job as the four above: a green
-	// source assertion is only worth what its finder is worth.
-	const PEN_RAW = (panBody: string): string =>
-		[
-			"\tprivate penRaw(samples: PenSample[], ev: PointerEvent): void {",
-			'\t\tif (this.mode === "lasso") {',
-			"\t\t\tthis.lassoMove(samples);",
-			"\t\t\tif (last) this.showLassoCursor(last);",
-			"\t\t\treturn;",
-			"\t\t}",
-			'\t\tif (this.mode === "pan") {',
-			panBody,
-			"\t\t\treturn;",
-			"\t\t}",
-			"\t}",
-		].join("\n");
-
-	it("slices the pan branch and not the lasso branch above it", () => {
-		// The neighbour matters: the lasso branch legitimately paints a
-		// reticle, sits immediately above, and would fail the rule if the
-		// slice reached back over it.
-		const branch = panMoveBranch(PEN_RAW("\t\t\tthis.panMove(ev);"));
-
-		expect(branch).toContain("this.panMove(ev)");
-		expect(branch).not.toContain("showLassoCursor");
-	});
-
-	it("still catches a reticle call put back into the pan branch", () => {
-		const buggy = panMoveBranch(PEN_RAW("\t\t\tthis.panMove(ev);\n\t\t\tthis.showPanCursor(last);"));
-
-		expect(buggy).toMatch(/show\w*Cursor\(/);
-	});
-
-	it("does NOT fire on a comment in the pan branch that names the old call", () => {
-		// The loud direction again, and the comment this fix actually left in
-		// the overlay: it explains the ring by naming what used to draw it.
-		const explained = panMoveBranch(
-			PEN_RAW("\t\t\t// no showPanCursor here any more; see penReticleShown\n\t\t\tthis.panMove(ev);")
-		);
-
-		expect(explained).not.toMatch(/show\w*Cursor\(/);
-	});
-
-	it("THROWS rather than passing vacuously when the branch cannot be found", () => {
-		// An empty slice would satisfy every "does not contain" above.
-		expect(() => panMoveBranch("const nothing = 1;\n")).toThrow(/penRaw/);
-		expect(() =>
-			panMoveBranch('\tprivate penRaw(): void {\n\t\tif (this.mode === "erase") {\n\t\t}\n\t}')
-		).toThrow(/pan branch/);
 	});
 
 	it("reads a scroller cursor from its own rule and nowhere else", () => {

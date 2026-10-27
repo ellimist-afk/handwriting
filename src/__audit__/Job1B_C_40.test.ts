@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
-import mainSource from "../main.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { emptyPage, serializePage, type PageData } from "../model/PageData";
@@ -19,9 +19,9 @@ import type { InkStroke } from "../ink/Stroke";
 const PDF_ID = "pdf-a1b2c3d4";
 const PATH = `.handwriting/${PDF_ID}.json`;
 
-// The production host registration, executed from main.ts source (same
+// The production host registration, executed from settings/PluginSettings.ts source (same
 // technique as src/persistence/PdfAdoptionRouteEndToEnd.test.ts).
-const source = mainSource.replace(/\r\n/g, "\n");
+const source = pluginSettingsSource.replace(/\r\n/g, "\n");
 const hostStart = source.indexOf("\t\tthis.pdfStore.attachHost({");
 const hostEnd = source.indexOf("\n\t\t});\n", hostStart);
 const installPdfPersistenceHost = new Function(

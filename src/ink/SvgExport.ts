@@ -146,14 +146,20 @@ export interface InkSvgRun {
  */
 export function inkSvgLayers(
 	strokes: readonly InkStroke[],
-	destination?: string | null
+	destination?: string | null,
+	/**
+	 * `penPerStroke`: every pen stroke is its own run instead of folding into its colour's run. For the print layer:
+	 * Chromium writes each <path> as one PDF fill, and a PDF reader takes seconds over one fill holding a heavy
+	 * note's every stroke. The highlighter always folds (one wash). The .svg file export never passes it.
+	 */
+	options?: { penPerStroke?: boolean }
 ): {
 	highlighter: InkSvgRun[];
 	pen: InkSvgRun[];
 } {
 	return {
 		highlighter: inkSvgRuns(strokes.filter((s) => s.tool === "highlighter"), destination),
-		pen: inkSvgRuns(strokes.filter((s) => s.tool !== "highlighter"), destination),
+		pen: inkSvgRuns(strokes.filter((s) => s.tool !== "highlighter"), destination, options?.penPerStroke === true),
 	};
 }
 
@@ -181,7 +187,7 @@ function runMarkup(runs: readonly InkSvgRun[]): string {
  * run merge instead of cancelling. That is also what the highlighter layer
  * wants: one flat wash rather than a dark seam at every crossing.
  */
-function inkSvgRuns(strokes: readonly InkStroke[], destination?: string | null): InkSvgRun[] {
+function inkSvgRuns(strokes: readonly InkStroke[], destination?: string | null, perStroke = false): InkSvgRun[] {
 	// Runs group on the colour actually EMITTED rather than the stored one.
 	// Two stored colours that adapt to the same value belong in one path, and
 	// a run that broke on the stored colour would emit two identical fills
@@ -193,10 +199,10 @@ function inkSvgRuns(strokes: readonly InkStroke[], destination?: string | null):
 	while (i < strokes.length) {
 		const color = emitted(strokes[i]!);
 		let d = "";
-		while (i < strokes.length && emitted(strokes[i]!) === color) {
+		do {
 			d += strokePathData(strokes[i]!);
 			i++;
-		}
+		} while (!perStroke && i < strokes.length && emitted(strokes[i]!) === color);
 		if (d !== "") out.push({ color, d });
 	}
 	return out;

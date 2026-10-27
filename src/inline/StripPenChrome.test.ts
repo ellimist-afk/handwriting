@@ -121,6 +121,7 @@
 
 import { describe, expect, it } from "vitest";
 import { codeOnly } from "../CodeOnly";
+import { surfaceFiles } from "./surfaceFiles.testutil";
 
 /**
  * Every `.ts` under src, as text. Keys are root-absolute with forward slashes
@@ -197,6 +198,31 @@ function occurrences(text: string, needle: string): number {
 }
 
 /**
+ * Every file that holds the note surface's code, as the ink-surface ledger
+ * lists them (surfaceFiles.testutil.ts). The note-surface claims below are
+ * about the SURFACE, so they read every one of these and sum over them:
+ * splitting InkOverlay.ts moves a call into another file, and every split
+ * commit lists that file in the ledger, so the call is still counted where it
+ * went instead of vanishing from a check keyed to one path. Each file is read
+ * through `code()`/`raw()`, so a ledger entry the scan does not hold fails
+ * loudly.
+ */
+const NOTE_FILES = surfaceFiles("note");
+
+/** `needle` in the note surface's code, summed over its files. */
+function noteCount(needle: string): number {
+	return NOTE_FILES.reduce((n, path) => n + occurrences(code(path), needle), 0);
+}
+
+/** The pdf surface's files: the controller and the parts the ledger lists for it. */
+const PDF_FILES = surfaceFiles("pdf");
+
+/** `needle` in the pdf surface's code, summed over its files. */
+function pdfCount(needle: string): number {
+	return PDF_FILES.reduce((n, path) => n + occurrences(code(path), needle), 0);
+}
+
+/**
  * The two halves of the pairing needle, as pure predicates over source text so
  * that the fixtures at the bottom of this file can attack them directly with a
  * string instead of having to plant a comment in a real surface.
@@ -227,6 +253,14 @@ const SET_INKING_ALLOWED: Readonly<Record<string, Exemption>> = {
 		max: ANY,
 		why: "declares setInking; the strip is the thing being driven, not a caller of it",
 	},
+	"/src/inline/MobileToolsBuildRest.ts": {
+		max: 1,
+		why: "the pen-toolbar mode watch re-applies the inking state once, at the end of the strip build; the build is the strip's own, moved out of MobileTools.ts, and a second call here still fails",
+	},
+	"/src/inline/NoteZoomControls.ts": {
+		max: 3,
+		why: "the note zoom bar, moved out of MobileTools.ts, declares setInking for itself and calls it twice: once from refresh to re-apply the state, once from penUp to clear it; the bar is the strip's own, and a fourth hit here still fails",
+	},
 	"/src/inline/StripPenChrome.ts": {
 		max: ANY,
 		why: "the one shared place, by definition - stripPenDown/stripPenUp are the wrappers this guard exists to funnel every surface through",
@@ -238,15 +272,45 @@ const CLOSE_INK_SLIDERS_ALLOWED: Readonly<Record<string, Exemption>> = {
 		max: ANY,
 		why: "declares closeInkSliders and closes its own pops from inside; WHICH pops close is this file's decision to make",
 	},
+	"/src/inline/MobileToolsDrag.ts": {
+		max: 1,
+		why: "armDrag closes the open ink sliders once as a drag arms; the drag is the strip's own, moved out of MobileTools.ts, and a second call here still fails",
+	},
+	"/src/inline/MobileToolsPaint.ts": {
+		max: 1,
+		why: "paintPresets closes the open ink sliders once when it paints the preset row; the paint is the strip's own, moved out of MobileTools.ts, and a second call here still fails",
+	},
+	"/src/inline/MobileToolsPops.ts": {
+		max: 3,
+		why: "declares closeInkSliders for the strip (the interface line and the function) and calls it once from setCollapsed, which closes the open ink sliders as the strip folds; the pops are the strip's own, moved out of MobileTools.ts, and a fourth hit here still fails",
+	},
 	"/src/inline/StripPenChrome.ts": {
 		max: ANY,
 		why: "the one shared place, as above",
 	},
-	"/src/inline/InkOverlay.ts": {
+};
+
+/**
+ * An allowance that belongs to a SURFACE rather than to one file: the cap is
+ * on the sum over every file the ledger lists for it, so a split can move the
+ * call between those files without anyone moving its allowance by hand, and a
+ * second call anywhere in the surface still fails.
+ */
+type SurfaceExemption = {
+	readonly name: string;
+	readonly files: readonly string[];
+	readonly max: number;
+	readonly why: string;
+};
+
+const CLOSE_INK_SLIDERS_SURFACE_ALLOWED: readonly SurfaceExemption[] = [
+	{
+		name: "the note surface",
+		files: NOTE_FILES,
 		max: 1,
 		why: "the file-switch reset, and ONE of it: a fresh note starts reading, so the strip starts as the pill. A document switch is not pen-gesture chrome, and routing it through stripPenDown would wrongly mark a freshly opened note as mid-stroke. The comment stating that is pinned by its own test below, so deleting the reason fails as surely as adding a second call does",
 	},
-};
+];
 
 const FOCUS_ALLOWED: Readonly<Record<string, Exemption>> = {
 	"/src/inline/NotePaper.ts": {
@@ -265,11 +329,11 @@ const FOCUS_ALLOWED: Readonly<Record<string, Exemption>> = {
 		max: 1,
 		why: "an Obsidian Modal focusing its own text field on open (desktop only, deliberately not on iOS). A modal is not an ink surface: no pen gesture, no PointerRouter, nothing suppressed the native focus this restores",
 	},
-	"/src/main.ts": {
+	"/src/ink/DeleteAllInk.ts": {
 		max: 1,
 		why: "the delete-all-ink confirm dialog focusing its Cancel button so Enter takes the safe branch. A dialog button, not a surface reclaiming the keyboard after a gesture",
 	},
-	"/src/slides/SlidesInkSurface.ts": {
+	"/src/slides/SlidesPenGuards.ts": {
 		max: 1,
 		why: "the slides surface focusing REVEAL'S OWN DECK WRAPPER before it claims a pen contact, never an ink surface and never the editor. Reveal is embedded with keyboardCondition:\"focused\" and focuses itself off the same pointerdown (S4); doing it first, in the capture phase, is what keeps the focus/blur cycle from straddling the start of a stroke. Nothing here strips a native focus, so there is nothing for stripPenFocus to restore",
 	},
@@ -329,9 +393,21 @@ function mountsWithoutTheRule(): string[] {
  * one diff, and what tells whoever hits it that the fix is either to route the
  * call through StripPenChrome or to add a line here saying why not.
  */
-function overAllowance(needle: string, allowed: Readonly<Record<string, Exemption>>): string[] {
+function overAllowance(
+	needle: string,
+	allowed: Readonly<Record<string, Exemption>>,
+	surfaces: readonly SurfaceExemption[] = []
+): string[] {
 	const over: string[] = [];
+	for (const surface of surfaces) {
+		const count = surface.files.reduce((n, path) => n + occurrences(code(path), needle), 0);
+		if (count > surface.max) {
+			over.push(`${surface.name}: ${count}x ${needle} (allowed ${surface.max} across ${surface.files.join(", ")})`);
+		}
+	}
+	const grouped = new Set(surfaces.flatMap((surface) => surface.files));
 	for (const [path] of SOURCES) {
+		if (grouped.has(path)) continue;
 		const count = occurrences(code(path), needle);
 		if (count === 0) continue;
 		const max = allowed[path]?.max ?? 0;
@@ -356,7 +432,8 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// exemption today - it contains none of the three needles - and that
 		// is a fact this test re-checks on every run rather than a claim.
 		const paths = SOURCES.map(([path]) => path);
-		expect(paths).toContain("/src/inline/InkOverlay.ts");
+		expect(NOTE_FILES.length, "precondition: the ledger names the note surface's files").toBeGreaterThan(0);
+		for (const path of NOTE_FILES) expect(paths, `the scan does not read the note surface's ${path}`).toContain(path);
 		expect(paths).toContain("/src/pdf/PdfInkController.ts");
 		expect(paths).toContain("/src/view/PenLabView.ts");
 		// And the drop rule dropped something: no test files, no declarations.
@@ -379,6 +456,11 @@ describe("strip pen chrome — one shared place, not two", () => {
 				if (!SOURCE_TEXT.has(path)) stale.push(path);
 			}
 		}
+		for (const surface of CLOSE_INK_SLIDERS_SURFACE_ALLOWED) {
+			for (const path of surface.files) {
+				if (!SOURCE_TEXT.has(path)) stale.push(path);
+			}
+		}
 		expect(stale).toEqual([]);
 	});
 
@@ -393,7 +475,7 @@ describe("strip pen chrome — one shared place, not two", () => {
 	});
 
 	it("no file in the tree calls closeInkSliders outside the shared place and the named exception", () => {
-		expect(overAllowance("closeInkSliders(", CLOSE_INK_SLIDERS_ALLOWED)).toEqual([]);
+		expect(overAllowance("closeInkSliders(", CLOSE_INK_SLIDERS_ALLOWED, CLOSE_INK_SLIDERS_SURFACE_ALLOWED)).toEqual([]);
 	});
 
 	it("no file in the tree reclaims the keyboard by hand", () => {
@@ -435,8 +517,11 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// surface that mounts a strip should fail the SWEEP, on its own
 		// missing call, not this harness check.
 		const mounters = stripMounters();
-		expect(mounters).toContain("/src/inline/InkOverlay.ts");
-		expect(mounters).toContain("/src/pdf/PdfInkController.ts");
+		expect(
+			mounters.some((path) => NOTE_FILES.includes(path)),
+			"no file of the note surface mounts a strip"
+		).toBe(true);
+		expect(mounters).toContain("/src/pdf/PdfInkTools.ts");
 	});
 
 	it("both strip-mounting surfaces ask the same rule, once each", () => {
@@ -445,22 +530,21 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// claim written about it. Exactly one call each, so a second gate on
 		// either surface - the beginning of a private answer to a shared
 		// question - fails here.
-		expect(occurrences(code("/src/inline/InkOverlay.ts"), "penToolsVisible(")).toBe(1);
-		expect(occurrences(code("/src/pdf/PdfInkController.ts"), "penToolsVisible(")).toBe(1);
-		expect(code("/src/pdf/PdfInkController.ts")).toContain('from "../inline/PenToolsMode"');
+		expect(noteCount("penToolsVisible("), "the note surface asks the strip rule other than once").toBe(1);
+		expect(occurrences(code("/src/pdf/PdfInkTools.ts"), "penToolsVisible(")).toBe(1);
+		expect(code("/src/pdf/PdfInkTools.ts")).toContain('from "../inline/PenToolsMode"');
 	});
 
 	it("the pdf surface never calls setInking or closeInkSliders directly", () => {
 		// This is the actual bug: PdfInkController had zero calls to either
 		// before this slice. Any direct call re-introduced here recreates it.
 		// Named as well as swept, so that an allowlist entry cannot void it.
-		const pdfInkControllerSrc = code("/src/pdf/PdfInkController.ts");
-		expect(occurrences(pdfInkControllerSrc, "setInking(")).toBe(0);
-		expect(occurrences(pdfInkControllerSrc, "closeInkSliders(")).toBe(0);
+		expect(pdfCount("setInking(")).toBe(0);
+		expect(pdfCount("closeInkSliders(")).toBe(0);
 	});
 
 	it("the note surface never calls setInking directly", () => {
-		expect(occurrences(code("/src/inline/InkOverlay.ts"), "setInking(")).toBe(0);
+		expect(noteCount("setInking("), "the note surface calls setInking directly").toBe(0);
 	});
 
 	it("the note surface's only direct closeInkSliders call is the named file-switch exception", () => {
@@ -471,11 +555,15 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// fail as surely as adding a call does, and blanking comments here would
 		// have quietly voided that. The pair is what makes it sound - the count
 		// proves a real call exists, the regex proves the reason sits against it.
-		expect(occurrences(code("/src/inline/InkOverlay.ts"), "closeInkSliders(")).toBe(1);
-		// \r?\n rather than a literal newline: the tree is CRLF.
-		expect(raw("/src/inline/InkOverlay.ts")).toMatch(
-			/\/\/ A fresh note starts reading, so the strip starts as the pill\.\r?\n\s*this\.mobileTools\?\.closeInkSliders\(\);/
-		);
+		expect(noteCount("closeInkSliders("), "the note surface's direct closeInkSliders calls are not exactly one").toBe(1);
+		// \r?\n rather than a literal newline: the tree is CRLF. Read in each of
+		// the note surface's files, since the call may live in any of them.
+		const reason =
+			/\/\/ A fresh note starts reading, so the strip starts as the pill\.\r?\n\s*this\.mobileTools\?\.closeInkSliders\(\);/;
+		expect(
+			NOTE_FILES.some((path) => reason.test(raw(path))),
+			"the reason for the note surface's one direct closeInkSliders call is gone"
+		).toBe(true);
 	});
 
 	it("no pen-claimed surface reclaims the keyboard by hand", () => {
@@ -485,8 +573,8 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// `focusClaimedPenEditor` (InlineFocus.ts, a CodeMirror view), the pdf
 		// through `stripPenFocus` here (a root element). A raw `.focus(`
 		// reappearing in either file is the shape of the bug coming back.
-		expect(occurrences(code("/src/inline/InkOverlay.ts"), ".focus(")).toBe(0);
-		expect(occurrences(code("/src/pdf/PdfInkController.ts"), ".focus(")).toBe(0);
+		expect(noteCount(".focus("), "the note surface reclaims the keyboard by hand").toBe(0);
+		expect(pdfCount(".focus(")).toBe(0);
 	});
 
 	it("both strip-driving surfaces import the shared pair", () => {
@@ -497,14 +585,25 @@ describe("strip pen chrome — one shared place, not two", () => {
 		// This one stays named rather than swept for the same reason: it
 		// asserts a PRESENCE, and no scan can demand every file in the tree
 		// import a module.
-		expect(code("/src/inline/InkOverlay.ts")).toContain('from "./StripPenChrome"');
-		expect(code("/src/pdf/PdfInkController.ts")).toContain('from "../inline/StripPenChrome"');
+		expect(
+			NOTE_FILES.some((path) => /from "(?:\.\/|\.\.\/inline\/)StripPenChrome"/.test(code(path))),
+			"no file of the note surface imports the shared pair"
+		).toBe(true);
+		expect(
+			PDF_FILES.some((path) => code(path).includes('from "../inline/StripPenChrome"')),
+			"no file of the pdf surface imports the shared pair"
+		).toBe(true);
 	});
 
 	it("the pdf surface takes its focus claim from the shared file", () => {
-		const pdfInkControllerSrc = code("/src/pdf/PdfInkController.ts");
-		expect(pdfInkControllerSrc).toContain("stripPenFocus(scroller)");
-		expect(pdfInkControllerSrc).toContain("armStripPenFocus(scroller)");
+		expect(
+			PDF_FILES.some((path) => code(path).includes("stripPenFocus(scroller)")),
+			"no file of the pdf surface claims focus through the shared file"
+		).toBe(true);
+		expect(
+			PDF_FILES.some((path) => code(path).includes("armStripPenFocus(scroller)")),
+			"no file of the pdf surface arms the focus claim through the shared file"
+		).toBe(true);
 	});
 });
 
@@ -521,8 +620,9 @@ describe("strip pen chrome — a comment is not an implementation", () => {
 		// carried on reading prose. This file is doc-heavy by design, so its
 		// own surfaces are a fair witness: blanking must remove characters and
 		// must not remove lines.
-		const rawText = raw("/src/inline/InkOverlay.ts");
-		const codeText = code("/src/inline/InkOverlay.ts");
+		const witness = NOTE_FILES[0]!;
+		const rawText = raw(witness);
+		const codeText = code(witness);
 		expect(codeText).not.toEqual(rawText);
 		expect(codeText.replace(/ /g, "").length).toBeLessThan(rawText.replace(/ /g, "").length);
 		expect(codeText).toHaveLength(rawText.length);

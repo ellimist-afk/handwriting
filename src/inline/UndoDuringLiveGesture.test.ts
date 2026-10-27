@@ -1,8 +1,9 @@
 /**
- * Undo pressed with an eraser drag or an insert-space drag in flight (the pen still down). Both change the store
- * live and record their own step only at the lift. The undo must meet the strokes as history recorded them, the
- * gesture is put back and ended, and the lift records nothing: the step the user just undid stays redoable, at the
- * place it was drawn. The lasso drag has the same cell in UndoDuringLassoDrag.test.ts.
+ * Undo pressed with an eraser drag or an insert-space drag in flight (the pen still down). The eraser changes the
+ * store live; the insert-space drag moves only its picture and moves the store at the lift. Both record their own
+ * step only at the lift. The undo must meet the strokes as history recorded them, the gesture is put back and
+ * ended, and the lift records nothing: the step the user just undid stays redoable, at the place it was drawn. The
+ * lasso drag has the same cell in UndoDuringLassoDrag.test.ts.
  *
  * The real applyInkOp, resetGestureState and the gestures' lift methods (endPenGesture's erase branch, spaceUp),
  * with CodeMirror history over the real store; host I/O in memory. The router is a stand-in that records being let go.
@@ -126,9 +127,8 @@ it("Ctrl+Z during an insert-space drag: the drag is put back and ended, and the 
 	o.spacePlan = { y: -5, from: 4, lineHeight: 24, text: false, doc: (o.view.state as EditorState).doc };
 	o.spaceLineY = -5;
 	o.spaceIds = ["T"];
-	inlineInk.moveStrokes(r.path, ["T"], 0, 30);
 	o.spaceTotalDy = 30;
-	expect(r.at("T").y, "precondition: the drag moved T live").toBe(30);
+	expect(r.at("T").y, "the drag moves only its picture: T is where it was drawn until the lift").toBe(0);
 
 	expect(r.run(undo)).toBe(true); // undoes the draw of T
 	expect(r.ids()).toEqual(["S"]);

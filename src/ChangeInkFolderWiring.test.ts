@@ -1,5 +1,5 @@
 /**
- * The WIRING of `changeInkFolder` (main.ts) - which callback goes in which
+ * The WIRING of `changeInkFolder` (settings/PluginSettings.ts) - which callback goes in which
  * slot, and what each one actually touches.
  *
  * WHY THIS FILE EXISTS. `changeFolder` (InkFolder.ts) is well covered and so
@@ -13,7 +13,7 @@
  * pieces were tested; the assembly moves someone's entire ink folder.
  *
  * HOW IT RUNS THE REAL CODE WITHOUT A PRODUCTION SEAM. `src/main.ts` cannot
- * be imported (it constructs a plugin) and must not be edited from here. So the method's own source is sliced out of `main.ts?raw` between
+ * be imported (it constructs a plugin) and must not be edited from here. So the method's own source is sliced out of `settings/PluginSettings.ts?raw` between
  * verbatim anchors and executed with its collaborators injected, exactly the
  * technique `LiveReloadTestHarness.ts` already uses for the live-reload poll.
  * Every boundary below is asserted, so a rename or a moved anchor fails this
@@ -29,15 +29,15 @@
 
 import { transformSync } from "esbuild";
 import { describe, expect, it } from "vitest";
-import mainSource from "./main.ts?raw";
+import settingsSource from "./settings/PluginSettings.ts?raw";
 import { SYNC_ALL_TYPES_HINT } from "./main";
 import { inkFolderSyncs, normalizeInkFolder } from "./persistence/InkFolder";
 
 // ---- the slice, fail-closed ------------------------------------------------
 
-const source = mainSource.replace(/\r\n/g, "\n");
-const START = "\tasync changeInkFolder(raw: string): Promise<void> {";
-const END = "\n\tprivate async loadSettings(";
+const source = settingsSource.replace(/\r\n/g, "\n");
+const START = "\tasync function changeInkFolder(this: HandwritingPlugin, raw: string): Promise<void> {";
+const END = "\n\tasync function loadSettings(";
 expect(source.split(START), "changeInkFolder's declaration line moved").toHaveLength(2);
 expect(source.split(END), "the method after changeInkFolder was renamed").toHaveLength(2);
 const bodyStart = source.indexOf(START) + START.length;

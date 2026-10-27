@@ -34,7 +34,10 @@ const OBSIDIAN_CAMERA_CSS = readFileSync(fileURLToPath(new URL("./noteViewportCa
 
 declare const process: { env: Record<string, string | undefined> };
 
-/** HW_PAPER_PAN_PLANT_UNCONDITIONAL=1: the paper pan writer writes on every call, changed or not (ZERO WRITES goes red). */
+/**
+ * HW_PAPER_PAN_PLANT_UNCONDITIONAL=1: the paper pan writer writes on every call, changed or not (AT REST, UNCHANGED goes
+ * red). Not ZERO WRITES: on a preview frame the writer hands the pan to the preview paper before the guard is reached.
+ */
 const UNCONDITIONAL = { from: "\t\tif (last ? last.x === ax && last.y === ay : !ax && !ay) return;\n", to: "" };
 
 beforeAll(async () => {
@@ -44,7 +47,7 @@ beforeAll(async () => {
 		bundle: true, write: false, format: "iife", platform: "browser",
 		alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: process.env.HW_PAPER_PAN_PLANT_UNCONDITIONAL ? [{ name: "paper-pan-unconditional", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlayPaperPinch\.ts$/ }, args => {
 				const text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
 				if (text.split(UNCONDITIONAL.from).length !== 2) throw new Error("unconditional plant: anchor not found once");
 				planted++;
@@ -358,6 +361,45 @@ it("ZERO WRITES: a pinch writes no paper property on any preview frame, and its 
 			const planted = await pinchWriteProbe(p, "paper", geometricRatios(0.85 / 0.9), plant);
 			expect(plant === "preview" ? planted.previewWrites : planted.commitPitchPhase, `positive control: the planted ${plant} write was not counted (finalZoom=${planted.finalZoom})`).toBe(1);
 		}
+	} finally {
+		await p.close();
+	}
+});
+
+/**
+ * AT REST, UNCHANGED: once a pinch has settled and the preview paper is down, the scroller carries the paper again, and
+ * the paper pan writer called with the pan where it already stands writes neither of the scroller's two pan properties.
+ * Two calls in a row; the second is the one counted, so the first may settle whatever the gesture left.
+ */
+it("AT REST, UNCHANGED: after a settle, a paper pan write with the pan unchanged writes no scroller pan property", async () => {
+	const p = await browser.newPage();
+	try {
+		await mountPaper(p);
+		await p.evaluate(() => (window as any).edgeAudit.commit("paper", 0.9));
+		await pinchWriteProbe(p, "paper", geometricRatios(0.85 / 0.9), "none");
+		await p.evaluate(() => (window as any).viewportFixture.rest());
+		const r = await p.evaluate(() => {
+			const overlay = (window as any).viewportFixture.overlay("paper");
+			const sst = (document.querySelector(".cm-scroller") as HTMLElement).style;
+			let calls = 0;
+			const realSet = sst.setProperty.bind(sst), realRemove = sst.removeProperty.bind(sst);
+			(sst as any).setProperty = (name: string, value: string, priority?: string) => { if (name.startsWith("--handwriting-paper-pan-")) calls++; return realSet(name, value, priority ?? ""); };
+			(sst as any).removeProperty = (name: string) => { if (name.startsWith("--handwriting-paper-pan-")) calls++; return realRemove(name); };
+			try {
+				const preview = !!overlay.pinchPreview || !!overlay.previewPaperEl;
+				overlay.writePaperPan();
+				const first = calls;
+				calls = 0;
+				overlay.writePaperPan();
+				return { preview, first, second: calls, zoom: (window as any).viewportFixture.snap("paper").state.zoom as number };
+			} finally {
+				(sst as any).setProperty = realSet; (sst as any).removeProperty = realRemove;
+			}
+		});
+		// eslint-disable-next-line no-console
+		console.log("PAPER-PAN-AT-REST " + JSON.stringify(r));
+		expect(r.preview, "premise: the settle has ended the preview, so the scroller carries the paper").toBe(false);
+		expect(r.second, "the second write, the pan unchanged since the first, writes no scroller pan property").toBe(0);
 	} finally {
 		await p.close();
 	}

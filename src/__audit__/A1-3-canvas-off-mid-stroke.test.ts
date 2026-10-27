@@ -33,7 +33,7 @@ function overlay() {
 		canvasMode: true, // the note was a canvas note, zoomed
 		pinchScaleNow: 1.5,
 		router: null,
-		builder: { finishReleaseFiltered: () => [] }, // the stroke in flight
+		builder: { flushRaw: () => undefined, finishReleaseFiltered: () => [] }, // the stroke in flight
 		strokePenGesture: true,
 		strokeRawMax: 0,
 		mouseStroke: false,

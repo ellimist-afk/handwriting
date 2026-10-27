@@ -274,19 +274,25 @@ export function rowsOf(strokes: readonly InkStroke[]): InkRow[] {
 	// sits directly OVER one letter of the row beneath it, and is closer to
 	// that row than a line of writing would be. Two genuine rows never match
 	// all three: they are the same width as each other, not a fraction of it.
+	//
+	// Every mark is judged against its host as the first pass left it, kept in
+	// `first`, so a row that already joined does not make the host taller or
+	// wider for the next one and let a chain of marks pull in a line too far.
+	const first = new Map(rows.map((r) => [r, { top: r.top, bottom: r.bottom, span: xSpan(r.ids, spans) }]));
 	for (let i = rows.length - 2; i >= 0; i--) {
 		const mark = rows[i]!;
 		const host = rows[i + 1]!;
-		const gap = host.top - mark.bottom;
-		if (gap < 0 || gap > host.bottom - host.top) continue;
-		const m = xSpan(mark.ids, spans);
-		const h = xSpan(host.ids, spans);
+		const base = first.get(host)!;
+		const gap = base.top - mark.bottom;
+		if (gap < 0 || gap > base.bottom - base.top) continue;
+		const m = first.get(mark)!.span;
+		const h = base.span;
 		if (m === null || h === null) continue;
 		const narrow = m.right - m.left <= (h.right - h.left) * 0.34;
 		const over = m.left >= h.left - 1 && m.right <= h.right + 1;
 		if (!narrow || !over) continue;
 		host.ids.push(...mark.ids);
-		host.top = mark.top;
+		host.top = Math.min(host.top, mark.top);
 		rows.splice(i, 1);
 	}
 	return rows;
@@ -381,57 +387,66 @@ function groupsOf(extents: readonly Extent[]): Group[] {
 /** The second pass of localRowsOf: floating marks onto their hosts. Groups in
  * (top, left) order; they are copied, never changed. */
 function withMarks(groups: readonly Group[]): {rows: InkRow[]; spans: {left: number; right: number}[]} {
-	const rows=groups.map((row,ord)=>({...row,ids:[...row.ids],ord}));
+	// `g` is the row's first-pass group, the only geometry a mark or a host is
+	// judged by; top, left, right and ids grow as the row takes marks, for the
+	// row it reports.
+	const rows=groups.map((g,ord)=>({g,ord,top:g.top,left:g.left,right:g.right,ids:[...g.ids]}));
 	// A floating mark chooses the nearest eligible LOCAL host below it,
 	// regardless of interleaved groups in another column. The height-relative
 	// width/overhang allowance also handles a dot above a lone vertical stem.
 	//
+	// A host is judged by its own group, never by the marks it has taken. A
+	// host judged grown was taller and wider after every mark, which made the
+	// next row above it a mark too: on a heavy page one low wide drawing took
+	// row after row up the page, and a note of 19,736 strokes became one row
+	// from near its top to near its bottom, so a divider anywhere moved or
+	// kept that whole row. Judged by its own group, a host takes only what
+	// lies within its own height above its own top.
+	//
 	// A host starts at or below the mark (gap >= 0) and no further below it
 	// than its own height, so only rows whose top lies within the tallest
-	// row's height under the mark can qualify. `byTop` keeps the live rows
-	// ordered by top, so each mark checks that window instead of every row:
-	// the all-rows filter per mark was quadratic, 30-80 ms on a note of one
-	// to two thousand written lines, after every ink change. The choice is
-	// the one the filter-and-sort made: nearest gap, then centre offset, then
-	// left, then the earlier row (`ord`, the stable sort's tie).
+	// group's height under the mark can qualify. `byTop` keeps the live rows
+	// ordered by their group's top, so each mark checks that window instead
+	// of every row: the all-rows filter per mark was quadratic, 30-80 ms on a
+	// note of one to two thousand written lines, after every ink change. The
+	// choice is the one the filter-and-sort made: nearest gap, then centre
+	// offset, then left, then the earlier row (`ord`, the stable sort's tie).
 	const byTop=[...rows];
 	const firstFrom=(y:number)=>{
 		let lo=0,hi=byTop.length;
-		while(lo<hi){const mid=(lo+hi)>>1;if(byTop[mid]!.top<y)lo=mid+1;else hi=mid;}
+		while(lo<hi){const mid=(lo+hi)>>1;if(byTop[mid]!.g.top<y)lo=mid+1;else hi=mid;}
 		return lo;
 	};
 	let tallest=0;
-	for(const row of rows)tallest=Math.max(tallest,row.bottom-row.top);
+	for(const {g} of rows)tallest=Math.max(tallest,g.bottom-g.top);
 	for(const mark of [...rows].reverse()){
-		let host:(typeof rows)[number]|null=null,hostAt=-1;
-		for(let i=firstFrom(mark.bottom);i<byTop.length;i++){
-			const cand=byTop[i]!;
-			if(cand.top-mark.bottom>tallest)break;
+		const m=mark.g;
+		let host:(typeof rows)[number]|null=null;
+		for(let i=firstFrom(m.bottom);i<byTop.length;i++){
+			const cand=byTop[i]!,c=cand.g;
+			if(c.top-m.bottom>tallest)break;
 			if(cand===mark)continue;
-			const height=cand.bottom-cand.top,gap=cand.top-mark.bottom;
-			if(!(height>0 && gap>=0 && gap<=height && mark.bottom-mark.top<=height*.34 &&
-				mark.right-mark.left<=Math.max(cand.right-cand.left,height*.25)*.34 &&
-				mark.left>=cand.left-height*.1 && mark.right<=cand.right+height*.1))continue;
+			const height=c.bottom-c.top,gap=c.top-m.bottom;
+			if(!(height>0 && gap>=0 && gap<=height && m.bottom-m.top<=height*.34 &&
+				m.right-m.left<=Math.max(c.right-c.left,height*.25)*.34 &&
+				m.left>=c.left-height*.1 && m.right<=c.right+height*.1))continue;
 			if(host){
-				const order=(cand.top-mark.bottom)-(host.top-mark.bottom)||
-					Math.abs(cand.left+cand.right-mark.left-mark.right)-Math.abs(host.left+host.right-mark.left-mark.right)||
-					cand.left-host.left||cand.ord-host.ord;
+				const h=host.g;
+				const order=(c.top-m.bottom)-(h.top-m.bottom)||
+					Math.abs(c.left+c.right-m.left-m.right)-Math.abs(h.left+h.right-m.left-m.right)||
+					c.left-h.left||cand.ord-host.ord;
 				if(!(order<0))continue;
 			}
-			host=cand;hostAt=i;
+			host=cand;
 		}
 		if(!host)continue;
 		host.ids.push(...mark.ids);host.top=mark.top;
 		host.left=Math.min(host.left,mark.left);host.right=Math.max(host.right,mark.right);
-		tallest=Math.max(tallest,host.bottom-host.top);
-		// The host's top moved up to the mark's: take it out and put it back
-		// in order, then drop the mark, which has no other place to be.
-		byTop.splice(hostAt,1);
-		byTop.splice(firstFrom(host.top),0,host);
+		// Drop the mark, which has no other place to be and hosts nothing now.
 		byTop.splice(byTop.indexOf(mark),1);
 	}
 	byTop.sort((a,b)=>a.top-b.top||a.left-b.left||a.ord-b.ord);
-	return {rows:byTop.map(({top,bottom,ids})=>({top,bottom,ids})),spans:byTop.map(({left,right})=>({left,right}))};
+	return {rows:byTop.map(({top,g,ids})=>({top,bottom:g.bottom,ids})),spans:byTop.map(({left,right})=>({left,right}))};
 }
 
 /**

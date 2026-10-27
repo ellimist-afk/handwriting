@@ -71,7 +71,8 @@
 
 import { describe, expect, it } from "vitest";
 import { codeOnly } from "../CodeOnly";
-import { INK_SURFACES, INLINE_PEN_CALLBACKS, type InkSurfaceId } from "./InkSurfaces";
+import { INK_SURFACES, INLINE_PEN_CALLBACKS, type InkSurface, type InkSurfaceId } from "./InkSurfaces";
+import { installedParts, ledgerDiff, surfaceCode as surfaceCodeOfScan, surfaceFiles, unlistedSiblings } from "./surfaceFiles.testutil";
 
 const ALL_TS = import.meta.glob("/src/**/*.ts", {
 	query: "?raw",
@@ -103,6 +104,14 @@ function surfaceText(file: string): string {
 	const text = ALL_TS[file];
 	if (text === undefined) throw new Error(`ink surface file not in the source scan: ${file}`);
 	return codeOnly(text);
+}
+/**
+ * A surface's code across all of its files, comments blanked. A split moves
+ * code out of `file` without changing what the surface does, so the rules
+ * read the whole surface. Throws if any of the files is missing.
+ */
+function surfaceCode(surface: InkSurface): string {
+	return surfaceFiles(surface.id).map(surfaceText).join("\n");
 }
 
 const ALL_IDS = INK_SURFACES.map((s) => s.id);
@@ -697,8 +706,8 @@ const RULES: readonly SurfaceRule[] = [
 ];
 
 describe("ink surfaces - the registry describes the tree it claims to", () => {
-	it.each(INK_SURFACES)("$id: its file is where it says it is", (surface) => {
-		expect(surfaceText(surface.file).length).toBeGreaterThan(0);
+	it.each(INK_SURFACES)("$id: its files are where it says they are", (surface) => {
+		for (const file of surfaceFiles(surface.id)) expect(surfaceText(file).length, file).toBeGreaterThan(0);
 	});
 
 	it.each(INK_SURFACES)("$id: constructs the router family it is filed under", (surface) => {
@@ -707,7 +716,7 @@ describe("ink surfaces - the registry describes the tree it claims to", () => {
 		// seven callbacks to two surfaces that then answer independently, and
 		// `PointerRouter` does not. A surface filed under the wrong one would
 		// be exempted from rules it actually needs.
-		const text = surfaceText(surface.file);
+		const text = surfaceCode(surface);
 		if (surface.router === "none") {
 			// The demo wires pointerdown/move/up on the canvas itself. Filed
 			// under no family, so the assertion inverts: it must construct
@@ -757,7 +766,7 @@ describe("ink surfaces - the shared callbacks are still wired twice", () => {
 	});
 
 	it.each(inline)("$id wires every shared callback itself", (surface) => {
-		const text = surfaceText(surface.file);
+		const text = surfaceCode(surface);
 		for (const cb of INLINE_PEN_CALLBACKS) {
 			expect(text, `${surface.id} does not wire ${cb}`).toContain(`${cb}:`);
 		}
@@ -805,7 +814,7 @@ describe("ink surfaces - each rule reaches every surface that carries it", () =>
 		for (const id of rule.on) {
 			const surface = INK_SURFACES.find((s) => s.id === id)!;
 			it(`${rule.rule} - present on ${id}`, () => {
-				const text = surfaceText(surface.file);
+				const text = surfaceCode(surface);
 				const found = rule.markers.filter((m) => text.includes(m));
 				expect(
 					found.length,
@@ -897,7 +906,7 @@ describe("ink surfaces - visibility and hardware are separate claims", () => {
 			// buttons that stay dark for a pen user unless mouse ink is on.
 			// That is precisely what the pdf did between `cff850d`, which
 			// split the flags on the note surface, and `77454fc`.
-			const lines = codeLines(surfaceText(surface.file));
+			const lines = codeLines(surfaceCode(surface));
 			const visibility = lines.filter((l) => l.includes(VISIBILITY_CLAIM)).length;
 			const hardware = lines.filter((l) => l.includes(HARDWARE_CLAIM)).length;
 			if (visibility === 0 && hardware === 0) return;
@@ -921,7 +930,7 @@ describe("ink surfaces - visibility and hardware are separate claims", () => {
 		// this cannot see - into a helper, or a branch above - the honest
 		// response is to re-rule this assertion in the open, not to widen it
 		// until it passes.
-		const claims = codeLines(surfaceText(surface.file)).filter((l) => l.includes(HARDWARE_CLAIM));
+		const claims = codeLines(surfaceCode(surface)).filter((l) => l.includes(HARDWARE_CLAIM));
 		const ungated = claims.filter((l) => !/pointerType === "pen"\)\s*markPenHardwareSeen\(/.test(l));
 		expect(
 			ungated,
@@ -937,7 +946,7 @@ describe("ink surfaces - visibility and hardware are separate claims", () => {
 		// number and make somebody say why.
 		const counts = stripSurfaces.map((s) => ({
 			id: s.id,
-			sites: codeLines(surfaceText(s.file)).filter((l) => l.includes(HARDWARE_CLAIM)).length,
+			sites: codeLines(surfaceCode(s)).filter((l) => l.includes(HARDWARE_CLAIM)).length,
 		}));
 		expect(counts).toEqual([
 			{ id: "note", sites: 2 },
@@ -958,10 +967,18 @@ describe("ink surfaces - the registry is derived from the tree, not maintained b
 	// time, and the suite was green. It got added by hand because nothing
 	// failed - the same opt-in blindness that hid a whole surface from
 	// StripPenChrome.test.ts for that file's entire life.
-	const built = Object.keys(ALL_TS)
-		.filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".d.ts"))
-		.filter((f) => codeOnly(ALL_TS[f]!).includes("new StrokeBuilder("))
-		.sort();
+	// A split moves code out of a surface's `file` into its `parts`, so a file
+	// that builds a stroke counts for the surface whose file or parts name it.
+	const surfaceOf = (f: string): string =>
+		INK_SURFACES.find((s) => surfaceFiles(s.id).includes(f))?.file ?? f;
+	const built = [
+		...new Set(
+			Object.keys(ALL_TS)
+				.filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".d.ts"))
+				.filter((f) => codeOnly(ALL_TS[f]!).includes("new StrokeBuilder("))
+				.map(surfaceOf)
+		),
+	].sort();
 
 	it("every file that builds a stroke is in INK_SURFACES", () => {
 		const listed = INK_SURFACES.map((s) => s.file).sort();
@@ -973,7 +990,7 @@ describe("ink surfaces - the registry is derived from the tree, not maintained b
 	it("every surface in INK_SURFACES really builds a stroke", () => {
 		for (const s of INK_SURFACES) {
 			expect(
-				codeOnly(surfaceRaw(s.file)).includes("new StrokeBuilder("),
+				surfaceFiles(s.id).some((f) => codeOnly(surfaceRaw(f)).includes("new StrokeBuilder(")),
 				`${s.file} is listed as a surface but constructs no StrokeBuilder`
 			).toBe(true);
 		}
@@ -1003,6 +1020,138 @@ describe("ink surfaces - the registry is derived from the tree, not maintained b
 		expect(buildsOne.filter((f) => !mounts.includes(f))).toEqual([
 			"/src/inline/FoldOrderControl.ts",
 		]);
+	});
+});
+
+describe("ink surfaces - the ledger's parts are held to the tree, not to memory", () => {
+	// THE GAP THIS CLOSES. The block above holds `file` to the tree and the
+	// "files are where it says" cell holds every LISTED file to existing, but
+	// nothing held the other direction for `parts`: a split part that never got
+	// its ledger line left every rule that reads `surfaceFiles()` blind to that
+	// file's code. Deleting the entry of a real split part left the whole
+	// suite and tsc green, twice.
+	//
+	// THE RULE. A split moves methods out of the surface file and installs
+	// them on the class prototype (`installX(Class.prototype)`, each `installX`
+	// imported from its part), so the install lines in `file` ARE the list of
+	// parts. The ledger's `parts` must equal that list, both ways. It is read
+	// from the surface file's own code, so a split that follows the house
+	// pattern is held with no extra step.
+	//
+	// STANDING EXCEPTIONS. A part with no install line (plain functions that the
+	// surface file imports) cannot be derived. It gets one line in
+	// PARTS_WITHOUT_INSTALL with the reason it has none, and
+	// the name rule below still requires it to be listed.
+	const PARTS_WITHOUT_INSTALL: Readonly<Record<string, string>> = {
+		"/src/slides/SlidesSections.ts": "pure functions the slides surface imports and re-exports; nothing is installed on SlidesDeck",
+		"/src/slides/SlidesStrokeSession.ts": "pure stroke session state machine the slides surface imports and re-exports; nothing is installed on SlidesDeck",
+		"/src/slides/SlidesContact.ts": "pure contact and eraser helpers the slides surface imports and re-exports; nothing is installed on SlidesDeck",
+		"/src/slides/SlidesController.ts": "module-level controller the slides surface re-exports; nothing is installed on SlidesDeck",
+		"/src/inline/InkOverlayToolState.ts": "module tool and setting state the note surface imports and re-exports; nothing is installed on InkOverlayPlugin",
+		"/src/inline/InkOverlayRegistry.ts": "module registry the note surface imports and re-exports; nothing is installed on InkOverlayPlugin",
+		"/src/inline/InkOverlayConstants.ts": "module constants and small helpers the note surface imports and re-exports; nothing is installed on InkOverlayPlugin",
+	};
+	const treeFiles = Object.keys(ALL_TS);
+
+	it.each(INK_SURFACES)("$id: parts are exactly the files its install lines name", (surface) => {
+		const derived = installedParts(surfaceText(surface.file), surface.file);
+		const { missing, ghost } = ledgerDiff(derived, surface.parts ?? [], PARTS_WITHOUT_INSTALL);
+		expect(missing, `${surface.id}: installed on the prototype by ${surface.file} but not in parts`).toEqual([]);
+		expect(ghost, `${surface.id}: in parts, but no install line names it and it has no exception`).toEqual([]);
+	});
+
+	// BACKSTOP. A part that is not an install, or a surface whose install lines
+	// were rewritten, still has to be listed when it is named after the surface
+	// file (InkOverlayX.ts beside InkOverlay.ts). Blind to a differently named
+	// file, which is why the install rule is the primary one.
+	it.each(INK_SURFACES)("$id: every file named like the surface file is listed", (surface) => {
+		expect(
+			unlistedSiblings(treeFiles, surfaceFiles(surface.id), surface.file),
+			`${surface.id}: a file named like ${surface.file} is in the tree and not in the ledger`
+		).toEqual([]);
+	});
+
+	it("the install rule is not vacuous: the note surface installs parts", () => {
+		const note = INK_SURFACES.find((s) => s.id === "note")!;
+		const derived = installedParts(surfaceText(note.file), note.file);
+		expect(derived.length).toBeGreaterThan(0);
+		expect(derived.length).toBe((note.parts ?? []).filter((part) => !(part in PARTS_WITHOUT_INSTALL)).length);
+	});
+
+	// FIXTURES. Pin the helpers against fail-open, the way the comment
+	// stripper's four are pinned below: a helper that returned [] would make
+	// both tree cells above pass by doing nothing.
+	describe("fixtures", () => {
+		const SRC = [
+			'import { installA } from "./FooA";',
+			'import { installB as installBee, type Other } from "./sub/FooB";',
+			'import { installC } from "../up/FooC.ts";',
+			"// installGhost(Foo.prototype);",
+			"/* installGhost2(Foo.prototype); */",
+			"installA(Foo.prototype);",
+			"installBee(Foo.prototype);",
+			"installC(Foo.prototype);",
+		].join("\n");
+
+		it("installedParts resolves each install call through the file's imports, comments blanked", () => {
+			expect(installedParts(codeOnly(SRC), "/src/x/Foo.ts")).toEqual([
+				"/src/up/FooC.ts",
+				"/src/x/FooA.ts",
+				"/src/x/sub/FooB.ts",
+			]);
+		});
+
+		it("installedParts throws on an install call with no import, rather than skipping it", () => {
+			expect(() => installedParts("installLost(Foo.prototype);", "/src/x/Foo.ts")).toThrow(/installLost/);
+		});
+
+		it("ledgerDiff names a missing part and a ghost part, and honours an exception", () => {
+			const derived = ["/src/x/FooA.ts", "/src/x/sub/FooB.ts"];
+			expect(ledgerDiff(derived, ["/src/x/FooA.ts", "/src/x/Gone.ts"])).toEqual({
+				missing: ["/src/x/sub/FooB.ts"],
+				ghost: ["/src/x/Gone.ts"],
+			});
+			expect(ledgerDiff(derived, [...derived, "/src/x/Plain.ts"], { "/src/x/Plain.ts": "plain functions" })).toEqual({
+				missing: [],
+				ghost: [],
+			});
+			expect(ledgerDiff(derived, derived)).toEqual({ missing: [], ghost: [] });
+		});
+
+		it("surfaceCode (the shared helper) joins the ledger's files in order, blanks comments, normalises CRLF, and throws on a missing file", () => {
+			const files = surfaceFiles("note");
+			expect(files.length, "premise: the note surface has a file and parts").toBeGreaterThan(1);
+			const scan: Record<string, string> = {};
+			files.forEach((f, i) => {
+				scan[f] = `// ${f}\r\nconst marker${i} = 1;`;
+			});
+			const out = surfaceCodeOfScan("note", scan);
+			expect(out).not.toContain("\r");
+			const at = files.map((f, i) => {
+				expect(out, `marker of ${f}`).toContain(`const marker${i} = 1;`);
+				expect(out, `comment of ${f} blanked`).not.toContain(f);
+				return out.indexOf(`const marker${i} = 1;`);
+			});
+			expect(at, "ledger order").toEqual([...at].sort((a, b) => a - b));
+			const last = files[files.length - 1]!;
+			const missing = { ...scan };
+			delete missing[last];
+			expect(() => surfaceCodeOfScan("note", missing)).toThrow(last);
+		});
+
+		it("unlistedSiblings flags a same-stem file and skips tests, testutils, other dirs and other stems", () => {
+			const tree = [
+				"/src/x/Foo.ts",
+				"/src/x/FooA.ts",
+				"/src/x/FooZ.ts",
+				"/src/x/FooA.test.ts",
+				"/src/x/FooA.testutil.ts",
+				"/src/x/Other.ts",
+				"/src/y/FooQ.ts",
+			];
+			expect(unlistedSiblings(tree, ["/src/x/Foo.ts", "/src/x/FooA.ts"], "/src/x/Foo.ts")).toEqual(["/src/x/FooZ.ts"]);
+			expect(unlistedSiblings(tree, ["/src/x/Foo.ts", "/src/x/FooA.ts", "/src/x/FooZ.ts"], "/src/x/Foo.ts")).toEqual([]);
+		});
 	});
 });
 

@@ -171,7 +171,7 @@ it("6: deltaMode 1 is lines, so the same gesture in line units lands on the same
 	}
 }, 120_000);
 
-it("8: the same travel on a touchpad zooms 1.5 times as far as on a mouse wheel", async () => {
+it("8: the same travel on a touchpad zooms 2.5 times as far as on a mouse wheel", async () => {
 	const page = await mounted();
 	try {
 		// 25 events of 4 px: the stream a precision touchpad sends. Same -100 px of travel as the
@@ -185,9 +185,9 @@ it("8: the same travel on a touchpad zooms 1.5 times as far as on a mouse wheel"
 			const wheel = await run(mouse, -100, 1);
 			report.push({ cell: "mouse", ...wheel });
 			expect(wheel.final.k, "the mouse run moved off 0.002").toBeCloseTo(Math.exp(100 * WHEEL_ZOOM_K), 2);
-			// The claim itself, in log ratio, which is where "1.5 times as far" is a straight line.
+			// The claim itself, in log ratio, which is where "2.5 times as far" is a straight line.
 			const gain = Math.log(pad.final.k) / Math.log(wheel.final.k);
-			expect(gain, `the touchpad run was ${gain.toFixed(3)} times the mouse run, not 1.5`).toBeCloseTo(1.5, 1);
+			expect(gain, `the touchpad run was ${gain.toFixed(3)} times the mouse run, not 2.5`).toBeCloseTo(2.5, 1);
 		} finally {
 			await mouse.close();
 		}

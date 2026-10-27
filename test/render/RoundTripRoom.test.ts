@@ -231,9 +231,9 @@ const record: unknown[] = [];
  * with the setting off, whose parked scroll needs the re-pin as well as the release.
  */
 const PLANT = process.env.HW_ROUNDTRIP_PLANT_NO_BAND_RELEASE
-	? { name: "no-band-release", edits: [["|| releaseAfterCommit) this.releaseBandMargin", "|| false) this.releaseBandMargin"]] as [string, string][] }
+	? { name: "no-band-release", file: /src[\\/]inline[\\/]InkOverlayBand\.ts$/, edits: [["|| releaseAfterCommit) this.releaseBandMargin", "|| false) this.releaseBandMargin"]] as [string, string][] }
 	: process.env.HW_ROUNDTRIP_PLANT_NO_BAND_SYNC
-	? { name: "no-band-sync", edits: [["if(this.syncBand()!==\"none\")this.handleResize();this.updateExtent", "this.updateExtent"]] as [string, string][] }
+	? { name: "no-band-sync", file: /src[\\/]inline[\\/]InkOverlayZoomApi\.ts$/, edits: [["if(this.syncBand()!==\"none\")this.handleResize();this.updateExtent", "this.updateExtent"]] as [string, string][] }
 	: null;
 
 beforeAll(async () => {
@@ -241,7 +241,7 @@ beforeAll(async () => {
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "roundTripRoomPage.ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: PLANT ? [{ name: "roundtrip-plant-" + PLANT.name, setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: PLANT.file }, args => {
 				let text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
 				for (const [from, to] of PLANT.edits) {
 					if (text.split(from).length !== 2) throw new Error("roundtrip plant: anchor not found once: " + from);

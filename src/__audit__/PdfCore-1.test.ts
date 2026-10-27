@@ -22,6 +22,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
+import claimsSource from "../pdf/PdfClaims.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { emptyPage, parsePage, serializePage, type PageData } from "../model/PageData";
@@ -33,24 +35,26 @@ import { installLiveReloadPoll } from "../testUtils/LiveReloadTestHarness";
 import type { InkStroke } from "../ink/Stroke";
 
 const source = mainSource.replace(/\r\n/g, "\n");
+const settingsSource = pluginSettingsSource.replace(/\r\n/g, "\n");
+const claims = claimsSource.replace(/\r\n/g, "\n");
 
 function sliceMethod(startMarker: string): string {
-	expect(source.split(startMarker)).toHaveLength(2);
-	const start = source.indexOf(startMarker);
-	const end = source.indexOf("\n\t}\n", start);
+	expect(claims.split(startMarker)).toHaveLength(2);
+	const start = claims.indexOf(startMarker);
+	const end = claims.indexOf("\n\t}\n", start);
 	expect(end).toBeGreaterThan(start);
-	return source.slice(start, end + 3);
+	return claims.slice(start, end + 3);
 }
 
 // --- production code, sliced verbatim ---------------------------------------
-const resolveText = sliceMethod("\tprivate async resolvePdfId(").replace(
-	"\tprivate async resolvePdfId(",
-	"async function resolvePdfId("
+const resolveText = sliceMethod("\tasync function resolvePdfId(this: HandwritingPlugin,").replace(
+	"\tasync function resolvePdfId(this: HandwritingPlugin,",
+	"async function resolvePdfId(this: HandwritingPlugin,"
 );
 expect(resolveText).toContain("(await this.store.readPdfPaths(cid))");
 expect(resolveText).toContain("await this.pdfStore.ensureLoaded(choice.id);");
-const headText = sliceMethod("\tprivate pdfHeadSource(file: TFile): HeadSource {").replace(
-	"\tprivate pdfHeadSource(",
+const headText = sliceMethod("\tfunction pdfHeadSource(this: HandwritingPlugin, file: TFile): HeadSource {").replace(
+	"\tfunction pdfHeadSource(",
 	"function pdfHeadSource("
 );
 const sliced = new Function(
@@ -59,12 +63,12 @@ const sliced = new Function(
 		"\nreturn { resolvePdfId, pdfHeadSource };"
 );
 
-// attachHost wiring (main.ts:5464-5471).
+// attachHost wiring (loadSettings, settings/PluginSettings.ts).
 const hostStartMarker = "\t\tthis.pdfStore.attachHost({";
-expect(source.split(hostStartMarker)).toHaveLength(2);
-const hostStart = source.indexOf(hostStartMarker);
-const hostEnd = source.indexOf("\n\t\t});\n", hostStart) + "\n\t\t});\n".length;
-const hostText = source.slice(hostStart, hostEnd);
+expect(settingsSource.split(hostStartMarker)).toHaveLength(2);
+const hostStart = settingsSource.indexOf(hostStartMarker);
+const hostEnd = settingsSource.indexOf("\n\t\t});\n", hostStart) + "\n\t\t});\n".length;
+const hostText = settingsSource.slice(hostStart, hostEnd);
 expect(hostText).toContain("load: (id, options) => this.store.load(id, options),");
 const installPdfHost = new Function(
 	"Notice",
@@ -74,17 +78,17 @@ const installPdfHost = new Function(
 
 // The pane sweep (main.ts:1364-1370).
 const sweepStart = "\t\tfor (const [root, controller] of [...this.pdfInk]) {\n\t\t\tif (seen.has(root) && root.isConnected) continue;\n";
-expect(source.split(sweepStart)).toHaveLength(2);
-const ss = source.indexOf(sweepStart);
-const se = source.indexOf("\n\t\t}\n", ss);
-const sweepCode = source.slice(ss, se + 4);
+expect(claims.split(sweepStart)).toHaveLength(2);
+const ss = claims.indexOf(sweepStart);
+const se = claims.indexOf("\n\t\t}\n", ss);
+const sweepCode = claims.slice(ss, se + 4);
 expect(sweepCode).toContain("controller.unmount();");
 expect(sweepCode).toContain("this.pdfIds.delete(root);");
 const runSweep = new Function("seen", transformSync(sweepCode, { loader: "ts", target: "es2022" }).code);
 
 // The committed-stroke sink shape (main.ts:1272-1280).
-expect(source).toContain("const next = applyOp(this.pdfStore.strokes(id), op);");
-expect(source).toContain("this.pdfStore.replaceAll(id, next);");
+expect(claims).toContain("const next = applyOp(this.pdfStore.strokes(id), op);");
+expect(claims).toContain("this.pdfStore.replaceAll(id, next);");
 
 // --- fixtures -----------------------------------------------------------------
 class ListingAdapter extends FakeAdapter {
@@ -232,6 +236,10 @@ describe("PdfCore-1: reopening a PDF after another device wrote its sidecar", ()
 	it("precondition: main.ts never forgets a PdfInkStore record or calls reloadExternal", () => {
 		expect(source).not.toMatch(/pdfStore\.forget\(/);
 		expect(source).not.toMatch(/pdfStore\.reloadExternal\(/);
+		expect(claims).not.toMatch(/pdfStore\.forget\(/);
+		expect(claims).not.toMatch(/pdfStore\.reloadExternal\(/);
+		expect(settingsSource).not.toMatch(/pdfStore\.forget\(/);
+		expect(settingsSource).not.toMatch(/pdfStore\.reloadExternal\(/);
 	});
 
 	it("control 1: a pane left open adopts the iPad revision through the poll, and the next stroke keeps it", async () => {

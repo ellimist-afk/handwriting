@@ -91,6 +91,23 @@ describe("decideWhatsNew", () => {
 		]);
 	});
 
+	it("1.4.24 notes are Alan's nine lines, character for character", () => {
+		// Alan wrote this text himself; the smiley and the lower
+		// case are his and are pinned as typed. Nine lines, in this order.
+		expect(RELEASE_NOTES["1.4.24"]).toEqual([
+			"big latency and performance patch. hope you guys enjoy -alan :)",
+			"many reading view ink fixes",
+			"slides fixes",
+			"pdf scroll fix",
+			"keyboard popup fix",
+			"export to pdf works",
+			"faster touchpad zoom + fixes",
+			"sync fixes",
+			"android click to erase setting added",
+		]);
+		expect(RELEASE_NOTES["1.4.24"]).toHaveLength(9);
+	});
+
 	it("1.3.10 -> 1.4.5 is five versions, but only the newest two show in full - this test used to pin all five (23 lines) at once, which is exactly the spam this feature exists to stop", () => {
 		// Measured against the shipped RELEASE_NOTES: 1.3.10 -> 1.4.5 is five
 		// versions (1.3.11, 1.4.1, 1.4.2, 1.4.4, 1.4.5). This test formerly

@@ -1,8 +1,9 @@
 /**
  * The ORIGIN-LINE observer, pinned - a WIRING guard, exactly like its sibling
- * `ContentResizeObserved.test.ts`, and for the same reason: the wiring lives
- * in `mount()` and `syncCamera()`, and fixturing `mount()` would buy a rig
- * that breaks whenever mount changes and would still not be an editor.
+ * `ContentResizeObserved.test.ts`: the wiring lives in `mount()` and
+ * `syncCamera()`, and both are RUN here, on a real overlay mounted all the
+ * way (`mountRig.test.util.ts`) with recording observers in place of the
+ * browser's.
  *
  * WHAT BROKE. 1.4.9 fixed the MEASUREMENT half of the Minimal defect:
  * `contentOriginLeft` reads the left edge of the text column rather than
@@ -35,14 +36,12 @@
  * at a fixed element, or arming it once instead of re-arming fails a test
  * instead of silently restoring a shipped defect.
  *
- * COMMENTS ARE BLANKED before every assertion, for the reason `CodeOnly.ts`
- * exists: the markers below are call shapes, and the doc comments in
- * `InkOverlay.ts` quote several of them verbatim.
+ * The wiring cells used to read `InkOverlay.ts` as text, cut by method
+ * header. They run the mounted overlay now, so a split that moves these
+ * methods to another file changes nothing here.
  */
 
-import { describe, expect, it } from "vitest";
-
-import { codeOnly } from "../CodeOnly";
+import { describe, expect, it, vi } from "vitest";
 
 // The behavioural half of this file drives the real `syncCamera` and the real
 // `originLineResized` off the prototype. The overlay reaches window's timers
@@ -51,50 +50,113 @@ import { codeOnly } from "../CodeOnly";
 (globalThis as { window?: unknown }).window = globalThis;
 
 import { Camera } from "../camera/Camera";
+import { contentOrigin, contentOriginLeft } from "./ContentOrigin";
 import { InkOverlayPlugin } from "./InkOverlay";
+import { type MountedOverlay, type RecordingObserver, type RigEl, mountOverlay, recordObservers } from "./mountRig.test.util";
 
-const ALL_TS = import.meta.glob("/src/**/*.ts", {
-	query: "?raw",
-	eager: true,
-	import: "default",
-}) as Record<string, string>;
-
-const OVERLAY = "/src/inline/InkOverlay.ts";
-const ORIGIN = "/src/inline/ContentOrigin.ts";
-
-/** Source with comments blanked. Throws on a rename rather than passing vacuously. */
-function code(path: string): string {
-	const text = ALL_TS[path];
-	if (text === undefined) throw new Error(`not in the source scan: ${path}`);
-	return codeOnly(text);
+/** A `.cm-line` in the mounted editor's content, at a left edge the test moves; counts its rect reads. */
+interface MountedLine {
+	el: RigEl;
+	setLeft(left: number): void;
+	reads(): number;
 }
 
-/**
- * The body of a block that starts at `start` and ends at the first `end`,
- * with line endings normalised so a CRLF checkout and a LF one probe the same
- * text. Both markers are ASSERTED rather than assumed: a slice to an
- * `indexOf` of -1 silently becomes "the rest of the file", and a probe that
- * matches the whole file passes no matter what the block actually says.
- */
-function block(source: string, start: string, end: string): string {
-	const text = source.replace(/\r\n/g, "\n");
-	const from = text.indexOf(start);
-	expect(from, `marker not found: ${start}`).toBeGreaterThanOrEqual(0);
-	const rest = text.slice(from);
-	const to = rest.indexOf(end);
-	expect(to, `block end not found after: ${start}`).toBeGreaterThanOrEqual(0);
-	return rest.slice(0, to);
+function addLine(m: MountedOverlay, left: number): MountedLine {
+	const el = m.contentDOM.createDiv({ cls: "cm-line" });
+	let x = left;
+	let reads = 0;
+	el.getBoundingClientRect = () => {
+		reads++;
+		return { left: x, top: 0, right: x + 400, bottom: 20, width: 400, height: 20, x, y: 0 };
+	};
+	return {
+		el,
+		setLeft(next: number) {
+			x = next;
+		},
+		reads: () => reads,
+	};
+}
+
+interface MountedWatch {
+	m: MountedOverlay;
+	o: Record<string, unknown> & { syncCamera(): void; scheduleRepaint(via?: string): void; originLine: unknown };
+	lines: MountedLine[];
+	/** Every MutationObserver the mount built. */
+	mutation: RecordingObserver[];
+	/** The ResizeObserver watching the line the overlay last recorded. Asserts there is exactly one. */
+	origin(): RecordingObserver;
+	add(left: number): MountedLine;
+	done(): void;
+}
+
+/** A real overlay, mounted with recording observers, with `.cm-line`s at the given lefts. */
+function mountWithLines(path: string, lefts: number[]): MountedWatch {
+	const observers = recordObservers();
+	let m: MountedOverlay;
+	try {
+		m = mountOverlay(path);
+	} catch (e) {
+		observers.restore();
+		throw e;
+	}
+	const o = m.o as MountedWatch["o"];
+	// The rig has no layout (its header says a test that wants layout brings
+	// its own). `syncCamera` stops before it records the column unless the
+	// container has a layout width and the view a scale, so give it the same
+	// numbers the prototype rig below uses.
+	Object.assign(m.container, { offsetWidth: 800, offsetHeight: 600 });
+	Object.assign(o.view as object, { scaleX: 1, scaleY: 1 });
+	const lines = lefts.map((left) => addLine(m, left));
+	return {
+		m,
+		o,
+		lines,
+		mutation: observers.mutation,
+		origin() {
+			expect(o.originLine, "the overlay records no watched line").toBeTruthy();
+			const on = observers.resize.filter((r) => r.watches(o.originLine));
+			expect(on, "no single ResizeObserver watches the line the overlay recorded").toHaveLength(1);
+			return on[0]!;
+		},
+		add: (left: number) => addLine(m, left),
+		done() {
+			try {
+				m.destroy();
+			} finally {
+				observers.restore();
+			}
+		},
+	};
+}
+
+/** The overlay's camera sync, repaint and resize entry points, spied on the instance. */
+function spyCamera(w: MountedWatch) {
+	const handleResize = vi.fn();
+	w.o.handleResize = handleResize;
+	return {
+		syncCamera: vi.spyOn(w.o, "syncCamera"),
+		scheduleRepaint: vi.spyOn(w.o, "scheduleRepaint").mockImplementation(() => {}),
+		handleResize,
+	};
 }
 
 describe("the origin-line resize observer", () => {
 	it("watches the element the origin scan measured, not a fixed one", () => {
-		// The whole point in two lines. `observe(this.view.contentDOM)` and
-		// `observe(host)` are the two that already existed and are blind to
-		// Minimal; this one takes its target from the scan's own answer, so
-		// it follows the column wherever the theme decides the column is.
-		const body = block(code(OVERLAY), "private watchOriginLine(", "\n\t}");
-		expect(body).toContain("observer.observe(line)");
-		expect(body).toContain("this.originLine = line");
+		// `observe(this.view.contentDOM)` and `observe(host)` are the two that
+		// already existed and are blind to Minimal; this one takes its target
+		// from the scan's own answer, so it follows the column wherever the
+		// theme decides the column is.
+		const w = mountWithLines("origin-line-watches.md", [380, 451.5]);
+		try {
+			w.o.syncCamera();
+			const picked = contentOrigin(w.m.contentDOM as unknown as HTMLElement).line;
+			expect(picked, "precondition: the scan picks the rightmost line").toBe(w.lines[1]!.el);
+			expect(w.o.originLine, "the overlay did not record the line the scan picked").toBe(picked);
+			expect(w.origin().watches(picked), "the origin-line observer is not watching the line the scan picked").toBe(true);
+		} finally {
+			w.done();
+		}
 	});
 
 	it("takes that element from the same scan syncCamera already ran", () => {
@@ -102,64 +164,130 @@ describe("the origin-line resize observer", () => {
 		// the left edge and the element together precisely so the re-arm
 		// costs no layout: syncCamera runs on resize and scroll ticks and at
 		// pen-down, and a second scan there would double its forced reads.
-		const body = block(code(OVERLAY), "private syncCamera(): void {", "\n\t}");
-		expect(body).toContain("const origin = contentOrigin(this.view.contentDOM)");
-		// The left edge travels with the element, so the re-arm can decide
-		// whether the column MOVED without a rect read of its own.
-		expect(body).toContain("this.watchOriginLine(origin.line, contentLeft)");
-		expect(body).not.toContain("contentOriginLeft(");
-		// And there is ONE scan rule, not two that can drift: the left-only
-		// entry point is a wrapper over the same function.
-		expect(code(ORIGIN)).toContain("return contentOrigin(contentDOM).left");
+		const w = mountWithLines("origin-line-one-scan.md", [380, 451.5]);
+		try {
+			w.o.syncCamera();
+			const before = w.lines.map((l) => l.reads());
+			w.o.syncCamera();
+			const during = w.lines.map((l, i) => l.reads() - before[i]!);
+			expect(during, "syncCamera scanned the lines more than once").toEqual([1, 1]);
+		} finally {
+			w.done();
+		}
+	});
+
+	it("has ONE scan rule: the left-only entry point answers what the scan answers", () => {
+		// `contentOriginLeft` is a wrapper over the same function, so the two
+		// cannot drift. Asked of the shapes the scan has to tell apart: lines
+		// at different lefts, one line, and no lines at all.
+		for (const lefts of [[380, 451.5, 402], [380], []]) {
+			const w = mountWithLines(`origin-line-rule-${lefts.length}.md`, lefts);
+			try {
+				const dom = w.m.contentDOM as unknown as HTMLElement;
+				expect(contentOriginLeft(dom), `contentOriginLeft answered differently from contentOrigin for lines at [${lefts}]`).toBe(
+					contentOrigin(dom).left
+				);
+			} finally {
+				w.done();
+			}
+		}
 	});
 
 	it("re-arms on a reference compare, so a recycled line costs nothing", () => {
 		// CodeMirror recycles `.cm-line` divs, so the watch cannot be
-		// installed once at mount. It is re-pointed from `syncCamera`, and on
-		// the frames where the line did not change the entire cost is this
-		// early return - no layout read, nothing that scales with the note.
-		const body = block(code(OVERLAY), "private watchOriginLine(", "\n\t}");
-		expect(body).toContain("if (line === this.originLine) return");
-		// The old target is released rather than left observed: a stale
-		// observation on a recycled div is a callback for a line that is no
-		// longer the column.
-		expect(body).toContain("observer.unobserve(this.originLine)");
+		// installed once at mount. It is re-pointed from `syncCamera`, and when
+		// the scan answers the element already watched - even one that moved -
+		// the re-arm is an early return: no observe, no unobserve, and so no
+		// fresh delivery armed.
+		const w = mountWithLines("origin-line-same.md", [380]);
+		try {
+			w.o.syncCamera();
+			const origin = w.origin();
+			const observed = origin.observed.length;
+			const unobserved = origin.unobserved.length;
+			w.lines[0]!.setLeft(451.5);
+			w.o.syncCamera();
+			expect(origin.observed.length, "re-pointed the watch at the line it was already watching").toBe(observed);
+			expect(origin.unobserved.length, "released the line it was still watching").toBe(unobserved);
+		} finally {
+			w.done();
+		}
+	});
+
+	it("releases the old line when the scan answers a new one", () => {
+		// A stale observation on a recycled div is a callback for a line that
+		// is no longer the column.
+		const w = mountWithLines("origin-line-swap.md", [380]);
+		try {
+			w.o.syncCamera();
+			const origin = w.origin();
+			const first = w.lines[0]!.el;
+			const moved = w.add(451.5);
+			w.o.syncCamera();
+			expect(w.o.originLine, "precondition: the scan moved to the new line").toBe(moved.el);
+			expect(origin.unobserved, "the old line was left observed").toContain(first);
+			expect(origin.watches(moved.el), "the new line is not watched").toBe(true);
+		} finally {
+			w.done();
+		}
 	});
 
 	it("re-syncs the camera rather than routing through handleResize", () => {
 		// Same reasoning as the `.cm-content` observer beside it: routing
 		// through `handleResize` would hit its `unchanged` early-return on
 		// exactly the case this exists for, and land a no-op that reads like
-		// a fix.
-		const body = block(code(OVERLAY), "private originLineResized(): void {", "\n\t}");
-		expect(body).toContain("this.syncCamera()");
-		expect(body).toContain("this.scheduleRepaint(");
-		expect(body).not.toContain("this.handleResize()");
+		// a fix. Fired through the observer itself, so the callback the mount
+		// handed it is what runs.
+		const w = mountWithLines("origin-line-fires.md", [380]);
+		try {
+			w.o.syncCamera();
+			const origin = w.origin();
+			const spy = spyCamera(w);
+			w.lines[0]!.setLeft(451.5);
+			origin.fire();
+			expect(spy.syncCamera, "the origin-line callback did not re-sync the camera").toHaveBeenCalled();
+			expect(spy.handleResize, "the origin-line callback went through handleResize").not.toHaveBeenCalled();
+			expect(spy.scheduleRepaint, "a column that moved scheduled no content-resize repaint").toHaveBeenCalledWith("content-resize");
+		} finally {
+			w.done();
+		}
 	});
 
 	it("holds its own frame guard, so a stroke in flight keeps its coordinates", () => {
 		// A mid-stroke line resize must not move the camera under the pen.
-		const body = block(code(OVERLAY), "private originLineResized(): void {", "\n\t}");
-		expect(body).toContain("frame.locked");
-	});
-
-	it("routes the observer at that method, so the two cannot drift apart", () => {
-		// The callback body was a closure until 1.4.10. It is a named method
-		// now so the repaint decision below can be CALLED rather than
-		// grepped; this is the seam that keeps the two guards above pointed
-		// at the code the browser actually runs.
-		expect(code(OVERLAY)).toContain(
-			"new ResizeObserver(() => this.originLineResized())"
-		);
+		const w = mountWithLines("origin-line-locked.md", [380]);
+		try {
+			w.o.syncCamera();
+			const origin = w.origin();
+			const spy = spyCamera(w);
+			const frame = w.o.frame as { begin(): void; end(): void; locked: boolean };
+			frame.begin();
+			w.lines[0]!.setLeft(451.5);
+			origin.fire();
+			frame.end();
+			expect(spy.syncCamera, "a line resize mid-stroke moved the camera").not.toHaveBeenCalled();
+			expect(spy.scheduleRepaint, "a line resize mid-stroke scheduled a repaint").not.toHaveBeenCalled();
+		} finally {
+			w.done();
+		}
 	});
 
 	it("is disconnected on unmount, like the two observers beside it", () => {
 		// A leaked observer on a detached `.cm-line` keeps the overlay
 		// reachable, and this one is the easiest of the three to forget
-		// because it is the only one never armed inside `mount()` itself.
-		const overlay = code(OVERLAY);
-		expect(overlay).toContain("this.originLineObserver?.disconnect()");
-		expect(overlay).toContain("this.originLine = null");
+		// because it is the only one never pointed at anything inside
+		// `mount()` itself.
+		const w = mountWithLines("origin-line-unmount.md", [380]);
+		let origin: RecordingObserver | undefined;
+		try {
+			w.o.syncCamera();
+			origin = w.origin();
+			expect(origin.disconnects, "precondition: still connected while mounted").toBe(0);
+		} finally {
+			w.done();
+		}
+		expect(origin?.disconnects, "unmount left the origin-line observer connected").toBeGreaterThan(0);
+		expect(w.o.originLine, "unmount kept a reference to the watched line").toBeNull();
 	});
 
 	it("leaves the metadata observer's attributeFilter alone", () => {
@@ -172,24 +300,18 @@ describe("the origin-line resize observer", () => {
 		// hot-path rule forbids, and its callback only calls
 		// `updateMetadataVisibility`, so it would not have re-synced anything
 		// even then.
-		const options = block(code(OVERLAY), "this.metadataObserver.observe(", "});");
-		expect(options).toContain('attributeFilter: ["data-property-key"]');
-		expect(options).not.toContain("class");
-	});
-
-	it("blanks comments before asserting, so a doc comment cannot satisfy it", () => {
-		// InkOverlay's own doc comment for this observer quotes
-		// `attributeFilter` and names `syncCamera`; without the blanking pass
-		// the guards above could be satisfied by prose alone.
-		const withComment = `
-			// observer.observe(line)
-			/* this.originLineObserver?.disconnect() */
-			const unrelated = 1;
-		`;
-		const stripped = codeOnly(withComment);
-		expect(stripped).not.toContain("observer.observe(line)");
-		expect(stripped).not.toContain("this.originLineObserver?.disconnect()");
-		expect(stripped).toContain("const unrelated = 1;");
+		const w = mountWithLines("origin-line-metadata.md", []);
+		try {
+			const filtered = w.mutation.flatMap((r) =>
+				r.observed.filter((o) => (o.options as { attributeFilter?: unknown } | undefined)?.attributeFilter !== undefined)
+			);
+			expect(filtered, "precondition: the mount registered one attribute-filtered observer").toHaveLength(1);
+			const options = filtered[0]!.options as { attributeFilter: string[]; subtree?: boolean };
+			expect(options.attributeFilter, "the metadata observer's attributeFilter changed").toEqual(["data-property-key"]);
+			expect(options.attributeFilter).not.toContain("class");
+		} finally {
+			w.done();
+		}
 	});
 });
 

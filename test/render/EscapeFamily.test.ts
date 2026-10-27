@@ -15,7 +15,7 @@ beforeAll(async () => {
 	const bundle = await build({entryPoints: [fileURLToPath(new URL("./escapeFamilyPage.ts", import.meta.url))], bundle: true, write: false, format: "iife", platform: "browser", alias: {obsidian: fileURLToPath(new URL("./escapeObsidian.ts", import.meta.url))}, plugins: plant ? [{
 		name: "escape-swallow-plant",
 		setup(build) {
-			build.onLoad({filter: /[/\\]InkOverlay\.ts$/}, args => {
+			build.onLoad({filter: /[/\\]InkOverlayRegistry\.ts$/}, args => {
 				let source = readFileSync(args.path, "utf8");
 				const peel = "releaseTipModes();";
 				const floor = "export function releaseMouseInkQuietlyEverywhere(): void {";
@@ -25,7 +25,9 @@ beforeAll(async () => {
 				} else if (plant === "block-pen") {
 					source = 'import { setPenInk as plantSetPenInk } from "./PenInk";\n' + source.replace(floor, floor + "\nplantSetPenInk(false);");
 				} else if (plant === "reset-nib") {
-					source = source.replace(floor, floor + '\nsetInkSizeMult("pen", 1); applyInkColor("pen", "#000000");');
+					if (source.split(floor).length !== 2) throw new Error("Escape nib plant target must occur exactly once");
+					source ='import { setInkSizeMult as plantSetInkSizeMult } from "./InkOverlayToolState";\nimport { applyInkColor as plantApplyInkColor } from "../ink/InkColor";\n'
+						+ source.replace(floor, floor + '\nplantSetInkSizeMult("pen", 1); plantApplyInkColor("pen", "#000000");');
 				} else if (plant === "capture-floor") {
 					const binding = 'win.addEventListener("keydown", onKey);';
 					if (source.split(binding).length !== 2) throw new Error("Escape phase plant target must occur exactly once");

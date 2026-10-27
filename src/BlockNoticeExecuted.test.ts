@@ -7,15 +7,17 @@
  * obsidian.asar, and reading is not running. `NoticeBlocks.test.ts` covers the
  * pure splitter; this covers the part that touches the DOM helpers.
  *
- * `blockNotice` is NOT exported - which is how it stayed unexecuted, and is a
- * reason to slice it rather than to widen main.ts's export surface for a test.
+ * `blockNotice` was NOT exported from main.ts - which is how it stayed
+ * unexecuted, and was the reason to slice it rather than widen main.ts's export
+ * surface for a test. It moved, exported, to view/Notices.ts; the slice
+ * stays and reads that file.
  * Same idiom as `LiveReloadTestHarness.ts`: take the real source, transpile it,
  * run it, and assert the extraction boundary so a moved function fails LOUDLY
  * instead of quietly testing nothing.
  */
 import { describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
-import mainSource from "./main.ts?raw";
+import noticesSource from "./view/Notices.ts?raw";
 
 /** A minimal stand-in for Obsidian's element helpers, recording what it built. */
 interface FakeNode {
@@ -41,7 +43,7 @@ interface Built {
 	durationMs: unknown;
 }
 
-const src = mainSource.replace(/\r\n/g, "\n");
+const src = noticesSource.replace(/\r\n/g, "\n");
 const START = "function blockNotice(message: string, durationMs?: number): Notice {";
 const END = "\n}\n";
 

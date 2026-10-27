@@ -141,3 +141,41 @@ describe("inkSvgLayers (what the reading view builds elements from)", () => {
 		}
 	});
 });
+
+describe("inkSvgLayers for print: one path per pen stroke", () => {
+	// A run of one colour printed as one <path> becomes one PDF fill holding every stroke, and a PDF reader draws that
+	// in seconds on a heavy note. The print layer asks for each pen stroke on its own; the highlighter keeps its wash.
+	const strokes = [
+		stroke("highlighter", [0, 10], 0),
+		stroke("highlighter", [0, 10], 10),
+		stroke("pen", [0, 10, 20], 20),
+		stroke("pen", [0, 10, 20], 40),
+		{ ...stroke("pen", [0, 10, 20], 60), color: "#e74c3c" },
+		stroke("pen", [0, 10, 20], 80),
+	];
+
+	it("every pen stroke is its own run, in the order drawn, with its colour", () => {
+		const layers = inkSvgLayers(strokes, undefined, { penPerStroke: true });
+		expect(layers.pen.map((r) => r.color)).toEqual(["#4b7bec", "#4b7bec", "#e74c3c", "#4b7bec"]);
+	});
+
+	it("the highlighter run stays one path", () => {
+		expect(inkSvgLayers(strokes, undefined, { penPerStroke: true }).highlighter).toHaveLength(1);
+	});
+
+	it("the geometry is the folded run's, cut at each stroke", () => {
+		const folded = inkSvgLayers(strokes);
+		const split = inkSvgLayers(strokes, undefined, { penPerStroke: true });
+		expect(split.pen.map((r) => r.d).join("")).toBe(folded.pen.map((r) => r.d).join(""));
+		expect(split.highlighter).toEqual(folded.highlighter);
+	});
+
+	it("the drawing-only SVG export file is byte-equal to 355ff932's", async () => {
+		// Pinned at the base: the .svg download keeps the fold (Alan 2026-10-16, drawing-only exports untouched).
+		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(inkToSvg(strokes)));
+		const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+		expect(hex).toBe(SVG_AT_BASE);
+	});
+});
+
+const SVG_AT_BASE = "ed5de3ae8ed3235e19a94ba5ac525532e28da9e1b61ac201e176559bf6df3b14";

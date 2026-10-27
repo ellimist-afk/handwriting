@@ -29,6 +29,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import mainSource from "../main.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
 import {
 	attachEmbedInkOnceReady,
 	disarmPrintSwaps,
@@ -43,7 +44,8 @@ import { PageData, ParseResult, emptyPage } from "../model/PageData";
 import { InkStroke } from "../ink/Stroke";
 
 // ---- the wiring main.ts does at plugin load (asserted verbatim) -------------
-const source = mainSource.replace(/\r\n/g, "\n");
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const source = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
 expect(source).toContain("\t\tinitEmbedInkRefresh((p) => inlineInk.strokes(p));\n");
 expect(source).toContain("\t\tthis.register(onInkChanged((p) => embedInkChanged(p)));\n");
 

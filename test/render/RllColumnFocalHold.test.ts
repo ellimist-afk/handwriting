@@ -367,15 +367,7 @@ let browser: Browser, script: string;
 /**
  * Plants, one at a time. HW_RLL_PLANT_NO_FOLLOW=1 keeps the preview's cap at scroll 0 for a centred column, in anchorPanTo
  * and in the input reducer: expected red, the four hold arms and the round trip on the slide, and the button arm, whose
- * next touch can no longer follow the fingers right and so reads a bounce. HW_RLL_PLANT_WINDOW_SETTLE=1 settles an inset column on the fitting
- * window again instead of its rest: expected red, the four hold arms on the stay. The round trip stays green under it by
- * construction: held both ways with nothing corrected at 25%, it comes back to its start on its own.
- * HW_RLL_PLANT_NO_LAYOUT_REST=1 RE-POINTED (part 68). It writes the rest as a PAN instead of the column's margin - the
- * pre-a000a659 carrier - by refusing `applyViewportBox` its resting margin, so `columnRestPan` finds the frozen inset
- * and hands the whole centring back as a translate. Under Obsidian's own theme, where the sizer carries the column,
- * that is the claim "the centring lives in the margin, not a standing pan" made falsifiable: expected red on every arm
- * that asserts no pan at rest, and on the arm that asserts the rest costs no reachable sideways room. Its previous
- * anchor had no match in the source at all, so the plant could only throw rather than discriminate.
+ * next touch can no longer follow the fingers right and so reads a bounce.
  *
  * HW_RLL_PLANT_CONTENT_COLUMN=1 measures the page's own width off `.cm-content` instead of the line box - which is what
  * candidate 1 did, and why it did nothing on the device. Expected GREEN under Obsidian's own theme, where the two are
@@ -383,10 +375,16 @@ let browser: Browser, script: string;
  * plant that makes the second theme load-bearing: without it, a suite could run under Minimal and assert nothing that
  * the default theme was not already asserting.
  */
-const PLANT: { name: string; edits: [string, string][] } | null = process.env.HW_RLL_PLANT_NO_FOLLOW
-	? { name: "no-follow", edits: [["const rightX = fitsX ?", "const rightX = false ?"], ["const fits = inset &&", "const fits = false &&"]] }
-	: process.env.HW_RLL_PLANT_NO_LAYOUT_REST ? { name: "no-layout-rest", edits: [["this.columnRestMargin=this.pinchPreview||!layout.sizerColumn?null:this.columnRestCentred(next,layout.externalScale*next);", "this.columnRestMargin=null;"]] }
-	: process.env.HW_RLL_PLANT_CONTENT_COLUMN ? { name: "content-column", edits: [["columnBox:columnBoxLocal,", "columnBox:column,"]] }
+// An edit may name its own file; one without falls back to the plant's, then to InkOverlay.ts.
+const RLL_INK = /src[\\/]inline[\\/]InkOverlay\.ts$/, RLL_PAN = /src[\\/]inline[\\/]InkOverlayPanSettle\.ts$/, RLL_PAPER = /src[\\/]inline[\\/]InkOverlayPaperPinch\.ts$/, RLL_VIEW = /src[\\/]inline[\\/]InkOverlayViewportBox\.ts$/, RLL_MARGIN = /src[\\/]inline[\\/]InkOverlayColumnMargin\.ts$/, RLL_CAM = /src[\\/]inline[\\/]InkOverlayCamera\.ts$/;
+const RLL_FACET_TOKEN = "(overlay.noteViewportOwnLines() ? \" handwriting-note-viewport-own-lines\" : \"\")";
+// NO_FOLLOW puts the cap back on preview frames, where the fingers are down: the pan may not carry a fitting inset
+// column right of scroll 0, and the input reducer may not move the target right of the column's natural inset.
+const PLANT: { name: string; file?: RegExp; edits: [string, string, RegExp?][] } | null = process.env.HW_RLL_PLANT_NO_FOLLOW
+	? { name: "no-follow", edits: [
+		["const rightX = !settling ? Number.POSITIVE_INFINITY", "const rightX = !settling ? (fitsPageX ? nativeLeft * effective : Number.POSITIVE_INFINITY)", RLL_PAN],
+		["(!settling || this.canvasMode || naturalInset == null ? visible", "(!settling && fits ? naturalInset * next : !settling || this.canvasMode || naturalInset == null ? visible", RLL_PAPER]] }
+	: process.env.HW_RLL_PLANT_CONTENT_COLUMN ? { name: "content-column", file: RLL_VIEW, edits: [["columnBox:columnBoxLocal,", "columnBox:column,"]] }
 	// NO_PAGE_BOX_SCROLL drops the commit's payment of what a line-centring theme's centring owes the page box:
 	// expected GREEN everywhere except Minimal's Fit arm with ink past the column, which reddens by the 16-24 px the
 	// ink is then carried past the pane's right edge. Inert under Obsidian's own theme, where the sizer margin pays it.
@@ -416,10 +414,10 @@ const PLANT: { name: string; edits: [string, string][] } | null = process.env.HW
 	// with the setting off too (the page's own left edge, measured 300 = the pane edge), and the ink camera derives from
 	// it either way. The setting decides whether the column MOVES, not whether it is read, so the sensitivity is real on
 	// both settings and is guarded on both. This supersedes the 1-of-8 coverage caveat recorded under part 68.
-	: process.env.HW_RLL_PLANT_FREEZE_MINIMAL ? { name: "freeze-minimal", edits: [["host.classList.toggle(\"handwriting-note-viewport-own-lines\",layout.ownLines);", "host.classList.toggle(\"handwriting-note-viewport-own-lines\",false);"], ["class: overlay.noteViewportOwnLines() ?", "class: false ?"], ["if (layout.ownLines) return 0;", "if (false) return 0;"]] }
-	: process.env.HW_RLL_PLANT_NO_PAGE_BOX_SCROLL ? { name: "no-page-box-scroll", edits: [["target.left=this.ownLinesPageBoxScrollLeft(next,effective,target.left);", ""]] }
-	: process.env.HW_RLL_PLANT_NO_FACET_CLASS ? { name: "no-facet-class", edits: [["class: overlay.noteViewportOwnLines() ?", "class: false ?"]] }
-	: process.env.HW_RLL_PLANT_NO_SETTLE_REMEASURE ? { name: "no-settle-remeasure", edits: [["\t\t// creating camera motion and a full repaint while the band is still.\n\t\tconst layoutColumn = this.ownedColumnLayoutLeft(origin.line);", "\t\t// creating camera motion and a full repaint while the band is still.\n\t\tconst layoutColumn = ((v:number|null)=>v===null?null:v+8)(this.ownedColumnLayoutLeft(origin.line));"]] } : null;
+	: process.env.HW_RLL_PLANT_FREEZE_MINIMAL ? { name: "freeze-minimal", edits: [["host.classList.toggle(\"handwriting-note-viewport-own-lines\",layout.ownLines);", "host.classList.toggle(\"handwriting-note-viewport-own-lines\",false);", RLL_VIEW], [RLL_FACET_TOKEN, "\"\""], ["if (layout.ownLines) return 0;", "if (false) return 0;", RLL_MARGIN]] }
+	: process.env.HW_RLL_PLANT_NO_PAGE_BOX_SCROLL ? { name: "no-page-box-scroll", file: /src[\\/]inline[\\/]InkOverlayZoomApi\.ts$/, edits: [["target.left=this.ownLinesPageBoxScrollLeft(next,effective,target.left);", ""]] }
+	: process.env.HW_RLL_PLANT_NO_FACET_CLASS ? { name: "no-facet-class", edits: [[RLL_FACET_TOKEN, "\"\""]] }
+	: process.env.HW_RLL_PLANT_NO_SETTLE_REMEASURE ? { name: "no-settle-remeasure", file: RLL_CAM, edits: [["\t\t// creating camera motion and a full repaint while the band is still.\n\t\tconst layoutColumn = this.ownedColumnLayoutLeft(origin.line);", "\t\t// creating camera motion and a full repaint while the band is still.\n\t\tconst layoutColumn = ((v:number|null)=>v===null?null:v+8)(this.ownedColumnLayoutLeft(origin.line));"]] } : null;
 const DPR = 2;
 const record: unknown[] = [];
 /**
@@ -443,17 +441,19 @@ beforeAll(async () => {
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "rllColumnFocalHoldPage.ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: PLANT ? [{ name: "rll-plant-" + PLANT.name, setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|InkOverlayPanSettle|InkOverlayViewportBox|InkOverlayColumnMargin|InkOverlayCamera|InkOverlayPaperPinch|InkOverlayZoomApi)\.ts$/ }, args => {
+				const mine = PLANT.edits.filter(([, , file]) => (file ?? PLANT.file ?? RLL_INK).test(args.path));
+				if (!mine.length) return undefined;
 				let text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
-				for (const [from, to] of PLANT.edits) {
+				for (const [from, to] of mine) {
 					if (text.split(from).length !== 2) throw new Error("rll plant " + PLANT.name + ": anchor not found once: " + from);
 					text = text.replace(from, to);
+					planted++;
 				}
-				planted++;
 				return { loader: "ts", contents: text };
 			});
 		} }] : [] });
-	if (PLANT && !planted) throw new Error("rll plant requested but never applied");
+	if (PLANT && planted !== PLANT.edits.length) throw new Error(`rll plant ${PLANT.name}: ${PLANT.edits.length} edits requested, ${planted} applied`);
 	script = b.outputFiles[0]!.text;
 	// eslint-disable-next-line no-console
 	console.log("RLLFOCAL-RUN " + JSON.stringify({ theme: THEME, themeCssBytes: THEME_CSS.length, plant: PLANT ? PLANT.name : null }));
@@ -1159,9 +1159,6 @@ for (const arm of FIT_ARMS) {
  * ON AN ORDINARY NOTE, which is this arm, it costs no reachable room at all: the sizer's width is the scroller's, so the
  * margin moves the column inside a box that does not grow, and the range stays 0. That is what this arm pins, so a change
  * that starts handing out blank sideways room on a plain note at a zoom-out is caught here.
- *
- * PLANT: HW_RLL_PLANT_NO_LAYOUT_REST=1 puts the centring back in the pan and the column is no longer at its rest, so the
- * premise this arm rests on goes red.
  */
 (THEME === "default" ? it : it.skip)("under the canvas the zoom button grants sideways room and scrolls nothing into it", async () => {
 	const { page, errors, mounted, n } = await open(true, "surface");

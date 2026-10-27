@@ -20,31 +20,45 @@ export class SnapPreview {
 	private live = false;
 	private x = 0;
 	private y = 0;
+	/** Date.now() of the last meaningful move; the pending timer measures the dwell from here when it fires. */
+	private movedAt = Number.NEGATIVE_INFINITY;
 	constructor(private host: PreviewHost, private fit = snapStroke) {}
 	start(x: number, y: number): void {
 		this.clear();
 		this.live = true;
 		this.x = x; this.y = y;
-		this.arm();
+		this.arm(DWELL_MS);
 	}
+	/**
+	 * A meaningful move restarts the dwell by stamping its time, not by
+	 * replacing the timer: the one pending timer re-arms for the rest when it
+	 * fires early. A pen in motion moves on nearly every sample, and a timer
+	 * set and cleared per sample woke the main thread for nothing.
+	 */
 	move(x: number, y: number): void {
 		if (!this.check()) return;
 		if (Math.hypot(x - this.x, y - this.y) <= 4) return;
-		this.clear();
-		this.live = true;
 		this.x = x; this.y = y;
-		this.arm();
+		this.movedAt = Date.now();
+		if (this.body || this.candidate) {
+			this.body = null;
+			this.candidate = null;
+			this.host.hide();
+		}
+		if (this.timer === null) this.arm(DWELL_MS);
 	}
 	check(): boolean {
 		if (!this.live) return false;
 		if (!this.host.valid()) { this.clear(); return false; }
 		return true;
 	}
-	private arm(): void {
+	private arm(ms: number): void {
 		const epoch = this.epoch;
 		this.timer = this.host.clock.setTimeout(() => {
 			if (epoch !== this.epoch || !this.check()) return;
 			this.timer = null;
+			const rest = this.movedAt + DWELL_MS - Date.now();
+			if (rest > 0) { this.arm(rest); return; }
 			const strokes = this.host.snapshot();
 			if (strokes.length !== 1) return;
 			const body = strokes[0]!;
@@ -53,7 +67,7 @@ export class SnapPreview {
 				this.body = body;
 				this.candidate = candidate;
 			}
-		}, DWELL_MS);
+		}, ms);
 	}
 	/** Final filtering may remove a body or split it. Never fit unseen geometry. */
 	take(final: InkStroke[], lift: boolean): InkStroke | null {
@@ -72,6 +86,7 @@ export class SnapPreview {
 		this.epoch++;
 		if (this.timer !== null) this.host.clock.clearTimeout(this.timer);
 		this.timer = null;
+		this.movedAt = Number.NEGATIVE_INFINITY;
 		this.live = false;
 		this.body = null;
 		this.candidate = null;

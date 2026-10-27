@@ -16,6 +16,9 @@
 import { describe, expect, it } from "vitest";
 import HandwritingPlugin, { HandwritingSettingTab } from "./main";
 import mainSource from "./main.ts?raw";
+import tabSource from "./settings/HandwritingSettingTab.ts?raw";
+import settingsModelSource from "./settings/SettingsModel.ts?raw";
+import pluginSettingsSource from "./settings/PluginSettings.ts?raw";
 import * as InkShapeModule from "./ink/InkShape";
 import { flattenStrokeShaped, IncrementalShaper, PEN_SHAPE, type ShapeParams } from "./ink/InkShape";
 import * as PenStyleModule from "./ink/PenStyle";
@@ -78,6 +81,12 @@ describe("the flatter pressure curve trial is gone", () => {
 		expect(plugin.settings).not.toHaveProperty("flatterPressureCurve");
 		expect(mainSource).not.toContain("flatterPressureCurve");
 		expect(mainSource).not.toContain("FlatterPressureCurve");
+		expect(settingsModelSource).not.toContain("flatterPressureCurve");
+		expect(settingsModelSource).not.toContain("FlatterPressureCurve");
+		expect(pluginSettingsSource).not.toContain("flatterPressureCurve");
+		expect(pluginSettingsSource).not.toContain("FlatterPressureCurve");
+		expect(tabSource).not.toContain("flatterPressureCurve");
+		expect(tabSource).not.toContain("FlatterPressureCurve");
 	});
 
 	it("carries a vault's stored trial value through untouched and gives it no effect", async () => {

@@ -37,6 +37,7 @@
 
 import { describe, expect, it } from "vitest";
 import { codeOnly } from "../CodeOnly";
+import { surfaceFiles } from "./surfaceFiles.testutil";
 
 const ALL_TS = import.meta.glob("/src/**/*.ts", {
 	query: "?raw",
@@ -89,22 +90,33 @@ function rawSetMouseInkImporters(): string[] {
 
 describe("mouse-ink writer invariant: only the command imports the raw setter", () => {
 	it("the raw setMouseInk is imported by exactly one module", () => {
-		// main.ts is where `applyMouseInkUiFanout` lives, so it is the one place
-		// the raw setter and the fan-out sit together. Any other importer is a
-		// mode change that can skip the repaint - the regression this pins.
-		expect(rawSetMouseInkImporters()).toEqual(["/src/main.ts"]);
+		// commands/RegisterCommands.ts holds the mouse-ink command, the one place
+		// the raw setter is called beside the fan-out. settings/PluginSettings.ts
+		// holds the settings load and merge writers, moved out of main.ts
+		// with no call changed. A third importer is a mode change that can skip
+		// the repaint - still the regression this pins.
+		expect(rawSetMouseInkImporters()).toEqual(["/src/commands/RegisterCommands.ts", "/src/settings/PluginSettings.ts"]);
 	});
 
 	it("neither ink surface nor the strip imports it", () => {
 		// Stated separately from the count so a failure names the surface that
-		// broke the rule, not just "the number moved". These three are the
-		// files that draw a strip light off `mouseInkOn()` (nibIsLit,
+		// broke the rule, not just "the number moved". The two ink surfaces and
+		// the strip are what draw a strip light off `mouseInkOn()` (nibIsLit,
 		// MobileTools.ts) and so are the ones a stale mode would show wrong.
+		// The surfaces' files come from the ink-surface ledger, so a file split
+		// out of either surface is checked as soon as the ledger lists it.
 		const importers = rawSetMouseInkImporters();
 		for (const surface of [
-			"/src/inline/InkOverlay.ts",
-			"/src/pdf/PdfInkController.ts",
+			...surfaceFiles("note"),
+			...surfaceFiles("pdf"),
 			"/src/inline/MobileTools.ts",
+			"/src/inline/MobileToolsBuild.ts",
+			"/src/inline/MobileToolsDrag.ts",
+			"/src/inline/MobileToolsPaint.ts",
+			"/src/inline/MobileToolsLayout.ts",
+			"/src/inline/MobileToolsBuildRest.ts",
+			"/src/inline/MobileToolsHost.ts",
+			"/src/inline/NoteZoomControls.ts",
 		]) {
 			expect(importers, `${surface} imports the raw setMouseInk`).not.toContain(surface);
 		}
@@ -114,6 +126,6 @@ describe("mouse-ink writer invariant: only the command imports the raw setter", 
 		// P3: a regex that silently matched no import would pass the two
 		// assertions above by finding an empty set, then reporting the rule
 		// held. Prove the matcher fires on the one importer that must exist.
-		expect(rawSetMouseInkImporters()).toContain("/src/main.ts");
+		expect(rawSetMouseInkImporters()).toContain("/src/commands/RegisterCommands.ts");
 	});
 });

@@ -40,9 +40,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 import HandwritingPlugin, { HandwritingSettingTab } from "./main";
 import css from "../styles.css?raw";
-import mainSrc from "./main.ts?raw";
+import mainOnly from "./main.ts?raw";
+import lifecycleSrc from "./PluginLifecycle.ts?raw";
+import onloadSrc from "./PluginOnload.ts?raw";
 import { codeOnly } from "./CodeOnly";
 import { inlineInk } from "./inline/InkOverlay";
+
+// onunload lives in PluginLifecycle.ts and the onload phases in PluginOnload.ts, both read here with main.ts.
+const mainSrc = [mainOnly, lifecycleSrc, onloadSrc].join("\n");
 
 const CLASS = "handwriting-active-page";
 const KEY = "hideStatusBarOnInkedNotes";

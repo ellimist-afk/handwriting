@@ -424,6 +424,14 @@ function sessionPhase(rig: Rig): string {
 /** Screen x -> deck-logical x at the rig's k = 0.5 (slides.left = 20). */
 const lx = (screenX: number): number => (screenX - 20) * 2;
 
+/**
+ * The rig's screen is whole-pixel and every move is a whole number of device
+ * px, so the pen's coarse-grid smoothing is on: after a stroke's first sample,
+ * each stored point is the mean of its sample and the one before, and the lift
+ * stores the last sample as itself. `mid(a, b)` is that mean in deck-logical x.
+ */
+const mid = (a: number, b: number): number => (lx(a) + lx(b)) / 2;
+
 /** A pen contact on the rig: the pen sends `pen` events with pressure and the tip button. */
 const pen = (over: Partial<AnyEvent> = {}): Partial<AnyEvent> => ({ pointerType: "pen", buttons: 1, pressure: 0.5, ...over });
 
@@ -469,7 +477,7 @@ describe("slides pen at rest: the 300 ms silence deadline under a pen that sends
 		rig.dispatch("pointerup", pen({ clientX: 260, clientY: 100, buttons: 0, pressure: 0, timeStamp: 1080 }));
 		await settle();
 		expect(lastStrokes(rig)).toHaveLength(1);
-		expect(savedXs(rig)).toContain(lx(220));
+		expect(savedXs(rig), "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toEqual([lx(100), mid(100, 140), mid(140, 180), mid(180, 220), mid(220, 260), lx(260)]);
 		clock.mockRestore();
 		rig.deck.dispose();
 	});
@@ -513,7 +521,7 @@ describe("slides pen at rest: the 300 ms silence deadline under a pen that sends
 		clock.mockReturnValue(1464);
 		rig.dispatch("pointerup", pen({ clientX: 220, clientY: 100, buttons: 0, pressure: 0, timeStamp: 1464 }));
 		await settle();
-		expect(savedXs(rig), "no ink after the opening rest").toContain(lx(180));
+		expect(savedXs(rig), "no ink after the opening rest; " + "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toEqual([lx(140), mid(140, 180), mid(180, 220), lx(220)]);
 		clock.mockRestore();
 		rig.deck.dispose();
 	});
@@ -577,7 +585,7 @@ describe("slides pen at rest: the 300 ms silence deadline under a pen that sends
 		rig.win.runTimers(SILENT_LIFT_QUIET_MS);
 		await settle();
 		expect(sessionPhase(rig), "the deadline ended the contact").not.toBe("drawing");
-		expect(savedXs(rig), "the writing before the silence is saved").toContain(lx(180));
+		expect(savedXs(rig), "the writing before the silence is saved; " + "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toEqual([lx(100), mid(100, 140), mid(140, 180), mid(180, 220), lx(220)]);
 		clock.mockRestore();
 		rig.deck.dispose();
 	});
@@ -645,7 +653,10 @@ describe("slides pen rest: a later sample from the same contact writes again", (
 		r.up(1448, 300, 100);
 		await settle();
 		expect(lastStrokes(r.rig)).toHaveLength(1);
-		expect(savedXs(r.rig), "nothing after the hover is ink").not.toContain(lx(260));
+		// A range, not an exact x: smoothing stores means, so an exact value can be
+		// absent while the ink it guards is there. The opening stroke ends at
+		// lx(180); anything right of it came after the hover.
+		expect(Math.max(...savedXs(r.rig)), "nothing after the hover is ink").toBeLessThanOrEqual(lx(180));
 		r.done();
 	});
 
@@ -657,7 +668,7 @@ describe("slides pen rest: a later sample from the same contact writes again", (
 		const click = r.rig.click();
 		await settle();
 		expect(lastStrokes(r.rig), "no second stroke from the lift").toHaveLength(1);
-		expect(savedPoints(r.rig)[0]!.map(([x]) => x)).toEqual([lx(100), lx(140), lx(180)]);
+		expect(savedPoints(r.rig)[0]!.map(([x]) => x), "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toEqual([lx(100), mid(100, 140), mid(140, 180), lx(180)]);
 		expect(undoSteps(r.rig)).toBe(1);
 		expect(click.stopped, "the lift of a stroke that was drawn must not click the arrow under the nib").toBe(true);
 		r.done();
@@ -698,8 +709,9 @@ describe("slides pen rest: a later sample from the same contact writes again", (
 		r.up(1480, 540, 300);
 		await settle();
 		expect(lastStrokes(r.rig)).toHaveLength(2);
-		expect(savedXs(r.rig), "the old contact adds nothing").not.toContain(lx(500));
-		expect(savedXs(r.rig)).not.toContain(lx(540));
+		// A range, not exact xs: smoothing stores means. The new contact ends at
+		// lx(440); the old contact's samples are all right of it.
+		expect(Math.max(...savedXs(r.rig)), "the old contact adds nothing").toBeLessThanOrEqual(lx(440));
 		r.done();
 	});
 
@@ -715,7 +727,7 @@ describe("slides pen rest: a later sample from the same contact writes again", (
 		r.up(1448, 260, 100);
 		await settle();
 		expect(lastStrokes(r.rig), "the writing after the palm touch is a second stroke").toHaveLength(2);
-		expect(savedPoints(r.rig)[1]!.map(([x]) => x)).toEqual([lx(220), lx(260)]);
+		expect(savedPoints(r.rig)[1]!.map(([x]) => x), "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toEqual([lx(220), mid(220, 260), lx(260)]);
 		r.done();
 	});
 
@@ -744,10 +756,13 @@ describe("slides pen rest: a later sample from the same contact writes again", (
 		r.move(1816, 260, 180);
 		r.up(1832, 260, 180);
 		await settle();
-		expect(savedPoints(r.rig)).toEqual([
-			[[lx(100), ly(100)], [lx(140), ly(100)], [lx(180), ly(100)]],
-			[[lx(180), ly(140)], [lx(180), ly(180)]],
-			[[lx(220), ly(180)], [lx(260), ly(180)]],
+		// Each stroke after a rest starts as given, then means, then its own
+		// last sample again at its end.
+		const midY = (a: number, b: number): number => (ly(a) + ly(b)) / 2;
+		expect(savedPoints(r.rig), "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toEqual([
+			[[lx(100), ly(100)], [mid(100, 140), ly(100)], [mid(140, 180), ly(100)], [lx(180), ly(100)]],
+			[[lx(180), ly(140)], [lx(180), midY(140, 180)], [lx(180), ly(180)]],
+			[[lx(220), ly(180)], [mid(220, 260), ly(180)], [lx(260), ly(180)]],
 		]);
 		expect(undoSteps(r.rig), "three strokes, three undo steps").toBe(3);
 		r.done();

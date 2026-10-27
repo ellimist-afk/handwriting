@@ -9,7 +9,7 @@
  * ink. B's Undo could not restore what B's Delete took, because the step was
  * never in B's history.
  *
- * FOUR COMMANDS come through here, verified by id in main.ts rather than taken
+ * FOUR COMMANDS come through here, verified by id in commands/RegisterCommands.ts rather than taken
  * from a description: `delete-selected-ink`, `copy-selected-ink`,
  * `cut-selected-ink` and `paste-ink`. Delete by hotkey is the most destructive
  * of the four, and a hotkey is how people delete.
@@ -24,7 +24,7 @@
  * deliberately stands in for the registered command. This file drives the
  * REGISTERED COMMAND itself: the actual `addCommand` blocks and the actual
  * `activeInkSurface` / `pdfControllerWithSelection` methods, lifted out of
- * `main.ts` source and transpiled - the house pattern of
+ * `main.ts`, `commands/RegisterCommands.ts` and `pdf/PdfClaims.ts` source and transpiled - the house pattern of
  * `ConcurrentExports.test.ts` - bound to the REAL `InkOverlayPlugin`, the REAL
  * `inlineInk` store, real `SelectionModel` selections, the real ink clipboard,
  * and a REAL headless CodeMirror history. Nothing about the routing is
@@ -48,6 +48,9 @@ import { EditorState, Transaction } from "@codemirror/state";
 import { history, redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { transformSync } from "esbuild";
 import mainSource from "./main.ts?raw";
+import claimsSource from "./pdf/PdfClaims.ts?raw";
+import commandsSource from "./commands/RegisterCommands.ts?raw";
+import exportCommandsSource from "./commands/RegisterExportCommands.ts?raw";
 import type { InkStroke } from "./ink/Stroke";
 
 const notices = vi.hoisted(() => ({ said: [] as string[] }));
@@ -101,28 +104,31 @@ g.MutationObserver ??= NoopObserver;
 // ---- the real source, lifted -----------------------------------------------
 
 const source = mainSource.replace(/\r\n/g, "\n");
+const claims = claimsSource.replace(/\r\n/g, "\n");
+const commands = [commandsSource, exportCommandsSource].join("\n").replace(/\r\n/g, "\n");
 
 /** A source slice, with both ends proven present and unique. */
-function slice(startMarker: string, endMarker: string): string {
-	expect(source.split(startMarker), `start marker not unique: ${startMarker}`).toHaveLength(2);
-	const start = source.indexOf(startMarker);
-	const end = source.indexOf(endMarker, start + startMarker.length);
+function slice(startMarker: string, endMarker: string, from: string = source): string {
+	expect(from.split(startMarker), `start marker not unique: ${startMarker}`).toHaveLength(2);
+	const start = from.indexOf(startMarker);
+	const end = from.indexOf(endMarker, start + startMarker.length);
 	expect(end, `end marker missing after: ${startMarker}`).toBeGreaterThan(start);
-	return source.slice(start, end + endMarker.length);
+	return from.slice(start, end + endMarker.length);
 }
 
 const SURFACE_BLOCK = slice(
-	'\tprivate activeInkSurface(): { kind: "inline"; overlay: InkOverlayPlugin } | { kind: "pdf"; controller: PdfInkController } | null {',
+	'\tactiveInkSurface(): { kind: "inline"; overlay: InkOverlayPlugin } | { kind: "pdf"; controller: PdfInkController } | null {',
 	"\n\t}",
 );
 const PDF_SELECTION_BLOCK = slice(
-	"\tprivate pdfControllerWithSelection(path: string): PdfInkController | null {",
+	"\tfunction pdfControllerWithSelection(this: HandwritingPlugin, path: string): PdfInkController | null {",
 	"\n\t}",
+	claims,
 );
-const DELETE_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "delete-selected-ink",', "\n\t\t});");
-const COPY_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "copy-selected-ink",', "\n\t\t});");
-const CUT_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "cut-selected-ink",', "\n\t\t});");
-const PASTE_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "paste-ink",', "\n\t\t});");
+const DELETE_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "delete-selected-ink",', "\n\t\t});", commands);
+const COPY_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "copy-selected-ink",', "\n\t\t});", commands);
+const CUT_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "cut-selected-ink",', "\n\t\t});", commands);
+const PASTE_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "paste-ink",', "\n\t\t});", commands);
 
 // Fail closed if the shapes these tests assume ever move: every one of the four
 // commands must still choose its surface through the one method, and that
@@ -161,7 +167,7 @@ type Surface = { kind: "inline"; overlay: InkOverlayPlugin } | { kind: "pdf"; co
  * exported one, and this file did not have to change between the red run
  * against unmodified production and the green one to introduce a new name.
  */
-const methods = build(`class Lifted { ${SURFACE_BLOCK}\n${PDF_SELECTION_BLOCK} }\nreturn Lifted.prototype;`, {
+const methods = build(`class Lifted { ${SURFACE_BLOCK} }\n${PDF_SELECTION_BLOCK}\nLifted.prototype.pdfControllerWithSelection = pdfControllerWithSelection;\nreturn Lifted.prototype;`, {
 	...InkOverlayModule,
 	View: class {},
 }) as {

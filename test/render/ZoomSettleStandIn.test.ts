@@ -21,7 +21,6 @@
  * Rig: the PanBakeRepaint page (panBakeRepaintPage.ts) on its synthetic note (4000 strokes over about 11,000 x 13,000 css px).
  * The zoom is committed as a zoom control does (rezoom); pieces are held where a cell must see the stand-in on screen.
  *
- * Skipped in 1.4.23, the zoom stand-in being off: every cell that asserts a held stand-in; see HELD_SKIP below.
  *
  * Run: npx vitest run --config vitest.render.mts test/render/ZoomSettleStandIn.test.ts
  */
@@ -39,14 +38,9 @@ const TEMPLATE = JSON.parse(readFileSync(fileURLToPath(new URL("./fixtures/alan-
 const PANE = { w: 1184, h: 824 };
 const DSF = 2;
 const PAGE_ID = "75d1627a-c4d7-4a11-947d-bc26b7f83c20";
-/**
- * The zoom stand-in is off for 1.4.23 (ZOOM_STAND_IN_ENABLED in InkOverlay.ts): no stand-in is ever held, so
- * every cell that asserts a held stand-in is skipped as a group, with this reason in its name. 8c, 8d and 8e assert none is held
- * and still run. The stand-in returns in 1.4.24 reworked or not at all; these cells come back with it.
- */
-const HELD_SKIP = "skipped in 1.4.23: the zoom stand-in is off, so none is ever held";
+/** The cells that assert a held stand-in (ZOOM_STAND_IN_ENABLED in InkOverlayConstants.ts). 8c, 8d and 8e assert none is held. */
 function itHeld(name: string, fn: () => Promise<void>, timeout?: number): void {
-	it.skip(`${name} (${HELD_SKIP})`, fn, timeout);
+	it(name, fn, timeout);
 }
 /** The camera still bar in device px (InkOverlay CAMERA_STILL_BACKING_PX): the bar for where the soft frame's ink stands. */
 const PLACE_BAR_PX = 0.1;
@@ -430,14 +424,18 @@ itHeld("9e: a device ratio change between the copy frame and the next whole repa
 	});
 }, 120_000);
 
-it("8c: the stand-in let go before the frame cancels the copy, and the frame draws by path", async () => {
+// The commit paints its one whole repaint in its own task; with a stand-in held it leaves the paint to the frame. Either way, once
+// the stand-in is let go before the frame, the whole layer is drawn by path by the commit's task or by the frame, and none is blank.
+it("8c: the stand-in let go before the frame cancels the copy, and the commit's task or the frame draws the whole layer by path", async () => {
 	await withRig(0.10, async ({ call }) => {
 		await call("holdPieces", true);
 		const t = await call<TaskRows>("commitThen", 0.12, "drop");
 		expect(t.held, "premise: the stand-in was let go in the task").toBe(false);
 		const f = await call<FrameRows>("afterFrame", null);
-		const sm = sumOf(f.rows);
-		expect({ stand: sm.stand, drewByPath: sm.pts > 0 }, `the frame (${JSON.stringify(f)})`).toEqual({ stand: 0, drewByPath: true });
+		const st = sumOf(t.rows), sm = sumOf(f.rows);
+		const ink = await call<number>("wholeLayerInk");
+		expect({ stand: sm.stand, drewByPath: st.pts > 0 || sm.pts > 0, inked: ink > 100 }, `no stand-in copy in the frame, the whole layer drawn by path in the commit's task or the frame, and ink on the layer after the frame (${JSON.stringify({ t, f, ink })})`)
+			.toEqual({ stand: 0, drewByPath: true, inked: true });
 		await call("holdPieces", false);
 	});
 }, 120_000);

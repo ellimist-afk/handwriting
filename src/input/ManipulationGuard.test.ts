@@ -221,6 +221,51 @@ describe("paroleEarned — blocked contacts that move like a swipe (v0.13.3)", (
 	});
 });
 
+describe("a surface built without the native window (the PDF viewer)", () => {
+	// On a PDF only the assist is known to pan with one finger: a finger handed
+	// to the browser in the window moved nothing on the device, again and again,
+	// for as long as the next touch kept landing inside the second.
+	it("a finger pan's last lift leaves the guard armed: no linger, no re-arm", () => {
+		const g = new ManipulationGuard(false);
+		g.touchStart();
+		const d = g.touchEnd(true);
+		expect(d.touchAction).toBe("none");
+		expect(d.scheduleRearm).toBe(false);
+		expect(g.current).toBe("armed");
+	});
+
+	it("the next finger straight after a pan is carried by the assist again", () => {
+		const g = new ManipulationGuard(false);
+		g.touchStart();
+		g.touchEnd(true);
+		const d = g.touchStart();
+		expect(d.assistThisGesture).toBe(true);
+		expect(d.touchAction).toBe("none");
+		expect(d.cancelRearm).toBe(false);
+		expect(g.current).toBe("armed-assist");
+	});
+
+	it("multi-finger: the last lift of a pan still leaves the guard armed", () => {
+		const g = new ManipulationGuard(false);
+		g.touchStart();
+		g.touchStart();
+		expect(g.touchEnd(true).touchAction).toBe("none");
+		const last = g.touchEnd(true);
+		expect(last.touchAction).toBe("none");
+		expect(last.scheduleRearm).toBe(false);
+		expect(g.current).toBe("armed");
+	});
+
+	it("a tap still leaves the guard armed, as on a note", () => {
+		const g = new ManipulationGuard(false);
+		g.touchStart();
+		const d = g.touchEnd(false);
+		expect(d.touchAction).toBe("none");
+		expect(d.scheduleRearm).toBe(false);
+		expect(g.current).toBe("armed");
+	});
+});
+
 describe("pinchStart", () => {
 	it("takes the surface back when the native window is open", () => {
 		// The bug this fixes: after a real pan the window is open, and the

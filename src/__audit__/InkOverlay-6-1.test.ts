@@ -112,14 +112,16 @@ async function scenario(afterRelease: () => void): Promise<FakeAdapter> {
 		overlay.spaceBounds = { x: 10, y: 200, width: 10, height: 10 };
 
 		// 3. Drag down 10 note units (under half a 24-unit line) with the REAL spaceMove.
+		//    A drag sample moves no store: the moving ink rides the tail as a
+		//    picture and the release moves the store once.
 		overlay.spaceMove([{ x: 50, y: 110, pressure: 0.5, t: 0 }]);
-		expect(memYs()).toEqual({ above: 40, below: 210 });
+		expect([memYs(), overlay.spaceTotalDy]).toEqual([{ above: 40, below: 200 }, 10]);
 
 		// 4. The pen is held; the debounce fires mid-drag and writes.
 		await vi.advanceTimersByTimeAsync(700);
-		// Precondition: the queued write DID land mid-drag with the provisional
-		// coordinate (the snapshot held the live stroke array).
-		expect(diskYs(fake)).toEqual({ above: 40, below: 210 });
+		// Precondition: the queued write DID land mid-drag, with the store's
+		// pen-down coordinate.
+		expect(diskYs(fake)).toEqual({ above: 40, below: 200 });
 
 		// 5. Release with the REAL spaceUp: lineSteps(10, 24) === 0, zero snap.
 		overlay.spaceUp();

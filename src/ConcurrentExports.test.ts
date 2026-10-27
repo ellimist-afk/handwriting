@@ -11,9 +11,9 @@
  * turn directly and would stay green if a caller stopped going through the
  * helper at all. These execute the ACTUAL registered `export-ink-svg` and
  * `export-ink-pdf` callbacks and the ACTUAL `flattenPdf` method, lifted out of
- * `main.ts` source and transpiled, bound to the REAL renderers, the REAL
- * `createFreshFile`, and the real `firstFreePath` loop. Nothing about naming
- * or writing is re-implemented here.
+ * `main.ts` and `export/Snips.ts` source and transpiled, bound to the REAL
+ * renderers, the REAL `createFreshFile`, and the real `firstFreePath` loop.
+ * Nothing about naming or writing is re-implemented here.
  *
  * THE HOST FIXTURE IS FAITHFUL TO THE OBSERVED CONTRACT, and that is the whole
  * point: `create` awaits an existence check and then awaits an overwrite-capable
@@ -30,6 +30,9 @@ import { describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
 import { stripMarkdownExtension } from "./util/MarkdownPath";
 import mainSource from "./main.ts?raw";
+import commandsSource from "./commands/RegisterCommands.ts?raw";
+import exportCommandsSource from "./commands/RegisterExportCommands.ts?raw";
+import snipsSource from "./export/Snips.ts?raw";
 import { createFreshFile } from "./export/CreateFreshFile";
 import { inkToSvg } from "./ink/SvgExport";
 import { inkToPdf } from "./ink/InkPdf";
@@ -37,20 +40,26 @@ import { bytesOf } from "./pdf/PdfSyntax";
 import { appendInkToPdf, flattenedPdfPath } from "./ink/InkPdfAppend";
 import type { InkStroke } from "./ink/Stroke";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+// The command registrations live in commands/RegisterCommands.ts and RegisterExportCommands.ts, read here with main.ts.
+const source = [mainSource, commandsSource, exportCommandsSource].join("\n").replace(/\r\n/g, "\n");
+const snips = snipsSource.replace(/\r\n/g, "\n");
 
 /** A source slice, with both ends proven present and unique. */
-function slice(startMarker: string, endMarker: string): string {
-	expect(source.split(startMarker), `start marker not unique: ${startMarker}`).toHaveLength(2);
-	const start = source.indexOf(startMarker);
-	const end = source.indexOf(endMarker, start + startMarker.length);
+function slice(startMarker: string, endMarker: string, text: string = source): string {
+	expect(text.split(startMarker), `start marker not unique: ${startMarker}`).toHaveLength(2);
+	const start = text.indexOf(startMarker);
+	const end = text.indexOf(endMarker, start + startMarker.length);
 	expect(end, `end marker missing after: ${startMarker}`).toBeGreaterThan(start);
-	return source.slice(start, end + endMarker.length);
+	return text.slice(start, end + endMarker.length);
 }
 
 const SVG_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "export-ink-svg",', "\n\t\t});");
 const PDF_BLOCK = slice('\t\tthis.addCommand({\n\t\t\tid: "export-ink-pdf",', "\n\t\t});");
-const FLATTEN_BLOCK = slice("\tprivate async flattenPdf(file: TFile, id: string): Promise<void> {", "\n\t}");
+const FLATTEN_BLOCK = slice(
+	"\tasync function flattenPdf(this: HandwritingPlugin, file: TFile, id: string): Promise<void> {",
+	"\n\t}",
+	snips
+);
 
 // Fail closed if the shapes these tests assume ever move.
 expect(SVG_BLOCK).toContain("createFreshFile(");
@@ -267,10 +276,12 @@ describe("two overlapping exports keep both snapshots", () => {
 					createFreshFile: watchedHelper(tag, log),
 				};
 				if (kind === "flatten") {
-					const Holder = build(`return class { ${FLATTEN_BLOCK} }`, deps) as {
-						prototype: { flattenPdf(this: unknown, f: unknown, id: string): Promise<void> };
-					};
-					return Holder.prototype.flattenPdf.call(stub, { path: "note.pdf" }, "id");
+					const flattenPdf = build(`"use strict";\nreturn ${FLATTEN_BLOCK.trimStart()}`, deps) as (
+						this: unknown,
+						f: unknown,
+						id: string
+					) => Promise<void>;
+					return flattenPdf.call(stub, { path: "note.pdf" }, "id");
 				}
 				const spec = registerCommand(kind === "svg" ? SVG_BLOCK : PDF_BLOCK, deps, stub);
 				spec.checkCallback(false);

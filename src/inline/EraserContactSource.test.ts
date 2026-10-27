@@ -1,8 +1,7 @@
 /**
- * A source guard over the ERASER CONTACT PATH, because the 1.4.12 report was
- * filed against the wrong toast and the cheapest way to keep that from
- * happening twice is to be able to prove where a pen contact can and cannot
- * reach.
+ * A guard over the ERASER CONTACT PATH, because the 1.4.12 report was filed
+ * against the wrong toast and the cheapest way to keep that from happening
+ * twice is to be able to prove where a pen contact can and cannot reach.
  *
  * WHAT WAS REPORTED. Alan, hardware, on `vault test 2`: "holding ctrl and
  * touching eraser end to screen spams toast notification - there is no ink on
@@ -22,37 +21,54 @@
  *     exists as an `addCommand` id and as nothing else, so no pen path, strip
  *     button or keyboard handler can invoke it however it is provoked.
  *
- * WHY SOURCE TEXT. A behavioural test can only show that the eraser did not
- * run a command in the situations it was driven through. What is worth
- * pinning is that there is no such call to run in the first place - a
- * property of the code, not of a scenario, and one a future edit could add
- * back without failing any behavioural test in this suite.
+ * THE ERASER CELLS RUN THE CONTACT. They used to read the eraser branch of
+ * `penDown` out of `InkOverlay.ts` as text. Now a real overlay, mounted all
+ * the way (`mountRig.test.util.ts`), takes the reported contact itself: the
+ * eraser end, Ctrl held, again and again, on a note with no ink and on one
+ * with ink. Obsidian's `app` - the overlay's only route to the command
+ * palette, read from the editor's info field, and the global one beside it -
+ * is a spy, and so is the Notice. A scrub that reached a command, spoke more
+ * than once, or erased differently under a modifier fails on the run, in
+ * whatever file the branch lives.
  *
- * BOUNDED AT BOTH ENDS, and both anchors asserted to exist. An unbounded
- * search over the file would be useless here: `InkOverlay.ts` legitimately
- * holds `commands.executeCommandById(id)` a thousand lines away, wiring the
- * pen-tools strip's buttons. The claim is about the eraser branch, so the
- * slice is the eraser branch, and a rename that moves either anchor fails
- * loudly rather than shrinking the window to nothing and passing.
+ * What a run cannot see, said plainly: a call that sits on the branch and is
+ * not reached by these contacts. The contacts here are the reported one and
+ * its neighbours (each modifier, each end of the pen, empty and inked notes),
+ * which is every input the branch reads.
  *
- * Source text via `import.meta.glob` + `?raw`, and comments blanked with
- * `codeOnly`, for the reasons those two carry in `InkSurfaceRules.test.ts`
- * and `CodeOnly.ts`: this repo has no `@types/node`, and a guard a comment
- * can satisfy is a guard a comment can defeat. This very file's header names
- * `executeCommandById` and `delete-all-ink` in prose, which would satisfy a
- * raw-text search on its own.
+ * `handwriting:delete-all-ink` stays a whole-tree read: its claim is that no
+ * file in the tree dispatches the id, a property of the tree, and that read
+ * keys on no one file. Source text via `import.meta.glob` + `?raw`, and
+ * comments blanked with `codeOnly`, for the reasons those two carry in
+ * `InkSurfaceRules.test.ts` and `CodeOnly.ts`.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const notices = vi.hoisted(() => ({ messages: [] as string[] }));
+vi.mock("obsidian", async (importOriginal) => {
+	const actual = (await importOriginal()) as Record<string, unknown>;
+	return {
+		...actual,
+		Notice: class {
+			constructor(message: string) {
+				notices.messages.push(message);
+			}
+		},
+	};
+});
+
 import { codeOnly } from "../CodeOnly";
+import type { InkStroke } from "../ink/Stroke";
+import { inlineInk } from "./InkOverlay";
+import { mountOverlay } from "./mountRig.test.util";
+import { resetTipModeForTest } from "./TipMode";
 
 const ALL_TS = import.meta.glob("/src/**/*.ts", {
 	query: "?raw",
 	eager: true,
 	import: "default",
 }) as Record<string, string>;
-
-const OVERLAY = "/src/inline/InkOverlay.ts";
 
 /** A file's code, comments blanked. Throws on a rename rather than passing vacuously. */
 function code(file: string): string {
@@ -61,64 +77,143 @@ function code(file: string): string {
 	return codeOnly(text);
 }
 
-/**
- * The eraser branch of `penDown`, from the branch itself to the next
- * gesture's branch.
- *
- * Both ends are asserted present and unique before anything is sliced, and
- * the slice is asserted non-trivial: the three ways a bounded-slice guard
- * goes quietly vacuous are a missing opener, a missing closer, and a window
- * that closes before it opens.
- */
-const ERASER_BRANCH_OPEN = "if (eraser) {";
-const ERASER_BRANCH_CLOSE = 'if (intent === "pan") {';
+const EMPTY_ERASE = "Handwriting: no ink on the page to erase";
 
-function eraserBranch(): string {
-	const text = code(OVERLAY);
-	const opens = text.split(ERASER_BRANCH_OPEN).length - 1;
-	const closes = text.split(ERASER_BRANCH_CLOSE).length - 1;
-	expect(opens, `anchor "${ERASER_BRANCH_OPEN}" in ${OVERLAY}`).toBe(1);
-	expect(closes, `anchor "${ERASER_BRANCH_CLOSE}" in ${OVERLAY}`).toBe(1);
-	const from = text.indexOf(ERASER_BRANCH_OPEN);
-	const to = text.indexOf(ERASER_BRANCH_CLOSE);
-	expect(to).toBeGreaterThan(from);
-	const slice = text.slice(from, to);
-	// A window that is present, ordered, and still too small to contain the
-	// branch would pass every check above. The erase branch sets four fields
-	// and calls four methods; anything under a few hundred characters means
-	// the anchors have drifted onto something else.
-	expect(slice.length).toBeGreaterThan(300);
-	return slice;
+type Modifiers = { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean };
+const MODIFIER_SETS: ReadonlyArray<readonly [string, Modifiers]> = [
+	["no modifier", {}],
+	["ctrl", { ctrlKey: true }],
+	["meta", { metaKey: true }],
+	["alt", { altKey: true }],
+	["shift", { shiftKey: true }],
+	["every modifier", { ctrlKey: true, metaKey: true, altKey: true, shiftKey: true }],
+];
+
+function stroke(id: string): InkStroke {
+	return {
+		id,
+		tool: "pen",
+		color: "#000000",
+		width: 2,
+		points: [
+			{ x: 10, y: 10, pressure: 0.5, t: 0 },
+			{ x: 20, y: 20, pressure: 0.5, t: 8 },
+		],
+		bbox: { x: 10, y: 10, width: 10, height: 10 },
+		createdAt: 0,
+	} as InkStroke;
+}
+
+/**
+ * A mounted overlay whose `app` is a spy, driven through its real `penDown`
+ * and `penUp`. The eraser end is `buttons & 32` with button 5, the way a
+ * digitizer reports it; the nib is button 0.
+ */
+function contactRig(path: string) {
+	const executeCommandById = vi.fn();
+	const app = { commands: { executeCommandById } };
+	const g = globalThis as { app?: unknown };
+	const hadApp = "app" in g;
+	const oldApp = g.app;
+	g.app = app;
+	let m: ReturnType<typeof mountOverlay>;
+	try {
+		m = mountOverlay(path, { app });
+	} catch (e) {
+		if (hadApp) g.app = oldApp;
+		else delete g.app;
+		throw e;
+	}
+	const o = m.o as Record<string, unknown> & {
+		penDown(sample: unknown, ev: unknown): void;
+		penUp(ev?: unknown): void;
+		mode: string;
+	};
+	const sample = { x: 60, y: 60, pressure: 0.5, timestamp: 0, tiltX: 0, tiltY: 0 };
+	return {
+		executeCommandById,
+		/** One contact; returns the gesture mode penDown chose. */
+		contact(end: "eraser" | "nib", mods: Modifiers = {}): string {
+			const ev = {
+				pointerType: "pen",
+				buttons: end === "eraser" ? 32 : 1,
+				button: end === "eraser" ? 5 : 0,
+				clientX: sample.x,
+				clientY: sample.y,
+				ctrlKey: false,
+				metaKey: false,
+				altKey: false,
+				shiftKey: false,
+				...mods,
+			};
+			o.penDown(sample, ev);
+			const mode = o.mode;
+			o.penUp({ ...ev, buttons: 0 });
+			return mode;
+		},
+		done() {
+			try {
+				m.destroy();
+			} finally {
+				if (hadApp) g.app = oldApp;
+				else delete g.app;
+			}
+		},
+	};
 }
 
 describe("the eraser contact path", () => {
+	beforeEach(() => {
+		resetTipModeForTest();
+		notices.messages = [];
+	});
+	afterEach(() => resetTipModeForTest());
+
 	it("reaches no palette command, however many contacts a scrub makes", () => {
-		const branch = eraserBranch();
-		// Every spelling this repo actually uses to run a command, from the
-		// two real dispatch sites (main.ts and InkOverlay's strip wiring).
-		for (const call of ["executeCommandById", "app.commands", ".commands", "exec("]) {
-			expect(branch, `eraser branch must not reach ${call}`).not.toContain(call);
+		// The reported contact, five times over: the eraser end with Ctrl held,
+		// on a note with no ink and on one with ink. Every route the overlay
+		// has to a command goes through `app.commands`, and that is the spy.
+		for (const [path, ink] of [["eraser-scrub-empty.md", false], ["eraser-scrub-inked.md", true]] as const) {
+			if (ink) inlineInk.commitGesture(path, [stroke(`${path}-1`)]);
+			const rig = contactRig(path);
+			try {
+				for (let i = 0; i < 5; i++) {
+					expect(rig.contact("eraser", { ctrlKey: true }), "precondition: the eraser end erased").toBe("erase");
+				}
+				expect(rig.executeCommandById, `an eraser scrub on ${path} ran a palette command`).not.toHaveBeenCalled();
+			} finally {
+				rig.done();
+			}
 		}
 	});
 
 	it("says its one thing through the gate, so a scrub cannot repeat it", () => {
-		const branch = eraserBranch();
-		// One Notice-raising call, and it is the gated helper rather than a
-		// bare `new Notice` - the bare form is what fired per contact.
-		expect(branch).toContain("this.sayIfPageEmpty(here, \"erase\")");
-		expect(branch).not.toContain("new Notice(");
+		// One sentence for the whole scrub, and it is the page's own refusal,
+		// not the delete-all command's. A bare `new Notice` on the branch is
+		// what fired per contact; the gate answers once per note.
+		const rig = contactRig("eraser-says-once.md");
+		try {
+			for (let i = 0; i < 5; i++) rig.contact("eraser", { ctrlKey: true });
+		} finally {
+			rig.done();
+		}
+		expect(notices.messages, "a five-contact scrub on an empty note did not say its sentence exactly once").toEqual([EMPTY_ERASE]);
 	});
 
 	it("still decides erase-vs-ink from the pen alone, never from a modifier", () => {
 		// The report named Ctrl. Nothing on this path reads a modifier, and
 		// the arbitration it does use takes buttons and the strip mode only
-		// (TipMode.penContactIntent). If a modifier is ever consulted here,
-		// this is the line that should have to be rewritten deliberately.
-		const branch = eraserBranch();
-		expect(branch).not.toContain("ctrlKey");
-		expect(branch).not.toContain("metaKey");
-		expect(branch).not.toContain("altKey");
-		expect(branch).not.toContain("shiftKey");
+		// (TipMode.penContactIntent). So every modifier, alone and together,
+		// leaves the eraser end erasing and the nib inking.
+		const rig = contactRig("eraser-modifiers.md");
+		try {
+			for (const [name, mods] of MODIFIER_SETS) {
+				expect(rig.contact("eraser", mods), `the eraser end with ${name} did not erase`).toBe("erase");
+				expect(rig.contact("nib", mods), `the nib with ${name} did not ink`).toBe("ink");
+			}
+		} finally {
+			rig.done();
+		}
 	});
 });
 
@@ -147,16 +242,22 @@ describe("handwriting:delete-all-ink", () => {
 			// RUNS it has to name the plugin prefix too.
 			if (text.includes("handwriting:delete-all-ink")) dispatching.push(file);
 		}
-		expect(declaring).toEqual(["/src/main.ts"]);
+		expect(declaring).toEqual(["/src/commands/RegisterExportCommands.ts"]);
 		expect(dispatching).toEqual([]);
 	});
 
 	it("is not on any pen-tools strip button", () => {
 		// The strip is the one thing in the plugin that turns a pen tap into
 		// a command id, so it is the one place a pen COULD reach a palette
-		// command. Its button table is the complete list, and this pins that
-		// the destructive command is not on it.
-		expect(code("/src/inline/MobileTools.ts")).not.toContain("delete-all-ink");
+		// command. The strip is split over several files, and a button can be
+		// declared in any of them, so every non-test file of the strip and of the
+		// note zoom controls is read, not one named file. The list must hold the
+		// button table, or the loop below could pass over nothing.
+		const stripFiles = files.filter((f) => /^\/src\/inline\/(MobileTools|NoteZoomControls)/.test(f));
+		expect(stripFiles, "the strip's button table is not among the files read").toContain("/src/inline/MobileToolsButtons.ts");
+		for (const file of stripFiles) {
+			expect(code(file), `${file} names the delete-all command`).not.toContain("delete-all-ink");
+		}
 	});
 
 	it("declares no default hotkey anywhere, so nothing binds it by accident", () => {

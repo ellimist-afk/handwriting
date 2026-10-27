@@ -12,9 +12,11 @@
 import { expect, it } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "./main.ts?raw";
+import onloadSource from "./PluginOnload.ts?raw";
 import type { InlineInkHost } from "./inline/InlineInkStore";
 
-const main = mainSource.replace(/\r\n/g, "\n");
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const main = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
 const START = "\t\tinlineInk.attachHost({", END = "\n\t\t});";
 const at = main.indexOf(START);
 if (at < 0 || main.indexOf(START, at + 1) >= 0) throw new Error(`wiring marker not found exactly once: ${START}`);

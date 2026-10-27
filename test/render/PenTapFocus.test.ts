@@ -34,8 +34,12 @@ let browser: Browser, script: string;
 const evidence: unknown[] = [];
 
 beforeAll(async () => {
+	const here = fileURLToPath(new URL(".", import.meta.url));
 	const b = await build({
-		entryPoints: [fileURLToPath(new URL("./penTapFocusPage.ts", import.meta.url))],
+		stdin: {
+			contents: 'import "./penTapFocusPage"; import { Platform } from "obsidian"; import { setPenInk } from "../../src/inline/PenInk"; import { setInlineInkEnabled } from "../../src/inline/InkOverlayRegistry"; (window as any).penTapFocus.setPenInk = setPenInk; (window as any).penTapFocus.setInlineInkEnabled = setInlineInkEnabled; (window as any).penTapFocus.setMobileApp = (on: boolean) => { (Platform as { isMobileApp: boolean }).isMobileApp = on; };',
+			resolveDir: here, loader: "ts", sourcefile: "penTapFocusEntry.ts",
+		},
 		bundle: true, write: false, format: "iife", platform: "browser",
 		alias: { obsidian: fileURLToPath(new URL("./mouseUndoObsidianStub.ts", import.meta.url)) },
 	});
@@ -150,11 +154,121 @@ it("leaving the editor gives the ordinary keyboard back", async () => {
 	expect(r.afterLeave.inputMode, "the editor kept asking for no keyboard after it lost focus").toBeNull();
 });
 
-it("control: editor already focused, a claimed pen tap changes nothing about focus or keyboard", async () => {
-	const r = await run("already-focused", { tapButtonFirst: false });
+type Row = { id: number; ptr: string; type: string; note: string; eventId?: string };
+const traceRows = (page: Page): Promise<Row[]> => page.evaluate(() => (window as any).penTapFocus.capture().events);
+/** The keyboard row of each pen-down, with the note of the router's own row for the same event. */
+async function keyboardRows(page: Page) {
+	const rows = await traceRows(page);
+	return rows
+		.filter((r) => r.note.startsWith("keyboard at pen-down"))
+		.map((r) => ({ ptr: r.ptr, note: r.note, router: rows.find((o) => o.eventId === r.eventId && o.note.startsWith("pen "))?.note ?? null }));
+}
+
+it("an editor that already has focus gets the hold on a claimed pen tap, with no focus change", async () => {
+	const r = await run("already-focused", { tapButtonFirst: false }, async (page) => ({ rows: await keyboardRows(page) }));
 	expect(r.beforeTap.focused, "premise: the editor has focus").toBe(true);
 	expect(r.claimed).toBe(true);
 	expect(r.afterTap.focusLog, "focus moved during a tap on an already focused editor").toEqual([]);
 	expect(r.afterTap.head).toBe(r.beforeTap.head);
-	expect(r.afterTap.inputMode, "an editor that already had focus had its keyboard setting changed").toBeNull();
+	expect(r.afterTap.inputMode, "a pen tap on an already focused editor left the keyboard free to rise").toBe("none");
+	expect(r.rows, "one keyboard row for the one pen-down").toHaveLength(1);
+	expect(r.rows[0]!.note).toBe('keyboard at pen-down: editor focused=yes, inputmode before=(unset) after="none", hold=placed');
+	expect(r.rows[0]!.ptr).toBe("pen");
+	expect(r.rows[0]!.router, "the router's row for the same event says it claimed").toMatch(/^pen CLAIMED/);
+});
+
+it("the trace row of a claimed pen tap on an editor that lost focus", async () => {
+	const r = await run("trace-claimed", {}, async (page) => ({ rows: await keyboardRows(page) }));
+	// The first pen-down is on the page button, outside the editor: no row. The second is the note tap.
+	expect(r.rows).toHaveLength(1);
+	expect(r.rows[0]!.note).toBe('keyboard at pen-down: editor focused=no, inputmode before=(unset) after="none", hold=placed');
+	expect(r.rows[0]!.router).toMatch(/^pen CLAIMED/);
+});
+
+it("a second pen contact the router ignores still holds the keyboard down", async () => {
+	const r = await run("ignored", {}, async (page) => {
+		const cdp = await page.context().newCDPSession(page);
+		await penPress(cdp, NOTE.x + 60, NOTE.y + 60);
+		try {
+			// The first stroke stays live. Blur releases the hold it placed.
+			await page.evaluate(() => (document.querySelector(".cm-content") as HTMLElement).blur());
+			const afterBlur = await call(page, "snap");
+			await page.evaluate(() => document.querySelector(".cm-content")!.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "pen", pointerId: 99, bubbles: true, cancelable: true, composed: true, clientX: 200, clientY: 300 })));
+			return { afterBlur, afterSecond: await call(page, "snap"), rows: await keyboardRows(page) };
+		} finally {
+			await penRelease(cdp, NOTE.x + 60, NOTE.y + 60);
+		}
+	});
+	expect(r.afterBlur.inputMode, "premise: blur released the hold").toBeNull();
+	const last = r.rows[r.rows.length - 1]!;
+	expect(last.router, "premise: the router ignored the second contact").toMatch(/^pen IGNORED/);
+	expect(r.afterSecond.inputMode, "a pen contact the router ignored left the keyboard free to rise").toBe("none");
+	expect(last.note).toBe('keyboard at pen-down: editor focused=no, inputmode before=(unset) after="none", hold=placed');
+});
+
+it("pen ink off: a pen pointerdown at the editor leaves the keyboard setting alone, and the trace says why", async () => {
+	const r = await run("pen-ink-off", {}, async (page, pen) => {
+		await pen(BUTTON.x, BUTTON.y);
+		const afterLeave = await call(page, "snap");
+		await page.evaluate(() => {
+			(window as any).penTapFocus.setPenInk(false);
+			document.querySelector(".cm-content")!.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "pen", pointerId: 98, bubbles: true, cancelable: true, composed: true, clientX: 200, clientY: 300 }));
+		});
+		return { afterLeave, afterOff: await call(page, "snap"), rows: await keyboardRows(page) };
+	});
+	expect(r.afterLeave.inputMode, "premise: leaving the editor released the hold").toBeNull();
+	expect(r.afterOff.inputMode, "a pen pointerdown with pen ink off changed the keyboard setting").toBeNull();
+	const last = r.rows[r.rows.length - 1]!;
+	expect(last.note).toBe('keyboard at pen-down: editor focused=no, inputmode before=(unset) after=(unset), hold=no (pen ink off)');
+	expect(last.router, "premise: the router handed the contact back").toMatch(/^pen NOT CLAIMED/);
+});
+
+it("inline ink off: a pen pointerdown at the editor leaves the keyboard setting alone, and the trace says why", async () => {
+	const r = await run("inline-ink-off", {}, async (page, pen) => {
+		await pen(BUTTON.x, BUTTON.y);
+		const afterLeave = await call(page, "snap");
+		await page.evaluate(() => {
+			(window as any).penTapFocus.setInlineInkEnabled(false);
+			document.querySelector(".cm-content")!.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "pen", pointerId: 96, bubbles: true, cancelable: true, composed: true, clientX: 200, clientY: 300 }));
+		});
+		const afterOff = await call(page, "snap");
+		const rows = await keyboardRows(page);
+		await page.evaluate(() => (window as any).penTapFocus.setInlineInkEnabled(true));
+		return { afterLeave, afterOff, rows };
+	});
+	expect(r.afterLeave.inputMode, "premise: leaving the editor released the hold").toBeNull();
+	expect(r.afterOff.inputMode, "a pen pointerdown with inline ink off changed the keyboard setting").toBeNull();
+	expect(r.rows[r.rows.length - 1]!.note).toBe('keyboard at pen-down: editor focused=no, inputmode before=(unset) after=(unset), hold=no (inline ink off)');
+});
+
+it("an overlay re-created on the same editor leaves one pen listener: one pen-down, one hold, one keyboard row", async () => {
+	const r = await run("recycle", {}, async (page, pen) => {
+		const rowsBefore = (await keyboardRows(page)).length;
+		await page.evaluate(() => (window as any).penTapFocus.recycleOverlay());
+		await pen(BUTTON.x, BUTTON.y);
+		const afterLeave = await call(page, "snap");
+		await pen(NOTE.x, NOTE.y);
+		return { rowsBefore, afterLeave, afterNote: await call(page, "snap"), rows: await keyboardRows(page) };
+	});
+	expect(r.rowsBefore, "premise: the first overlay's one pen-down left one row").toBe(1);
+	expect(r.afterLeave.inputMode, "premise: leaving the editor released the hold").toBeNull();
+	expect(r.afterNote.inputMode, "a pen tap on the re-created overlay's editor left the keyboard free to rise").toBe("none");
+	// Two pen-downs after the recycle (the button is outside the editor, so only the note tap counts): one row, not one per overlay ever built.
+	expect(r.rows.length - r.rowsBefore, "one pen-down in the editor wrote more than one keyboard row").toBe(1);
+	expect(r.rows[r.rows.length - 1]!.note).toBe('keyboard at pen-down: editor focused=no, inputmode before=(unset) after="none", hold=placed');
+});
+
+it("a mobile app: a pen pointerdown at the editor leaves the keyboard setting alone, and the trace says why", async () => {
+	const r = await run("mobile-app", {}, async (page, pen) => {
+		await pen(BUTTON.x, BUTTON.y);
+		const afterLeave = await call(page, "snap");
+		await page.evaluate(() => {
+			(window as any).penTapFocus.setMobileApp(true);
+			document.querySelector(".cm-content")!.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "pen", pointerId: 97, bubbles: true, cancelable: true, composed: true, clientX: 200, clientY: 300 }));
+		});
+		return { afterLeave, afterMobile: await call(page, "snap"), rows: await keyboardRows(page) };
+	});
+	expect(r.afterLeave.inputMode, "premise: leaving the editor released the hold").toBeNull();
+	expect(r.afterMobile.inputMode, "a pen pointerdown on a mobile app changed the keyboard setting").toBeNull();
+	expect(r.rows[r.rows.length - 1]!.note).toBe('keyboard at pen-down: editor focused=no, inputmode before=(unset) after=(unset), hold=no (mobile app)');
 });

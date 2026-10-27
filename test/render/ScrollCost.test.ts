@@ -23,7 +23,12 @@
  * THE CLAIMS, per arm:
  *   - a repaint inside the horizontal fling takes at most 2 ms, except a repaint that moves the ink band (it writes the
  *     overlay's left), which takes under 5 ms: the band carries its pixels and draws only the strip it uncovers, and the
- *     first move of a fling can meet a strip of a hundred or more strokes. Priced on a GPU canvas, the launch below;
+ *     first move of a fling can meet a strip of a hundred or more strokes. Priced on a GPU canvas, the launch below.
+ *     One stray per fling is let through: a single repaint over its bound, under 5 ms (a band move under 10), whose
+ *     slow reads follow no write. On Paladin the 1.4.23 release and the 1.4.24 tip both put one such repaint over in
+ *     about half their flings, at the same rate (10 runs each, 2026-10-16), and the probes name no writer for it. A second
+ *     repaint over, or any over repaint whose slow read follows a write, stays red.
+ *     The let-through row prints on every run (SCROLLCOST-STRAY), so the stray stays visible when the cell is green;
  *   - no canvas takes a draw or a size write on any frame of the top bounce.
  * A red names the writer: the repaints over 2 ms, each with its slow reads, the write before it, and the method that made it.
  *
@@ -262,7 +267,7 @@ window.scrollCost = {
 		const mo = new MutationObserver(() => {});
 		mo.observe(sd, { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ["style", "class", "width", "height", "hidden"] });
 		const rows = [], scrolls = [], extras = [];
-		let phase = "down", prevSnap = {}, pendingAt = null;
+		let phase = "down", prevSnap = {}, pendingAt = null, repaintN = 0;
 		const origRepaint = overlay.repaint, origExtent = overlay.updateExtent, origSchedule = overlay.scheduleRepaint;
 		// The scroll probe's "+ms" is the wait from the request to the run, not the cost of the repaint: the first request since the last run starts it.
 		overlay.scheduleRepaint = function (...a) { if (pendingAt === null) pendingAt = performance.now(); return origSchedule.apply(this, a); };
@@ -286,6 +291,16 @@ window.scrollCost = {
 			try { return origRepaint.apply(this, a); } finally {
 				// The plant: a style write that restyles the page, then a layout read, at the end of every repaint, as a stand-in for the suspect.
 				if (plant === "layout") plantLayout();
+				else if (plant) {
+					// The stray plants, on the fling's fourth repaint (and the seventh for stray2): see PLANT below.
+					const at4 = repaintN === 3, at7 = repaintN === 6;
+					if (plant === "stray1" && at4) spin(3);
+					if (plant === "stray2" && (at4 || at7)) spin(3);
+					if (plant === "stray6" && at4) spin(6);
+					if (plant === "write1" && at4) { for (let k = 0; k < 200 && !cur.slow.some(s => s.after !== null); k++) plantLayout(); document.body.style.setProperty("--font-text-size", "19px"); spin(t0 + 3 - performance.now()); }
+					if (at4 || (plant === "stray2" && at7)) cur.planted = plant;
+				}
+				repaintN++;
 				cur.ms = performance.now() - t0; rs.cur = null;
 				cur.writes = takeWrites(mo);
 				const snap = snapshot(); cur.canvases = delta(prevSnap, snap); prevSnap = snap;
@@ -297,6 +312,7 @@ window.scrollCost = {
 		const flushWrites = () => { const w = takeWrites(mo); if (Object.keys(w).length) extras.push({ phase, t: Math.round(performance.now()), before: "frame", writes: w }); };
 		sd.addEventListener("scroll", onScroll);
 		let plantN = 0;
+		const spin = ms => { const until = performance.now() + ms; while (performance.now() < until) { /* the stray plants' busy time */ } };
 		const plantLayout = () => { document.body.style.setProperty("--font-text-size", (19 + (plantN++ % 2) * 0.02) + "px"); return sd.scrollWidth; };
 		const read = () => { const b = overlay.overscrollBounceReadout(); return { active: b.active, total: axis === "y" ? b.restY + b.y : b.restX + b.x, fling: router.flingRaf !== 0 }; };
 		const scrollAtStart = { left: sd.scrollLeft, top: sd.scrollTop, scrollWidth: sd.scrollWidth, scrollHeight: sd.scrollHeight };
@@ -363,7 +379,7 @@ async function open(tag: string, canvas: boolean) {
 
 type Row = { phase: string; kind?: string; waited?: number; t: number; ms: number; extentMs: number; reads: number; readMs: number; scrollLeft: number; scrollTop: number;
 	slow: { api: string; ms: number; after: string | null; where: string }[]; writes: Record<string, Record<string, number>>;
-	canvases: Record<string, { draw: number; state: number; size: number; methods: Record<string, number> }> };
+	canvases: Record<string, { draw: number; state: number; size: number; methods: Record<string, number> }>; planted?: string };
 
 const f2 = (n: number) => Math.round(n * 100) / 100;
 /** One line per repaint: its time, the time inside updateExtent, the layout reads that cost 0.3 ms or more with what dirtied layout before them and who called, the writes, the draws. */
@@ -376,7 +392,14 @@ function table(rows: Row[]) {
 const SCROLL_PHASES = ["down", "drag", "coast", "tail"];
 const inFling = (rows: Row[]) => rows.filter(r => SCROLL_PHASES.includes(r.phase));
 
-/** HW_SCROLLCOST_PLANT=layout: a font-size style write and a scrollWidth read at the end of every repaint; the claim must go red naming that read. */
+/**
+ * HW_SCROLLCOST_PLANT=layout: a font-size style write and a scrollWidth read at the end of every repaint; the claim must go
+ * red naming that read. The stray plants act on the fling's fourth repaint (and seventh), a drag frame, with no write:
+ * stray1 spins 3 ms there (one stray, let through: green, printed); stray2 spins 3 ms on the fourth and the seventh (two
+ * over: red); stray6 spins 6 ms on the fourth (over the stray's 5 ms ceiling: red); write1 writes the font size and reads
+ * scrollWidth until a read is slow, puts the font size back (so the next repaint pays nothing for it), then spins
+ * until the repaint has run 3 ms, on the fourth only (one over, under the 5 ms ceiling, naming a write: red).
+ */
 const PLANT = process.env.HW_SCROLLCOST_PLANT || null;
 const HORIZONTAL = [
 	{ name: "towards the room the scroll asks for (finger left, scrollLeft rises)", dir: -1, where: "near the right edge of the range" },
@@ -398,9 +421,18 @@ for (const canvas of [true, false]) for (const h of HORIZONTAL) {
 			const rows = inFling(r.rows as Row[]);
 			const bandMove = (x: Row) => !!x.writes["div.handwriting-ink-overlay"]?.left;
 			const over = rows.filter(x => x.ms > (bandMove(x) ? timingBound(5) : timingBound(2)));
+			// The stray: the one repaint over its bound, when it is the only one, its slow reads follow no write, and it stays
+			// under 5 ms (a band move under 10). It is let through and printed; anything else over is red, the stray with it.
+			const namesWrite = (x: Row) => x.slow.some(s => s.after !== null);
+			const lone = over.length === 1 ? over[0]! : null;
+			const stray = lone && !namesWrite(lone) && lone.ms < (bandMove(lone) ? timingBound(10) : timingBound(5)) ? lone : null;
+			const red = stray ? [] : over;
+			const overLine = (x: Row) => `${f2(x.ms)} ms (updateExtent ${f2(x.extentMs)}): ${x.slow.map(s => `${s.api} ${s.ms} ms after [${s.after ?? "no write"}] at ${s.where}`).join(" | ") || "no slow read"}; writes ${JSON.stringify(x.writes)}`;
 			const worst = rows.reduce((a, x) => Math.max(a, x.ms), 0);
-			record.push({ cell: "horizontal", canvas, dir: h.dir, mounted, start, range, scrollAtStart: r.scrollAtStart, end: r.end, worst: f2(worst), over: over.length, repaints: rows.length, scrollEvents: r.scrolls.length, traced, rows: r.rows, extras: r.extras });
-			const brief = `\nrange ${range}, began at ${start}, ended at ${r.end.left}, ${rows.length} repaints, ${r.scrolls.length} scroll events, worst ${f2(worst)} ms, ${over.length} over 2 ms\n${table(r.rows)}`;
+			record.push({ cell: "horizontal", canvas, dir: h.dir, mounted, start, range, scrollAtStart: r.scrollAtStart, end: r.end, worst: f2(worst), over: over.length, stray: stray ? f2(stray.ms) : null, repaints: rows.length, scrollEvents: r.scrolls.length, traced, rows: r.rows, extras: r.extras });
+			const planted = rows.filter(x => x.planted).map(x => `${x.planted} at row ${rows.indexOf(x)} ${x.phase} ${f2(x.ms)} ms${bandMove(x) ? " (band move)" : ""}${namesWrite(x) ? " (names a write)" : ""}`);
+			console.log(`SCROLLCOST-STRAY canvas ${canvas ? "on" : "off"} dir ${h.dir}: ${over.length} over; let through: ${stray ? overLine(stray) : "none"}${PLANT ? `; plant ${PLANT}: ${planted.join(", ") || "not fired"}` : ""}`);
+			const brief = `\nrange ${range}, began at ${start}, ended at ${r.end.left}, ${rows.length} repaints, ${r.scrolls.length} scroll events, worst ${f2(worst)} ms, ${over.length} over 2 ms, let through ${stray ? f2(stray.ms) + " ms" : "none"}\n${table(r.rows)}`;
 			expect(errors).toEqual([]);
 			// PREMISES: 1500 strokes; the mode is the arm's; the scroller has a range; the fling moved it; repaints ran.
 			expect(mounted.strokes, "premise: 1500 strokes").toBe(1500);
@@ -409,9 +441,9 @@ for (const canvas of [true, false]) for (const h of HORIZONTAL) {
 			expect(Math.abs(r.end.left - r.scrollAtStart.left), `premise: the fling moved the scroller${brief}`).toBeGreaterThan(100);
 			expect(r.scrolls.length, `premise: scroll events fired${brief}`).toBeGreaterThanOrEqual(10);
 			expect(rows.length, `premise: the fling repainted${brief}`).toBeGreaterThanOrEqual(5);
-			// THE CLAIM: every repaint in the fling, updateExtent included, takes at most 2 ms; a band move under 5 ms.
-			expect(over.map(x => `${f2(x.ms)} ms (updateExtent ${f2(x.extentMs)}): ${x.slow.map(s => `${s.api} ${s.ms} ms after [${s.after ?? "no write"}] at ${s.where}`).join(" | ") || "no slow read"}; writes ${JSON.stringify(x.writes)}`),
-				`repaints over 2 ms (a band move: over 5 ms)${brief}`).toEqual([]);
+			// THE CLAIM: every repaint in the fling, updateExtent included, takes at most 2 ms; a band move under 5 ms; one stray
+			// let through, as above.
+			expect(red.map(overLine), `repaints over 2 ms (a band move: over 5 ms), past the one stray${brief}`).toEqual([]);
 		} finally { await page.close(); }
 	}, 240_000);
 }

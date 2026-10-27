@@ -45,13 +45,15 @@ it.each([.1,.5,1])("moves the right lower word independently at zoom %s",async z
   expect(r.hoverFeedback.rendered.filter((s:any)=>!s.moving).map((s:any)=>s.id)).toEqual(["left-crossing"]);
   expect(r.hoverFeedback.rendered.every((s:any)=>s.alpha)).toBe(true);
   expect(r.hover).toBeCloseTo(r.contact.y,1);expect(r.live.reticle).toBeCloseTo(r.contact.y+30*r.scale,1);
-  for(const move of [...r.moves,{dy:30,strokes:r.after.strokes,ids:r.down.ids}]){
-   expect(move.ids).toEqual(["right-lower"]);
-   for(let i=0;i<r.before.strokes.length;i++){
-    const before=r.before.strokes[i],after=move.strokes[i];
-    expect(after.id).toBe(before.id);
-    expect(after.points).toEqual(before.points.map((p:any)=>({...p,y:p.y+(before.id==="right-lower"?move.dy:0)})));
-   }
+  // Mid-drag the store holds the pen-down ink and the drag's offset follows the pen; the lift writes the move once.
+  for(const move of r.moves){
+   expect(move.ids).toEqual(["right-lower"]);expect(move.total).toBeCloseTo(move.dy,6);
+   expect(move.strokes).toEqual(r.before.strokes);
+  }
+  for(let i=0;i<r.before.strokes.length;i++){
+   const before=r.before.strokes[i],after=r.after.strokes[i];
+   expect(after.id).toBe(before.id);
+   expect(after.points).toEqual(before.points.map((p:any)=>({...p,y:p.y+(before.id==="right-lower"?30:0)})));
   }
   expect(r.after.doc).toBe("");expect(r.after.history).toBe(r.before.history+1);
   expect(r.undone.strokes).toEqual(r.before.strokes);expect(r.redone.strokes).toEqual(r.after.strokes);
@@ -116,8 +118,10 @@ it.each([[1,1,0,false],[.1,1,0,false],[4,1,40,false],[1,1.5,24,false],[1,1,0,tru
 
 it.each([{dy:3},{dy:-48},{dy:48,edit:true}])("rolls back ink when the text cannot make the same edit: %j",async options=>{
  const page=await mounted();try{
-  const r=await page.evaluate(options=>(window as any).insertSpaceProbe(1,1,0,true,options),options);
+  const r=await page.evaluate(options=>(window as any).insertSpaceProbe(1,1,0,true,{...options,liveHoldMs:700}),options);
   expect(r.down.mode).toBe("space");expect(r.live.dy).toBe(options.dy);
+  expect(r.before.anchored,"premise: no stroke holds an anchor before the pen goes down").toBe(0);
+  expect(r.live.anchored,"the old-ink pass holds while the pen is down").toBe(0);
   expect(r.after.strokes).toEqual(r.before.strokes);
   expect(r.after.doc).toBe(r.before.doc+("edit" in options?" external":""));
   expect(r.after.history-r.before.history).toBe("edit" in options?1:0);
@@ -167,14 +171,16 @@ it.each([119,120,121])("keeps a tall stroke whole while distant ink stays indepe
    expect(sample.rendered.every((s:any)=>s.alpha)).toBe(true);
   }
   expect(r.down.rendered.filter((s:any)=>s.moving).map((s:any)=>s.id)).toEqual(expected);
-  for(const move of [...r.moves,{dy:13,ids:r.down.ids,strokes:r.after.strokes}]){
-   expect(move.ids).toEqual(expected);
-   expect(move.strokes.map((s:any)=>s.id)).toEqual(r.before.strokes.map((s:any)=>s.id));
-   for(let i=0;i<r.before.strokes.length;i++){
-    const before=r.before.strokes[i],after=move.strokes[i],dy=expected.includes(before.id)?move.dy:0;
-    expect(after.points).toEqual(before.points.map((p:any)=>({...p,y:p.y+dy})));
-    expect(after.color).toBe(before.color);
-   }
+  // Mid-drag the store holds the pen-down ink and the drag's offset follows the pen; the lift writes the move once.
+  for(const move of r.moves){
+   expect(move.ids).toEqual(expected);expect(move.total).toBeCloseTo(move.dy,6);
+   expect(move.strokes).toEqual(r.before.strokes);
+  }
+  expect(r.after.strokes.map((s:any)=>s.id)).toEqual(r.before.strokes.map((s:any)=>s.id));
+  for(let i=0;i<r.before.strokes.length;i++){
+   const before=r.before.strokes[i],after=r.after.strokes[i],dy=expected.includes(before.id)?13:0;
+   expect(after.points).toEqual(before.points.map((p:any)=>({...p,y:p.y+dy})));
+   expect(after.color).toBe(before.color);
   }
   expect(r.after.doc).toBe("");expect(r.undone.strokes).toEqual(r.before.strokes);expect(r.redone.strokes).toEqual(r.after.strokes);
  }finally{await page.close();}
@@ -195,7 +201,9 @@ it("keeps text seams independent of large ink groups and predicts rounded releas
 
 it("keeps raw aim visible when no eligible target exists",async()=>{
  const page=await mounted();try{
-  const r=await page.evaluate(()=>(window as any).insertSpaceProbe(1,1,0,false,{invalidTarget:true}));
+  const r=await page.evaluate(()=>(window as any).insertSpaceProbe(1,1,0,false,{invalidTarget:true,liveHoldMs:700}));
+  expect(r.before.anchored,"premise: no stroke holds an anchor before the pen goes down").toBe(0);
+  expect(r.live.anchored,"the old-ink pass holds while the pen is down").toBe(0);
   expect(r.hover).toBeCloseTo(r.contact.y,1);expect(r.down.reticle).toBeCloseTo(r.contact.y,1);
   expect(r.live.reticle).toBeCloseTo(r.contact.y+48,1);expect(r.hoverFeedback.guides).toEqual([]);
   expect(r.after.doc).toBe(r.before.doc);expect(r.after.strokes).toEqual(r.before.strokes);

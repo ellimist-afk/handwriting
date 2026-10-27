@@ -251,7 +251,7 @@ it("a stroke in flight when the ink file lands is stored and painted where its w
 	const noop = () => undefined;
 	Object.assign(o, {
 		mode: "ink",
-		builder: { finishReleaseFiltered: () => [inFlight] },
+		builder: { flushRaw: () => undefined, finishReleaseFiltered: () => [inFlight] },
 		strokePenGesture: true,
 		strokeRawMax: 0,
 		mouseStroke: false,

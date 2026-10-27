@@ -220,7 +220,7 @@ window.wetAlloc = {
 
 const PLANT_SLOW = !!process.env.HW_WET_ALLOC_PLANT;
 const PLANT_NO_RELEASE = !!process.env.HW_WET_ALLOC_PLANT_NO_RELEASE;
-const NO_RELEASE = { from: "\tprivate releaseWetIfIdle(): void {\n", to: "\tprivate releaseWetIfIdle(): void {\n\t\treturn;\n" };
+const NO_RELEASE = { from: "\treleaseWetIfIdle(): void {\n", to: "\treleaseWetIfIdle(): void {\n\t\treturn;\n" };
 /** The lag rig's flags: a GPU canvas, the kind the device draws with. */
 const GPU_ARGS = process.platform === "win32" ? ["--ignore-gpu-blocklist", "--enable-gpu-rasterization", "--use-angle=d3d11"] : [];
 const REPEATS = 10;

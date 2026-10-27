@@ -26,15 +26,25 @@
  * here can. That is what the instrument is for.
  */
 import { describe, expect, it } from "vitest";
-import controllerSrc from "./PdfInkController.ts?raw";
 import traceSrc from "./PdfPanTrace.ts?raw";
 import mainSrc from "../main.ts?raw";
+import commandsSrc from "../commands/RegisterCommands.ts?raw";
+import diagCommandsSrc from "../commands/RegisterDiagCommands.ts?raw";
 import { codeOnly } from "../CodeOnly";
+import { surfaceCode } from "../inline/surfaceFiles.testutil";
 import { type PdfPanEntry, summarizePdfPanMoves } from "./PdfPanTrace";
 
-const CONTROLLER = codeOnly(controllerSrc.replace(/\r\n/g, "\n"));
+// The pdf surface's code across every file the ink-surface ledger lists for it (surfaceCode). The glob literal stays per module.
+const ALL_TS = import.meta.glob("/src/**/*.ts", {
+	query: "?raw",
+	eager: true,
+	import: "default",
+}) as Record<string, string>;
+
+const CONTROLLER = surfaceCode("pdf", ALL_TS);
 const TRACE = codeOnly(traceSrc.replace(/\r\n/g, "\n"));
-const MAIN = codeOnly(mainSrc.replace(/\r\n/g, "\n"));
+// The command registrations live in commands/RegisterCommands.ts and RegisterDiagCommands.ts, read here with main.ts.
+const MAIN = codeOnly([mainSrc, commandsSrc, diagCommandsSrc].join("\n").replace(/\r\n/g, "\n"));
 
 /** A recorded pan move, healthy by default; override the column under test. */
 function move(over: Partial<PdfPanEntry> = {}): PdfPanEntry {
@@ -313,7 +323,7 @@ describe("the recording sits behind the diagnostics read", () => {
  * of every pdf pane whether anybody was recording or not.
  */
 describe("the scroll instrument is gated the same way, on its own read", () => {
-	const at = CONTROLLER.indexOf("private readonly onScroll = (): void => {");
+	const at = CONTROLLER.indexOf("readonly onScroll = (): void => {");
 	const HANDLER = blockFrom(CONTROLLER, at);
 	const GATE = blockFrom(HANDLER, HANDLER.indexOf("if (scrollDiagOn) {"));
 	const OUT = HANDLER.split(GATE).join("");

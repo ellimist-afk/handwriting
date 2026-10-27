@@ -205,7 +205,20 @@ describe("ink trace left running by an earlier plugin instance", () => {
 });
 
 describe("plugin wiring for a leftover ink trace", () => {
-	const MAIN = (import.meta.glob("../main.ts", { query: "?raw", import: "default", eager: true })["../main.ts"] as string).replace(/\r\n/g, "\n");
+	// The command registrations live in commands/RegisterCommands.ts and RegisterDiagCommands.ts, read here with main.ts.
+	// onunload lives in PluginLifecycle.ts, read here too.
+	const MAIN = [
+		import.meta.glob("../main.ts", { query: "?raw", import: "default", eager: true })["../main.ts"] as string,
+		import.meta.glob("../commands/RegisterCommands.ts", { query: "?raw", import: "default", eager: true })[
+			"../commands/RegisterCommands.ts"
+		] as string,
+		import.meta.glob("../commands/RegisterDiagCommands.ts", { query: "?raw", import: "default", eager: true })[
+			"../commands/RegisterDiagCommands.ts"
+		] as string,
+		import.meta.glob("../PluginLifecycle.ts", { query: "?raw", import: "default", eager: true })[
+			"../PluginLifecycle.ts"
+		] as string,
+	].join("\n").replace(/\r\n/g, "\n");
 	const body = (sig: string): string => {
 		const start = MAIN.indexOf(sig);
 		expect(start, `${sig} found in main.ts`).toBeGreaterThan(0);
@@ -214,7 +227,7 @@ describe("plugin wiring for a leftover ink trace", () => {
 	};
 
 	it("onunload stops a trace only through the gated helper", () => {
-		const onunload = body("\n\tonunload(): void {");
+		const onunload = body("\n\tfunction onunload(this: HandwritingPlugin): void {");
 		expect(onunload).toMatch(/stopTraceAtUnload\(this\.inkTrace, this\.settings\?\.devDiagnostics === true\)/);
 		expect(onunload, "no ungated stop").not.toMatch(/stopLeftover/);
 	});
@@ -222,7 +235,7 @@ describe("plugin wiring for a leftover ink trace", () => {
 	// A guard, green before and after: the command callbacks inside onload
 	// may name the recorder, but nothing in onload stops or probes a trace.
 	it("onload makes no tracing call", () => {
-		const onload = body("\n\tasync onload(): Promise<void> {");
+		const onload = body("\n\tasync onload(): Promise<void> {") + body("\n\tfunction registerCommands(") + body("\n\tfunction registerDiagCommands(");
 		expect(onload).toContain('id: "stop-ink-trace"');
 		expect(onload).not.toMatch(/stopLeftover|getTraceBufferUsage|stopRecording|startRecording/);
 	});

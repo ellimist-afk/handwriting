@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import mainSrc from "../main.ts?raw";
+import onloadSrc from "../PluginOnload.ts?raw";
+import settingsSrc from "../settings/PluginSettings.ts?raw";
+import settingsModelSrc from "../settings/SettingsModel.ts?raw";
+import settingsTabSrc from "../settings/HandwritingSettingTab.ts?raw";
 import { codeOnly } from "../CodeOnly";
 import {
 	clearPenHardwareSeen,
@@ -534,37 +538,59 @@ describe("the restore accepts either spelling of a stored true", () => {
  */
 describe("main.ts restores the latch before any strip can be built", () => {
 	const src = codeOnly(mainSrc).replace(/\r\n/g, "\n");
+	// loadSettings and applyRuntimeSettings moved to settings/PluginSettings.ts; the onload anchors stay in main.ts.
+	const settingsCode = codeOnly(settingsSrc).replace(/\r\n/g, "\n");
+	// The onload phases moved to PluginOnload.ts; onload itself, which runs them in order, stays in main.ts.
+	const onloadCode = codeOnly(onloadSrc).replace(/\r\n/g, "\n");
+	// What main.ts held before the move, for the absence checks: main.ts, the onload phases and the two settings files.
+	const allCode = [src, onloadCode, settingsCode, codeOnly(settingsModelSrc).replace(/\r\n/g, "\n")].join("\n");
+	// The settings page moved to settings/HandwritingSettingTab.ts; the absence checks read it too.
+	const tabCode = codeOnly(settingsTabSrc).replace(/\r\n/g, "\n");
 
 	const LOAD = "await this.loadSettings();";
-	const LOAD_SETTINGS = "private async loadSettings(): Promise<void> {";
+	const LOAD_SETTINGS = "async function loadSettings(this: HandwritingPlugin): Promise<void> {";
 	const STRIP_HOST = "this.registerEditorExtension(inkOverlayExtension());";
 	const STORE = "setPenHardwareStore({";
 	const MODE = "setPenToolsMode(this.settings.penTools);";
 	const RESTORE = "restorePenHardwareEverSeenFromStore();";
 
-	const onlyIndexOf = (needle: string, what: string): number => {
-		const at = src.indexOf(needle);
-		expect(at, `${what} is not in main.ts any more: ${needle}`).toBeGreaterThan(-1);
-		expect(src.indexOf(needle, at + 1), `${what} is no longer unique in main.ts`).toBe(-1);
+	const onlyIndexOf = (needle: string, what: string, text = src, file = "main.ts"): number => {
+		const at = text.indexOf(needle);
+		expect(at, `${what} is not in ${file} any more: ${needle}`).toBeGreaterThan(-1);
+		expect(text.indexOf(needle, at + 1), `${what} is no longer unique in ${file}`).toBe(-1);
 		return at;
 	};
 
 	it("awaits loadSettings before it registers the editor extension that builds strips", () => {
+		// The registration is in the views phase (PluginOnload.ts); onload runs that phase after the
+		// settings load, so the order is read in onload and the registration inside its phase.
 		const load = onlyIndexOf(LOAD, "the settings load");
-		const host = onlyIndexOf(STRIP_HOST, "the note surface's strip host");
-		expect(load, "settings must be read before any surface exists").toBeLessThan(host);
+		const views = onlyIndexOf("this.onloadViews();", "the views phase call");
+		const phase = onlyIndexOf("function onloadViews(this: HandwritingPlugin): void {", "the views phase", onloadCode, "PluginOnload.ts");
+		const after = onlyIndexOf("function onloadNoteChrome(this: HandwritingPlugin): void {", "the phase after views", onloadCode, "PluginOnload.ts");
+		const host = onlyIndexOf(STRIP_HOST, "the note surface's strip host", onloadCode, "PluginOnload.ts");
+		expect(load, "settings must be read before any surface exists").toBeLessThan(views);
+		expect(host, "the strip host is registered in the views phase").toBeGreaterThan(phase);
+		expect(host, "the strip host is registered in the views phase").toBeLessThan(after);
 	});
 
 	it("wires the device store before loadSettings is ever called, and before the restore reads through the seam", () => {
-		const store = onlyIndexOf(STORE, "the pen hardware device store wiring");
+		// The wiring is in the device phase (PluginOnload.ts); onload awaits that phase before the
+		// settings load, so the order is read in onload and the wiring inside its phase.
+		const device = onlyIndexOf("await this.onloadDevice();", "the device phase call");
+		const phase = onlyIndexOf("async function onloadDevice(this: HandwritingPlugin): Promise<void> {", "the device phase", onloadCode, "PluginOnload.ts");
+		const after = onlyIndexOf("function onloadStore(this: HandwritingPlugin): void {", "the phase after device", onloadCode, "PluginOnload.ts");
+		const store = onlyIndexOf(STORE, "the pen hardware device store wiring", onloadCode, "PluginOnload.ts");
 		const load = onlyIndexOf(LOAD, "the settings load");
-		const restore = onlyIndexOf(RESTORE, "the latch restore");
+		onlyIndexOf(RESTORE, "the latch restore", settingsCode, "PluginSettings.ts");
 
 		// The seam must be filled before the restore reads through it: a
 		// restore through an empty seam reads nothing, and silently answers
 		// "no pen has ever been here" on a device that has held one.
-		expect(store, "the store must be registered before settings load").toBeLessThan(load);
-		expect(store, "a restore through an empty seam reads nothing").toBeLessThan(restore);
+		// Store before restore follows from store before the load here and the restore inside loadSettings below.
+		expect(store, "the store is wired in the device phase").toBeGreaterThan(phase);
+		expect(store, "the store is wired in the device phase").toBeLessThan(after);
+		expect(device, "the store must be registered before settings load").toBeLessThan(load);
 	});
 
 	/**
@@ -598,31 +624,33 @@ describe("main.ts restores the latch before any strip can be built", () => {
 	 * this walk is where it shows up, and it shows up loudly.
 	 */
 	const bodyOfMethod = (signature: string): string => {
-		const at = onlyIndexOf(signature, "the settings reader's declaration");
-		const open = src.indexOf("{", at);
+		const at = onlyIndexOf(signature, "the settings reader's declaration", settingsCode, "PluginSettings.ts");
+		const open = settingsCode.indexOf("{", at);
 		expect(open, "that declaration has no body at all").toBeGreaterThan(-1);
 		let depth = 0;
-		for (let i = open; i < src.length; i += 1) {
-			if (src[i] === "{") depth += 1;
-			else if (src[i] === "}") {
+		for (let i = open; i < settingsCode.length; i += 1) {
+			if (settingsCode[i] === "{") depth += 1;
+			else if (settingsCode[i] === "}") {
 				depth -= 1;
-				if (depth === 0) return src.slice(open + 1, i);
+				if (depth === 0) return settingsCode.slice(open + 1, i);
 			}
 		}
-		throw new Error(`${signature} never closes: the brace walk ran off the end of main.ts`);
+		throw new Error(`${signature} never closes: the brace walk ran off the end of PluginSettings.ts`);
 	};
 
 	it("restores the latch INSIDE loadSettings, and before the pen tools mode is applied", () => {
 		const body = bodyOfMethod(LOAD_SETTINGS);
 
-		// Bounded to this method's REAL size, not to a floor no slice of a
-		// 200,000-character file could fall under. `loadSettings` reads and
-		// normalises the whole settings object and fills a dozen persist
-		// seams, so it runs to thousands of characters; and it is one method
-		// of many, so it is a small fraction of the file. Either bound
-		// failing means the walk found something that is not this body.
+		// Bounded below by this method's REAL size, not by a floor no slice of a
+		// whole file could fall under: `loadSettings` reads and normalises the
+		// whole settings object and fills a dozen persist seams, so it runs to
+		// thousands of characters. Bounded above by the function that follows it
+		// in its file: a walk that overshoots swallows that function's signature.
+		// Either check failing means the walk found something that is not this body.
 		expect(body.length, "the brace walk collapsed to something far smaller than this method").toBeGreaterThan(4000);
-		expect(body.length, "the brace walk swallowed more than loadSettings").toBeLessThan(src.length / 8);
+		expect(body, "the brace walk ran past loadSettings into settingsFrom").not.toContain(
+			"function settingsFrom(this: HandwritingPlugin, raw: Partial<HandwritingSettings> | null | undefined): HandwritingSettings {"
+		);
 
 		// The mode is applied by applyRuntimeSettings, which loadSettings calls;
 		// the latch must be restored before that call.
@@ -633,7 +661,7 @@ describe("main.ts restores the latch before any strip can be built", () => {
 			"the restore has left loadSettings: a latch restored after the first strip is built leaves a pen device with no Keyboard button"
 		).toBeGreaterThan(-1);
 		expect(apply, "loadSettings no longer applies the runtime settings").toBeGreaterThan(-1);
-		expect(bodyOfMethod("private applyRuntimeSettings(): void {"), "the pen tools mode is no longer applied").toContain(MODE);
+		expect(bodyOfMethod("function applyRuntimeSettings(this: HandwritingPlugin): void {"), "the pen tools mode is no longer applied").toContain(MODE);
 		expect(restore, "the latch must be set before the mode that decides who gets a strip").toBeLessThan(apply);
 	});
 
@@ -643,10 +671,16 @@ describe("main.ts restores the latch before any strip can be built", () => {
 	// through the normalise. `codeOnly` blanks comments, so the prose above
 	// that explains the removal cannot satisfy either check.
 	it("reads the latch from no setting at all, so a synced data.json cannot carry it", () => {
-		expect(src, "the setting is read again; the latch would travel between machines").not.toContain(
+		expect(allCode, "the setting is read again; the latch would travel between machines").not.toContain(
 			"settings.penHardwareEverSeen"
 		);
-		expect(src, "the normalise is back; an old key from another machine would be trusted").not.toContain(
+		expect(tabCode, "the settings page reads the setting again; the latch would travel between machines").not.toContain(
+			"settings.penHardwareEverSeen"
+		);
+		expect(allCode, "the normalise is back; an old key from another machine would be trusted").not.toContain(
+			"raw?.penHardwareEverSeen"
+		);
+		expect(tabCode, "the settings page normalises the old key; an old key from another machine would be trusted").not.toContain(
 			"raw?.penHardwareEverSeen"
 		);
 	});
@@ -655,7 +689,8 @@ describe("main.ts restores the latch before any strip can be built", () => {
 	// reach for the contact function to replay a stored fact: that would fire
 	// the cursor-mode light-up on startup and set both present-tense flags.
 	it("never calls markPenHardwareSeen", () => {
-		expect(src).not.toContain("markPenHardwareSeen(");
+		expect(allCode).not.toContain("markPenHardwareSeen(");
+		expect(tabCode, "the settings page replays a stored fact as a contact").not.toContain("markPenHardwareSeen(");
 	});
 });
 

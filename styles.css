@@ -379,6 +379,17 @@ div.handwriting-snap-chip.handwriting-snap-chip {
 	max-width: none;
 }
 
+/* A native export cuts the ink into one strip per block, so a block that moves
+   to the next page takes its ink along; the one box is hidden while they stand. */
+.handwriting-embed-ink-strip {
+	position: absolute;
+	pointer-events: none;
+}
+
+.handwriting-embed-ink.is-stripped {
+	display: none;
+}
+
 /* A reading view's scroll room for ink left of its column: a 1 px spacer that
    widens the scroll range, and the sideways scroll it needs to reach it. */
 .handwriting-embed-scroll-reserve {
@@ -3190,6 +3201,17 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
                            var(--handwriting-column-auto-left, calc((100% - var(--file-line-width)) / 2)),
                            var(--handwriting-column-margin-left,
                                var(--handwriting-column-auto-left, calc((100% - var(--file-line-width)) / 2)))) !important;
+ /*
+  * The line's width is held too, from below. Minimal sizes each line `width: var(--line-width)` with
+  * `max-width: var(--max-width)` (88%), and the percentage resolves against the counter-sized host, so on screen it
+  * stays the same size while the zoom grows the line: above the zoom where 88% of the content is narrower than the
+  * line, the line stopped growing, its width-bound pictures with it, while the line height and the ink kept scaling.
+  * Ink below the pictures then sat lower than its line by the pictures' height times the difference (Alan, Orion,
+  * 2026-10-24: 590 px at 189%). The minimum is the line's content width measured at 100% (written with the
+  * column); CSS applies min-width after max-width, so the line keeps its 100% width at every zoom, and at 100%
+  * nothing changes.
+  */
+ min-width: var(--handwriting-note-line-width) !important;
 }
 /*
  * Alan, Orion, 2026-09-21, Minimal, 20.7%: "the untitled title moves to the right as i pinch outward". Obsidian
@@ -3247,4 +3269,12 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
 .view-action.handwriting-canvas-action.is-active {
 	color: var(--text-on-accent);
 	background-color: var(--interactive-accent);
+}
+
+/* Line numbers travel with the text while the plugin holds the note (InkOverlayViewportBox writeGutterTravel). The class
+   is on the editor host, so a gutter CodeMirror rebuilds inherits it. CodeMirror writes position: sticky inline on its
+   fixed gutters, so the rule needs !important to win; :where() keeps it at zero specificity, so a theme that positions
+   the gutter itself with !important (Minimal's absolute) still wins. */
+:where(.handwriting-gutter-travel .cm-gutters) {
+	position: relative !important;
 }

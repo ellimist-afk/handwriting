@@ -208,9 +208,9 @@ describe("the ownership guard asks before it swallows (source)", () => {
 		// The whole fix is an ordering. A containment test that runs after
 		// the swallow is not one, and nothing behavioural in this repo can
 		// see the difference on a synthetic event that records both.
-		const arm = code.indexOf("private armOwnership()");
+		const arm = code.indexOf("\tarmOwnership(): void");
 		expect(arm, "armOwnership moved or was renamed").toBeGreaterThan(-1);
-		const body = code.slice(arm, code.indexOf("private scheduleOwnershipDisarm()", arm));
+		const body = code.slice(arm, code.indexOf("\tscheduleOwnershipDisarm(): void", arm));
 		const asked = body.indexOf("penGuardEatsEvent(");
 		const swallowed = body.indexOf("preventDefault()");
 		expect(asked, "armOwnership no longer consults the reach predicate").toBeGreaterThan(-1);

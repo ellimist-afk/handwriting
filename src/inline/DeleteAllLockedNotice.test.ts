@@ -44,7 +44,7 @@ import { history, undo } from "@codemirror/commands";
 import { InkOverlayPlugin, inlineInk } from "./InkOverlay";
 import { inkApplied, inkEffect, inkHistorySupport } from "./InkHistory";
 import type { InlineInkHost } from "./InlineInkStore";
-import storeSrc from "./InlineInkStore.ts?raw";
+import persistSrc from "./InlineInkStorePersist.ts?raw";
 import { codeOnly } from "../CodeOnly";
 import { emptyPage, parsePage, serializePage, type PageData } from "../model/PageData";
 import type { InkStroke } from "../ink/Stroke";
@@ -486,17 +486,19 @@ describe("delete all ink on a note the store may not write", () => {
 	it("the duplicate lock is the quietest of the four: persist never names it, only snapshot does", () => {
 		// Where each lock is enforced is the reason the duplicate case above is
 		// silent by default rather than after a spent warning.
-		const src = codeOnly(storeSrc);
+		const src = codeOnly(persistSrc);
 		const region = (start: string): string => {
 			const at = src.indexOf(start);
 			expect(at, start + " not found").toBeGreaterThanOrEqual(0);
 			// The next member declaration. Comments are blanked, so a
-			// `private` inside one cannot end the region early.
-			const next = src.indexOf("private ", at + start.length);
-			return src.slice(at, next > 0 ? next : src.length);
+			// `function` inside one cannot end the region early.
+			const ends = ["\n\tfunction ", "\n\tasync function "]
+				.map((end) => src.indexOf(end, at + start.length))
+				.filter((i) => i > 0);
+			return src.slice(at, ends.length > 0 ? Math.min(...ends) : src.length);
 		};
-		const persist = region("private persist(");
-		const snapshot = region("private snapshot(");
+		const persist = region("function persist(");
+		const snapshot = region("function snapshot(");
 
 		// `persist` refuses legacy and future BY NAME, each with its own notice.
 		expect(persist).toContain("legacyLocked");

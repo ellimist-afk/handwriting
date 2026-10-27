@@ -6,14 +6,17 @@
  * sample, so the repaint that followed rebuilt the whole note's index once
  * per frame. The live eraser, the lasso and the space drag asked every OTHER
  * pane showing the note for a full repaint per sample: all of its ink
- * re-rasterized each frame.
+ * re-rasterized each frame. The insert-space drag now moves only its picture
+ * (InkOverlayLassoSpace.ts SpaceSnapshot): its samples touch no stroke and no
+ * index, and the lift moves the store once, through the same index upkeep.
  *
  * Rig: two REAL InkOverlayPlugin instances on one note (the constructor
  * registers both; mount stays inert on an empty editor state), the REAL
- * inlineInk store in memory mode, the REAL lassoMove, spaceMove, eraseAt,
- * scheduleRepaint, repaintPath and StrokeIndex. Selection UI and the frame
- * itself are not drawn: `frame()` runs only the index step of the partial
- * repaint (rebuild when dirty), which is the cost being counted.
+ * inlineInk store in memory mode, the REAL lassoMove, spaceMove, spaceUp,
+ * eraseAt, scheduleRepaint, repaintPath and StrokeIndex. Selection UI and the
+ * frame itself are not drawn: `frame()` runs only the index step of the
+ * partial repaint (rebuild when dirty, from the list the committed layers
+ * paint), which is the cost being counted.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InkOverlayPlugin, inlineInk } from "./InkOverlay";
@@ -90,7 +93,7 @@ async function rig(n = 1500) {
 	const frame = () => {
 		for (const o of [a, b]) {
 			o.repaintQueued = false;
-			if (o.indexDirty) { (o.strokeIndex as StrokeIndex).rebuild(inlineInk.strokes(path)); o.indexDirty = false; }
+			if (o.indexDirty) { (o.strokeIndex as StrokeIndex).rebuild(o.committedStrokes(inlineInk.strokes(path))); o.indexDirty = false; }
 			o.damage.take();
 		}
 	};
@@ -113,6 +116,27 @@ async function rig(n = 1500) {
 
 const sample = (x: number, y: number) => ({ x, y, pressure: 0.5, timestamp: 0, tiltX: 0, tiltY: 0 });
 
+/**
+ * What spaceDown leaves on pane A for a divider at world y `seam` in the ink gap moving `ids` (their real bounds), and the
+ * picture it takes; the text edit at the lift is a no-op dispatch.
+ */
+function spaceDrag(r: Awaited<ReturnType<typeof rig>>, ids: string[], seam: number): void {
+	const set = new Set(ids);
+	const below = inlineInk.strokes(r.path).filter((s) => set.has(s.id));
+	const x0 = Math.min(...below.map((s) => s.bbox.x)), y0 = Math.min(...below.map((s) => s.bbox.y));
+	const x1 = Math.max(...below.map((s) => s.bbox.x + s.bbox.width)), y1 = Math.max(...below.map((s) => s.bbox.y + s.bbox.height));
+	const plan = { y: seam, from: 0, lineHeight: 24, text: false as const };
+	Object.assign(r.a, {
+		spaceLineY: seam, spaceFromY: seam, spaceIds: ids, spaceTotalDy: 0, spaceHistoryIdentity: null, spaceRows: null,
+		spaceBounds: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
+		spacePlan: { ...plan, doc: r.a.view.state.doc },
+		spacePreview: { plan, doc: r.a.view.state.doc, moving: ids, staying: [], rows: [] },
+	});
+	r.a.view.dispatch = noop;
+	expect(r.a.beginSpaceSnapshot(inlineInk.strokes(r.path)), "precondition: the drag took its picture").toBe(true);
+}
+const sumY = (path: string) => inlineInk.strokes(path).reduce((a, s) => a + s.bbox.y, 0);
+
 describe("live drags keep every pane's index exact without a per-frame rebuild", () => {
 	it("lasso drag: no rebuild on either pane, the other pane repaints by rect, both indexes exact", async () => {
 		const r = await rig();
@@ -134,39 +158,32 @@ describe("live drags keep every pane's index exact without a per-frame rebuild",
 		r.exact();
 	});
 
-	it("insert-space drag moving a tenth of the note: no rebuild on either pane, the other pane repaints by rect, both indexes exact", async () => {
+	// A tenth of the note moves each stroke through the other pane's index at the lift; most of it marks that index dirty
+	// (rebuilding beats moving more than an eighth of the note), and it rebuilds once.
+	it.each([
+		{ share: "a tenth", ids: Array.from({ length: 150 }, (_, i) => `s${1350 + i}`), seam: 3365, rebuildsB: 0 },
+		{ share: "most", ids: Array.from({ length: 900 }, (_, i) => `s${600 + i}`), seam: 1490, rebuildsB: 1 },
+	])("insert-space drag moving $share of the note: the samples touch no stroke, no index and no other pane; the lift moves the store once and both indexes are exact", async ({ ids, seam, rebuildsB }) => {
 		const r = await rig();
-		const ids = Array.from({ length: 150 }, (_, i) => `s${1350 + i}`);
-		Object.assign(r.a, {
-			spaceLineY: 3365, spaceFromY: 3365, spaceIds: ids, spaceTotalDy: 0,
-			spaceBounds: { x: 0, y: 3375, width: 600, height: 375 },
-		});
-		let otherAll = 0;
+		const y0 = sumY(r.path);
+		spaceDrag(r, ids, seam);
+		// The pen-down repaint: pane A paints without the moving strokes, and its index is rebuilt so.
+		r.frame();
+		let otherDamage = 0, storeMoved = 0;
 		for (let i = 1; i <= 20; i++) {
-			r.a.spaceMove([sample(50, 3365 + i * 5)]);
-			if (r.b.damage.isAll) otherAll++;
+			r.a.spaceMove([sample(50, seam + i * 5)]);
+			if (!r.b.damage.isEmpty) otherDamage++;
+			if (sumY(r.path) !== y0) storeMoved++;
 			r.frame();
 		}
-		expect({ rebuildsA: r.rebuilds.get(r.a), rebuildsB: r.rebuilds.get(r.b), otherPaneFullRepaints: otherAll })
-			.toEqual({ rebuildsA: 0, rebuildsB: 0, otherPaneFullRepaints: 0 });
-		r.exact();
-	});
-
-	it("insert-space drag moving most of the note: one rebuild per frame beats moving each stroke, the other pane still repaints by rect", async () => {
-		const r = await rig();
-		const ids = Array.from({ length: 900 }, (_, i) => `s${600 + i}`);
-		Object.assign(r.a, {
-			spaceLineY: 1490, spaceFromY: 1490, spaceIds: ids, spaceTotalDy: 0,
-			spaceBounds: { x: 0, y: 1500, width: 600, height: 2250 },
-		});
-		let otherAll = 0;
-		for (let i = 1; i <= 20; i++) {
-			r.a.spaceMove([sample(50, 1490 + i * 5)]);
-			if (r.b.damage.isAll) otherAll++;
-			r.frame();
-		}
-		expect({ rebuildsA: r.rebuilds.get(r.a), rebuildsB: r.rebuilds.get(r.b), otherPaneFullRepaints: otherAll })
-			.toEqual({ rebuildsA: 20, rebuildsB: 20, otherPaneFullRepaints: 0 });
+		expect({ rebuildsA: r.rebuilds.get(r.a), rebuildsB: r.rebuilds.get(r.b), otherDamage, storeMoved, offset: r.a.spaceTotalDy })
+			.toEqual({ rebuildsA: 1, rebuildsB: 0, otherDamage: 0, storeMoved: 0, offset: 100 });
+		r.a.spaceUp();
+		expect(r.b.damage.isAll, "the other pane repaints by rect at the lift").toBe(false);
+		r.frame();
+		expect(sumY(r.path) - y0, "the lift moved every moving stroke once, by the drag").toBeCloseTo(100 * ids.length, 6);
+		expect({ rebuildsA: r.rebuilds.get(r.a), rebuildsB: r.rebuilds.get(r.b), snapshot: r.a.spaceSnapshot ?? null })
+			.toEqual({ rebuildsA: 2, rebuildsB, snapshot: null });
 		r.exact();
 	});
 
@@ -242,27 +259,24 @@ describe("the other pane is handed rects covering everything a live gesture chan
 		}
 	});
 
-	it("insert-space drag: the moved strokes' old and new boxes", async () => {
+	it("insert-space drag: at the lift, the moved strokes' old and new boxes (the samples hand the other pane nothing)", async () => {
 		const r = await rig();
 		// Every stroke below the divider, and their real bounds, as spaceDown would plan them.
 		const ids = Array.from({ length: 144 }, (_, i) => `s${1356 + i}`);
 		const set = new Set(ids);
-		const below = inlineInk.strokes(r.path).filter((s) => set.has(s.id));
-		const x0 = Math.min(...below.map((s) => s.bbox.x)), y0 = Math.min(...below.map((s) => s.bbox.y));
-		const x1 = Math.max(...below.map((s) => s.bbox.x + s.bbox.width)), y1 = Math.max(...below.map((s) => s.bbox.y + s.bbox.height));
-		Object.assign(r.a, {
-			spaceLineY: 3380, spaceFromY: 3380, spaceIds: ids, spaceTotalDy: 0,
-			spaceBounds: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
-		});
+		spaceDrag(r, ids, 3380);
+		r.frame();
+		const before = boxes(r.path, set);
 		for (let i = 1; i <= 10; i++) {
-			const before = boxes(r.path, set);
 			r.a.spaceMove([sample(50, 3380 + i * 5)]);
-			const after = boxes(r.path, set);
-			expect(after.get(ids[0]!)!.y, "precondition: the drag moved the ink").not.toBe(before.get(ids[0]!)!.y);
-			const rects = handed(r);
-			expectCovered(rects, before.values(), "old place");
-			expectCovered(rects, after.values(), "new place");
+			expect(r.b.damage.isEmpty, `sample ${i}: nothing for the other pane`).toBe(true);
 		}
+		r.a.spaceUp();
+		const after = boxes(r.path, set);
+		expect(after.get(ids[0]!)!.y, "precondition: the lift moved the ink").not.toBe(before.get(ids[0]!)!.y);
+		const rects = handed(r);
+		expectCovered(rects, before.values(), "old place");
+		expectCovered(rects, after.values(), "new place");
 	});
 
 	it("live partial erase: the boxes of the strokes it cut or took, and of the pieces it left", async () => {

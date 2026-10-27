@@ -360,32 +360,97 @@ describe("embedInkAnchor", () => {
 		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 148 });
 	});
 
-	it("print: the layer starts below the file-name title, not at the title (audit 18 print half)", () => {
-		// Obsidian's print container: a markdown-preview-view with NO sizer,
-		// the file-name h1 first, then the note's sections.
-		const first = { offsetTop: 44 };
-		const h1 = { offsetTop: 0, offsetHeight: 44, nextElementSibling: first };
-		const root = {
-			classList: { contains: (c: string) => c === "markdown-preview-view" },
-			querySelector: (sel: string) => (sel === ":scope > h1" ? h1 : null),
-		};
-		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 0, top: 44 });
+	it("print: the layer starts at the first block below the file-name title, at the text's left (audit 18 print half)", () => {
+		// Obsidian's print container: a markdown-preview-view with NO sizer and
+		// padding round the text, the file-name h1 first, then the note's
+		// blocks, each in a div of its own. The padding edge is not the text's.
+		const root = fakePrintRoot();
+		const h1 = fakePrintChild(root, 32, 32, 44);
+		const first = fakePrintChild(root, 32, 76, 24);
+		root.kids.push(h1, first);
+		root.h1 = h1;
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 76 });
 	});
 
-	it("print: a container with no title, or not laid out, keeps the stylesheet's origin", () => {
-		const bare = {
-			classList: { contains: (c: string) => c === "markdown-preview-view" },
-			querySelector: () => null,
-		};
-		expect(embedInkAnchor(bare as unknown as HTMLElement)).toBeNull();
-		const h1 = { offsetTop: 0, offsetHeight: 0, nextElementSibling: { offsetTop: 0 } };
-		const hidden = {
-			classList: { contains: (c: string) => c === "markdown-preview-view" },
-			querySelector: (sel: string) => (sel === ":scope > h1" ? h1 : null),
-		};
+	it("print: with the file name off, the first block's top takes in the padding and its own margin", () => {
+		const root = fakePrintRoot();
+		root.kids.push(fakePrintChild(root, 32, 48, 24));
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 48 });
+	});
+
+	it("print: our own layer and spacer are not the first block", () => {
+		const root = fakePrintRoot();
+		root.kids.push(fakePrintChild(root, 0, 0, 900, "handwriting-embed-ink"), fakePrintChild(root, 0, 0, 1, "handwriting-embed-scroll-reserve"), fakePrintChild(root, 20, 36, 24));
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 20, top: 36 });
+	});
+
+	it("print: the left is the text column's, read from the blocks' boxes, when a theme centres them", () => {
+		const root = fakePrintRoot(100);
+		const first = fakePrintChild(root, 32, 48, 24, undefined, 140);
+		root.kids.push(first, fakePrintChild(root, 32, 90, 24, undefined, 140));
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 40, top: 48 });
+	});
+
+	it("print: a title with no block under it puts the top at the title's bottom", () => {
+		const root = fakePrintRoot();
+		const h1 = fakePrintChild(root, 32, 32, 44);
+		root.kids.push(h1);
+		root.h1 = h1;
+		expect(embedInkAnchor(root as unknown as HTMLElement)).toEqual({ left: 32, top: 76 });
+	});
+
+	it("print: a container with neither a block nor a title, or not laid out, keeps the stylesheet's origin", () => {
+		expect(embedInkAnchor(fakePrintRoot() as unknown as HTMLElement)).toBeNull();
+		const hidden = fakePrintRoot();
+		const h1 = fakePrintChild(hidden, 0, 0, 0);
+		const block = fakePrintChild(hidden, 0, 0, 0);
+		h1.offsetParent = null;
+		block.offsetParent = null;
+		hidden.kids.push(h1, block);
+		hidden.h1 = h1;
 		expect(embedInkAnchor(hidden as unknown as HTMLElement)).toBeNull();
 	});
 });
+
+/**
+ * Obsidian's print container for `embedInkAnchor`: no sizer, children in
+ * order, the file-name title as `:scope > h1` when set. With `rectLeft` the
+ * root and its children answer `getBoundingClientRect`, so the column is read
+ * from their boxes; without it the column falls back to the block's offset.
+ */
+function fakePrintRoot(rectLeft?: number) {
+	const root = {
+		kids: [] as FakePrintChild[],
+		h1: null as FakePrintChild | null,
+		rectLeft,
+		clientLeft: 0,
+		classList: { contains: (c: string) => c === "markdown-preview-view" },
+		get children() { return root.kids; },
+		querySelector: (sel: string) => (sel === ":scope > h1" ? root.h1 : null),
+		getBoundingClientRect: rectLeft === undefined ? undefined : () => ({ left: rectLeft, width: 800 }),
+	};
+	return root;
+}
+
+interface FakePrintChild {
+	offsetLeft: number;
+	offsetTop: number;
+	offsetHeight: number;
+	offsetParent: unknown;
+	classList: { contains(c: string): boolean };
+	getBoundingClientRect?: () => { left: number; width: number };
+}
+
+function fakePrintChild(root: { rectLeft?: number }, offsetLeft: number, offsetTop: number, offsetHeight: number, cls?: string, rectLeft?: number): FakePrintChild {
+	return {
+		offsetLeft,
+		offsetTop,
+		offsetHeight,
+		offsetParent: root,
+		classList: { contains: (c: string) => c === cls },
+		getBoundingClientRect: root.rectLeft === undefined ? undefined : () => ({ left: rectLeft ?? root.rectLeft! + offsetLeft, width: 600 }),
+	};
+}
 
 describe("embedInkRootIsEmbed", () => {
 	it("recognizes an embed's content box", () => {

@@ -1,3 +1,6 @@
+import { diagnosticsEnabled } from "../diag/DiagSwitch";
+import { tr } from "./InlinePenRouterTrace";
+
 /**
  * Claimed pen events are cancelled before Chromium can focus CodeMirror.
  * Restore that focus explicitly so Delete and the editor's undo/redo keys
@@ -39,6 +42,53 @@ export function focusClaimedPenEditor(
 	if (suppress || view.hasFocus) return;
 	if (view.contentDOM) quietKeyboardForPen(view.contentDOM, view.dom ?? view.contentDOM);
 	view.focus();
+}
+
+/**
+ * The hold goes on at every pen-down in the editor, not only the one that has
+ * to bring focus back. A pen-down on an editor that already has focus, and a
+ * pen contact nothing claims, used to reach Chromium with the ordinary
+ * keyboard setting: the touch keyboard rose and the window shrank under the
+ * pen. The listener sits on the editor root in the capture phase, so it runs
+ * before anything below the root handles or ends the event.
+ * `skip` answers why this surface wants no hold now, or null when it wants
+ * one: not once the overlay is gone, not on a touch device, not while the pen
+ * is off.
+ *
+ * Every pen-down also leaves one row in the pen trace, whatever happens to
+ * it after: the editor's focus, its inputmode before and after, and whether
+ * the hold was placed. Whether the router claimed the contact is on the
+ * router's own row for the same event.
+ *
+ * Returns what takes the listener off the root again. The root outlives the
+ * overlay when the editor is reconfigured, so the owner calls it on destroy.
+ */
+export function holdKeyboardForEveryPen(
+	view: { readonly hasFocus: boolean; readonly contentDOM?: HTMLElement; readonly dom?: HTMLElement },
+	skip: () => string | null
+): () => void {
+	if (typeof view.dom?.addEventListener !== "function" || !view.contentDOM) return () => {};
+	const root = view.dom;
+	const content = view.contentDOM;
+	const onPenDown = (ev: PointerEvent) => {
+		if (ev.pointerType !== "pen") return;
+		const before = content.getAttribute("inputmode");
+		const focused = view.hasFocus;
+		const why = skip();
+		const held = penQuietKeyboard.has(content);
+		if (why === null) quietKeyboardForPen(content, root);
+		if (diagnosticsEnabled()) {
+			const shown = (v: string | null) => (v === null ? "(unset)" : `"${v}"`);
+			tr(
+				"guard",
+				ev,
+				`keyboard at pen-down: editor focused=${focused ? "yes" : "no"}, inputmode before=${shown(before)} after=${shown(content.getAttribute("inputmode"))}, ` +
+					`hold=${why !== null ? `no (${why})` : held ? "already" : "placed"}`
+			);
+		}
+	};
+	root.addEventListener("pointerdown", onPenDown, true);
+	return () => root.removeEventListener("pointerdown", onPenDown, true);
 }
 
 /** Editors whose keyboard is held down for the pen, and how to give it back. */

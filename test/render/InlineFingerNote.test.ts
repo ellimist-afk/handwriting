@@ -36,6 +36,7 @@ beforeAll(async () => {
 		format: "iife",
 		platform: "browser",
 		target: "es2022",
+		alias: { obsidian: fileURLToPath(new URL("../obsidian-stub.ts", import.meta.url)) },
 	});
 	browser = await chromium.launch({ headless: true });
 	page = await browser.newPage({ viewport: { width: 393, height: 852 }, hasTouch: true });

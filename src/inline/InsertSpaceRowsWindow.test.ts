@@ -4,15 +4,20 @@
  *
  * The mark pass used to filter every row for every row (quadratic; 30-80 ms
  * on one to two thousand written lines, after each ink change). It now
- * checks only rows whose top lies within the tallest row's height below the
- * mark. `referenceRows` below is the previous implementation, verbatim, so
- * any drift in which host a mark joins, or in tie order, shows here.
+ * checks only rows whose top lies within the tallest group's height below
+ * the mark. `referenceRows` below is that all-rows pass, kept as the oracle,
+ * so any drift in which host a mark joins, or in tie order, shows here.
+ *
+ * The oracle judges a host by its own first-pass group, never by the marks
+ * it has taken, as the production pass does. Both passes once judged a host
+ * grown, so each mark it took could qualify the next row above it, and on a
+ * heavy page one row ran most of the page's height (InsertSpaceHeavyPage).
  */
 import { describe, expect, it } from "vitest";
 import { InsertSpaceRows, type InkRow } from "./InsertSpace";
 import type { InkStroke } from "../ink/Stroke";
 
-// ---- the previous implementation, kept as the oracle -------------------------
+// ---- the all-rows pass, kept as the oracle -----------------------------------
 function extentOf(stroke: InkStroke): { top: number; bottom: number; left:number; right:number } {
 	const pts = stroke.points;
 	if (pts.length === 0) return { top: stroke.bbox.y, bottom: stroke.bbox.y + stroke.bbox.height, left:stroke.bbox.x, right:stroke.bbox.x+stroke.bbox.width };
@@ -74,19 +79,22 @@ function referenceRows(strokes: readonly InkStroke[]): InkRow[] {
 		if(row){row.ids.push(s.id);row.top=Math.min(row.top,s.top);row.bottom=Math.max(row.bottom,s.bottom);row.left=Math.min(row.left,s.left);row.right=Math.max(row.right,s.right);}
 		else grouped.set(key,{top:s.top,bottom:s.bottom,left:s.left,right:s.right,ids:[s.id]});
 	});
-	const rows=[...grouped.values()].sort((a,b)=>a.top-b.top||a.left-b.left);
+	// `g` is each row's first-pass group: the only geometry a mark or a host is judged by.
+	const rows=[...grouped.values()].sort((a,b)=>a.top-b.top||a.left-b.left)
+		.map(r=>({...r,g:{top:r.top,bottom:r.bottom,left:r.left,right:r.right}}));
 	// A floating mark chooses the nearest eligible LOCAL host below it,
 	// regardless of interleaved groups in another column. The height-relative
 	// width/overhang allowance also handles a dot above a lone vertical stem.
 	for(const mark of [...rows].reverse()){
+		const m=mark.g;
 		const hosts=rows.filter(host=>{
 			if(host===mark)return false;
-			const height=host.bottom-host.top,gap=host.top-mark.bottom;
-			return height>0 && gap>=0 && gap<=height && mark.bottom-mark.top<=height*.34 &&
-				mark.right-mark.left<=Math.max(host.right-host.left,height*.25)*.34 &&
-				mark.left>=host.left-height*.1 && mark.right<=host.right+height*.1;
-		}).sort((a,b)=>(a.top-mark.bottom)-(b.top-mark.bottom)||
-			Math.abs(a.left+a.right-mark.left-mark.right)-Math.abs(b.left+b.right-mark.left-mark.right)||a.left-b.left);
+			const c=host.g,height=c.bottom-c.top,gap=c.top-m.bottom;
+			return height>0 && gap>=0 && gap<=height && m.bottom-m.top<=height*.34 &&
+				m.right-m.left<=Math.max(c.right-c.left,height*.25)*.34 &&
+				m.left>=c.left-height*.1 && m.right<=c.right+height*.1;
+		}).sort((a,b)=>(a.g.top-m.bottom)-(b.g.top-m.bottom)||
+			Math.abs(a.g.left+a.g.right-m.left-m.right)-Math.abs(b.g.left+b.g.right-m.left-m.right)||a.g.left-b.g.left);
 		const host=hosts[0];
 		if(!host)continue;
 		host.ids.push(...mark.ids);host.top=mark.top;
@@ -145,14 +153,18 @@ function page(lines: number, seed: number): InkStroke[] {
 }
 
 describe("insert-space row grouping, windowed mark pass", () => {
-	it("groups 60 random pages exactly as the previous pass", () => {
+	it("groups 60 random pages exactly as the all-rows pass", () => {
+		// Every seed is compared, so a failure lists all the pages that differ, not the first.
+		const same = (a: unknown, b: unknown) => { try { expect(a).toEqual(b); return true; } catch { return false; } };
+		const differ: number[] = [];
 		for (let seed = 1; seed <= 60; seed++) {
 			const strokes = page(20 + (seed % 7) * 15, seed);
-			expect(new InsertSpaceRows().get(strokes), `seed ${seed}`).toEqual(referenceRows(strokes));
+			if (!same(new InsertSpaceRows().get(strokes), referenceRows(strokes))) differ.push(seed);
 		}
+		expect(differ, "seeds whose rows differ from the all-rows pass").toEqual([]);
 	});
 
-	it("a mark between two identical hosts joins the one the previous pass chose", () => {
+	it("a mark between two identical hosts joins the one the all-rows pass chooses", () => {
 		const strokes = [
 			mk("hostA", 0, 20, 60, 40), mk("hostB", 0, 20, 60, 40),
 			mk("dot", 28, 12, 31, 15),
@@ -162,7 +174,7 @@ describe("insert-space row grouping, windowed mark pass", () => {
 		expect(new InsertSpaceRows().get(strokes)).toEqual(referenceRows(strokes));
 	});
 
-	it("a chain of marks, each hosting the one above, groups as before", () => {
+	it("a stack of marks over one host groups as the all-rows pass groups it", () => {
 		const strokes = [
 			mk("base", 0, 100, 300, 160),
 			mk("m1", 100, 70, 160, 90),

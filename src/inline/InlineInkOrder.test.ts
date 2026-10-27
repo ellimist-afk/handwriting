@@ -6,6 +6,7 @@ import { inkApplied, inkEffect, inkHistorySupport, type InkOp } from "./InkHisto
 import { InlineInkStore, type InlineInkHost } from "./InlineInkStore";
 import { emptyPage, parsePage, serializePage, type ParseResult } from "../model/PageData";
 import type { InkStroke } from "../ink/Stroke";
+import { DamageLedger } from "../ink/DamageLedger";
 
 let serial = 0;
 const paths = new Set<string>();
@@ -63,7 +64,7 @@ async function historyRig(initial: InkStroke[]) {
 	const published: InkOp[] = [];
 	const overlay = Object.create(InkOverlayPlugin.prototype) as any;
 	Object.assign(overlay, { filePath: () => r.path, selection: { prune() {} },
-		scheduleRepaint() {}, repaintPath() {}, redrawSelectionUI() {} });
+		scheduleRepaint() {}, repaintPath() {}, redrawSelectionUI() {}, damage: new DamageLedger() });
 	const dispatch = (input: Transaction | TransactionSpec) => {
 		const tr = input instanceof Transaction ? input : state.update(input);
 		state = tr.state;

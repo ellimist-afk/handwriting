@@ -54,6 +54,7 @@ import { resetPenInkForTest, setPenInk } from "../inline/PenInk";
 // and importing main.ts for real would pull obsidian's runtime in. `?raw`
 // (raw-imports.d.ts) is the house pattern for asking what a file says.
 import mainSrc from "../main.ts?raw";
+import onloadSrc from "../PluginOnload.ts?raw";
 import { strokesHitByCircle } from "../ink/Eraser";
 import { calibrationStrokes } from "./PdfCalibration";
 import { clearInkClipboard, clipboardSize } from "../inline/InkClipboard";
@@ -4377,12 +4378,14 @@ describe("PdfInkController: the pen off on a pdf claims nothing", () => {
 		// read - `?raw` (raw-imports.d.ts), the house pattern - and it is
 		// bounded at BOTH ends by anchors asserted to exist, so it cannot pass
 		// on a stray `endLiveStroke` somewhere else in the file.
-		const from = mainSrc.indexOf("addStripSurface(");
+		// The onload phases live in PluginOnload.ts, read here with main.ts.
+		const src = [mainSrc, onloadSrc].join("\n");
+		const from = src.indexOf("addStripSurface(");
 		expect(from, "main.ts no longer registers a strip surface at all").toBeGreaterThan(-1);
-		const to = mainSrc.indexOf('this.app.workspace.on("file-open"', from);
+		const to = src.indexOf('this.app.workspace.on("file-open"', from);
 		expect(to, "the anchor after the registration moved").toBeGreaterThan(from);
 		expect(
-			mainSrc.slice(from, to),
+			src.slice(from, to),
 			"main.ts registers no end-live-stroke callback, so a pdf stroke survives the pen going off"
 		).toContain("c.endLiveStroke(preserveMouse)");
 	});

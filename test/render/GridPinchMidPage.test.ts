@@ -65,13 +65,13 @@ const ARMS = [
 ] as const;
 
 const PLANTS: { env: string; from: string; to: string; file?: RegExp }[] = [
-	{ env: "HW_GRID_PINCH_PLANT_DRIFT", from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;", to: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next + 7 * next;" },
-	{ env: "HW_GRID_PINCH_PLANT_SCROLL_OUTSIDE", from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;", to: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal) * next + (nativeLeft - a.scrollLeft) * outer;" },
-	{ env: "HW_GRID_PINCH_PLANT_FORM_NO_OUTER", from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;", to: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft)) * next;" },
-	{ env: "HW_GRID_PINCH_PLANT_SLOW_AFTER", from: "else this.endPreviewPaper(\"settle\");", to: "else this.endPreviewPaper(\"settle\"); setTimeout(() => { const t0 = performance.now(); while (performance.now() - t0 < 150) { /* block */ } }, 0);" },
+	{ env: "HW_GRID_PINCH_PLANT_DRIFT", file: /InkOverlayPanSettle\.ts$/, from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;", to: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next + 7 * next;" },
+	{ env: "HW_GRID_PINCH_PLANT_SCROLL_OUTSIDE", file: /InkOverlayPanSettle\.ts$/, from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;", to: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal) * next + (nativeLeft - a.scrollLeft) * outer;" },
+	{ env: "HW_GRID_PINCH_PLANT_FORM_NO_OUTER", file: /InkOverlayPanSettle\.ts$/, from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;", to: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft)) * next;" },
+	{ env: "HW_GRID_PINCH_PLANT_SLOW_AFTER", file: /InkOverlayPinch\.ts$/, from: "else this.endPreviewPaper(\"settle\");", to: "else this.endPreviewPaper(\"settle\"); setTimeout(() => { const t0 = performance.now(); while (performance.now() - t0 < 150) { /* block */ } }, 0);" },
 	{ env: "HW_GRID_PINCH_TRACE", file: /DiagSwitch\.ts$/, from: "let enabled = false;", to: "let enabled = true;" },
 	{ env: "HW_GRID_PINCH_TRACE", file: /ScrollProbe\.ts$/, from: "push({ kind: \"extent\", t: performance.now(), what });", to: "push({ kind: \"extent\", t: performance.now(), what }); console.log(`PROBE ${what}`);" },
-	{ env: "HW_GRID_PINCH_PLANT_SLOW_MEASURE", from: "const measure={key:this,read:()=>owns()&&matchesScroll()?geometry():null,write:(before:number[]|null)=>{", to: "const measure={key:this,read:()=>owns()&&matchesScroll()?geometry():null,write:(before:number[]|null)=>{if(hold&&hold.attempts===0){const t0=performance.now();while(performance.now()-t0<150){/* block */}}" },
+	{ env: "HW_GRID_PINCH_PLANT_SLOW_MEASURE", file: /InkOverlayZoomApi\.ts$/, from: "const measure={key:this,read:()=>owns()&&matchesScroll()?geometry():null,write:(before:number[]|null)=>{", to: "const measure={key:this,read:()=>owns()&&matchesScroll()?geometry():null,write:(before:number[]|null)=>{if(hold&&hold.attempts===0){const t0=performance.now();while(performance.now()-t0<150){/* block */}}" },
 ];
 
 let script: string;
@@ -84,7 +84,7 @@ beforeAll(async () => {
 		bundle: true, write: false, format: "iife", platform: "browser",
 		alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: active.length ? [{ name: "grid-pinch-plants", setup(builder) {
-			builder.onLoad({ filter: /src[\\/](inline[\\/](InkOverlay|ScrollProbe)|diag[\\/]DiagSwitch)\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/](inline[\\/](InkOverlay|InkOverlayPanSettle|InkOverlayZoomApi|InkOverlayPinch|ScrollProbe)|diag[\\/]DiagSwitch)\.ts$/ }, args => {
 				let text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
 				for (const pl of active.filter(pl => (pl.file ?? /InkOverlay\.ts$/).test(args.path))) {
 					if (text.split(pl.from).length !== 2) throw new Error(`${pl.env}: anchor not found once`);

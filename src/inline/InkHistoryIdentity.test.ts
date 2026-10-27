@@ -107,20 +107,18 @@ async function rig(mode: Mode = "claimed", initial: InkStroke[] = []) {
 }
 
 describe("session history record identity", () => {
-	it("rolls a provisional space move back after rename exactly once",async()=>{
+	it("an insert-space drag abandoned after a rename leaves the store as it was, writes nothing, and a second abandon does nothing",async()=>{
+		// The drag moves only its picture until the lift (InkOverlayLassoSpace.ts SpaceSnapshot): the store holds the
+		// pen-down places throughout, so the abandon has nothing to put back on either record.
 		const r=await rig("claimed",[stroke("same-id")]);
-		const before=structuredClone(r.strokes());
+		const before=structuredClone(r.strokes()),writes=r.writes.length;
 		r.overlay.frontierCache={invalidate() {}};
 		r.overlay.spaceHistoryIdentity=inlineInk.captureHistoryIdentity(r.path);
 		r.overlay.spaceIds=["same-id"];r.overlay.spaceTotalDy=48;
-		inlineInk.moveStrokes(r.path,["same-id"],0,48);
 		r.rename();r.overlay.rollbackSpaceMove();r.overlay.rollbackSpaceMove();
 		expect(r.strokes()).toEqual(before);
-		const expected=emptyPage(r.pageId);expected.strokes=[...before];
-		// This raw unit fixture has unpadded bounds; compare both persisted
-		// sides through the same normal serializer/parser normalization.
-		expect(parsePage(r.saved.get(r.pageId)!,r.pageId)!.data.strokes)
-			.toEqual(parsePage(serializePage(expected),r.pageId)!.data.strokes);
+		expect(r.writes.length).toBe(writes);
+		expect([r.overlay.spaceHistoryIdentity,r.overlay.spaceTotalDy]).toEqual([null,0]);
 	});
 	it("does not apply an abandoned inverse to a replacement with the same path and stroke IDs",async()=>{
 		const r=await rig("claimed",[stroke("same-id")]);
@@ -289,7 +287,7 @@ describe("production overlay with CodeMirror history", () => {
 
 	it.each(["claimed", "memory"] as const)("insert-space in %s mode is one text-and-ink event across rename", async mode => {
 		const r = await rig(mode, [stroke("s")]);
-		inlineInk.moveStrokes(r.path, ["s"], 0, 20);
+		// A drag of 20 moved only its picture; the lift moves the store.
 		Object.assign(r.overlay, { spaceTotalDy: 20, spaceIds: ["s"], spacePlan: { y:0,from:0,lineHeight:20 },
 			spaceTextChange: () => ({ dy: 20, changes: { from: 0, insert: "\n" } }) });
 		r.overlay.spaceUp();

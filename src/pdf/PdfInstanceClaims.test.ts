@@ -11,6 +11,9 @@ import HandwritingPlugin from "../main";
 import { Notice, TFile } from "obsidian";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import commandsSource from "../commands/RegisterCommands.ts?raw";
+import exportCommandsSource from "../commands/RegisterExportCommands.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { PdfInkStore } from "./PdfInkStore";
@@ -25,7 +28,9 @@ import { document } from "../../test/pdf-fixture";
  * The vault's rename and modify handlers, lifted from onload as written, so
  * a cell reaches the plugin through the events Obsidian sends.
  */
-const source = mainSource.replace(/\r\n/g, "\n");
+// The command registrations live in commands/RegisterCommands.ts and RegisterExportCommands.ts, read here with main.ts.
+// The onload phases live in PluginOnload.ts, read here too.
+const source = [mainSource, commandsSource, exportCommandsSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
 const eventsStart =
 	'\t\tthis.registerEvent(\n\t\t\tthis.app.vault.on("rename", (file, oldPath) => {\n\t\t\t\tif (file instanceof TFile && file.extension === "md") {\n\t\t\t\t\tinlineInk.handleRename(';
 const eventsEnd = "\t\t\tthis.pdfModifyTimers?.clear();\n\t\t});";
@@ -418,11 +423,11 @@ it("the plugin writes PDFs only as new files, so its own writes never reach the 
 	for (const [file, text] of Object.entries(sources)) {
 		expect(text, `${file} modifies a file's bytes in place`).not.toMatch(/\b(modifyBinary|writeBinary)\s*\(|\bvault\.modify\s*\(/);
 	}
-	const main = sources["/src/main.ts"]!.replace(/\r\n/g, "\n");
-	const start = main.indexOf("private async flattenPdf(");
-	const end = main.indexOf("\n\t}\n", start);
+	const snips = sources["/src/export/Snips.ts"]!.replace(/\r\n/g, "\n");
+	const start = snips.indexOf("async function flattenPdf(");
+	const end = snips.indexOf("\n\t}\n", start);
 	expect(start > 0 && end > start, "flattenPdf found whole").toBe(true);
-	const flatten = main.slice(start, end);
+	const flatten = snips.slice(start, end);
 	expect(flatten, "flatten writes a fresh file").toMatch(/createFreshFile\(/);
 	expect(flatten).toMatch(/createBinary\(/);
 });

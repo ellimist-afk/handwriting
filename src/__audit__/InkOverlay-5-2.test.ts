@@ -25,7 +25,6 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 (globalThis as { window?: unknown }).window = globalThis;
 
 import { InkOverlayPlugin, inlineInk, setScrollExpansionEnabled } from "../inline/InkOverlay";
-import overlaySource from "../inline/InkOverlay.ts?raw";
 import type { InlineInkHost } from "../inline/InlineInkStore";
 import { MIN_PINCH_SCALE } from "../inline/PinchScale";
 import { WheelZoomRun } from "../inline/WheelZoom";
@@ -306,10 +305,9 @@ describe("InkOverlay-5-2: Infinite Canvas off resets a zoomed note once; a refus
 		expect(r.call("canvasModeOn")).toBe(false);
 		expect(r.commits, "applyCanvasMode skipped the reset under the live stroke").toEqual([]);
 		(r.o.frame as { locked: boolean }).locked = false; // pen up
-		// The rig cannot run the whole penUp; it runs the retry penUp makes right after frame.end(), and the
-		// source pin below holds penUp to making it: penUp hands the gesture to endPenGesture first, and that
-		// method ends the frame and retries the reset before anything else.
-		expect(overlaySource.replace(/\r\n/g, "\n")).toMatch(/private penUp\(ev\?: PointerEvent\): void \{[\s\S]{0,300}?this\.endPenGesture\(ev\);[\s\S]*?private endPenGesture\(ev\?: PointerEvent\): void \{[\s\S]{0,200}?this\.frame\.end\(\);[\s\S]{0,120}?this\.retryCanvasOffReset\(\);/);
+		// The rig cannot run the whole penUp; it runs the retry penUp makes right after frame.end(). That penUp
+		// really makes it is a running test of its own: src/__audit__/A1-3-canvas-off-mid-stroke.test.ts drives
+		// the real penUp with the reset pending and asserts the lift lands the note at 100 percent.
 		r.call("retryCanvasOffReset");
 
 		expect.soft(r.scale(), "note still zoomed after Infinite Canvas off during a stroke").toBe(1);

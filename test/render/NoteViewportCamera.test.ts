@@ -3,6 +3,7 @@ import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fitScale } from "./noteViewportCameraModel";
+import { withoutLineAnchor } from "./storedInk";
 import { chromium, type Browser } from "playwright";
 import css from "../../styles.css?raw";
 declare const process: { env: Record<string, string | undefined> };
@@ -49,7 +50,7 @@ it.each(["before","during"] as const)("mounted sync retains a lifted lasso selec
   expect(r.result.outcome,"retained selection must prevent premature shared-model adoption").toBe("held");
   expect(r.refused.b.selected,"adoption refusal must preserve the actual lifted lasso selection").toEqual(["seed-0"]);
   for(const id of ["a","b"]){
-   expect(r.refused[id].strokes).toEqual(r.before[id].strokes);
+   expect(withoutLineAnchor(r.refused[id].strokes)).toEqual(withoutLineAnchor(r.before[id].strokes));
    expect(r.refused[id].history).toBe(r.before[id].history);
    expect(r.refused[id].doc).toBe(r.before[id].doc);
   }
@@ -79,16 +80,16 @@ it.each(["before","during"] as const)("mounted sync preserves the same live pen 
   const r=await page.evaluate(p=>(window as any).mountedSyncAdmission("pen",p),phase);evidence.push(r);
   expect(errors).toEqual([]);expect(r.before.quiet).toEqual([true,true]);expect(r.busy.quiet).toEqual([true,false]);
   expect(r.result.outcome,"an uncommitted sibling gesture must prevent premature adoption").toBe("held");
-  for(const id of ["a","b"]){expect(r.refused[id].strokes).toEqual(r.before[id].strokes);expect(r.refused[id].history).toBe(r.before[id].history);}
+  for(const id of ["a","b"]){expect(withoutLineAnchor(r.refused[id].strokes)).toEqual(withoutLineAnchor(r.before[id].strokes));expect(r.refused[id].history).toBe(r.before[id].history);}
   expect(r.refused.accepts).toBe(0);expect(r.refused.notifications).toBe(0);expect(r.refused.notices).toEqual([]);
   expect(r.refused.preparations).toBe(phase==="during"?1:0);expect(r.refused.changed).toBe(true);
   expect(r.completed.b.strokes).toHaveLength(2);expect(r.completed.a.strokes).toEqual(r.completed.b.strokes);
-  expect(r.completed.b.strokes[0]).toEqual(r.before.b.strokes[0]);
+  expect(withoutLineAnchor(r.completed.b.strokes.slice(0,1))).toEqual(withoutLineAnchor(r.before.b.strokes.slice(0,1)));
   const stroke=r.completed.b.strokes[1],first=stroke.points[0],last=stroke.points.at(-1);
   expect(last.x-first.x,"same stroke retains contact before await and continuation afterwards").toBeCloseTo(50/r.pointScale,2);
   expect(last.y-first.y).toBeCloseTo(15/r.pointScale,2);
   expect(r.completed.b.history).toBe(r.before.b.history+1);
-  expect(r.undone.b.strokes).toEqual(r.before.b.strokes);expect(r.redone.b.strokes).toEqual(r.completed.b.strokes);
+  expect(withoutLineAnchor(r.undone.b.strokes)).toEqual(withoutLineAnchor(r.before.b.strokes));expect(r.redone.b.strokes).toEqual(r.completed.b.strokes);
   expect(r.released.queued).toBe(false);expect(r.released.quiet).toEqual([true,true]);expect(r.retry.outcome).toBe("adopted");
   for(const id of ["a","b"]){expect(r.after[id].strokes.map((s:any)=>s.id)).toEqual(["incoming"]);expect(r.after[id].paint.visible).toBeGreaterThan(0);}
   expect(r.recovery.some((copy:any)=>copy.ids.includes(stroke.id)),"committed local revision remains recoverable independently of incoming visibility").toBe(true);
@@ -106,7 +107,7 @@ it("mounted sync rejects a transient same-note pane joining and retiring during 
   expect(errors).toEqual([]);expect(r.before.quiet).toEqual([true,true]);expect(r.joined.quiet).toEqual([true,true,true]);expect(r.busy.quiet).toEqual([true,true]);
   expect(r.result.outcome,"the original quiet cohort cannot bless an attempt spanning a transient attached pane").toBe("held");
   expect(r.refused.accepts).toBe(0);expect(r.refused.notifications).toBe(0);expect(r.refused.changed).toBe(true);
-  for(const id of ["a","b"])expect(r.refused[id].strokes).toEqual(r.before[id].strokes);
+  for(const id of ["a","b"])expect(withoutLineAnchor(r.refused[id].strokes)).toEqual(withoutLineAnchor(r.before[id].strokes));
   expect(r.retry.outcome).toBe("adopted");expect(r.after.accepts).toBe(1);expect(r.after.changed).toBe(false);
   for(const id of ["a","b"]){expect(r.after[id].strokes.map((s:any)=>s.id)).toEqual(["incoming"]);expect(r.after[id].paint.visible).toBeGreaterThan(0);}
  }finally{await page.close();}
@@ -250,7 +251,7 @@ it("real Fit frames saved separated ink within the zoom range, ignores empty gro
   expect(fitted.state.zoom).toBeLessThan(.3);expect(fitted.strokes).toHaveLength(2);
   const union={width:Math.max(...before.strokes.map((s:any)=>s.bbox.x+s.bbox.width))-Math.min(...before.strokes.map((s:any)=>s.bbox.x)),height:Math.max(...before.strokes.map((s:any)=>s.bbox.y+s.bbox.height))-Math.min(...before.strokes.map((s:any)=>s.bbox.y))};expect(fitted.state.zoom).toBeCloseTo(fitScale(union),10);
   for(const b of fitted.ink){expect(b.x).toBeGreaterThanOrEqual(-.5);expect(b.y).toBeGreaterThanOrEqual(-.5);expect(b.right).toBeLessThanOrEqual(640.5);expect(b.bottom).toBeLessThanOrEqual(480.5);}
-  expect(fitted.strokes).toEqual(before.strokes);expect(fitted.doc).toBe(before.doc);expect(fitted.writes).toBe(before.writes);expect(fitted.history).toBe(before.history);
+  expect(withoutLineAnchor(fitted.strokes)).toEqual(withoutLineAnchor(before.strokes));expect(fitted.doc).toBe(before.doc);expect(fitted.writes).toBe(before.writes);expect(fitted.history).toBe(before.history);
   expect(Math.max(...fitted.backings)).toBeLessThan(8_000_000);
   const grown=await page.evaluate(()=>(window as any).viewportFixture.growEmpty("far"));
   const again=await page.evaluate(()=>(window as any).viewportFixture.fit("far"));
@@ -260,7 +261,7 @@ it("real Fit frames saved separated ink within the zoom range, ignores empty gro
   // Two arms (issue 9): a note never seen this session opens at 100 percent and the top (`before`,
   // the first open); the same note reopened returns at the zoom it was left at, here the last Fit.
   expect(before.state.zoom,"FIRST OPEN: a note never seen this session opens at 100 percent").toBe(1);expect(before.scroll.top,"FIRST OPEN: at the top").toBe(0);
-  const reopened=await page.evaluate(async()=>{const vf=(window as any).viewportFixture;await vf.reopen("far");await vf.settle();return vf.snap("far");});expect(reopened.state.zoom,"RETURN: the reopened note comes back at the zoom it was left at").toBeCloseTo(repeated.state.zoom,10);expect(reopened.strokes).toEqual(before.strokes);expect(reopened.writes).toBe(before.writes);
+  const reopened=await page.evaluate(async()=>{const vf=(window as any).viewportFixture;await vf.reopen("far");await vf.settle();return vf.snap("far");});expect(reopened.state.zoom,"RETURN: the reopened note comes back at the zoom it was left at").toBeCloseTo(repeated.state.zoom,10);expect(withoutLineAnchor(reopened.strokes)).toEqual(withoutLineAnchor(before.strokes));expect(reopened.writes).toBe(before.writes);
   const refit=await page.evaluate(()=>(window as any).viewportFixture.fit("far"));expect(refit.state.zoom).toBe(fitted.state.zoom);
   const corners=await page.evaluate(()=>(window as any).viewportFixture.corners("far"));expect(corners.added).toBe(4);for(const error of corners.errors)for(const axis of error)expect(Math.abs(axis)).toBeLessThan(1);
  }finally{await page.close();}
@@ -419,8 +420,8 @@ it("Chromium touch input pans without native coast; wheel scrolling remains avai
 // The wording is product copy that changes, so only the row is pinned: the setting exists,
 // drives the canvas key, and says something.
 it("lists the Infinite canvas setting with a description",()=>{
- const main=readFileSync(fileURLToPath(new URL("../../src/main.ts",import.meta.url)),"utf8");
- const row=main.match(/name:\s*"Infinite canvas",\s*desc:\s*"([^"]*)",\s*control:\s*\{\s*type:\s*"toggle",\s*key:\s*"extendCanvasWhileScrolling"\s*\}/);
+ const tab=readFileSync(fileURLToPath(new URL("../../src/settings/HandwritingSettingTab.ts",import.meta.url)),"utf8");
+ const row=tab.match(/name:\s*"Infinite canvas",\s*desc:\s*"([^"]*)",\s*control:\s*\{\s*type:\s*"toggle",\s*key:\s*"extendCanvasWhileScrolling"\s*\}/);
  expect(row,"the Infinite canvas toggle row").not.toBeNull();
  expect((row![1] ?? "").trim().length).toBeGreaterThan(0);
 });

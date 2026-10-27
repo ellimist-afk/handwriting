@@ -40,15 +40,15 @@ const evidence: unknown[] = [];
 
 beforeAll(async () => {
 	const plants: [string, string, string, string][] = [];
-	if (process.env.HW_SIDEWAYS_PLANT_NO_FLOOR) plants.push(["no-floor", "InkOverlay", "floor = Math.max(floor, onScreenFloorX(view));", "floor = Math.max(floor, 0);"]);
-	if (process.env.HW_SIDEWAYS_PLANT_NO_RELEASE_GUARD) plants.push(["no-release-guard", "InkOverlay", "if (Math.max(scroller.clientWidth, spacerRight) < scroller.scrollLeft + scroller.clientWidth) return;", ""]);
-	if (process.env.HW_SIDEWAYS_PLANT_STEP_WHILE_SCROLLING) plants.push(["step-while-scrolling", "InkOverlay", "if (this.shrinkStepped.get(path) === due && !force) return granted;", ""]);
+	if (process.env.HW_SIDEWAYS_PLANT_NO_FLOOR) plants.push(["no-floor", "InkOverlayBand", "floor = Math.max(floor, onScreenFloorX(view));", "floor = Math.max(floor, 0);"]);
+	if (process.env.HW_SIDEWAYS_PLANT_NO_RELEASE_GUARD) plants.push(["no-release-guard", "InkOverlayBand", "if (Math.max(scroller.clientWidth, spacerRight) < scroller.scrollLeft + scroller.clientWidth) return;", ""]);
+	if (process.env.HW_SIDEWAYS_PLANT_STEP_WHILE_SCROLLING) plants.push(["step-while-scrolling", "InkOverlayBand", "if (this.shrinkStepped.get(path) === due && !force) return granted;", ""]);
 	if (process.env.HW_SIDEWAYS_PLANT_STRICT_EDGE) plants.push(["strict-edge", "SurfaceExtent", "return g.originLeft + g.frontierX * g.fontZoom > g.clientWidth - EXTENT_MARGIN * g.fontZoom ? g.frontierX : 0;", "return g.originLeft + g.frontierX * g.fontZoom > g.clientWidth ? g.frontierX : 0;"]);
 	const applied = new Set<string>();
 	const b = await build({ entryPoints: [fileURLToPath(new URL("./sidewaysScrollPage.ts", import.meta.url))], bundle: true, write: false, format: "iife", platform: "browser", target: "es2022",
 		alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: plants.length ? [{ name: "sideways-plants", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|SurfaceExtent)\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|InkOverlayBand|SurfaceExtent)\.ts$/ }, args => {
 				let text = readFileSync(args.path, "utf8");
 				for (const [name, file, from, to] of plants) {
 					if (!args.path.replace(/\\/g, "/").endsWith(`/${file}.ts`)) continue;

@@ -3,7 +3,8 @@
  * beside "Paper background", and the command.
  *
  * Both are registered in main.ts, so both are sliced out of main.ts's source
- * (each marker proven present and unique), compiled, and run against fakes -
+ * (each marker proven present and unique), with the choice they both write
+ * sliced out of view/HeaderActions.ts, compiled, and run against fakes -
  * `BarsToggleCommand.test.ts`'s harness, for its reason: the behaviour that
  * ships is the block main.ts registers, not a copy of it written here.
  *
@@ -16,8 +17,14 @@
 import { describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
+import commandsSource from "../commands/RegisterCommands.ts?raw";
+import headerSource from "../view/HeaderActions.ts?raw";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+// The onload phases live in PluginOnload.ts, read here too.
+const source = [mainSource, commandsSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
+const header = headerSource.replace(/\r\n/g, "\n");
 
 type Choice = true | false | "default";
 type Item = {
@@ -28,12 +35,12 @@ type Item = {
 };
 type Recorded = { title: string; checked: boolean; click: () => void };
 
-function slice(start: string, end: string): string {
-	expect(source.split(start), `${start} appears once`).toHaveLength(2);
-	const at = source.indexOf(start);
-	const stop = source.indexOf(end, at);
+function slice(start: string, end: string, text: string = source): string {
+	expect(text.split(start), `${start} appears once`).toHaveLength(2);
+	const at = text.indexOf(start);
+	const stop = text.indexOf(end, at);
 	expect(stop).toBeGreaterThan(at);
-	return source.slice(at, stop + end.length);
+	return text.slice(at, stop + end.length);
 }
 
 const MENU = (): string =>
@@ -41,7 +48,7 @@ const MENU = (): string =>
 const COMMAND = (): string =>
 	slice('\t\tthis.addCommand({\n\t\t\tid: "canvas-note-override-cycle",', "\n\t\t});");
 const WRITER = (): string =>
-	slice("\tapplyCanvasChoice(path: string, choice: NoteCanvasChoice): void {", "\n\t}");
+	slice("\tfunction applyCanvasChoice(this: HandwritingPlugin, path: string, choice: NoteCanvasChoice): void {", "\n\t}", header);
 
 /** A markdown file, as `file instanceof TFile && extension === "md"` sees it. */
 class FakeFile {
@@ -107,7 +114,7 @@ function harness(opts: { choice?: Choice; written?: boolean; throws?: boolean; g
 
 	// The writer first: both routes call it, so it has to be on the object
 	// before either of them runs.
-	const writer = build(`return (${WRITER().replace("applyCanvasChoice(path: string, choice: NoteCanvasChoice): void {", "function (path, choice) {")})`);
+	const writer = build(`return (${WRITER().replace("function applyCanvasChoice(this: HandwritingPlugin, path: string, choice: NoteCanvasChoice): void {", "function (path, choice) {")})`);
 	plugin.applyCanvasChoice = (writer.call(plugin) as (this: unknown, p: string, c: Choice) => Promise<void> | void);
 	const call = plugin.applyCanvasChoice as (p: string, c: Choice) => Promise<void>;
 	plugin.applyCanvasChoice = function (this: unknown, p: string, c: Choice) { return call.call(plugin, p, c); };

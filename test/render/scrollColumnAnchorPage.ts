@@ -849,6 +849,10 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 				topBoundaryShift,
 				offYAdj: m ? m.top + dy0 * r - focal.y - topBoundaryShift
 					- Math.round(((m.top - view.contentDOM.getBoundingClientRect().top) / r - inContent0) / LINE_H) * LINE_H * r : null,
+				// THE LINE'S OWN MISS: the raw offset less only the top pin. The zoom lift holds the LINE under the fingers
+				// (the settle moves the scroll by what that line moved in the rebuild), so CodeMirror's estimate shift above
+				// is part of what the settle must hold, not a displacement to forgive. offYAdj stays in the trace.
+				offYLine: m ? m.top + dy0 * r - focal.y - topBoundaryShift : null,
 				markerLeft: m ? Math.round(m.left * 100) / 100 : null,
 				markerTop: m ? Math.round(m.top * 100) / 100 : null,
 				// WHERE THE LINE SITS INSIDE `.cm-content`, in note units. CodeMirror
@@ -992,7 +996,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			offFrames: offG.length,
 			maxOffBy: gesture.length ? Math.max(...gesture.map((f: any) => Math.max(Math.abs(f.offX ?? 1e9), Math.abs(f.offY ?? 1e9)))) : 0,
 			maxOffX: gesture.length ? Math.max(...gesture.map((f: any) => Math.abs(f.offX ?? 1e9))) : 0,
-			maxOffY: gesture.length ? Math.max(...gesture.map((f: any) => Math.abs(f.offYAdj ?? 1e9))) : 0,
+			maxOffY: gesture.length ? Math.max(...gesture.map((f: any) => Math.abs(f.offYLine ?? 1e9))) : 0,
 			maxOffYRaw: gesture.length ? Math.max(...gesture.map((f: any) => Math.abs(f.offY ?? 1e9))) : 0,
 			// How far CodeMirror moved the marker inside `.cm-content` over the
 			// gesture, in note px. Non-zero means the raw numbers above carry a
@@ -1007,7 +1011,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			// fingers; the 300 was this oracle's own top pin. offYAdj is unchanged and still in the trace.
 			previewOffFrames: previewOnly.filter((f: any) => f.offX === null || f.offY === null || Math.abs(f.offX) > 1 || Math.abs(f.offY) > 1).length,
 			maxPreviewOff: previewOnly.length ? Math.max(...previewOnly.map((f: any) => Math.max(Math.abs(f.offX ?? 1e9), Math.abs(f.offY ?? 1e9)))) : 0,
-			settleOffX: settled.offX, settleOffY: settled.offYAdj, settleOffYRaw: settled.offY,
+			settleOffX: settled.offX, settleOffY: settled.offYLine, settleOffYRaw: settled.offY,
 			// The bound's own geometry at the settle, so the cell derives the rest the ruling
 			// line 4 puts the page on rather than pinning a number.
 			bound: typeof (overlay as any).overscrollBounceReadout === "function"
@@ -1020,8 +1024,8 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			// when both ends are wrong by the same amount.
 			settleJumpX: previewOnly.length && settled.offX !== null && previewOnly[previewOnly.length - 1]!.offX !== null
 				? settled.offX - previewOnly[previewOnly.length - 1]!.offX : null,
-			settleJumpY: previewOnly.length && settled.offYAdj !== null && previewOnly[previewOnly.length - 1]!.offYAdj !== null
-				? settled.offYAdj - previewOnly[previewOnly.length - 1]!.offYAdj : null,
+			settleJumpY: previewOnly.length && settled.offYLine !== null && previewOnly[previewOnly.length - 1]!.offYLine !== null
+				? settled.offYLine - previewOnly[previewOnly.length - 1]!.offYLine : null,
 			// THE CLOSE THAT JUMP OWES, from the frame the lift happened on. exposureY is -topBoundaryShift
 			// by construction, so -max(exposureY, 0) is that frame's topBoundaryShift, which is <= 0 already.
 			settleJumpYLaw: previewOnly.length ? (previewOnly[previewOnly.length - 1]!.topBoundaryShift ?? 0) : 0,
@@ -2444,6 +2448,23 @@ async function runFocal(readable: boolean, infiniteCanvas: boolean, moving: bool
 			if (input) {
 				const heldBefore = !!overlay.panAnchorHold;
 				const panBefore = { ...overlay.viewportPan };
+				// THE RECREATE READ, step by step: the scroll, which overlay is live, its strokes' line corrections, the ink
+				// frontier of the strokes as shown, the extent granted to the note and the spacer that grants it.
+				const recreating = input.replace('Control', '') === 'recreate', steps: any[] = [];
+				const step = (name: string): void => {
+					if (!recreating) return;
+					const o = overlayForPath(path) as any, strokes = inlineInk.strokes(path);
+					const dys = o ? strokes.map((s: any) => o.lineAnchorDy(s) as number) : [];
+					const granted = surfaceExtents.get(path);
+					steps.push({
+						step: name, top: scroller.scrollTop, scrollHeight: scroller.scrollHeight, overlay: o === overlay ? 'old' : o ? 'new' : 'none',
+						anchored: strokes.filter((s: any) => s.lineAnchor).length, of: strokes.length,
+						dy: dys.length ? [Math.min(...dys), Math.max(...dys)] : null,
+						frontier: o ? inkFrontier(o.noteStrokes(path)) : inkFrontier(strokes),
+						granted: { x: granted.x, y: granted.y }, spacerTop: o ? o.spacerTop : null,
+					});
+				};
+				step('before');
 				if (input === "postMeasure") { /* navigation ran in the public update listener */ }
 				else if (input === "scrollImmediate" || input === "missing" || input === "nonfirst") scroller.scrollTop += 120;
 				else if (input === "wheel") scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true }));
@@ -2459,18 +2480,23 @@ async function runFocal(readable: boolean, infiniteCanvas: boolean, moving: bool
 					if (mode === 'setState') view.setState(view.state);
 					else if (mode === 'remove' || mode === 'recreate') {
 						view.dispatch({ effects: rig.overlayCompartment.reconfigure([]), filter: false });
+						step('removed');
 						if (mode === 'recreate') view.dispatch({ effects: rig.overlayCompartment.reconfigure(rig.overlayExtensions), filter: false });
+						step('recreated');
 					} else view.dispatch({ effects: StateEffect.reconfigure.of(rig.baseExtensions), filter: false });
 				}
 				else { touch(400, f); router.beginPinch(new PointerEvent('pointerdown', { pointerId: 802, pointerType: 'touch' })); touch(450, f); router.updatePinch(new PointerEvent('pointermove', { pointerId: 802, pointerType: 'touch' })); }
 				const snapshot = () => ({ pan: { ...overlay.viewportPan }, left: scroller.scrollLeft, top: scroller.scrollTop, scale: overlay.pinchScaleNow, writes: requests.filter(r => r.generation === settleGeneration).length, container: !!overlay.container });
 				const baseline = snapshot(), revoked = !overlay.panAnchorHold;
+				step('baseline');
 				gateSettle = false;
 				for (const resume of heldMeasures) resume();
 				await Promise.resolve();
-				cancellation = { input, heldBefore, panBefore, revoked, revokedAfter: !overlay.panAnchorHold, baseline, after: snapshot() };
+				step('resumed');
+				cancellation = { input, heldBefore, panBefore, revoked, revokedAfter: !overlay.panAnchorHold, baseline, after: snapshot(), steps };
 				if (input && ['remove','recreate','reconfigureAll','mappedRemove','foreignReplace','setState'].includes(input.replace('Control',''))) {
-					await settle(8); cancellation.drained = snapshot();
+					for (let i = 0; i < 8; i++) { await frame(); step(`frame-${i}`); }
+					cancellation.drained = snapshot();
 					cancellation.consumerBeforeCleanup = view.state.facet(EditorView.scrollHandler).map(f => f.name);
 					view.dispatch({ effects: StateEffect.reconfigure.of(rig.baseExtensions), filter: false });
 					cancellation.consumerAfterCleanup = view.state.facet(EditorView.scrollHandler).map(f => f.name);
@@ -3808,6 +3834,13 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 	if (!shot) throw new Error("runPixelColumn needs the test-side __scpShot binding");
 	const rig = await mount(`pixels-${readable ? "rll" : "full"}-${infiniteCanvas ? "ic" : "noic"}`, readable, infiniteCanvas);
 	const { view, overlay, pane, sizer, path } = rig;
+	// THE LINE ANCHORS (LineAnchor.ts), read on every frame: the passes that anchored old ink in this cell, counted on the
+	// instance, and each mark stroke's shown correction (lineAnchor below).
+	const anchorPasses = { runs: 0, took: 0 };
+	{
+		const anchors = (overlay as any).lineAnchors, realPass = anchors.anchorMeasured;
+		anchors.anchorMeasured = function (this: unknown, ...a: unknown[]) { anchorPasses.runs++; const n = realPass.apply(this, a); anchorPasses.took += n; return n; };
+	}
 	const scroller = view.scrollDOM;
 	// EXTERNAL SCALE: an ancestor transform the note viewport does not own
 	// (an app zoom). The same driver the boundary and column arms use.
@@ -3915,6 +3948,17 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 		for (const el of Array.from(view.contentDOM.querySelectorAll(".cm-line"))) if (el.textContent === text) return el.getBoundingClientRect();
 		return null;
 	};
+	// THE WORDS AS PAINTED: every drawn line's number, its top and bottom on screen and the height of one of its rows there
+	// (its line height times its own painted-to-layout ratio), so the test can name the row under the ink's detected top.
+	const rowsRead = (): number[][] => {
+		const out: number[][] = [];
+		for (const el of Array.from(view.contentDOM.querySelectorAll(".cm-line")) as HTMLElement[]) {
+			const r = el.getBoundingClientRect(), lh = parseFloat(getComputedStyle(el).lineHeight);
+			if (!(r.height > 0) || !(el.offsetHeight > 0)) continue;
+			out.push([view.state.doc.lineAt(view.posAtDOM(el)).number, r.top, r.bottom, (Number.isFinite(lh) ? lh : el.offsetHeight) * (r.height / el.offsetHeight)]);
+		}
+		return out;
+	};
 	let anchorLine: { text: string; deltaNote: number } | null = null;
 	{
 		const at = layout();
@@ -4004,7 +4048,11 @@ async function runPixelColumn(readable: boolean, infiniteCanvas: boolean, backin
 			stable, after: stable ? undefined : after,
 			markHalfW: note.halfW * at.scale, markHalfH: note.halfH * at.scale,
 			texelDevice: cc.width > 0 ? (cc.getBoundingClientRect().width / cc.width) * window.devicePixelRatio : NaN,
-			previewInkOffset: overlay.previewInkOffset, backing: backing ? backingRead() : undefined,
+			previewInkOffset: overlay.previewInkOffset, backing: backing ? backingRead() : undefined, rows: rowsRead(),
+			lineAnchor: (() => {
+				const marks = inlineInk.strokes(path), dys = marks.map((s: any) => overlay.lineAnchorDy(s) as number);
+				return { anchored: marks.filter((s: any) => s.lineAnchor).length, of: marks.length, dyMin: Math.min(...dys), dyMax: Math.max(...dys), passes: { ...anchorPasses } };
+			})(),
 		});
 	};
 	const router = overlay.router;

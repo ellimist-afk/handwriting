@@ -5,8 +5,13 @@
  */
 import { describe, expect, it } from "vitest";
 import mainSource from "./main.ts?raw";
+import commandsSource from "./commands/RegisterCommands.ts?raw";
+import diagCommandsSource from "./commands/RegisterDiagCommands.ts?raw";
+import onloadSource from "./PluginOnload.ts?raw";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+// The command registrations live in commands/RegisterCommands.ts and RegisterDiagCommands.ts, read here with main.ts.
+// The onload phases live in PluginOnload.ts, read here too.
+const source = [mainSource, commandsSource, diagCommandsSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
 
 describe("recording dot follows the switch (audit 142)", () => {
 	it("the diagnostics-changed listener repaints every strip", () => {

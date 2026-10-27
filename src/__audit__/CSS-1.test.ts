@@ -12,8 +12,8 @@
  *  - the REAL InlineInkStore (commitGesture -> persist -> claim, deleteAll
  *    readiness/capture, applyRemove = what InkOverlay.clearAllInk calls,
  *    ensureLoaded after a restart, isHandwritingPage);
- *  - main.ts's notePageId (the host readPageId, main.ts:2034) and
- *    claimNotePageId (the host claimId, main.ts:2035), sliced verbatim and
+ *  - notePageId (the host readPageId) and claimNotePageId (the host
+ *    claimId), sliced verbatim out of persistence/PageIdentity.ts and
  *    transpiled, over a fake vault/metadata cache;
  *  - main.ts's updateStatusBarClass, sliced verbatim;
  *  - styles.css parsed with postcss: every rule that targets `.status-bar`.
@@ -24,33 +24,40 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
 import postcss from "postcss";
 import mainSource from "../main.ts?raw";
-import inkOverlaySource from "../inline/InkOverlay.ts?raw";
+import applySource from "../PluginApply.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
+import identitySource from "../persistence/PageIdentity.ts?raw";
+import deleteAllSource from "../ink/DeleteAllInk.ts?raw";
 import stylesSource from "../../styles.css?raw";
+import { inlineInk } from "../inline/InkOverlay";
+import { mountOverlay } from "../inline/mountRig.test.util";
 import { InlineInkStore, type InlineInkHost } from "../inline/InlineInkStore";
 import { UnreadableFrontmatterError, claimMarkdown, hasFrontmatterBlock } from "../inline/InlineClaim";
 import { parseMarkdownPage } from "../model/MarkdownPage";
 import { isSafePageId, type PageData, type ParseResult } from "../model/PageData";
 import type { InkStroke } from "../ink/Stroke";
 
-const source = mainSource.replace(/\r\n/g, "\n");
-const overlay = inkOverlaySource.replace(/\r\n/g, "\n");
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const source = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
+const apply = applySource.replace(/\r\n/g, "\n");
+const identity = identitySource.replace(/\r\n/g, "\n");
 
-function between(startMarker: string, endMarker: string): string {
-	expect(source.split(startMarker)).toHaveLength(2);
-	const s = source.indexOf(startMarker) + startMarker.length;
-	const e = source.indexOf(endMarker, s);
+function between(startMarker: string, endMarker: string, text: string = source): string {
+	expect(text.split(startMarker)).toHaveLength(2);
+	const s = text.indexOf(startMarker) + startMarker.length;
+	const e = text.indexOf(endMarker, s);
 	expect(e).toBeGreaterThan(s);
-	return source.slice(s, e);
+	return text.slice(s, e);
 }
 
 // ---- slice production code out of main.ts -----------------------------------
 
 // Since 1.4.22 the closure calls the plugin method `applyStatusBarVisibility`, which reads the setting (default off)
 // and keys the class on strokes. The method body is sliced verbatim and run with the plugin as `this`.
-const methodStart = "\tapplyStatusBarVisibility(): void {\n";
-expect(source.split(methodStart)).toHaveLength(2);
-const ms = source.indexOf(methodStart) + methodStart.length;
-const methodBody = source.slice(ms, source.indexOf("\n\t}\n", ms));
+const methodStart = "\tfunction applyStatusBarVisibility(this: HandwritingPlugin): void {\n";
+expect(apply.split(methodStart)).toHaveLength(2);
+const ms = apply.indexOf(methodStart) + methodStart.length;
+const methodBody = apply.slice(ms, apply.indexOf("\n\t}\n", ms));
 expect(methodBody).toContain('"handwriting-active-page"');
 expect(methodBody).toContain("inlineInk.inkPresence(path)");
 expect(source).toContain("const updateStatusBarClass = (): void => this.applyStatusBarVisibility();");
@@ -60,10 +67,11 @@ const methodCode = transformSync(
 ).code;
 const makeUpdateStatusBarClass = new Function("inlineInk", "document", methodCode);
 
-// notePageId (main.ts:4999-5019), verbatim body.
+// notePageId (persistence/PageIdentity.ts), verbatim body.
 const notePageIdBody = between(
-	"\tprivate notePageId(path: string): string | null {\n",
-	"\n\t}\n\n\t/**\n\t * Atomically stamp"
+	"\tfunction notePageId(this: HandwritingPlugin, path: string): string | null {\n",
+	"\n\t}\n\n\t/**\n\t * Atomically stamp",
+	identity
 );
 expect(notePageIdBody).toContain('fm?.["handwriting-page-id"]');
 const makeNotePageId = new Function(
@@ -74,14 +82,15 @@ const makeNotePageId = new Function(
 	}).code
 );
 
-// claimNotePageId (main.ts:5021-5044), verbatim body.
-expect(source).toContain("\tprivate async claimNotePageId(\n");
+// claimNotePageId (persistence/PageIdentity.ts), verbatim body.
+expect(identity).toContain("\tasync function claimNotePageId(this: HandwritingPlugin,\n");
 const claimBody = between(
 	"): Promise<{ pageId: string; futureVersion?: number; content?: string }> {\n",
-	"\n\t}\n\n\t/**\n\t * Start slides ink"
+	"\n\t}\n\nexport function installPageIdentity",
+	identity
 );
 expect(claimBody).toContain("const r = claimMarkdown(data, proposedId);");
-// The body refuses a frontmatter block Obsidian cannot parse; both names are main.ts imports from InlineClaim.
+// The body refuses a frontmatter block Obsidian cannot parse; both names are PageIdentity.ts imports from InlineClaim.
 expect(claimBody).toContain("hasFrontmatterBlock(data)");
 expect(claimBody).toContain("throw new UnreadableFrontmatterError();");
 const makeClaimNotePageId = new Function(
@@ -98,14 +107,11 @@ const makeClaimNotePageId = new Function(
 expect(source).toContain("readPageId: (path) => this.notePageId(path),");
 expect(source).toContain("claimId: (path, proposedId) => this.claimNotePageId(path, proposedId),");
 
-// Delete-all precondition: the wipe the command reaches is InkOverlay.clearAllInk,
-// whose only store mutation is inlineInk.applyRemove(path, every stroke id).
-const clearStart = overlay.indexOf("\tclearAllInk(path: string): number | null {\n");
-expect(clearStart).toBeGreaterThan(0);
-const clearBody = overlay.slice(clearStart, overlay.indexOf("\n\t}\n", clearStart));
-expect(clearBody).toContain("inlineInk.applyRemove(");
-expect(clearBody).not.toContain("processFrontMatter");
-expect(source).toContain("const n = deleteAllInkOn(path);");
+// Delete-all precondition: the wipe the command reaches is InkOverlay.clearAllInk.
+// That its store mutation is inlineInk.applyRemove(path, every stroke id), and that
+// it never calls processFrontMatter, is run, not read: see "the wipe Delete all ink
+// reaches" below. The command's finish step lives in ink/DeleteAllInk.ts.
+expect(deleteAllSource.replace(/\r\n/g, "\n")).toContain("const n = deleteAllInkOn(path);");
 
 // ---- the stylesheet: which rules hide the status bar -------------------------
 interface StatusRule {
@@ -320,5 +326,43 @@ describe("CSS-1: status bar after Delete all ink", () => {
 		// CORRECT: a note with no ink keeps Obsidian's status bar.
 		expect(hiddenAtLayoutReady, "status bar hidden at layout-ready on a note with zero strokes").toBe(false);
 		expect(world.statusBarHidden(), "status bar hidden after restart on a note with zero strokes").toBe(false);
+	});
+});
+
+describe("CSS-1 precondition: the wipe Delete all ink reaches", () => {
+	// The cells above stand in for the wipe with store.applyRemove(every id). This
+	// runs the real one: InkOverlay.clearAllInk on an overlay built by its own
+	// constructor and mounted all the way (mountRig.test.util.ts), over the real
+	// inlineInk store.
+	it("clearAllInk removes every stroke on its note through one inlineInk.applyRemove", () => {
+		const path = "css-1-precondition.md";
+		inlineInk.commitGesture(path, [stroke("w1"), stroke("w2")]);
+		// The wipe's only mutation is the store's: it does not edit the note's
+		// frontmatter, so the handwriting-page-id the cells above reason about
+		// is still there after it. The overlay's only route to the file manager
+		// is Obsidian's `app`, which it reads from the editor's info field; that
+		// `app` and the global one are both this spy here, so a wipe that
+		// reaches processFrontMatter by either route is seen.
+		const processFrontMatter = vi.fn();
+		const app = { fileManager: { processFrontMatter } };
+		const g = globalThis as { app?: unknown };
+		const hadApp = "app" in g;
+		const oldApp = g.app;
+		g.app = app;
+		const m = mountOverlay(path, { app });
+		const remove = vi.spyOn(inlineInk, "applyRemove");
+		try {
+			const o = m.o as unknown as { clearAllInk(path: string): number | null };
+			expect(o.clearAllInk(path), "clearAllInk did not report both strokes removed").toBe(2);
+			expect(remove, "the wipe did not go through one applyRemove").toHaveBeenCalledTimes(1);
+			expect(remove).toHaveBeenCalledWith(path, ["w1", "w2"]);
+			expect(inlineInk.strokes(path), "ink survived the wipe").toHaveLength(0);
+			expect(processFrontMatter, "clearAllInk wrote the note's frontmatter").not.toHaveBeenCalled();
+		} finally {
+			remove.mockRestore();
+			m.destroy();
+			if (hadApp) g.app = oldApp;
+			else delete g.app;
+		}
 	});
 });

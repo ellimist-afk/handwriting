@@ -7,7 +7,8 @@ const ALL_TS = import.meta.glob("./**/*.ts", { query: "?raw", import: "default",
 	string
 >;
 
-const MAIN = codeOnly(ALL_TS["./main.ts"] ?? "");
+// flushOnHide lives in PluginLifecycle.ts and its registrations in PluginOnload.ts, both read here with main.ts.
+const MAIN = codeOnly([ALL_TS["./main.ts"] ?? "", ALL_TS["./PluginLifecycle.ts"] ?? "", ALL_TS["./PluginOnload.ts"] ?? ""].join("\n"));
 
 /**
  * The background-freeze drain is WIRED, not merely present.
@@ -59,7 +60,7 @@ describe("the background-freeze flush is wired to the events that mean 'frozen'"
 	});
 
 	it("and what they call still dispatches the pending writes", () => {
-		const at = MAIN.indexOf("private flushOnHide(): void {");
+		const at = MAIN.indexOf("function flushOnHide(this: HandwritingPlugin): void {");
 		expect(at, "flushOnHide is gone from main.ts").toBeGreaterThan(-1);
 		const end = MAIN.indexOf("\n\t}", at);
 		expect(end, "flushOnHide has no end in main.ts any more").toBeGreaterThan(at);

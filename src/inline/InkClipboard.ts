@@ -70,7 +70,8 @@ export function markerIsCurrent(text: string): boolean {
 	return tok !== null && token !== null && tok === token && held.length > 0;
 }
 
-const clone = (s: InkStroke): InkStroke => ({
+// A copy leaves its line anchor behind: pasted ink is placed anew, wherever it lands.
+const clone = ({ lineAnchor: _line, ...s }: InkStroke): InkStroke => ({
 	...s,
 	points: s.points.map((p) => ({ ...p })),
 	bbox: { ...s.bbox },

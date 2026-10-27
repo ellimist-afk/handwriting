@@ -34,7 +34,8 @@ const ALL_TS = import.meta.glob("/src/**/*.ts", {
 	import: "default",
 }) as Record<string, string>;
 
-const MAIN = codeOnly(ALL_TS["/src/main.ts"] ?? "");
+// The command registrations live in commands/RegisterCommands.ts, RegisterExportCommands.ts and RegisterDiagCommands.ts, read here with main.ts.
+const MAIN = codeOnly([ALL_TS["/src/main.ts"] ?? "", ALL_TS["/src/commands/RegisterCommands.ts"] ?? "", ALL_TS["/src/commands/RegisterExportCommands.ts"] ?? "", ALL_TS["/src/commands/RegisterDiagCommands.ts"] ?? ""].join("\n"));
 
 /**
  * id -> the new `name:` this ruling gave it. Every id here is UNCHANGED -
@@ -58,6 +59,7 @@ const RENAMED: [id: string, name: string][] = [
 	["copy-selected-ink", "Lasso: copy selection"],
 	["cut-selected-ink", "Lasso: cut selection"],
 	["paste-ink", "Lasso: paste"],
+	["open-pen-diagnostics", "Diagnostics: open pen probe"],
 ];
 
 describe("command palette: surviving ids carry the renamed labels", () => {

@@ -32,11 +32,17 @@
 import { describe, expect, it } from "vitest";
 import HandwritingPlugin, { HandwritingSettingTab } from "./main";
 import mainSource from "./main.ts?raw";
+import commandsSource from "./commands/RegisterCommands.ts?raw";
+import pluginSettingsSource from "./settings/PluginSettings.ts?raw";
+import tabSource from "./settings/HandwritingSettingTab.ts?raw";
 import { applyToolbarPlacement } from "./inline/InkOverlay";
 import { pressureSensitivityEnabled, setPressureSensitivity } from "./ink/PenStyle";
 import { resetPressureGainForTest, setPressureStore, strokeGain } from "./ink/PressureGain";
 
-const MAIN = mainSource.replace(/\r\n/g, "\n");
+// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+const MAIN = [mainSource, commandsSource].join("\n").replace(/\r\n/g, "\n");
+const SETTINGS = pluginSettingsSource.replace(/\r\n/g, "\n");
+const TAB = tabSource.replace(/\r\n/g, "\n");
 
 const proto = HandwritingPlugin.prototype as unknown as {
 	loadSettings(this: unknown): Promise<void>;
@@ -264,10 +270,11 @@ describe("pressure sensitivity is stored, not pinned", () => {
 	});
 
 	it("applies the loaded value at startup", () => {
-		expect(MAIN).toContain("setPressureSensitivity(this.settings.pressureSensitivity);");
+		expect(SETTINGS).toContain("setPressureSensitivity(this.settings.pressureSensitivity);");
 		// Two call sites since the row was restored: this one at startup, and
 		// the `setControlValue` case that the toggle goes through.
-		expect(MAIN.match(/setPressureSensitivity\(/g), "two call sites in main.ts").toHaveLength(2);
+		expect((MAIN + SETTINGS).match(/setPressureSensitivity\(/g), "the startup call site, main.ts and PluginSettings.ts").toHaveLength(1);
+		expect(TAB.match(/setPressureSensitivity\(/g), "the toggle's call site in the settings tab").toHaveLength(1);
 	});
 });
 

@@ -9,16 +9,33 @@
  * it ships switched off is that nobody could establish what it costs on the
  * device (PurgeSentinel.ts, and 1.4.12-design.md §14).
  *
- * The source assertions at the bottom are the half a behavioural test cannot
- * reach: `InkOverlay.repaint` is not constructible in this suite, so "the
- * readback is behind the mobile guard" is pinned by reading the call site.
- * Counted on `codeOnly` output so prose about the guard cannot stand in for
- * the guard, the lesson DeferredUnloadGuard.test.ts wrote down.
+ * The guards at the bottom run: a real `InkOverlay.repaint`, driven by the
+ * repaint rig (overlayRig.testutil.ts), with the PurgeSentinel exports
+ * watched. Two checks still read source, both on `codeOnly` output so prose
+ * cannot stand in for code (the lesson DeferredUnloadGuard.test.ts wrote
+ * down): StrokeRenderer's own sentinel switch, and the repo-wide rule that
+ * there is one `getImageData` in production code, read across every file.
  */
-import { describe, expect, it, vi } from "vitest";
-import overlaySrc from "../inline/InkOverlay.ts?raw";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+(globalThis as { window?: unknown }).window = globalThis;
+
+// Every PurgeSentinel export is the real one; the four the overlay calls are
+// wrapped so a cell can watch them and, for the two gates, answer for them.
+vi.mock("./PurgeSentinel", async (importOriginal) => {
+	const actual = (await importOriginal()) as Record<string, unknown>;
+	const wrapped: Record<string, unknown> = { ...actual };
+	for (const name of ["paintPurgeSentinel", "readPurgeSentinel", "purgeProbeArmed", "purgeProbeDue"]) {
+		wrapped[name] = vi.fn(actual[name] as (...a: unknown[]) => unknown);
+	}
+	return wrapped;
+});
+
+import { Platform } from "obsidian";
 import rendererSrc from "./StrokeRenderer.ts?raw";
 import { codeOnly } from "../CodeOnly";
+import { setDiagnosticsEnabled } from "../diag/DiagSwitch";
+import { openRepaintRig } from "../inline/overlayRig.testutil";
 import {
 	PURGE_PROBE_INTERVAL_MS,
 	PURGE_SENTINEL_ALPHA,
@@ -28,7 +45,15 @@ import {
 	purgeDetected,
 	purgeProbeArmed,
 	purgeProbeDue,
+	readPurgeSentinel,
 } from "./PurgeSentinel";
+
+/** Every production source file, as text: tests and test utilities left out. */
+const PRODUCTION_SOURCES = Object.fromEntries(
+	Object.entries(
+		import.meta.glob("/src/**/*.ts", { query: "?raw", eager: true, import: "default" }) as Record<string, string>
+	).filter(([file]) => !/\.test\.ts$|\.testutil\.ts$|\.test\.util\.ts$|^\/src\/testUtils\//.test(file))
+);
 
 /** The one shape where a probe is due; each test breaks exactly one term. */
 const DUE: PurgeProbeGate = {
@@ -150,35 +175,108 @@ describe("paintPurgeSentinel", () => {
 	});
 });
 
-describe("the readback is behind the guards, in the source", () => {
-	const overlay = codeOnly(overlaySrc);
-	const renderer = codeOnly(rendererSrc);
+describe("the readback is behind the guards", () => {
+	// Run, not read. A real InkOverlay is driven through real repaints by the
+	// repaint rig (overlayRig.testutil.ts), with every PurgeSentinel export
+	// wrapped (see the mock at the top) so a cell can watch the calls the
+	// overlay makes and, for the two gates, answer for them.
+	const noHooks = { onCommittedDraw: () => undefined, onPostDraw: () => undefined };
+	const armedGate = vi.mocked(purgeProbeArmed);
+	const dueGate = vi.mocked(purgeProbeDue);
+	const read = vi.mocked(readPurgeSentinel);
+	const paint = vi.mocked(paintPurgeSentinel);
 
-	it("the overlay reads the sentinel exactly once, and only under purgeProbeDue", () => {
-		expect(overlay.match(/readPurgeSentinel\(/g) ?? []).toHaveLength(1);
-		expect(overlay).toMatch(
-			/purgeProbeDue\(\{[\s\S]{0,600}?\}\)[\s\S]{0,200}?readPurgeSentinel\(/
-		);
+	afterEach(() => {
+		Platform.isMobileApp = false;
+		setDiagnosticsEnabled(false);
+		// Back to the real implementation, any unspent one-off answer dropped.
+		for (const fn of [armedGate, dueGate, read, paint]) fn.mockReset();
 	});
 
-	it("the armed flag is the mobile AND recording pair, read at the paint", () => {
-		expect(overlay).toMatch(
-			/purgeProbeArmed\(\s*Platform\.isMobileApp\s*,\s*diagnosticsEnabled\(\)\s*\)/
-		);
-		// And nothing else may arm it: one call, feeding both the marker and
-		// the gate, so the paint and the read can never disagree.
-		expect(overlay.match(/purgeProbeArmed\(/g) ?? []).toHaveLength(1);
+	it("the overlay reads the sentinel exactly once, and only under purgeProbeDue", async () => {
+		const rig = await openRepaintRig(3, noHooks);
+		const ctx = rig.overlay.committedCtx as CanvasRenderingContext2D;
+		// Every readback on the committed context, and whether it happened
+		// inside the sentinel read.
+		let inRead = false;
+		const readbacks: boolean[] = [];
+		const realGetImageData = ctx.getImageData.bind(ctx);
+		ctx.getImageData = ((...a: Parameters<CanvasRenderingContext2D["getImageData"]>) => {
+			readbacks.push(inRead);
+			return realGetImageData(...a);
+		}) as CanvasRenderingContext2D["getImageData"];
+		const actual = await vi.importActual<typeof import("./PurgeSentinel")>("./PurgeSentinel");
+		read.mockImplementation((c) => {
+			inRead = true;
+			try {
+				return actual.readPurgeSentinel(c);
+			} finally {
+				inRead = false;
+			}
+		});
+		read.mockClear();
+		dueGate.mockClear();
+		dueGate.mockReturnValueOnce(false);
+		rig.damageAll();
+		rig.repaintNow();
+		expect(dueGate, "the repaint never asked purgeProbeDue").toHaveBeenCalledTimes(1);
+		expect(read, "the sentinel was read without purgeProbeDue's yes").not.toHaveBeenCalled();
+		expect(readbacks, "a readback ran on a repaint whose probe was not due").toEqual([]);
+
+		dueGate.mockReturnValueOnce(true);
+		rig.damageAll();
+		rig.repaintNow();
+		expect(read, "a due probe did not read the sentinel exactly once").toHaveBeenCalledTimes(1);
+		expect(read).toHaveBeenCalledWith(ctx);
+		expect(readbacks.length, "precondition: the sentinel read reads the canvas back").toBeGreaterThan(0);
+		expect(readbacks.every(Boolean), "a readback ran outside the sentinel read").toBe(true);
 	});
 
-	it("the marker is painted only when armed, on both the full and partial paths", () => {
-		// `probeArmed` is followed by the width-floor argument now, not a bare
-		// close-paren - matches either shape, but still pins that `probeArmed`
-		// is the argument in that position and nothing renamed it away.
-		expect(overlay).toMatch(/"pen",\s*probeArmed[,)]/);
-		expect(overlay).toMatch(/if \(probeArmed\) paintPurgeSentinel\(/);
+	it("the armed flag is the mobile AND recording pair, read at the paint", async () => {
+		const rig = await openRepaintRig(3, noHooks);
+		for (const [mobile, recording] of [
+			[false, false],
+			[true, false],
+			[false, true],
+			[true, true],
+		] as const) {
+			Platform.isMobileApp = mobile;
+			setDiagnosticsEnabled(recording);
+			armedGate.mockClear();
+			dueGate.mockReturnValueOnce(false);
+			rig.damageAll();
+			rig.repaintNow();
+			// One call, feeding both the marker and the gate, so the paint and
+			// the read can never disagree.
+			expect(armedGate, `mobile=${mobile} recording=${recording}: not asked exactly once per paint`).toHaveBeenCalledTimes(1);
+			expect(armedGate, `mobile=${mobile} recording=${recording}: armed from something else`).toHaveBeenCalledWith(mobile, recording);
+		}
+	});
+
+	it("the marker is painted only when armed, on both the full and partial paths", async () => {
+		const rig = await openRepaintRig(3, noHooks);
+		const ctx = rig.overlay.committedCtx;
+		for (const path of ["full", "partial"] as const) {
+			for (const armed of [true, false]) {
+				armedGate.mockReturnValueOnce(armed);
+				dueGate.mockReturnValueOnce(false);
+				paint.mockClear();
+				// The full path records how many strokes it painted; the partial
+				// path never touches that count, so it tells the two apart.
+				rig.overlay.paintedStrokeCount = -1;
+				if (path === "full") rig.damageAll();
+				else rig.damageRect({ x: 100, y: 50, width: 80, height: 10 });
+				rig.repaintNow();
+				expect(rig.overlay.paintedStrokeCount === -1, `precondition: the ${path} path ran`).toBe(path === "partial");
+				const marks = paint.mock.calls.filter(([c]) => c === ctx).length;
+				if (armed) expect(marks, `the ${path} path did not paint the marker while armed`).toBeGreaterThan(0);
+				else expect(marks, `the ${path} path painted the marker while disarmed`).toBe(0);
+			}
+		}
 	});
 
 	it("drawCommitted paints it only when its caller asks", () => {
+		const renderer = codeOnly(rendererSrc);
 		expect(renderer).toMatch(/sentinel = false/);
 		expect(renderer).toMatch(/if \(sentinel\) paintPurgeSentinel\(ctx\);/);
 	});
@@ -186,7 +284,12 @@ describe("the readback is behind the guards, in the source", () => {
 	it("stays the only getImageData in production source, through countPaintedPixels", () => {
 		// This repo has exactly one readback call site and a comment on the
 		// wet renderer saying "never on the hot path". The heal must not
-		// become the second one.
-		expect(codeOnly(overlaySrc)).not.toMatch(/getImageData\(/);
+		// become the second one. Read across every production file, so code
+		// moving between files cannot carry a second site past this check.
+		const sites = Object.entries(PRODUCTION_SOURCES).flatMap(([file, text]) =>
+			(codeOnly(text).match(/getImageData\(/g) ?? []).map(() => file)
+		);
+		expect(Object.keys(PRODUCTION_SOURCES).length, "precondition: the glob found the source tree").toBeGreaterThan(50);
+		expect(sites).toEqual(["/src/diag/Raster.ts"]);
 	});
 });

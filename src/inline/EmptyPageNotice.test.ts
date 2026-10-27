@@ -13,7 +13,9 @@
  *                       Fixed by refusing to speak on "unknown".
  *
  * Both live here so neither needs a rig to pin. The wiring that connects them
- * to the eraser and the lasso is covered by `EmptyPageNotices.test.ts`.
+ * to the eraser and the lasso is covered by `EmptyPageNotices.test.ts`. The
+ * one exception is the re-arm subscription, which only a finished mount
+ * creates: that cell mounts a real overlay (`mountRig.test.util.ts`).
  */
 
 import { describe, expect, it } from "vitest";
@@ -22,8 +24,9 @@ import {
 	emptyPageNoticeText,
 	inkChangeRearmsNotice,
 } from "./EmptyPageNotice";
-import overlaySrc from "./InkOverlay.ts?raw";
-import { codeOnly } from "../CodeOnly";
+import { inlineInk } from "./InkOverlay";
+import { notifyInkChanged } from "./InkEvents";
+import { mountOverlay } from "./mountRig.test.util";
 
 describe("emptyPageNoticeText", () => {
 	it("names the tool that refused", () => {
@@ -106,21 +109,45 @@ describe("EmptyPageNoticeGate", () => {
 	});
 
 	// AND THE OVERLAY ACTUALLY ASKS. The rule above is worth nothing if the
-	// subscription that re-arms the gate does not consult it; the rig that
-	// drives the erase branch never runs `mount`, so nothing else on this
-	// line can see that wiring. Read as CODE, so the comment beside it
-	// cannot satisfy the assertion.
+	// subscription that re-arms the gate does not consult it. The rig that
+	// drives the erase branch never runs `mount`, so this cell mounts a real
+	// overlay all the way (mountRig.test.util.ts) and drives the real ink-change
+	// events through the subscription mount makes.
 	it("the overlay re-arms through this rule, not on any ink change", () => {
-		const src = codeOnly(overlaySrc).split("\r\n").join("\n");
-		const at = src.indexOf("this.offInkChanged = onInkChanged(");
-		expect(at, "the overlay no longer subscribes to ink changes").toBeGreaterThan(-1);
-		const end = src.indexOf("});", at);
-		expect(end, "the subscription has no end in InkOverlay.ts any more").toBeGreaterThan(at);
-		const body = src.slice(at, end);
-		expect(
-			body,
-			"the ink-change subscription forgets the notice without asking whether ink arrived"
-		).toContain("inkChangeRearmsNotice(");
+		const path = "empty-page-notice-rearm.md";
+		const m = mountOverlay(path);
+		try {
+			const gate = m.o.emptyNotice as EmptyPageNoticeGate;
+			expect(gate.claim(path, "erase"), "precondition: the first refusal speaks").toBe(true);
+			expect(gate.claim(path, "erase"), "precondition: the next one on the same note is quiet").toBe(false);
+
+			// An ink change that brings no ink: the page is still empty, so the
+			// notice stays quiet.
+			notifyInkChanged(path);
+			expect(
+				gate.claim(path, "erase"),
+				"the ink-change subscription forgets the notice without asking whether ink arrived"
+			).toBe(false);
+
+			// Ink arrives on the note: now the subscription re-arms it.
+			inlineInk.commitGesture(path, [
+				{
+					id: "rearm-1",
+					tool: "pen",
+					color: "#000000",
+					width: 2,
+					points: [
+						{ x: 10, y: 10, pressure: 0.5, t: 0 },
+						{ x: 20, y: 20, pressure: 0.5, t: 8 },
+					],
+					bbox: { x: 10, y: 10, width: 10, height: 10 },
+					createdAt: 1,
+				},
+			]);
+			expect(gate.claim(path, "erase"), "ink arrived and the notice was never re-armed").toBe(true);
+		} finally {
+			m.destroy();
+		}
 	});
 
 	it("forgetAll clears every note, for a switch or a teardown", () => {

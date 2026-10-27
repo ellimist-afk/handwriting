@@ -56,7 +56,8 @@ const ALL_TS = import.meta.glob("/src/**/*.ts", {
 /** Every shipped source file - the tests that talk ABOUT the id are not it. */
 const SHIPPED = Object.entries(ALL_TS).filter(([path]) => !path.endsWith(".test.ts"));
 
-const MAIN = codeOnly(ALL_TS["/src/main.ts"] ?? "");
+// The command registrations live in commands/RegisterCommands.ts and RegisterExportCommands.ts, read here with main.ts.
+const MAIN = codeOnly([ALL_TS["/src/main.ts"] ?? "", ALL_TS["/src/commands/RegisterCommands.ts"] ?? "", ALL_TS["/src/commands/RegisterExportCommands.ts"] ?? ""].join("\n"));
 
 function occurrences(src: string, needle: string): number {
 	return src.split(needle).length - 1;
@@ -146,14 +147,14 @@ describe("`pen-ink-toggle` is out of the palette, and out of src", () => {
 	});
 
 	it("survives in exactly one place: the strip button's own id", () => {
-		// MobileTools.ts owns the button, `DEFAULT_FOLD_ORDER` and the saved
+		// MobileToolsButtons.ts owns the button, `DEFAULT_FOLD_ORDER` and the saved
 		// fold orders written in that id, which is why the id outlived the
 		// command. Named once, exported once, and nothing else in `src`
 		// spells it.
 		const spelt = SHIPPED.filter(([, src]) =>
 			codeOnly(src).includes('"handwriting:pen-ink-toggle"')
 		);
-		expect(spelt.map(([path]) => path)).toEqual(["/src/inline/MobileTools.ts"]);
+		expect(spelt.map(([path]) => path)).toEqual(["/src/inline/MobileToolsButtons.ts"]);
 		expect(occurrences(codeOnly(spelt[0]?.[1] ?? ""), '"handwriting:pen-ink-toggle"')).toBe(1);
 		expect(PEN_INK_TOGGLE).toBe("handwriting:pen-ink-toggle");
 	});
@@ -164,7 +165,7 @@ describe("`pen-ink-toggle` is out of the palette, and out of src", () => {
 		// go away.
 		setPenInk(false);
 		expect(penInkEnabled()).toBe(false);
-		expect(codeOnly(ALL_TS["/src/inline/MobileTools.ts"] ?? "")).toContain(
+		expect(codeOnly(ALL_TS["/src/inline/MobileToolsButtons.ts"] ?? "")).toContain(
 			"commandId: PEN_INK_TOGGLE"
 		);
 	});

@@ -111,8 +111,16 @@ describe("main.ts wiring, so the gate cannot be quietly unwired", () => {
 	 * at load. Gating `penOnOff(...)` itself would stop the pen toggling at
 	 * all with the switch off - silent, and not visible in a toast test.
 	 */
-	const MAIN = import.meta.glob("./main.ts", { query: "?raw", import: "default", eager: true })[
-		"./main.ts"
+	// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+	const MAIN = [
+		import.meta.glob("./main.ts", { query: "?raw", import: "default", eager: true })["./main.ts"] as string,
+		import.meta.glob("./commands/RegisterCommands.ts", { query: "?raw", import: "default", eager: true })[
+			"./commands/RegisterCommands.ts"
+		] as string,
+	].join("\n");
+	// The settings load moved out of main.ts, and the priming call with it.
+	const SETTINGS = import.meta.glob("./settings/PluginSettings.ts", { query: "?raw", import: "default", eager: true })[
+		"./settings/PluginSettings.ts"
 	] as string;
 
 	it("was actually read", () => {
@@ -120,7 +128,7 @@ describe("main.ts wiring, so the gate cannot be quietly unwired", () => {
 	});
 
 	it("primes the switch from devDiagnostics at load", () => {
-		expect(MAIN).toContain("setRoutineNoticesVisible(this.settings.devDiagnostics)");
+		expect(SETTINGS).toContain("setRoutineNoticesVisible(this.settings.devDiagnostics)");
 	});
 
 	it("never gates the pen toggle's own state change", () => {

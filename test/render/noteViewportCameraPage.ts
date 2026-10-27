@@ -212,7 +212,7 @@ function snap(id:string) {
  // The pin, same pair/names as `run()`'s the harness engine's own
  // CSS-zoom support, and the overlay's separately cached gate.
  const engineZoom=CSS.supports("zoom","0.5"),hostZoom=(overlay as any).hostZoomSupported() as boolean;
- return {engineZoom,hostZoom,paddingTop:Number.parseFloat(getComputedStyle(view.contentDOM).paddingTop),paper:{image:paperStyle.backgroundImage,attachment:paperStyle.backgroundAttachment},state:overlay.getNoteViewportState(),doc:view.state.doc.toString(),writes,history:undoDepth(view.state),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),extent:surfaceExtents.get(path),scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop,width:view.scrollDOM.scrollWidth,height:view.scrollDOM.scrollHeight},viewport:{x:sr.x,y:sr.y,width:sr.width,height:sr.height},ink:inlineInk.strokes(path).map(s=>({id:s.id,x:cr.left+s.bbox.x*scale*font,y:view.documentTop+s.bbox.y*scale*font,right:cr.left+(s.bbox.x+s.bbox.width)*scale*font,bottom:view.documentTop+(s.bbox.y+s.bbox.height)*scale*font})),layout:Array.from({length:Math.min(100,view.state.doc.length+1)},(_,i)=>{const c=view.coordsAtPos(i)!;return[(c.left-cr.left)/scale,(c.top-cr.top)/scale];}),buttons:[...host.querySelectorAll(".handwriting-note-viewport-controls button")].map(b=>b.getBoundingClientRect().toJSON()),backings:[...host.querySelectorAll("canvas")].map(c=>c.width*c.height),selection:view.state.selection.main.toJSON(),selected:overlay.selection.strokeIds,handles:host.querySelectorAll(".handwriting-selection-handle").length};
+ return {engineZoom,hostZoom,paddingTop:Number.parseFloat(getComputedStyle(view.contentDOM).paddingTop),paper:{image:paperStyle.backgroundImage,attachment:paperStyle.backgroundAttachment},state:overlay.getNoteViewportState(),doc:view.state.doc.toString(),writes,history:undoDepth(view.state),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path),(k,v)=>k==="lineAnchor"?undefined:v)),extent:surfaceExtents.get(path),scroll:{left:view.scrollDOM.scrollLeft,top:view.scrollDOM.scrollTop,width:view.scrollDOM.scrollWidth,height:view.scrollDOM.scrollHeight},viewport:{x:sr.x,y:sr.y,width:sr.width,height:sr.height},ink:inlineInk.strokes(path).map(s=>({id:s.id,x:cr.left+s.bbox.x*scale*font,y:view.documentTop+s.bbox.y*scale*font,right:cr.left+(s.bbox.x+s.bbox.width)*scale*font,bottom:view.documentTop+(s.bbox.y+s.bbox.height)*scale*font})),layout:Array.from({length:Math.min(100,view.state.doc.length+1)},(_,i)=>{const c=view.coordsAtPos(i)!;return[(c.left-cr.left)/scale,(c.top-cr.top)/scale];}),buttons:[...host.querySelectorAll(".handwriting-note-viewport-controls button")].map(b=>b.getBoundingClientRect().toJSON()),backings:[...host.querySelectorAll("canvas")].map(c=>c.width*c.height),selection:view.state.selection.main.toJSON(),selected:overlay.selection.strokeIds,handles:host.querySelectorAll(".handwriting-selection-handle").length};
 }
 async function fit(id:string) {const r=rigs.get(id)!.overlay.fitHandwriting();await settle();return {result:r,...snap(id)};}
 /**
@@ -633,13 +633,16 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
 
 // Reuse the real store, editor, camera and hit-tested router to compare the
 // Insert Space contact/preview boundary with the eventual text/ink operation.
-(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string;context?:string;contactY?:number;tall?:boolean;sweep?:number[];moves?:number[];invalidTarget?:boolean;localColumns?:boolean;clickOnly?:boolean;verifySaved?:boolean;releasePixels?:boolean}={})=>{
+(window as any).insertSpaceProbe=async(zoom=1,font=1,scroll=0,wrapped=false,options:{dy?:number;end?:string;textOnly?:boolean;markup?:boolean;edit?:boolean;shortText?:string;context?:string;contactY?:number;tall?:boolean;sweep?:number[];moves?:number[];invalidTarget?:boolean;localColumns?:boolean;clickOnly?:boolean;verifySaved?:boolean;releasePixels?:boolean;liveHoldMs?:number;pictures?:boolean;room?:number;tallBottom?:number}={})=>{
  const id="space-precision",path=`fit-${id}.md`,pageId=`fit-page-${id}`;
  const data=emptyPage(pageId);data.surface="inline";
  data.strokes=[90,210].map((y,i)=>({id:`row-${i}`,tool:"pen" as const,color:"#000000",width:2,createdAt:1,points:[{x:30,y,pressure:.5,t:0},{x:40,y:y+20,pressure:.5,t:10}],bbox:{x:28,y:y-2,width:14,height:24}}));
- if(options.tall)data.strokes=[{id:"tall",x:30,top:50,bottom:190},{id:"distant",x:330,top:170,bottom:230},{id:"below",x:80,top:280,bottom:300}].map(s=>({id:s.id,tool:"pen",color:"#000000",width:2,createdAt:1,points:[{x:s.x,y:s.top,pressure:.3,t:0},{x:s.x+10,y:s.bottom,pressure:.8,t:10}],bbox:{x:s.x-2,y:s.top-2,width:14,height:s.bottom-s.top+4}}));
+ // tallBottom: the tall stroke's bottom (default 190), for a row taller than the band's margin above the pane.
+ if(options.tall)data.strokes=[{id:"tall",x:30,top:50,bottom:options.tallBottom??190},{id:"distant",x:330,top:170,bottom:230},{id:"below",x:80,top:280,bottom:300}].map(s=>({id:s.id,tool:"pen",color:"#000000",width:2,createdAt:1,points:[{x:s.x,y:s.top,pressure:.3,t:0},{x:s.x+10,y:s.bottom,pressure:.8,t:10}],bbox:{x:s.x-2,y:s.top-2,width:14,height:s.bottom-s.top+4}}));
  if(options.localColumns)data.strokes=[{id:"left-upper",x:0,w:200,top:60,bottom:95},{id:"right-upper",x:600,w:300,top:90,bottom:115},{id:"left-crossing",x:0,w:200,top:110,bottom:150},{id:"right-lower",x:600,w:300,top:140,bottom:170}].map(s=>({id:s.id,tool:"pen",color:"#000000",width:2,createdAt:1,points:[{x:s.x,y:s.top,pressure:.3,t:0},{x:s.x+s.w,y:s.bottom,pressure:.8,t:10}],bbox:{x:s.x-2,y:s.top-2,width:s.w+4,height:s.bottom-s.top+4}}));
  if(options.textOnly)data.strokes=[];
+ // room: one short stroke "far" at world y room, so a short note scrolls; the pane is then scrolled natively to `scroll`.
+ if(options.room)data.strokes.push({id:"far",tool:"pen",color:"#000000",width:2,createdAt:1,points:[{x:80,y:options.room,pressure:.5,t:0},{x:90,y:options.room+20,pressure:.5,t:10}],bbox:{x:78,y:options.room-2,width:14,height:24}});
  ids.set(path,pageId);pages.set(pageId,serializePage(data));
  const paragraph="word ".repeat(240);
  const contextual=options.context==="setext-dash"?paragraph+"\n---\nlast":options.context==="setext-equals"?paragraph+"\n===\nlast":options.context==="fence"?"```\n"+paragraph+"\n```\nlast":options.context==="frontmatter"?"---\ntitle: "+paragraph+"\n---\nlast":undefined;
@@ -648,6 +651,7 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  if(options.localColumns){r.view.dom.style.width="1000px";r.view.dom.parentElement!.style.width="1000px";r.view.requestMeasure();await settle();}
  if(font!==1){r.view.contentDOM.style.fontSize=`${16*font}px`;r.view.requestMeasure();await settle();}
  r.overlay.commitCameraScale(zoom,{left:0,top:scroll});await settle();
+ if(options.room){r.view.scrollDOM.scrollTop=scroll;await settle();}
  const origin=r.view.contentDOM.getBoundingClientRect().top+parseFloat(getComputedStyle(r.view.contentDOM).paddingTop)*r.overlay.cssScale;
  const scale=r.overlay.scale,contact={x:100,y:origin+(options.contactY??104)*scale};
  // Observe the actual transient renderer, not a copy of the planner's IDs.
@@ -669,7 +673,10 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  const feedback=()=>({rendered:structuredClone(rendered),labels:structuredClone(labels),guides:[...guides]});
  if(options.invalidTarget)r.overlay.planSpace=()=>null;
  const coords=()=>Array.from({length:r.view.state.doc.lines},(_,i)=>{const l=r.view.state.doc.line(i+1),c=r.view.coordsAtPos(l.from);return {text:l.text,top:c?.top,bottom:c?.bottom};});
- const capture=()=>({doc:r.view.state.doc.toString(),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),text:coords(),rects:Array.from({length:r.view.state.doc.length+1},(_,i)=>r.view.coordsAtPos(i,1)),zoom:r.overlay.getNoteViewportState().zoom,history:undoDepth(r.view.state),scroll:{left:r.view.scrollDOM.scrollLeft,top:r.view.scrollDOM.scrollTop}});
+ // Old ink takes its line anchor at any quiet moment, so strokes compare without it: a rollback keeps id, order, points
+ // and bbox. `anchored` counts the strokes holding one.
+ const anchored=()=>inlineInk.strokes(path).filter(s=>s.lineAnchor).length;
+ const capture=()=>({doc:r.view.state.doc.toString(),strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path),(k,v)=>k==="lineAnchor"?undefined:v)),anchored:anchored(),text:coords(),rects:Array.from({length:r.view.state.doc.length+1},(_,i)=>r.view.coordsAtPos(i,1)),zoom:r.overlay.getNoteViewportState().zoom,history:undoDepth(r.view.state),scroll:{left:r.view.scrollDOM.scrollLeft,top:r.view.scrollDOM.scrollTop}});
  const before=capture();
  let releasePixels:any=null;
  const otherPath="space-switch-other.md",otherId="space-switch-other";
@@ -684,6 +691,19 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
   otherBefore=structuredClone(inlineInk.strokes(otherPath));
  }
  setPenInk(true);setInlineSpaceMode(true);
+ // pictures: count the drag picture's windows and row rasters (as InsertSpaceDragCost.test.ts counts them), with the camera,
+ // the moving box and the picture's numeric state after the pen-down frame and after each move.
+ const pics={picture:0,rows:0},counted:[string,any][]=[];
+ if(options.pictures)for(const k of ["rasterSpacePicture","rasterSpaceRows"]){
+  const o=(r.overlay as any)[k];counted.push([k,o]);
+  (r.overlay as any)[k]=function(this:any,...a:any[]){pics[k==="rasterSpacePicture"?"picture":"rows"]++;return o.apply(this,a);};
+ }
+ const picture=()=>{
+  const s=(r.overlay as any).spaceSnapshot,c=r.overlay.camera.snapshot;
+  return {...pics,cam:{x:c.x,y:c.y,zoom:c.zoom},backing:r.overlay.committedBacking,cssScale:r.overlay.cssScale,tailH:r.overlay.tailCanvas?.height,
+   box:s?{...s.box}:null,state:s?Object.fromEntries(Object.entries(s).filter(([,v])=>typeof v==="number")):null,canvasH:s?.canvas?.height??null};
+ };
+ let downPictures:any=null;
  const sweep=[];
  for(const y of options.sweep??[]){penEvent("pointermove",contact.x,origin+y*scale,921);await new Promise(requestAnimationFrame);sweep.push({y,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,...feedback()});}
  penEvent("pointermove",contact.x,contact.y,921);
@@ -692,12 +712,57 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  const hoverFeedback=feedback();
  penEvent("pointerdown",contact.x,contact.y,921);
  const down={cut:r.overlay.spaceLineY,ids:[...r.overlay.spaceIds],reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,mode:r.overlay.mode,...feedback()};
+ if(options.pictures){await new Promise(requestAnimationFrame);downPictures=picture();}
  const dy=options.clickOnly?0:options.dy??48;
  const moves=[];
- for(const y of options.moves??[]){penEvent("pointermove",contact.x,contact.y+y*scale,921);await new Promise(requestAnimationFrame);moves.push({dy:y,ids:[...r.overlay.spaceIds],strokes:capture().strokes,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,...feedback()});}
+ for(const y of options.moves??[]){penEvent("pointermove",contact.x,contact.y+y*scale,921);await new Promise(requestAnimationFrame);moves.push({dy:y,total:r.overlay.spaceTotalDy,ids:[...r.overlay.spaceIds],strokes:capture().strokes,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,...feedback(),...(options.pictures?{pictures:picture()}:{})});}
  if(!options.clickOnly)penEvent("pointermove",contact.x,contact.y+dy*scale,921);
  await new Promise(requestAnimationFrame);
- const live={cut:r.overlay.spaceLineY,dy:r.overlay.spaceTotalDy,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,...feedback()};
+ const live={cut:r.overlay.spaceLineY,dy:r.overlay.spaceTotalDy,reticle:r.overlay.penCursorEl?.getBoundingClientRect().top,...feedback(),anchored:0};
+ // pictures: the tail as the drag built its picture (look), against the same window cleared and rastered again in one pass
+ // from the first row it held (onePass: only the chunking differs), and, reported only, against a picture made fresh at the
+ // offset (the snapshot's camera spoiled, so the next draw makes a new window, of another height; this backend's antialiasing
+ // moves with a canvas's height). inkedRevealed counts inked px in the rows above the offset, brought in from above the band.
+ let pictureEnd:any=null;
+ if(options.pictures){
+  const end={...picture(),band:(r.overlay as any).band?{...(r.overlay as any).band}:null,scrollTop:r.view.scrollDOM.scrollTop},s=(r.overlay as any).spaceSnapshot,tc=r.overlay.tailCanvas as HTMLCanvasElement;
+  const read=()=>{r.overlay.redrawSelectionUI();return tc.getContext("2d")!.getImageData(0,0,tc.width,tc.height).data;};
+  const shift=Math.round(r.overlay.spaceTotalDy*end.cam.zoom*(end.backing??0));
+  const compare=(a:Uint8ClampedArray,b:Uint8ClampedArray)=>{
+   let maxDiff=0,diffPx=0,inkedA=0,inkedB=0,inkedRevealed=0,top=Infinity,bottom=-Infinity,left=Infinity,right=-Infinity;
+   const first:any[]=[],premult=[0,0,0,0,0,0,0,0,0];let over=0,maxPremult=0;
+   for(let i=0;i<a.length;i+=4){
+    let d=0;for(let c=0;c<4;c++)d=Math.max(d,Math.abs(a[i+c]!-b[i+c]!));
+    const row=Math.floor(i/4/tc.width),col=i/4%tc.width;
+    // Premultiplied, as the pixel shows over the page: a near-transparent px's colour channels carry no weight.
+    let q=Math.abs(a[i+3]!-b[i+3]!);for(let c=0;c<3;c++)q=Math.max(q,Math.round(Math.abs(a[i+c]!*a[i+3]!-b[i+c]!*b[i+3]!)/255));
+    if(q)premult[Math.min(q,9)-1]!++;
+    if(q>maxPremult)maxPremult=q;
+    if(q>3&&first.length<12)first.push([row,col,[...a.slice(i,i+4)],[...b.slice(i,i+4)]]);
+    if(d>3)over++;
+    if(d){diffPx++;if(d>maxDiff)maxDiff=d;top=Math.min(top,row);bottom=Math.max(bottom,row);left=Math.min(left,col);right=Math.max(right,col);}
+    if(a[i+3]){inkedA++;if(row<shift)inkedRevealed++;}
+    if(b[i+3])inkedB++;
+   }
+   return {maxDiff,diffPx,inked:inkedA,inkedOther:inkedB,inkedRevealed,diffRows:diffPx?[top,bottom]:null,diffCols:diffPx?[left,right]:null,over,maxPremult,premult,first};
+  };
+  const held=read(),afterHeld={...pics};
+  let onePass=held;
+  if(s?.canvas){
+   const g=s.canvas.getContext("2d");g.save();g.setTransform(1,0,0,1,0,0);g.clearRect(0,0,s.canvas.width,s.canvas.height);g.restore();
+   const start="lo" in s?s.lo:s.top;s.done=start;if("lo" in s)s.lo=start;
+   onePass=read();
+  }
+  const afterOnePass={...pics};
+  if(s)s.x=NaN;
+  const fresh=read(),afterFresh={...pics};
+  pictureEnd={end,afterHeld,afterOnePass,afterFresh,shift,look:{...compare(held,onePass),w:tc.width,h:tc.height},freshLook:compare(held,fresh)};
+  for(const [k,o] of counted)(r.overlay as any)[k]=o;
+ }
+ // liveHoldMs: the pen stays down and still that long after the last move, past the old-ink pass's quiet time, before the
+ // anchors are counted.
+ if(options.liveHoldMs)await new Promise(res=>setTimeout(res,options.liveHoldMs));
+ live.anchored=anchored();
  if(options.edit)r.view.dispatch({changes:{from:r.view.state.doc.length,insert:" external"},annotations:isolateHistory.of("full")});
  if(options.end==="blur")window.dispatchEvent(new Event("blur"));
  else if(options.end==="unmount")r.overlay.unmount();
@@ -727,5 +792,6 @@ async function momentum(zoom:number,axis:"x"|"y",mode:string) {
  let undoResult:boolean|null=null,persisted:any=null;
  if(after.history>before.history||options.verifySaved){undoResult=undo(r.view);await settle();undone=capture();if(undoResult){redo(r.view);await settle();redone=capture();}}
  if(options.verifySaved){inlineInk.save(path);await settle();persisted=parsePage(pages.get(pageId)!,pageId)!.data.strokes;}
- return {releasePixels,zoom,font,scroll,wrapped,scale,origin,contact,hover,hoverFeedback,sweep,moves,down,live,ended,before,after,undone,redone,undoResult,persisted,otherBefore,otherAfter};
+ return {releasePixels,zoom,font,scroll,wrapped,scale,origin,contact,hover,hoverFeedback,sweep,moves,down,live,ended,before,after,undone,redone,undoResult,persisted,otherBefore,otherAfter,
+  pictures:options.pictures?{down:downPictures,...pictureEnd}:null};
 };

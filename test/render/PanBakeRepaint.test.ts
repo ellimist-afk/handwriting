@@ -518,18 +518,19 @@ it("at 10 percent a pan after an erase draws by path until the raster is built a
 	});
 }, 180_000);
 
-// An erase across the whole note (one stroke in ten) damages so much that its repaint is a whole repaint, which is no pan, stroke
-// or bounce frame: it paints by path and arms a build, and the raster built after it holds the store as it is (count and generation).
-// The strips a pan uncovers hold erased ink, so a stale raster copied there would show it.
-it("at 10 percent an erase across the whole note rebuilds the raster on its own repaint, and a pan after it copies the ink as it is now", async () => {
+// An erase across the whole note (one stroke in ten): its frames repaint the damaged rects (coalesced to one past twelve) and build
+// nothing; its lift asks the next repaint to arm a build, as the lasso and space lifts do, and the raster built after it holds the
+// store as it is (count and generation). The strips a pan uncovers hold erased ink, so a stale raster copied there would show it.
+it("at 10 percent an erase across the whole note arms a raster build at its lift, and a pan after it copies the ink as it is now", async () => {
 	await withRig("extent-after-wide-erase-10", 0.10, async ({ page, mounted, touch, rows }) => {
 		const n0 = (await rows()).length;
-		const er = await page.evaluate(() => (window as any).panBake.eraseEvery(10)) as { erased: number };
+		const er = await page.evaluate(() => (window as any).panBake.eraseEvery(10)) as { erased: number; armed: boolean };
 		expect(er.erased, "premise: one stroke in ten was erased, across the note").toBe(Math.ceil(WANT / 10));
 		const erase = (await rows()).slice(n0).filter(r => r.painted);
-		expect(erase.some(r => r.work === "all"), `premise: the erase repaint was a whole repaint (${JSON.stringify(erase.map(r => r.work))})`).toBe(true);
+		expect(erase.length, "premise: the erase repainted").toBeGreaterThan(0);
+		expect(er.armed, `a build is armed after the erase's lift (${JSON.stringify(erase.map(r => r.work))})`).toBe(true);
 		const t = tally(erase);
-		expect({ built: t.built, copies: t.copies ?? 0 }, `the erase's whole repaint builds nothing on its frame (${JSON.stringify(t)})`).toEqual({ built: 0, copies: 0 });
+		expect({ built: t.built, copies: t.copies ?? 0 }, `the erase's repaints build nothing on their frames (${JSON.stringify(t)})`).toEqual({ built: 0, copies: 0 });
 		const ext = ((await page.evaluate(() => (window as any).panBake.awaitWhole())) as any).ext;
 		expect(ext && { count: ext.count, generation: ext.generation }, `the raster holds the store as it is (${JSON.stringify(ext)})`)
 			.toEqual(ext && { count: ext.storeCount, generation: ext.storeGeneration });
@@ -582,9 +583,9 @@ it("at 10 percent the extent raster is built on no pan, stroke or bounce frame",
 	});
 }, 180_000);
 
-// The zoom settle law, as the zoom settle design of 2026-10-04 changed it: the frame that settles a zoom below 100
-// percent draws no stroke by path and builds nothing; it shows the stand-in (the old raster scaled into place). The raster is built
-// after it in pieces on later tasks, none on a frame, and once whole it is byte for byte the one-pass reference.
+// The zoom settle law, as the zoom settle lane of 2026-10-21 changed it: the frame that settles a zoom below 100 percent draws no
+// stroke by path and builds nothing; it shows the stand-in (the old raster scaled into place). The raster is built after it in
+// pieces on later tasks, none on a frame, and once whole it is byte for byte the one-pass reference.
 const settleCell = (fx?: { text: string; id: string; want: number }) => async () => {
 	await withRig(`pieces-settle${fx ? "-mcb" : ""}`, 0.10, async ({ page, rows }) => {
 		await page.evaluate(() => (window as any).panBake.pieces());
@@ -595,8 +596,8 @@ const settleCell = (fx?: { text: string; id: string; want: number }) => async ()
 		expect(settle.length, "premise: the zoom's settle repainted the whole layer").toBeGreaterThan(0);
 		const t = tally(settle);
 		const perRow = settle.map(r => ({ phase: r.phase, pts: r.pts, copies: r.copies ?? 0, stand: r.standCopies ?? 0 }));
-		expect({ built: t.built, drewByPath: t.pts > 0, standIn: t.standCopies > 0 }, `the settle frames paint by path with the stand-in off, show no stand-in and build nothing (${JSON.stringify({ t, perRow })})`)
-			.toEqual({ built: 0, drewByPath: true, standIn: false });
+		expect({ built: t.built, drewByPath: t.pts > 0, standIn: t.standCopies > 0 }, `the settle frames draw no path, show the stand-in and build nothing (${JSON.stringify({ t, perRow })})`)
+			.toEqual({ built: 0, drewByPath: false, standIn: true });
 		const whole = await page.evaluate(() => (window as any).panBake.awaitWhole()) as any;
 		const pieces = await page.evaluate(() => (window as any).panBake.pieces()) as Array<{ ms: number; drew: number; inFrame: boolean }>;
 		console.log(`PIECES settle${fx ? "-mcb" : ""} ` + JSON.stringify({ n: pieces.length, longest: Math.max(0, ...pieces.map(p => p.ms)), drew: pieces.reduce((a, p) => a + p.drew, 0), whole: whole.ms }));
@@ -609,13 +610,14 @@ const settleCell = (fx?: { text: string; id: string; want: number }) => async ()
 			.toEqual(v && { pen: 0, hl: 0, count: v.storeCount });
 	}, fx);
 };
-it("a zoom's settle frame paints by path with the stand-in off in 1.4.23 and builds nothing; the raster is built after it in pieces, byte for byte the one-pass reference", settleCell(), 180_000);
-it.skipIf(!FAR_MCB_TEXT)("on MCB EXAM 3 a zoom's settle frame paints by path with the stand-in off in 1.4.23 and builds nothing; the raster is built after it in pieces, byte for byte the one-pass reference",
+it("a zoom's settle frame shows the stand-in, draws no path and builds nothing; the raster is built after it in pieces, byte for byte the one-pass reference", settleCell(), 180_000);
+it.skipIf(!FAR_MCB_TEXT)("on MCB EXAM 3 a zoom's settle frame shows the stand-in, draws no path and builds nothing; the raster is built after it in pieces, byte for byte the one-pass reference",
 	settleCell({ text: FAR_MCB_TEXT, id: "cf77b392-e4c0-47b3-b87a-b9583f5884cb", want: FAR_MCB_TEXT ? (JSON.parse(FAR_MCB_TEXT) as { strokes: unknown[] }).strokes.length : 0 }), 300_000);
 
 // Row 511: one cell per member of the piece gate. A build is armed and held, the member is set, the hold is let go: no piece may
 // draw while the member holds. Then the member is let go and the build finishes, equal to the one-pass reference.
-for (const member of ["contact", "stroke", "pinch", "bounce", "queued", "scroll"]) {
+// A bounce is no member: its pieces run one per frame while it plays (cell below).
+for (const member of ["contact", "stroke", "pinch", "queued", "scroll"]) {
 	it(`no piece of the build runs while the gate member "${member}" holds, and the build finishes after`, async () => {
 		await withRig(`pieces-gate-${member}`, 0.10, async ({ page }) => {
 			await page.evaluate(() => (window as any).panBake.holdPieces(true));
@@ -638,6 +640,28 @@ for (const member of ["contact", "stroke", "pinch", "bounce", "queued", "scroll"
 		});
 	}, 120_000);
 }
+
+// A bounce playing does not hold the build back: each piece waits for the next frame and runs between two of the bounce's frames,
+// never inside a repaint, and the build finishes while the bounce still plays, equal to the one-pass reference.
+it("the build's pieces run while a bounce plays, none inside a repaint, and the build finishes equal to the one-pass reference", async () => {
+	await withRig("pieces-gate-bounce", 0.10, async ({ page }) => {
+		await page.evaluate(() => (window as any).panBake.holdPieces(true));
+		await page.evaluate(() => (window as any).panBake.rezoom(0.12));
+		const b0 = await page.evaluate(() => (window as any).panBake.build()) as any;
+		expect(b0 && b0.next, `premise: a build is armed and has drawn nothing (${JSON.stringify(b0)})`).toBe(0);
+		await page.evaluate(() => (window as any).panBake.gate("bounce", true));
+		await page.evaluate(() => (window as any).panBake.holdPieces(false));
+		await page.evaluate(() => (window as any).panBake.pieces());
+		const whole = await page.evaluate(() => (window as any).panBake.awaitWhole()) as any;
+		const held = await page.evaluate(() => (window as any).panBake.pieces()) as Array<{ inFrame: boolean }>;
+		await page.evaluate(() => (window as any).panBake.gate("bounce", false));
+		expect(whole.pending, "the build finished while the bounce played").toBe(false);
+		expect(held.length, "pieces that ran while the bounce played").toBeGreaterThan(0);
+		expect(held.filter(p => p.inFrame).length, "pieces that ran inside a repaint while the bounce played").toBe(0);
+		const v = await page.evaluate(() => (window as any).panBake.extentVsOnePass()) as any;
+		expect(v && v.pen.differ, `the raster against the one-pass reference (${JSON.stringify(v)})`).toBe(0);
+	});
+}, 120_000);
 
 // Row 501 law 5: no piece between pen down and lift, with a real pen. The build is armed and held, the pen goes down, the hold is
 // let go, and the pen moves for a while before it lifts: no piece draws until the lift. The stroke is added at the end of the store

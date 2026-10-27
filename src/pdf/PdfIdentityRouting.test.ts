@@ -10,7 +10,7 @@ vi.mock("obsidian", async (importOriginal) => ({
 
 import HandwritingPlugin from "../main";
 import { TFile, Notice } from "obsidian";
-import mainSource from "../main.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { PdfInkStore } from "./PdfInkStore";
@@ -22,7 +22,7 @@ const COPY = "Template 1.pdf";
 
 // Execute the production host registration, including its load options, rather
 // than reconstructing that adapter in this fixture.
-const source = mainSource.replace(/\r\n/g, "\n");
+const source = pluginSettingsSource.replace(/\r\n/g, "\n");
 const hostStart = "\t\tthis.pdfStore.attachHost({";
 expect(source.split(hostStart)).toHaveLength(2);
 const hostAt = source.indexOf(hostStart);

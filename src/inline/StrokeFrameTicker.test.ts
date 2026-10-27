@@ -78,3 +78,40 @@ it("does not reschedule when a callback stops the ticker", () => {
  expect(r.pending.size).toBe(0);
  expect(r.record).not.toHaveBeenCalled();
 });
+
+it("a present probe during a stroke rides the tick instead of asking for a frame of its own", () => {
+ const r = rig();
+ const present = vi.spyOn(StrokeMetrics.prototype, "recordPresent");
+ r.overlay.startFrameTicker();
+ r.overlay.schedulePresentProbe(50);
+ r.overlay.schedulePresentProbe(60);
+ expect(r.pending.size).toBe(1);
+ r.frame();
+ expect(present).toHaveBeenCalledTimes(1);
+ expect(r.record).toHaveBeenCalledTimes(1);
+ expect(r.pending.size).toBe(1);
+ r.frame();
+ expect(present).toHaveBeenCalledTimes(1);
+});
+
+it("a probe still waiting when the stroke stops gets its own frame", () => {
+ const r = rig();
+ const present = vi.spyOn(StrokeMetrics.prototype, "recordPresent");
+ r.overlay.startFrameTicker();
+ r.overlay.schedulePresentProbe(50);
+ r.overlay.stopFrameTicker();
+ expect(r.pending.size).toBe(1);
+ r.frame();
+ expect(present).toHaveBeenCalledTimes(1);
+ expect(r.record).not.toHaveBeenCalled();
+ expect(r.pending.size).toBe(0);
+});
+
+it("outside a stroke the present probe asks for its own frame", () => {
+ const r = rig();
+ const present = vi.spyOn(StrokeMetrics.prototype, "recordPresent");
+ r.overlay.schedulePresentProbe(50);
+ expect(r.pending.size).toBe(1);
+ r.frame();
+ expect(present).toHaveBeenCalledTimes(1);
+});

@@ -62,13 +62,19 @@
 
 import { describe, expect, it } from "vitest";
 import mainSrc from "./main.ts?raw";
+import settingsSrc from "./settings/PluginSettings.ts?raw";
+import onloadSrc from "./PluginOnload.ts?raw";
 import { codeOnly } from "./CodeOnly";
 
 /** The deferral site, verbatim. Every registration in main.ts uses this form. */
 const DEFER = "this.app.workspace.onLayoutReady(() => {";
 
-/** `main.ts`'s registrations, without `main.ts`'s prose about them. */
-const mainCode = codeOnly(mainSrc);
+/**
+ * `main.ts`'s registrations, without `main.ts`'s prose about them, plus the
+ * settings load's one, which moved to settings/PluginSettings.ts, and the
+ * onload phases' ones, which moved to PluginOnload.ts.
+ */
+const mainCode = codeOnly(mainSrc) + "\n" + codeOnly(settingsSrc) + "\n" + codeOnly(onloadSrc);
 
 function occurrences(src: string, needle: string): number {
 	return src.split(needle).length - 1;
@@ -100,7 +106,7 @@ describe("deferred onLayoutReady callbacks check unloaded", () => {
 	});
 
 	it("every deferred callback opens with the unloaded guard", () => {
-		expect(guardedDeferrals(mainSrc)).toBe(occurrences(mainCode, DEFER));
+		expect(guardedDeferrals(mainSrc) + guardedDeferrals(settingsSrc) + guardedDeferrals(onloadSrc)).toBe(occurrences(mainCode, DEFER));
 	});
 });
 

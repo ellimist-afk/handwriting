@@ -1,6 +1,8 @@
 /**
- * Three notice texts that said something the plugin does not do. Each is driven from the real source in main.ts:
- * the piece under test is sliced out, compiled, and run against stand-ins for what it reads.
+ * Three notice texts that said something the plugin does not do. Each is driven from the real code, run against
+ * stand-ins for what it reads. The write-failure callback and the fork wiring are inline in main.ts's onload, so they
+ * are sliced out of main.ts and compiled; the delete-all pieces live in ink/DeleteAllInk.ts as functions, so they are
+ * imported and called with a stand-in as `this`.
  *
  *  - the write-failure notice must say how many tries the store really makes, counted from the real write path;
  *  - the Delete all ink dialog must name the trash folder the copy will go to, from the store's own rule;
@@ -8,17 +10,63 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("obsidian", () => ({
+/** The dialog's stand-in elements and the Modal it extends: open() runs onOpen and records the dialog. */
+const dialogs = vi.hoisted(() => {
+	class FakeEl {
+		text = "";
+		children: FakeEl[] = [];
+		setText(t: string): void {
+			this.text = t;
+		}
+		createEl(_tag: string, opts: { text?: string } = {}): FakeEl {
+			const el = new FakeEl();
+			el.text = opts.text ?? "";
+			this.children.push(el);
+			return el;
+		}
+		createDiv(): FakeEl {
+			const el = new FakeEl();
+			this.children.push(el);
+			return el;
+		}
+		addEventListener(): void {}
+		focus(): void {}
+		empty(): void {}
+	}
+	const opened: Array<{ contentEl: FakeEl }> = [];
+	const pending: Promise<unknown>[] = [];
+	class Modal {
+		titleEl = new FakeEl();
+		contentEl = new FakeEl();
+		constructor(public app: unknown) {}
+		open(): void {
+			pending.push((this as unknown as { onOpen(): Promise<void> }).onOpen());
+			opened.push(this);
+		}
+	}
+	return { Modal, opened, pending };
+});
+
+vi.mock("obsidian", async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
 	normalizePath: (p: string) => p.replace(/\\/g, "/").replace(/\/+/g, "/"),
+	Modal: dialogs.Modal,
 }));
 
 import { transformSync } from "esbuild";
 import mainSource from "./main.ts?raw";
+import onloadSource from "./PluginOnload.ts?raw";
+import commandsSource from "./commands/RegisterCommands.ts?raw";
+import type { HandwritingPlugin } from "./main";
+import { ConfirmDeleteInkModal, confirmDeleteAllInk, noteNameFor, notePathFor } from "./ink/DeleteAllInk";
+import { inlineInk } from "./inline/InkOverlay";
 import { PageStore, WRITE_ATTEMPTS, WRITE_MAX_RETRIES } from "./persistence/PageStore";
 import { FakeAdapter } from "./persistence/FakeAdapter";
 import { emptyPage, serializePage } from "./model/PageData";
 
-const main = mainSource.replace(/\r\n/g, "\n");
+// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+// The onload phases live in PluginOnload.ts, read here too.
+const main = [mainSource, commandsSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
 const NL = "\n";
 
 function slice(from: string, to: string): string {
@@ -87,29 +135,7 @@ describe("write-failure notice (tries)", () => {
 });
 
 describe("Delete all ink dialog", () => {
-	class FakeEl {
-		text = "";
-		children: FakeEl[] = [];
-		setText(t: string): void {
-			this.text = t;
-		}
-		createEl(_tag: string, opts: { text?: string } = {}): FakeEl {
-			const el = new FakeEl();
-			el.text = opts.text ?? "";
-			this.children.push(el);
-			return el;
-		}
-		createDiv(): FakeEl {
-			const el = new FakeEl();
-			this.children.push(el);
-			return el;
-		}
-		addEventListener(): void {}
-		focus(): void {}
-		empty(): void {}
-	}
-
-	/** Runs main.ts's real confirm step and modal class for one note, against a real store. */
+	/** Runs the real confirm step and modal class for one note, against a real store. */
 	async function dialogText(noun: "note" | "PDF", where: "configured" | "other"): Promise<string> {
 		const fake = new FakeAdapter();
 		const store = new PageStore({ vault: { adapter: fake } } as never, ".handwriting", () => 5_000_000);
@@ -117,33 +143,25 @@ describe("Delete all ink dialog", () => {
 		fake.files.set(home, serializePage(emptyPage("p1")));
 		fake.dirs.add(home.slice(0, home.lastIndexOf("/")));
 
-		const cls = compile(slice("class ConfirmDeleteInkModal extends Modal {", `${NL}}${NL}`));
-		const opened: Array<{ contentEl: FakeEl }> = [];
-		const pending: Promise<unknown>[] = [];
-		class Modal {
-			titleEl = new FakeEl();
-			contentEl = new FakeEl();
-			constructor(public app: unknown) {}
-			open(): void {
-				pending.push((this as unknown as { onOpen(): Promise<void> }).onOpen());
-				opened.push(this);
+		dialogs.opened.length = 0;
+		dialogs.pending.length = 0;
+		const strokes = vi.spyOn(inlineInk, "strokes").mockReturnValue([1, 2] as never);
+		const pageIdOf = vi.spyOn(inlineInk, "pageIdOf").mockReturnValue("p1");
+		const ctx = { app: {}, store, confirmedDeleteAllInk: () => {} };
+		try {
+			if (noun === "note") {
+				confirmDeleteAllInk.call(ctx as unknown as HandwritingPlugin, { path: "n.md" } as never);
+			} else {
+				// The PDF command builds its dialog inline; the modal is fed the store's answer the same way.
+				new ConfirmDeleteInkModal({} as never, 2, "PDF", () => {}, () => store.trashFolderFor("p1")).open();
 			}
+			await Promise.all(dialogs.pending);
+		} finally {
+			strokes.mockRestore();
+			pageIdOf.mockRestore();
 		}
-		const inlineInk = { strokes: () => [1, 2], pageIdOf: () => "p1" };
-		const Ctor = new Function("Modal", `${cls}${NL}return ConfirmDeleteInkModal;`)(Modal);
-		const ctx = { app: {}, store, confirmedDeleteAllInk: () => {} } as Record<string, unknown>;
-		if (noun === "note") {
-			const method = compile(`class T { ${slice("private confirmDeleteAllInk(target: DeleteAllTarget): void {", `${NL}\t}${NL}`)} }${NL}return T;`);
-			const T = new Function("inlineInk", "ConfirmDeleteInkModal", method)(inlineInk, Ctor);
-			Object.assign(ctx, { confirmDeleteAllInk: T.prototype.confirmDeleteAllInk });
-			(ctx.confirmDeleteAllInk as (t: unknown) => void).call(ctx, { path: "n.md" });
-		} else {
-			// The PDF command builds its dialog inline; the modal is fed the store's answer the same way.
-			new Ctor({}, 2, "PDF", () => {}, () => store.trashFolderFor("p1")).open();
-		}
-		await Promise.all(pending);
-		expect(opened).toHaveLength(1);
-		return opened[0]!.contentEl.children.map((c) => c.text).join(" ");
+		expect(dialogs.opened).toHaveLength(1);
+		return dialogs.opened[0]!.contentEl.children.map((c) => c.text).join(" ");
 	}
 
 	it("names the configured folder's trash for a note stored there", async () => {
@@ -163,11 +181,7 @@ describe("Delete all ink dialog", () => {
 
 describe("noteNameFor names the file", () => {
 	function nameFor(pageId: string, opts: { owners?: Record<string, string>; pdf?: Record<string, string> } = {}): string {
-		const method = slice("private noteNameFor(pageId: string): string {", "\n\t}\n");
-		const lookup = slice("private notePathFor(pageId: string): string | null {", "\n\t}\n");
-		const js = compile(`class T { ${method} ${lookup} }\nreturn T;`);
-		const Ctor = new Function("SLIDES_SIDECAR_SUFFIX", js)(".slides") as new () => { noteNameFor(id: string): string };
-		const t = new Ctor() as unknown as Record<string, unknown>;
+		const t: Record<string, unknown> = { notePathFor };
 		const owners = opts.owners ?? {};
 		t.pageIds = { owner: (id: string) => owners[id] ?? null };
 		t.app = { vault: { getMarkdownFiles: () => [] } };
@@ -175,7 +189,7 @@ describe("noteNameFor names the file", () => {
 		const roots = Object.keys(opts.pdf ?? {}).map((id) => ({ id, root: {} }));
 		t.pdfIds = new Map(roots.map((r) => [r.root, r.id]));
 		t.pdfFiles = new Map(roots.map((r) => [r.root, (opts.pdf ?? {})[r.id]]));
-		return (t as unknown as { noteNameFor(id: string): string }).noteNameFor(pageId);
+		return noteNameFor.call(t as unknown as HandwritingPlugin, pageId);
 	}
 
 	it("an open PDF's ink id gives the PDF's path", () => {
@@ -192,16 +206,13 @@ describe("noteNameFor names the file", () => {
 	});
 	it("the lookup half answers null for an id nothing knows, so a caller can fall back to the bare id (#194)", () => {
 		const ctor = () => {
-			const lookup = slice("private notePathFor(pageId: string): string | null {", "\n\t}\n");
-			const js = compile(`class T { ${lookup} }\nreturn T;`);
-			const Ctor = new Function("SLIDES_SIDECAR_SUFFIX", js)(".slides") as new () => Record<string, unknown>;
-			const t = new Ctor();
+			const t: Record<string, unknown> = {};
 			t.pageIds = { owner: (id: string) => (id === "11112222" ? "Talks/deck.md" : null) };
 			t.app = { vault: { getMarkdownFiles: () => [] } };
 			t.recentPageIdFor = () => null;
 			t.pdfIds = new Map();
 			t.pdfFiles = new Map();
-			return t as unknown as { notePathFor(id: string): string | null };
+			return { notePathFor: (id: string) => notePathFor.call(t as unknown as HandwritingPlugin, id) };
 		};
 		expect(ctor().notePathFor("deadbeefcafe")).toBeNull();
 		expect(ctor().notePathFor("11112222")).toBe("Talks/deck.md");

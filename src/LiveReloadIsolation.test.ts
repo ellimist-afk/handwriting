@@ -257,6 +257,17 @@ describe("the registered live-reload poll", () => {
 		expect(h.detachedErrors).toEqual([]);
 	});
 
+	it("backs the sidecar check off to one tick in five on a long quiet run and no further", async () => {
+		const h = harness({ check: () => false });
+		// The stride grows by one for every five quiet checks and stops at five: from the twenty-first quiet check on,
+		// every window of fifty ticks holds exactly ten checks.
+		for (let tick = 0; tick < 200; tick++) await h.tick();
+		const before = h.host.pollStats.checks;
+		for (let tick = 0; tick < 50; tick++) await h.tick();
+		expect(h.host.pollStats.checks - before).toBe(10);
+		expect(h.host.pollStats.ticks).toBe(250);
+	});
+
 	it.each(["note", "deck.slides"])("preserves existing isolation of a failed %s reload", async id => {
 		const error = new Error(`injected ${id} failure`);
 		const h = harness({ reload: current => current === id ? Promise.reject(error) : true });

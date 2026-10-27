@@ -28,6 +28,232 @@ export function signedArea(poly: ReadonlyArray<readonly [number, number]>): numb
 	return sum / 2;
 }
 
+export const MAX_RASTER_PATH_EXTENT = 16000;
+let boundsPasses = 0;
+/** How many ribbons fillRibbon has measured point by point; a test reads it to see a committed draw skip the measure. */
+export function ribbonBoundsPasses(): number {
+	return boundsPasses;
+}
+type XY = [number, number];
+type Rect = { left: number; top: number; right: number; bottom: number };
+type Disc = { x: number; y: number; r: number };
+
+function intersect(a: Rect, b: Rect): Rect | null {
+	const box = { left: Math.max(a.left, b.left), top: Math.max(a.top, b.top), right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom) };
+	return box.left < box.right && box.top < box.bottom ? box : null;
+}
+
+/** All pixels that can be written, expressed in this context's logical coordinates. */
+function visibleBounds(ctx: CanvasRenderingContext2D, bounds: Rect): Rect | null {
+	const m = ctx.getTransform();
+	const { width, height } = ctx.canvas;
+	if (![...Object.values(bounds), m.a, m.b, m.c, m.d, m.e, m.f, width, height].every(Number.isFinite)) {
+		throw new RangeError("Non-finite bounded ribbon geometry");
+	}
+	if (width <= 0 || height <= 0) return null;
+	const det = m.a * m.d - m.b * m.c;
+	if (det === 0) return null; // A singular transform paints no area.
+	const xs: number[] = [], ys: number[] = [];
+	for (const [x, y] of [[0, 0], [width, 0], [0, height], [width, height]]) {
+		xs.push((m.d * (x! - m.e) - m.c * (y! - m.f)) / det);
+		ys.push((m.a * (y! - m.f) - m.b * (x! - m.e)) / det);
+	}
+	if (![...xs, ...ys].every(Number.isFinite)) throw new RangeError("Unrepresentable ribbon viewport");
+	return intersect(bounds, { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) });
+}
+
+function ribbonBounds(cam: CameraState, pts: readonly RibbonPt[]): Rect {
+	const box = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+	for (const p of pts) {
+		const x = toScreenX(cam, p.x), y = toScreenY(cam, p.y);
+		const r = Math.max(0.25, Math.abs(p.hw * cam.zoom));
+		box.left = Math.min(box.left, x - r); box.right = Math.max(box.right, x + r);
+		box.top = Math.min(box.top, y - r); box.bottom = Math.max(box.bottom, y + r);
+	}
+	return box;
+}
+
+/** Grid edges land on backing-pixel boundaries for the renderer's scale/translate contexts. */
+function rasterGrid(ctx: CanvasRenderingContext2D, box: Rect): { xs: number[]; ys: number[] } {
+	const m = ctx.getTransform();
+	const axis = (lo: number, hi: number, scale: number, offset: number): number[] => {
+		const limit = MAX_RASTER_PATH_EXTENT - 2;
+		const aligned = m.b === 0 && m.c === 0 && Number.isFinite(scale) && scale > 0 && scale * limit >= 1;
+		const first = aligned ? (Math.floor(lo * scale + offset) - offset) / scale : lo;
+		const last = aligned ? (Math.ceil(hi * scale + offset) - offset) / scale : hi;
+		const step = aligned ? Math.floor(limit * scale) / scale : limit;
+		if (![first, last, step].every(Number.isFinite) || first + step <= first) throw new RangeError("Unrepresentable ribbon grid");
+		const edges = [first];
+		for (let i = 1, v = first + step; v < last; v = first + (++i) * step) {
+			if (v <= edges[edges.length - 1]!) throw new RangeError("Non-progressing ribbon grid");
+			edges.push(v);
+		}
+		edges.push(last);
+		return edges;
+	};
+	return { xs: axis(box.left, box.right, m.a, m.e), ys: axis(box.top, box.bottom, m.d, m.f) };
+}
+
+function cellRange(edges: number[], lo: number, hi: number): [number, number] {
+	const search = (value: number, inclusive: boolean) => {
+		let left = 0, right = edges.length;
+		while (left < right) {
+			const mid = (left + right) >>> 1;
+			if (edges[mid]! < value || (inclusive && edges[mid] === value)) left = mid + 1;
+			else right = mid;
+		}
+		return left;
+	};
+	return [Math.max(0, search(lo, true) - 1), Math.min(edges.length - 1, search(hi, false))];
+}
+
+function clipPolygon(poly: XY[], rect: Rect): XY[] {
+	for (const [axis, edge, sign] of [[0, rect.left, 1], [0, rect.right, -1], [1, rect.top, 1], [1, rect.bottom, -1]] as const) {
+		const out: XY[] = [];
+		for (let i = 0; i < poly.length; i++) {
+			const a = poly[i]!, b = poly[(i + 1) % poly.length]!;
+			const da = (a[axis] - edge) * sign, db = (b[axis] - edge) * sign;
+			if (da >= 0) out.push(a);
+			if ((da >= 0) !== (db >= 0)) {
+				const t = da / (da - db);
+				const p: XY = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+				p[axis] = edge;
+				out.push(p);
+			}
+		}
+		poly = out;
+	}
+	return poly;
+}
+
+/** Exact boundary of disc intersect rectangle: original arcs plus straight clip edges. */
+function clippedDisc(ctx: CanvasRenderingContext2D, d: Disc, box: Rect): boolean {
+	const { x, y, r } = d;
+	if (x + r <= box.left || x - r >= box.right || y + r <= box.top || y - r >= box.bottom) return false;
+	const tau = Math.PI * 2;
+	const at = (t: number): XY => [x + r * Math.cos(t), y + r * Math.sin(t)];
+	const inside = (p: XY) => p[0] >= box.left - 1e-7 && p[0] <= box.right + 1e-7 && p[1] >= box.top - 1e-7 && p[1] <= box.bottom + 1e-7;
+	const angles = [0, tau];
+	for (const edge of [box.left, box.right]) {
+		const q = (edge - x) / r;
+		if (q > -1 && q < 1) { const a = Math.acos(q); angles.push(a, tau - a); }
+	}
+	for (const edge of [box.top, box.bottom]) {
+		const q = (edge - y) / r;
+		if (q > -1 && q < 1) { const a = Math.asin(q); angles.push((a + tau) % tau, (Math.PI - a + tau) % tau); }
+	}
+	angles.sort((a, b) => a - b);
+	const pieces: Array<{ from: XY; to: XY; arc?: [number, number] }> = [];
+	for (let i = 1; i < angles.length; i++) {
+		const a = angles[i - 1]!, b = angles[i]!;
+		if (b - a > 1e-12 && inside(at((a + b) / 2))) pieces.push({ from: at(b), to: at(a), arc: [b, a] });
+	}
+	const corners: XY[] = [[box.left, box.top], [box.left, box.bottom], [box.right, box.bottom], [box.right, box.top]];
+	for (let i = 0; i < 4; i++) {
+		const a = corners[i]!, b = corners[(i + 1) % 4]!;
+		const dx = b[0] - a[0], dy = b[1] - a[1], ax = a[0] - x, ay = a[1] - y;
+		const aa = dx * dx + dy * dy, bb = 2 * (ax * dx + ay * dy), cc = ax * ax + ay * ay - r * r;
+		const det = bb * bb - 4 * aa * cc;
+		const cuts = [0, 1];
+		if (det >= 0 && aa > 0) for (const t of [(-bb - Math.sqrt(det)) / (2 * aa), (-bb + Math.sqrt(det)) / (2 * aa)]) if (t > 0 && t < 1) cuts.push(t);
+		cuts.sort((a, b) => a - b);
+		for (let j = 1; j < cuts.length; j++) {
+			const lo = cuts[j - 1]!, hi = cuts[j]!, mid = (lo + hi) / 2;
+			if ((ax + mid * dx) ** 2 + (ay + mid * dy) ** 2 <= r * r && hi > lo) {
+				pieces.push({ from: [a[0] + lo * dx, a[1] + lo * dy], to: [a[0] + hi * dx, a[1] + hi * dy] });
+			}
+		}
+	}
+	if (!pieces.length) return false;
+	let piece = pieces.shift()!;
+	ctx.moveTo(...piece.from);
+	for (;;) {
+		if (piece.arc) ctx.arc(x, y, r, piece.arc[0], piece.arc[1], true);
+		else ctx.lineTo(...piece.to);
+		if (!pieces.length) break;
+		let closest = 0, distance = Infinity;
+		for (let i = 0; i < pieces.length; i++) {
+			const p = pieces[i]!.from, dd = (p[0] - piece.to[0]) ** 2 + (p[1] - piece.to[1]) ** 2;
+			if (dd < distance) { closest = i; distance = dd; }
+		}
+		piece = pieces.splice(closest, 1)[0]!;
+	}
+	return true;
+}
+
+function fillBoundedRibbon(ctx: CanvasRenderingContext2D, cam: CameraState, pts: readonly RibbonPt[], perSegment: boolean, bounds: Rect): void {
+	const visible = visibleBounds(ctx, bounds);
+	if (!visible) return;
+	const polys: XY[][] = [], discs: Disc[] = [];
+	let poly: XY[] = [];
+	// Collect the existing construction, so winding, normals and joint choice
+	// stay identical. Splitting the centerline would invent caps and normals.
+	// A polygon starts at each moveTo: the quad loop leaves its quads open
+	// (fill closes them), and a disc's moveTo leaves a one-point polygon that
+	// the length check below drops.
+	const sink = {
+		beginPath() {}, moveTo(x: number, y: number) { poly = [[x, y]]; polys.push(poly); },
+		lineTo(x: number, y: number) { poly.push([x, y]); },
+		closePath() {},
+		arc(x: number, y: number, r: number) { discs.push({ x, y, r }); }, fill() {},
+	} as unknown as CanvasRenderingContext2D;
+	paintRibbon(sink, cam, pts, perSegment);
+	// Bucket only intersected cells. Slice each primitive into grid rows first,
+	// so a sparse diagonal costs crossed rows/cells, not its bbox's full area.
+	// Offscreen points above still determine the original visible normals.
+	const { xs, ys } = rasterGrid(ctx, visible);
+	const buckets = new Map<number, { cell: Rect; polys: XY[][]; discs: Disc[] }>();
+	const bucket = (x: number, y: number) => {
+		const key = y * xs.length + x;
+		let entry = buckets.get(key);
+		if (!entry) {
+			entry = { cell: { left: xs[x]!, top: ys[y]!, right: xs[x + 1]!, bottom: ys[y + 1]! }, polys: [], discs: [] };
+			buckets.set(key, entry);
+		}
+		return entry;
+	};
+	for (const original of polys) {
+		const poly = clipPolygon(original, visible);
+		if (poly.length < 3) continue;
+		const [first, end] = cellRange(ys, Math.min(...poly.map(p => p[1])), Math.max(...poly.map(p => p[1])));
+		for (let y = first; y < end; y++) {
+			const row = clipPolygon(poly, { ...visible, top: ys[y]!, bottom: ys[y + 1]! });
+			if (row.length < 3) continue;
+			const [left, right] = cellRange(xs, Math.min(...row.map(p => p[0])), Math.max(...row.map(p => p[0])));
+			for (let x = left; x < right; x++) bucket(x, y).polys.push(row);
+		}
+	}
+	for (const disc of discs) {
+		if (!intersect(visible, { left: disc.x - disc.r, top: disc.y - disc.r, right: disc.x + disc.r, bottom: disc.y + disc.r })) continue;
+		const [first, end] = cellRange(ys, disc.y - disc.r, disc.y + disc.r);
+		for (let y = first; y < end; y++) {
+			const dy = Math.max(ys[y]! - disc.y, disc.y - ys[y + 1]!, 0);
+			const dx = Math.sqrt(Math.max(0, (disc.r - dy) * (disc.r + dy)));
+			const [left, right] = cellRange(xs, disc.x - dx, disc.x + dx);
+			for (let x = left; x < right; x++) bucket(x, y).discs.push(disc);
+		}
+	}
+	for (const { cell, polys: cellPolys, discs: cellDiscs } of buckets.values()) {
+		ctx.save();
+		try {
+			ctx.beginPath(); ctx.rect(cell.left, cell.top, cell.right - cell.left, cell.bottom - cell.top); ctx.clip();
+			// No closePath for a polygon or a disc piece: fill closes every subpath,
+			// and a close per piece is the cost the quad loop's note below describes.
+			ctx.beginPath();
+			let present = false;
+			for (const poly of cellPolys) {
+				const clipped = clipPolygon(poly, cell);
+				if (clipped.length < 3) continue;
+				ctx.moveTo(...clipped[0]!);
+				for (let i = 1; i < clipped.length; i++) ctx.lineTo(...clipped[i]!);
+				present = true;
+			}
+			for (const disc of cellDiscs) present = clippedDisc(ctx, disc, cell) || present;
+			if (present) ctx.fill();
+		} finally { ctx.restore(); }
+	}
+}
+
 /**
  * Fill a ribbon. `pts` is a centerline in world coordinates carrying a local
  * half-width; the context transform is CSS pixels (dpr already applied).
@@ -73,7 +299,14 @@ export function fillRibbon(
 	 * cssScale. Undefined preserves today's behaviour exactly (wet, tail,
 	 * snip/export all pass nothing).
 	 */
-	floor?: { backing: number; dpr: number }
+	floor?: { backing: number; dpr: number },
+	/**
+	 * Set by drawStroke when the stroke's bbox shows this ribbon cannot reach
+	 * MAX_RASTER_PATH_EXTENT, so the point-by-point measure below is skipped.
+	 * The wet strip, the tail and drawSegment's long-segment route call this
+	 * directly, pass nothing, and are always measured.
+	 */
+	extentKnownSmall = false
 ): void {
 	const n = pts.length;
 	if (n === 0) return;
@@ -86,6 +319,20 @@ export function fillRibbon(
 	if (floor) {
 		pts = pts.map(p => ({ ...p, hw: flooredHalfWidth(p.hw, floor.backing, floor.dpr) }));
 	}
+	if (!extentKnownSmall) {
+		boundsPasses++;
+		const bounds = ribbonBounds(cam, pts);
+		if (!Object.values(bounds).every(Number.isFinite)) throw new RangeError("Non-finite bounded ribbon geometry");
+		if (bounds.right - bounds.left > MAX_RASTER_PATH_EXTENT || bounds.bottom - bounds.top > MAX_RASTER_PATH_EXTENT) {
+			fillBoundedRibbon(ctx, cam, pts, perSegment, bounds);
+			return;
+		}
+	}
+	paintRibbon(ctx, cam, pts, perSegment);
+}
+
+function paintRibbon(ctx: CanvasRenderingContext2D, cam: CameraState, pts: readonly RibbonPt[], perSegment: boolean): void {
+	const n = pts.length;
 
 	// A dot: one disc.
 	if (n === 1) {

@@ -184,7 +184,7 @@ function rasterFrameDiff(overlay: any, ext: any, cam: Cam, rect: Rect | null): D
 			if (current) {
 				if (ok) current.copies = (current.copies ?? 0) + 1; else current.copyMiss = (current.copyMiss ?? 0) + 1;
 				current.missWhy = ok ? current.missWhy : JSON.stringify({ cam: a[1], cam0: this.extentRaster?.cam0, rect: a[2], k: a[1].zoom * this.extentRaster?.backing });
-				if (ok) {
+				if (ok && !rig.noCheck) {
 					const v = rasterFrameDiff(this, a[0], a[1], a[2]), d = directDiff(this, a[1], a[2]);
 					current.vDiffer = (current.vDiffer ?? 0) + v.differ; current.vInked = (current.vInked ?? 0) + v.inked;
 					current.vOver24 = (current.vOver24 ?? 0) + v.over24; current.vEdge = (current.vEdge ?? 0) + v.edge; current.vMax = Math.max(current.vMax ?? 0, v.maxDelta);
@@ -558,6 +558,8 @@ function rasterFrameDiff(overlay: any, ext: any, cam: Cam, rect: Rect | null): D
 	},
 	/** From now on every copy is refused and its strip drawn by path, as on the base: the same pan with copies off. */
 	copiesOff() { rig.noCopy = true; },
+	/** Skip the on-the-spot check of each copy from the raster (it redraws by path to compare), so a cell can time the settle. */
+	checksOff() { rig.noCheck = true; },
 	/** The whole committed layer against a path draw of every stroke at the camera it was painted at: pixels that differ, inked pixels. */
 	layerVsPath() { return directDiff(rig.overlay, rig.overlay.lastPaintCam, null); },
 	/** The smoothing setting turned off as a synced settings change does it (main.ts): the switch, then every overlay repainted. */
@@ -567,16 +569,27 @@ function rasterFrameDiff(overlay: any, ext: any, cam: Cam, rect: Rect | null): D
 		repaintAllInkOverlays();
 		await settle(8);
 	},
-	/** Erase every `k`th stroke of the note, wherever it is, as a selection delete would: strips a pan uncovers then hold erased ink. */
+	/** Erase every `k`th stroke of the note, wherever it is, as an eraser gesture and its lift would: strips a pan uncovers then hold erased ink. */
 	async eraseEvery(k = 10) {
 		const { overlay, path } = rig;
 		const gone = inlineInk.strokes(path).filter((_: any, i: number) => i % k === 0);
 		rig.phase = "erase";
 		inlineInk.applyRemove(path, gone.map((s: any) => s.id));
+		// The gesture's frames: one rect per erased stroke, as eraseAt adds them.
 		for (const s of gone) overlay.damage.addRect(s.bbox);
 		overlay.scheduleRepaint("partial");
 		await settle(8);
-		return { erased: gone.length, strokes: inlineInk.strokes(path).length };
+		// The lift, as the erase pen-up does it: ask the next repaint to arm a build, over the box of everything taken.
+		rig.phase = "erase-lift";
+		let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+		for (const s of gone) { x0 = Math.min(x0, s.bbox.x); y0 = Math.min(y0, s.bbox.y); x1 = Math.max(x1, s.bbox.x + s.bbox.width); y1 = Math.max(y1, s.bbox.y + s.bbox.height); }
+		overlay.extentArmAsked = true;
+		overlay.damage.addRect({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+		overlay.scheduleRepaint("partial");
+		await settle(2);
+		const armed = !!overlay.extentBuild || !!overlay.extentRaster;
+		await settle(6);
+		return { erased: gone.length, strokes: inlineInk.strokes(path).length, armed };
 	},
 	/** A whole-layer repaint asked for by no pan, stroke or bounce (a size or a setting, say): where a stale extent raster is built again. */
 	async wholeRepaint() {

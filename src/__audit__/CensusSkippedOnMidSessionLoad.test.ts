@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
 import { TFile } from "obsidian";
 import mainSource from "../main.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
 import HandwritingPlugin from "../main";
 import { PageIdIndex } from "../model/PageIdIndex";
 import { inlineInk } from "../inline/InkOverlay";
@@ -29,9 +30,11 @@ const COPY = "Original 1.md";
 const SHARED = "shared-page-id";
 
 // ---- slice the census registration out of onload --------------------------
-const source = mainSource.replace(/\r\n/g, "\n");
+// The census lives in the page-id watch phase in PluginOnload.ts, read here with main.ts; the slice ends
+// at that phase's close.
+const source = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
 const startMarker = "\t\tconst runCensus = () => {";
-const endMarker = "\n\t}\n\n\t// ---- duplicate page ids (v0.13.6)";
+const endMarker = "\n\t}\n\nexport function installPluginOnload(";
 expect(source.split(startMarker)).toHaveLength(2);
 expect(source.split(endMarker)).toHaveLength(2);
 const block = source.slice(source.indexOf(startMarker), source.indexOf(endMarker));

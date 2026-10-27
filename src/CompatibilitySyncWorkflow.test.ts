@@ -10,29 +10,46 @@ import HandwritingPlugin, { HandwritingSettingTab } from "./main";
 import { PageStore } from "./persistence/PageStore";
 import { FakeAdapter, gate } from "./persistence/FakeAdapter";
 import { InlineInkStore } from "./inline/InlineInkStore";
-import { inlineInk } from "./inline/InkOverlay";
+import { InkOverlayPlugin, captureInlineReloadAdmission, inlineInk, inlineReloadCandidates } from "./inline/InkOverlay";
 import { PdfInkStore } from "./pdf/PdfInkStore";
 import { pdfInkId } from "./pdf/PdfIdentity";
 import { emptyPage, parsePage, serializePage, type PageData } from "./model/PageData";
 import type { InkStroke } from "./ink/Stroke";
 import { installLiveReloadPoll } from "./testUtils/LiveReloadTestHarness";
-import { transformSync } from "esbuild";
-import overlaySource from "./inline/InkOverlay.ts?raw";
 
-// Execute the shipped census/admission functions. Only editor binding metadata
-// is reduced here; mounted gesture/selection behavior is covered by the browser fixture.
-const overlay = overlaySource.replace(/\r\n/g, "\n");
-const candidatesStart = "export interface InlineReloadBinding {";
-const candidatesEnd = "/** Zoom diagnostics";
-expect(overlay.split(candidatesStart)).toHaveLength(2);
-expect(overlay.split(candidatesEnd)).toHaveLength(2);
-const candidatesCode = transformSync(overlay.slice(overlay.indexOf(candidatesStart), overlay.indexOf(candidatesEnd)).replace(/^export /gm, ""),
-  { loader: "ts", target: "es2022" }).code;
-expect(candidatesCode).toContain("reloadBinding()");
+// Execute the shipped census/admission functions: the exported InkOverlay
+// functions themselves, over the module's own live overlay set. Each editor
+// stand-in rides a real overlay in that set - built by its own constructor on a
+// view with no file behind it, so mount stays inert - that answers
+// reloadBinding() from the stand-in. Only editor binding metadata is reduced
+// here; mounted gesture/selection behavior is covered by the browser fixture.
 type EditorStandIn = ReturnType<typeof editor>;
+const ridden: InkOverlayPlugin[] = [];
+afterEach(() => {
+  for (const overlay of ridden.splice(0)) overlay.destroy();
+});
 function productionNoteCandidates(editors: EditorStandIn[]) {
-  return new Function("instances", `${candidatesCode}\nreturn {noteCandidates:inlineReloadCandidates,noteAdmission:captureInlineReloadAdmission};`)(editors) as {
-    noteCandidates:()=>string[]; noteAdmission:(path:string)=>(()=>boolean)|null;
+  const overlays = new Map<EditorStandIn, InkOverlayPlugin>();
+  // Re-read before every question, so a pane that joins mid-test is counted,
+  // as the live set counts a newly mounted editor.
+  const sync = (): void => {
+    for (const standIn of editors) {
+      if (overlays.has(standIn)) continue;
+      const overlay = new InkOverlayPlugin({ state: { field: () => undefined } } as never);
+      const fields = overlay as unknown as { reloadBinding: () => unknown; unmount: () => void };
+      fields.reloadBinding = () => standIn.reloadBinding();
+      fields.unmount = () => {};
+      overlays.set(standIn, overlay);
+      ridden.push(overlay);
+    }
+  };
+  return {
+    noteCandidates: (): string[] => { sync(); return inlineReloadCandidates(); },
+    noteAdmission: (path: string): (() => boolean) | null => {
+      sync();
+      const admitted = captureInlineReloadAdmission(path);
+      return admitted && (() => { sync(); return admitted(); });
+    },
   };
 }
 function editor(path: string, busy = false) {
@@ -513,7 +530,11 @@ describe("sync regimes through save and cold reopen", () => {
   it("(iii-a) both panes hold while a sibling is mid-gesture, then converge without a local edit", async () => {
     const { files, d, clock } = await start();
     const notePanes = [editor(notePath, true), editor(notePath, false)];
-    const p = poll(d, { pdfPanes:2, notePanes:2, ...productionNoteCandidates(notePanes) });
+    const census = productionNoteCandidates(notePanes);
+    const p = poll(d, { pdfPanes:2, notePanes:2, ...census });
+    // The census on its own: admission refuses a busy cohort too, so the end
+    // result below cannot tell a census that ignored the busy pane.
+    expect(census.noteCandidates(), "a busy pane did not keep its note off the reload census").not.toContain(notePath);
     await pollThroughBackoff(p); p.panes[1]!.idle = false;
     replace(files, "advancing"); clock.now = 5000;
     await pollThroughBackoff(p); await pollThroughBackoff(p);
@@ -523,6 +544,7 @@ describe("sync regimes through save and cold reopen", () => {
     expect(p.panes.map(pane=>pane.painted)).toEqual([["pdf-original"],["pdf-original"]]);
     expect(await d.store.externallyChanged(noteId), "held incoming baseline stays unaccepted").toBe(true);
     notePanes[0]!.busy=false; p.panes[1]!.idle=true;
+    expect(census.noteCandidates(), "precondition: with both panes quiet the census lists the note").toContain(notePath);
     clock.now=10000; await pollThroughBackoff(p);
     expect(ids(d)).toEqual([["note-incoming"],["pdf-incoming"]]);
     expect(p.notePaints).toEqual([["note-incoming"],["note-incoming"]]);

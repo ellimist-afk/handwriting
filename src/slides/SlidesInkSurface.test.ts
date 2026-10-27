@@ -15,8 +15,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import stylesSrc from "../../styles.css?raw";
 import surfaceSrc from "./SlidesInkSurface.ts?raw";
-import mainSrc from "../main.ts?raw";
+import mainOnly from "../main.ts?raw";
+import lifecycleSrc from "../PluginLifecycle.ts?raw";
+import onloadSrc from "../PluginOnload.ts?raw";
 import { codeOnly } from "../CodeOnly";
+import { surfaceFiles } from "../inline/surfaceFiles.testutil";
 import {
 	IDLE_SESSION,
 	NOTE_CHECK_CHARS,
@@ -88,6 +91,10 @@ import { inkThemeOverride, setInkThemeOverride } from "../ink/InkTheme";
 import { InkStroke } from "../ink/Stroke";
 import { TailRenderer } from "../ink/TailRenderer";
 
+// startSlidesInk lives in PluginLifecycle.ts and the css-change handler in PluginOnload.ts, both read
+// here with main.ts.
+const mainSrc = [mainOnly, lifecycleSrc, onloadSrc].join("\n");
+
 /**
  * A bounded slice of the module's own source, for the assertions that can only
  * be made against the text. Both ends are asserted, so a probe that silently
@@ -97,8 +104,24 @@ import { TailRenderer } from "../ink/TailRenderer";
 /** The fixed `buildId` every fake host in this file reports. */
 const TEST_BUILD_ID = "test-build";
 
-function slice(from: string, to: string): string {
-	const src = surfaceSrc.replace(/\r\n/g, "\n");
+const SLIDES_TS = import.meta.glob("/src/slides/*.ts", {
+	query: "?raw",
+	eager: true,
+	import: "default",
+}) as Record<string, string>;
+
+/** Every file of the slides surface, joined: code moved out of SlidesInkSurface.ts is still the surface's. */
+function surfaceAllSrc(): string {
+	return surfaceFiles("slides")
+		.map((file) => {
+			expect(SLIDES_TS[file], `${file} is not in the glob`).toBeDefined();
+			return SLIDES_TS[file]!;
+		})
+		.join("\n");
+}
+
+function slice(from: string, to: string, source: string = surfaceSrc): string {
+	const src = source.replace(/\r\n/g, "\n");
 	const start = src.indexOf(from);
 	expect(start, `anchor not found: ${from}`).toBeGreaterThan(-1);
 	const rest = src.slice(start + from.length);
@@ -202,7 +225,7 @@ describe("tap vs stroke (Alan's ruling, §3.3)", () => {
 	});
 
 	it("has no target whitelist: the two flags are the only gate", () => {
-		const guard = slice("private onGuardedEvent(ev: Event): void {", "\n\t}\n");
+		const guard = slice("function onGuardedEvent(this: SlidesDeck, ev: Event): void {", "\n\t}\n", SLIDES_TS["/src/slides/SlidesPenGuards.ts"]);
 		expect(guard).toContain("swallowDuringPenContact(");
 		expect(guard).toContain("this.penContact && this.penStroke");
 		expect(guard).toContain("ev.type");
@@ -501,13 +524,13 @@ describe("the eraser move path costs one repaint (§3.2)", () => {
 	// stroke per SAMPLE, several times inside one JS turn before the browser
 	// painted once. The hits accumulate; the repaint happens after the loop.
 	it("leaves the repaint to the caller instead of doing one per hit sample", () => {
-		const eraseAt = slice("private eraseAt(clientX: number, clientY: number): boolean {", "\n\t}\n");
+		const eraseAt = slice("function eraseAt(this: SlidesDeck, clientX: number, clientY: number): boolean {", "\n\t}\n", SLIDES_TS["/src/slides/SlidesPointerPath.ts"]);
 		expect(eraseAt).toContain("eraserHitsInSlide(");
 		expect(eraseAt).not.toContain("this.repaint()");
 	});
 
 	it("marks the slide dirty once AFTER the coalesced loop, and never repaints inside it", () => {
-		const branch = slice("if (this.erasing) {", "ev.preventDefault();");
+		const branch = slice("if (this.erasing) {", "ev.preventDefault();", SLIDES_TS["/src/slides/SlidesPointerPath.ts"]);
 		expect(branch).toContain("for (const s of list) {");
 		expect(branch).toContain("if (this.eraseAt(s.clientX, s.clientY)) erased = true;");
 		// No repaint anywhere on the move path: the frame owns it now.
@@ -523,13 +546,13 @@ describe("the eraser move path costs one repaint (§3.2)", () => {
 		// capture immediately, which swallowed the navigation click under a
 		// tap. B1 now waits on the same slop/clock promotion as ink (A1), so
 		// pointerdown's erase arm does nothing but arm the gesture.
-		const down = slice("this.erasedCount = 0;", "return;");
+		const down = slice("this.erasedCount = 0;", "return;", SLIDES_TS["/src/slides/SlidesPointerPath.ts"]);
 		expect(down).not.toContain("eraseAt(");
 		expect(down).not.toContain("markErased(");
 	});
 
 	it("measures the deck on no move at all: the ink path reads the cache", () => {
-		const ink = slice("const style = this.activeStyle;", "ev.preventDefault();");
+		const ink = slice("const style = this.activeStyle;", "ev.preventDefault();", SLIDES_TS["/src/slides/SlidesPointerPath.ts"]);
 		// One read of the cache, and nothing that forces layout. The runtime
 		// count is asserted too ("takes zero getBoundingClientRect across 100
 		// pointermoves"); this is the same rule stated where a reader editing
@@ -913,19 +936,19 @@ describe("the sidecar is not a note page (§3.1)", () => {
 	});
 
 	it("claims the bare page id and suffixes only for the sidecar", () => {
-		const persist = slice("private persist(): void {", "\n\t}\n");
+		const persist = slice("function persist(this: SlidesDeck): void {", "\n\t}\n", SLIDES_TS["/src/slides/SlidesPersistence.ts"]);
 		expect(persist).toContain(".claimId(path, proposed)");
 		expect(persist).not.toContain("claimId(path, slidesSidecarId");
 		expect(persist).toContain("slidesSidecarId(result.pageId)");
 		// The suffix is applied in exactly one function, so there is one place
 		// to look when asking which ids this surface can ever write.
-		const src = surfaceSrc.replace(/\r\n/g, "\n");
+		const src = surfaceAllSrc().replace(/\r\n/g, "\n");
 		const applications = src.split("`${pageId}${SLIDES_SIDECAR_SUFFIX}`").length - 1;
 		expect(applications).toBe(1);
 	});
 
 	it("declares the surface and coordinate space on every page it writes", () => {
-		const snapshot = slice("private snapshot(): PageData | null {", "\n\t}\n");
+		const snapshot = slice("function snapshot(this: SlidesDeck): PageData | null {", "\n\t}\n", SLIDES_TS["/src/slides/SlidesPersistence.ts"]);
 		expect(snapshot).toContain('surface: "slides"');
 		expect(snapshot).toContain('coordSpace: "slide-logical"');
 		expect(snapshot).toContain("pageId: sidecarId");
@@ -2359,8 +2382,9 @@ describe("the silent lift (S5 extended: a lift is not always an event)", () => {
 		const page = lastPage(rig);
 		expect(page.strokes).toHaveLength(1);
 		// Down plus the two real moves, and NOT the hover sample: screen
-		// (400,400) is deck-logical (760,750) at the rig's k=0.5.
-		expect(page.strokes[0]!.points).toHaveLength(3);
+		// (400,400) is deck-logical (760,750) at the rig's k=0.5. The two
+		// moves are stored as means, and the last real move again at the lift.
+		expect(page.strokes[0]!.points, "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toHaveLength(4);
 		expect(page.strokes[0]!.points.some((p) => p.x === 760 && p.y === 750)).toBe(false);
 		expect(
 			rig.logs.some((l) => l.includes("stroke end on slide 0: reason=silent-lift"))
@@ -2384,7 +2408,7 @@ describe("the silent lift (S5 extended: a lift is not always an event)", () => {
 		rig.win.runTimers(SILENT_LIFT_QUIET_MS);
 		const page = lastPage(rig);
 		expect(page.strokes).toHaveLength(1);
-		expect(page.strokes[0]!.points).toHaveLength(3);
+		expect(page.strokes[0]!.points, "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toHaveLength(4);
 		expect(
 			rig.logs.some((l) => l.includes("stroke end on slide 0: reason=silent-lift"))
 		).toBe(true);
@@ -2416,7 +2440,7 @@ describe("the silent lift (S5 extended: a lift is not always an event)", () => {
 		rig.end("pointerup", { buttons: 0, pressure: 0 });
 		const page = lastPage(rig);
 		expect(page.strokes).toHaveLength(1);
-		expect(page.strokes[0]!.points).toHaveLength(4);
+		expect(page.strokes[0]!.points, "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toHaveLength(5);
 		expect(rig.logs.some((l) => l.includes("reason=silent-lift"))).toBe(false);
 		clock.mockRestore();
 		rig.deck.dispose();
@@ -2538,7 +2562,7 @@ describe("a slide change under a live stroke (the note surface's abandon rule)",
 		expect(page.strokes).toHaveLength(1);
 		// `pageOfSlide(0)` - the slide it was drawn on, not the one now shown.
 		expect(page.strokes[0]!.page).toBe(1);
-		expect(page.strokes[0]!.points).toHaveLength(3);
+		expect(page.strokes[0]!.points, "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toHaveLength(4);
 		// Nothing half-drawn is left painted over the new slide.
 		expect(wetClear).toHaveBeenCalled();
 		expect(tailClear).toHaveBeenCalled();
@@ -3382,7 +3406,7 @@ describe("the surface leaves no trace on reveal's own element", () => {
 describe("the wet layer asks for a plain (non-desynchronized) canvas", () => {
 	it("is built from SLIDES_DESYNCHRONIZED, never a bare `true`", () => {
 		expect(SLIDES_DESYNCHRONIZED).toBe(false);
-		const src = surfaceSrc.replace(/\r\n/g, "\n");
+		const src = SLIDES_TS["/src/slides/SlidesMount.ts"]!.replace(/\r\n/g, "\n");
 		expect(src).toMatch(/new WetInkRenderer\(wetCanvas, SLIDES_DESYNCHRONIZED\)/);
 		expect(src).not.toMatch(/new WetInkRenderer\(wetCanvas,\s*true\s*\)/);
 	});
@@ -3631,7 +3655,7 @@ describe("live shaping follows the device, per stroke (mouse ink draws flat)", (
 		// `WetInkRenderer.beginStroke` reads `this.shape` into
 		// `shapingThisStroke` and never looks at it again for that stroke, so
 		// an assignment after the call would be a whole stroke too late.
-		const down = slice("private beginInkAt(", "\n\t}\n");
+		const down = slice("function beginInkAt(", "\n\t}\n", SLIDES_TS["/src/slides/SlidesPointerPath.ts"]);
 		expect(down).toContain("l.wet.shape = !fromMouse;");
 		expect(down.indexOf("l.wet.shape = !fromMouse;")).toBeLessThan(
 			down.indexOf("l.wet.beginStroke(")
@@ -3857,9 +3881,16 @@ describe("the live head (Alan, mouse: the commit sprayed backwards out of the pe
 		rig.move(260, 260);
 		expect(spy).toHaveBeenCalledTimes(1);
 		const to = spy.mock.calls[0]![3];
-		// The whole point of the head: the drawn geometry reaches the newest
-		// sample, not the settled midpoint half a sample behind it.
-		expect(to).toEqual(logical(rig, 260, 260));
+		// The head reaches the newest stored point, not the smoother's settled
+		// midpoint behind it. On a whole-pixel grid that point is the mean of
+		// the newest sample and the one before, so the head sits within half
+		// that sample's own step of the newest sample: half a pixel on a
+		// one-pixel step, and never further.
+		const newest = logical(rig, 260, 260);
+		const before = logical(rig, 200, 200);
+		expect(to, "the mean of the newest sample and the one before").toEqual({ x: (newest.x + before.x) / 2, y: (newest.y + before.y) / 2 });
+		expect(Math.abs(to.x - newest.x), "within half the newest sample's own step").toBeLessThanOrEqual(Math.abs(newest.x - before.x) / 2);
+		expect(Math.abs(to.y - newest.y), "within half the newest sample's own step").toBeLessThanOrEqual(Math.abs(newest.y - before.y) / 2);
 		rig.deck.dispose();
 	});
 
@@ -4278,6 +4309,25 @@ describe("live reload: another device wrote the .slides sidecar while the deck i
 		const rig = makeRig({ sections: 2, source: "only one slide here" });
 		await tick();
 		expect(rig.deck.reloadCandidateSidecarId()).toBeNull();
+	});
+
+	it("tells the reader once that ink is not being saved when a re-read finds the file damaged", async () => {
+		let disk: ParseResult | null = storedPageWith("note-1.slides", ["stored-1"]);
+		const rig = makeRig({ load: async () => disk });
+		await tick();
+		expect(rig.notices).toEqual([]);
+		// The other device's write lands broken: the deck holds its writes from here, so the reader has to hear it.
+		disk = { ...storedPage("note-1.slides", "ignored"), damaged: true };
+		expect(await rig.deck.reloadExternal("note-1.slides")).toBe(false);
+		expect(rig.notices).toHaveLength(1);
+		expect(rig.notices[0]).toContain("could not be read");
+		expect(rig.notices[0]).toContain("not being saved");
+		// The poll keeps finding it damaged, and ink keeps coming: still one notice.
+		drawStrokeOn(rig);
+		expect(await rig.deck.reloadExternal("note-1.slides")).toBe(false);
+		expect(rig.notices).toHaveLength(1);
+		rig.deck.dispose();
+		expect(rig.savedNow, "the damaged file is not overwritten").toEqual([]);
 	});
 });
 
@@ -4822,7 +4872,7 @@ function deferredClaim(pageId: string): {
  */
 function slidesHostSource(): string {
 	const code = codeOnly(mainSrc).replace(/\r\n/g, "\n");
-	const startNeedle = "private startSlidesInk(): void {";
+	const startNeedle = "function startSlidesInk(this: HandwritingPlugin): void {";
 	const start = code.indexOf(startNeedle);
 	expect(start, "anchor not found: startSlidesInk").toBeGreaterThan(-1);
 	const rest = code.slice(start);
@@ -4920,8 +4970,9 @@ describe("coalesced samples are all consumed (item 3)", () => {
 		rig.end("pointerup", { buttons: 0 });
 		const committed = strokesOn(rig, 0);
 		expect(committed).toHaveLength(1);
-		// The pen-down point plus the three coalesced ones.
-		expect(committed[0]!.points).toHaveLength(4);
+		// The pen-down point plus the three coalesced ones, and the last of
+		// them again at the lift.
+		expect(committed[0]!.points, "lift point stored: on a whole-pixel grid each point is the mean of its sample and the one before, and the lift stores the last sample as itself").toHaveLength(5);
 		rig.deck.dispose();
 	});
 });
@@ -5122,7 +5173,7 @@ describe("the committed repaint opts INTO the ribbon cache (item 10)", () => {
 		// A full-slide repaint runs on every slide change, load, erase and
 		// resize, over every stroke on the slide; flattening each ribbon again
 		// each time is the cost this argument exists to avoid.
-		const body = slice("private repaint(): void {", "\n\t}");
+		const body = slice("\tfunction repaint(this: SlidesDeck): void {", "\n\t}\n", SLIDES_TS["/src/slides/SlidesMount.ts"]);
 		expect(body).toContain("drawStroke(s.tool === \"highlighter\" ? l.highlightCtx : l.ctx, cam, s, undefined, true);");
 	});
 });
@@ -5257,7 +5308,7 @@ describe("the teardown re-checks (item 6: nothing survives dispose)", () => {
 	 */
 	it("keeps the disposed re-check inside the erase frame", () => {
 		const frame = codeOnly(
-			slice("this.eraseFrame = win.requestAnimationFrame(() => {", "this.repaint();")
+			slice("this.eraseFrame = win.requestAnimationFrame(() => {", "this.repaint();", SLIDES_TS["/src/slides/SlidesPointerPath.ts"])
 		);
 		expect(frame).toContain("this.eraseFrame = null;");
 		expect(frame).toContain("|| this.disposed) return;");
@@ -5277,7 +5328,7 @@ describe("the teardown re-checks (item 6: nothing survives dispose)", () => {
 	 * gesture to carry it. Pinned against the source rather than pretended.
 	 */
 	it("keeps the flush in dispose()", () => {
-		const teardown = codeOnly(slice("\tdispose(): void {", "this.disposed = true;"));
+		const teardown = codeOnly(slice("function dispose(this: SlidesDeck): void {", "this.disposed = true;", SLIDES_TS["/src/slides/SlidesBind.ts"]));
 		expect(teardown).toContain("this.commitStroke(");
 		expect(teardown).toContain("this.flushErase();");
 		// Order matters as much as presence: the commit is what has a builder
@@ -5299,7 +5350,7 @@ describe("the teardown re-checks (item 6: nothing survives dispose)", () => {
 	 */
 	it("keeps the move trace's own teardown in dispose()", () => {
 		const teardown = codeOnly(
-			slice("setInkThemeOverride(null);", "for (const d of this.disposers.splice(0)) d();")
+			slice("setInkThemeOverride(null);", "for (const d of this.disposers.splice(0)) d();", SLIDES_TS["/src/slides/SlidesBind.ts"])
 		);
 		expect(teardown).toContain("this.moveTrace.dispose();");
 	});

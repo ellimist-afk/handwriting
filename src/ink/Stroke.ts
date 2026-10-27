@@ -64,6 +64,78 @@ export interface InkStroke {
 	 * objects that erase and undo separately; see PageMap.strokePage.
 	 */
 	page?: number;
+	/**
+	 * Where the stroke sat against the note's text, note surface only. The
+	 * points and bbox stay page coordinates and the truth of record; the note
+	 * surface shows the stroke moved by however far its line has moved since
+	 * (LineAnchor.ts). Absent, the stroke shows at its page position, as it
+	 * always has. Older builds keep the field through the unknown-field path.
+	 */
+	lineAnchor?: LineAnchor;
+}
+
+/**
+ * A stroke's place against one line of the note's text, taken when the line
+ * was laid out. All lengths are world units.
+ */
+export interface LineAnchor {
+	/** 1-based editor line under the stroke's bbox top when the anchor was taken. */
+	line: number;
+	/** That line's top when the anchor was taken. The stroke is shown moved by the line's top now minus this. */
+	top: number;
+	/** The stroke's bbox.y when the anchor was taken. A move by a build that does not know the field breaks the match. */
+	y: number;
+	/** A 32-bit hash of the line's text when the anchor was taken: an edit made where no anchor followed it breaks the match. */
+	key: number;
+	/** The editor's content width, layout px, when the anchor was taken. */
+	width: number;
+	/** The editor's font size, px, when the anchor was taken. */
+	fontPx: number;
+	/**
+	 * A 32-bit hash of the text of every line above `line` when the anchor was taken or last moved by a live edit. Read once
+	 * after a surface mounts: an edit above made where no anchor followed it breaks the match. Absent in older files, where
+	 * the anchor is not honoured until a surface takes it again.
+	 */
+	above?: number;
+}
+
+/** The same anchor on a stroke moved down by `dy` in page coordinates: the line and its top stay, the stroke's own y moves. */
+export function translatedAnchor(a: LineAnchor, dy: number): LineAnchor {
+	return { ...a, y: a.y + dy };
+}
+
+/** The same anchor on a stroke scaled about the note origin by `k`: world lengths scale with it. */
+export function scaledAnchor(a: LineAnchor, k: number): LineAnchor {
+	return { ...a, top: a.top * k, y: a.y * k };
+}
+
+/**
+ * Holders of line anchors that document changes have not reached yet: a note surface applies typing to its anchors when it
+ * next reads them (LineAnchors in inline/LineAnchor.ts), and holds them here meanwhile. Each `fold` brings its anchors up to
+ * date and lets go.
+ */
+const unsettledAnchors = new Set<{ fold(): void }>();
+
+export function holdLineAnchors(holder: { fold(): void }): void {
+	unsettledAnchors.add(holder);
+}
+
+export function releaseLineAnchors(holder: { fold(): void }): void {
+	unsettledAnchors.delete(holder);
+}
+
+/** Bring every line anchor up to date with its note's text: before a page's strokes are written. */
+export function settleLineAnchors(): void {
+	for (const holder of unsettledAnchors) holder.fold();
+}
+
+/**
+ * The anchor of a piece cut from `parent`: the parent's line and top, and the parent's anchor y moved by the piece's bbox
+ * offset, so a parent anchor that had stopped matching its stroke stops matching on the piece too.
+ */
+export function pieceAnchor(parent: InkStroke, piece: InkStroke): LineAnchor | undefined {
+	const a = parent.lineAnchor;
+	return a ? { ...a, y: a.y + (piece.bbox.y - parent.bbox.y) } : undefined;
 }
 
 export function computeBBox(points: InkPoint[], padWorld: number): BBox {

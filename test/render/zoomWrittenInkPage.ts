@@ -10,11 +10,13 @@ import { setPenInk } from "../../src/inline/PenInk";
 import { emptyPage, parsePage, serializePage, type PageData } from "../../src/model/PageData";
 import { installObsidianDom } from "./obsidianDom";
 import { editorInfoField } from "./iphoneObsidianStub";
+import { withoutLineAnchor } from "./storedInk";
 import type { InkStroke } from "../../src/ink/Stroke";
 import { surfaceExtents, ScrollExpansionDemand } from "../../src/inline/SurfaceExtent";
 import { WetInkRenderer } from "../../src/ink/WetInkRenderer";
 import { TailRenderer } from "../../src/ink/TailRenderer";
 import { DEFAULT_PEN } from "../../src/ink/PenStyle";
+import { contentOriginLeft } from "../../src/inline/ContentOrigin";
 installObsidianDom();
 const path = "drift.md", id = "drift-page";
 let saved = "", loads = 0;
@@ -321,10 +323,25 @@ async function pendingPinchPen(measured:boolean,cancel:boolean){
  // itself, clamped into the pane, so the contact follows the note at any pan.
  const surface=overlay.committedCanvas.getBoundingClientRect(),pane=view.scrollDOM.getBoundingClientRect();
  const hx=Math.max(surface.left,pane.left)+60,hy=Math.max(surface.top,pane.top)+20;
- point("pointerdown",hx,hy);point("pointermove",hx+10,hy+5);
+ // CodeMirror's measure calls made by the contact itself, counted only inside the pointerdown's dispatch: a contact
+ // inside a zoom lift's first measure runs it once (InkOverlayLifecycle onViewportInput), any other runs none.
+ const measureCalls={held:0,plain:0},viewAny=view as unknown as {measure:(...a:unknown[])=>unknown},realMeasure=viewAny.measure;
+ let counting:null|"held"|"plain"=null;
+ viewAny.measure=function(this:unknown,...a:unknown[]){if(counting)measureCalls[counting]++;return realMeasure.apply(this,a);};
+ counting="held";point("pointerdown",hx,hy);counting=null;
+ // ABSOLUTE: the note point the text's DOM gives for the contact, read in the same synchronous block as the down,
+ // after its dispatch (the form of scrollColumnAnchorPage.ts expected). A drift common to both paths is invisible to
+ // the two-path compare; this leg sees it.
+ const domScale=view.dom.getBoundingClientRect().width/parseFloat(getComputedStyle(view.dom).width),domTop=view.contentDOM.getBoundingClientRect().top+parseFloat(getComputedStyle(view.contentDOM).paddingTop)*domScale;
+ const expected={x:(hx-contentOriginLeft(view.contentDOM)!)/domScale/(overlay.fontZoom||1),y:(hy-domTop)/domScale/(overlay.fontZoom||1),cssScale:overlay.cssScale};
+ point("pointermove",hx+10,hy+5);
  await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
  const held=coverage();point("pointerup",hx+20,hy+10);await settle();
- return {before,held,after:coverage(),stroke:snapshot().strokes.at(-1)};
+ const after=coverage(),stroke=snapshot().strokes.at(-1);
+ // A plain pen down: no lift waiting, so the contact runs no measure.
+ counting="plain";point("pointerdown",hx+40,hy+30);counting=null;point("pointerup",hx+50,hy+30);await settle();
+ viewAny.measure=realMeasure;
+ return {before,held,after,stroke,measureCalls,expected};
 }
 function focusSeed(){
  const page=emptyPage(id);page.surface="inline";
@@ -384,7 +401,7 @@ async function editorFocus(zoom:number,locked:boolean,focus:boolean){
  }
  await settle();
  const strokes=inlineInk.strokes(path),after=read();
- return {before,focused,blurred,refocused,after,error,oldUnchanged:JSON.stringify(strokes.slice(0,JSON.parse(old).length))===old,added:strokes.length-JSON.parse(old).length};
+ return {before,focused,blurred,refocused,after,error,oldUnchanged:JSON.stringify(withoutLineAnchor(strokes.slice(0,JSON.parse(old).length)))===withoutLineAnchor(old),added:strokes.length-JSON.parse(old).length};
 }
 function desktopPlatform(){Object.assign(Platform,{isMobile:false,isDesktop:true,isIosApp:false,isDesktopApp:true,isMobileApp:false,isPhone:false,isWin:true});}
 async function viewportOwnership(){

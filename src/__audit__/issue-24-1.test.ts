@@ -31,6 +31,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
 import { isMarkdownPath, stripMarkdownExtension } from "../util/MarkdownPath";
 import mainSource from "../main.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
+import reloadSource from "../PluginOnloadReload.ts?raw";
 import {
 	attachEmbedInkOnceReady,
 	embedInkIsLiveEditorBlock,
@@ -46,9 +48,10 @@ import { InkStroke } from "../ink/Stroke";
 import { runDetached } from "../util/Detached";
 
 // ---- the production post-processor, verbatim out of main.ts ---------------
-const src = mainSource.replace(/\r\n/g, "\n");
+// The onload phases live in PluginOnload.ts and PluginOnloadReload.ts, read here with main.ts.
+const src = [mainSource, onloadSource, reloadSource].join("\n").replace(/\r\n/g, "\n");
 const HEAD = "\t\tthis.registerMarkdownPostProcessor((el, ctx) => {\n";
-const TAIL = "\n\t\t});\n\t\t// Embed layers stop going stale";
+const TAIL = "\n\t\t});\n\t}";
 expect(src.split(HEAD)).toHaveLength(2);
 expect(src.split(TAIL)).toHaveLength(2);
 const bodyStart = src.indexOf(HEAD) + HEAD.length;

@@ -12,7 +12,8 @@ it("R1-21-F1 does not label ordinary successful camera assertions as expected fa
 });
 
 it("R2-002 privacy documentation describes the explicit diagnostic upload and its payload scope", () => {
-	const main = source("src/main.ts");
+	// The command registrations live in commands/RegisterCommands.ts and RegisterDiagCommands.ts, read here with main.ts.
+	const main = [source("src/main.ts"), source("src/commands/RegisterCommands.ts"), source("src/commands/RegisterDiagCommands.ts")].join("\n");
 	const security = source("SECURITY.md");
 	const readme = source("README.md");
 	expect(main).toContain('method: "POST"');
@@ -32,7 +33,8 @@ it("R2-003 contributor prerequisites and test-scope copy match the actual toolch
 });
 
 it("R2-004 site and manual diagnostic instructions use the registered commands and Copy ID control", () => {
-	const main = source("src/main.ts");
+	// The command registrations live in commands/RegisterCommands.ts and RegisterDiagCommands.ts, read here with main.ts.
+	const main = [source("src/main.ts"), source("src/commands/RegisterCommands.ts"), source("src/commands/RegisterDiagCommands.ts")].join("\n");
 	const site = source("docs/index.html");
 	const manual = source("docs/manual.md");
 	expect(main).toContain('name: "Bug report: record"');

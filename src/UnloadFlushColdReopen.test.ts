@@ -49,6 +49,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "./main.ts?raw";
+import pluginSettingsSource from "./settings/PluginSettings.ts?raw";
+import onloadSource from "./PluginOnload.ts?raw";
 import HandwritingPlugin from "./main";
 import { inlineInk } from "./inline/InkOverlay";
 import { InlineInkStore } from "./inline/InlineInkStore";
@@ -67,21 +69,24 @@ import { InkPoint, InkStroke, InkTool, computeBBox } from "./ink/Stroke";
 import { PageData, parsePage, serializePage, emptyPage } from "./model/PageData";
 import { FakeDoc, FakeEl } from "./testUtils/fakeDom";
 
-// ---- the two host blocks main.ts builds inside onload -------------------------
+// ---- the two host blocks: main.ts builds the inline one inside onload; the PDF
+// ---- one is built in loadSettings, which moved to settings/PluginSettings.ts;
+// ---- the onload phases live in PluginOnload.ts, read here with main.ts
 
-const main = mainSource.replace(/\r\n/g, "\n");
+const main = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
+const pluginSettings = pluginSettingsSource.replace(/\r\n/g, "\n");
 
-function sliceBlock(start: string, end: string): string {
-	const occurrences = main.split(start).length - 1;
+function sliceBlock(text: string, start: string, end: string): string {
+	const occurrences = text.split(start).length - 1;
 	if (occurrences !== 1) throw new Error(`wiring marker found ${occurrences} times: ${start}`);
-	const at = main.indexOf(start);
-	const stop = main.indexOf(end, at);
+	const at = text.indexOf(start);
+	const stop = text.indexOf(end, at);
 	if (stop <= at) throw new Error(`wiring end marker not found after: ${start}`);
-	return main.slice(at, stop + end.length);
+	return text.slice(at, stop + end.length);
 }
 
-const INLINE_WIRING = sliceBlock("\t\tinlineInk.attachHost({", "\n\t\t});");
-const PDF_WIRING = sliceBlock("\t\tthis.pdfStore.attachHost({", "\n\t\t});");
+const INLINE_WIRING = sliceBlock(main, "\t\tinlineInk.attachHost({", "\n\t\t});");
+const PDF_WIRING = sliceBlock(pluginSettings, "\t\tthis.pdfStore.attachHost({", "\n\t\t});");
 
 /** `this` is the plugin; the parameters are the free names the block closes over. */
 const attachInlineHost = new Function(

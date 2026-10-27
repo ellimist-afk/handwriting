@@ -14,6 +14,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import mainSrc from "../main.ts?raw";
+import onloadSrc from "../PluginOnload.ts?raw";
 import { codeOnly } from "../CodeOnly";
 import {
 	FOREGROUND_EVENTS,
@@ -215,7 +216,8 @@ describe("armForegroundRepaint: gated on isMobileApp", () => {
  * there.
  */
 describe("main.ts arms the foreground repaint", () => {
-	const mainCode = codeOnly(mainSrc);
+	// The onload phases live in PluginOnload.ts, read here with main.ts.
+	const mainCode = codeOnly([mainSrc, onloadSrc].join("\n"));
 
 	it("registers it exactly once, through `register` so unload takes it back", () => {
 		const calls = mainCode.match(/armForegroundRepaint\(/g) ?? [];

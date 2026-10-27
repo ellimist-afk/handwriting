@@ -135,11 +135,19 @@ export function strokePdfOps(stroke: InkStroke): string {
 }
 
 /**
- * Consecutive strokes of one colour, sharing a path and a single fill.
+ * Consecutive strokes of one colour, sharing one colour setting.
  *
  * CONSECUTIVE and not grouped by colour: strokes paint in the order they were
  * drawn, and gathering every red in a note into one fill would lift the early
  * reds above a blue drawn over them.
+ *
+ * A pen stroke is filled on its own. A run used to share one path and one
+ * fill, and a viewer draws a fill as one path: a note of 4,851 pen strokes
+ * became 23 paths of about 34,000 segments each, and Obsidian's PDF viewer
+ * took 7 s to draw the page (0.2 s one fill per stroke). Opaque ink paints the
+ * same pixels either way, but for the smoothing of an edge where two strokes of
+ * one colour overlap. A highlighter run keeps its single fill: filled one by
+ * one, two crossing strokes would double the wash.
  *
  * `f` is nonzero winding, which is what unions each outline with its discs -
  * see StrokeOutline for why that pairing is the shape.
@@ -149,17 +157,24 @@ function runs(strokes: readonly InkStroke[], destination?: string | null): strin
 	let i = 0;
 	while (i < strokes.length) {
 		// Grouped on the colour actually WRITTEN, so two stored colours that
-		// adapt to one value share a fill instead of emitting it twice.
+		// adapt to one value share one colour setting instead of emitting it twice.
 		const color = pdfColor(strokes[i]!.tool, strokes[i]!.color, destination);
 		let ops = "";
+		// Highlighter paths waiting for the run's one fill.
+		let open = false;
 		while (
 			i < strokes.length &&
 			pdfColor(strokes[i]!.tool, strokes[i]!.color, destination) === color
 		) {
-			ops += strokePdfOps(strokes[i]!);
+			const one = strokePdfOps(strokes[i]!);
+			if (one !== "") {
+				const pen = strokes[i]!.tool !== "highlighter";
+				ops += pen ? `${one}f ` : one;
+				open = !pen;
+			}
 			i++;
 		}
-		if (ops !== "") out += `${color} rg ${ops}f `;
+		if (ops !== "") out += `${color} rg ${ops}${open ? "f " : ""}`;
 	}
 	return out;
 }

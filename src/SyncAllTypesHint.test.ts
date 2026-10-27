@@ -5,7 +5,8 @@
  * all say to turn it on. Detecting sidecars that did not arrive is later work.
  */
 import { describe, expect, it } from "vitest";
-import mainSource from "./main.ts?raw";
+import pluginSettingsSource from "./settings/PluginSettings.ts?raw";
+import tabSource from "./settings/HandwritingSettingTab.ts?raw";
 import readme from "../README.md?raw";
 import { SYNC_ALL_TYPES_HINT } from "./main";
 import { codeOnly } from "./CodeOnly";
@@ -19,12 +20,12 @@ describe("the Obsidian Sync file-type hint", () => {
 	});
 
 	it("is the sync row's description", () => {
-		const code = codeOnly(mainSource).replace(/\r\n/g, "\n");
+		const code = codeOnly(tabSource).replace(/\r\n/g, "\n");
 		expect(code).toMatch(/name: "Compatibility with Obsidian Sync, iCloud and Dropbox",\n\t+desc: SYNC_ALL_TYPES_HINT,/);
 	});
 
 	it("follows the move notice when the new folder syncs", () => {
-		const code = codeOnly(mainSource);
+		const code = codeOnly(pluginSettingsSource);
 		expect(code).toContain("(inkFolderSyncs(next) ? ` ${SYNC_ALL_TYPES_HINT}` :");
 	});
 

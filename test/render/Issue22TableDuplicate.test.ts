@@ -25,6 +25,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import css from "../../styles.css?raw";
 import type {} from "./issue22TableDuplicatePage";
+import { withoutLineAnchor } from "./storedInk";
 
 declare const process: { env: Record<string, string | undefined> };
 let browser: Browser, script: string;
@@ -97,7 +98,7 @@ async function capture(page: Page, dpr: number, test: string, phase: string) {
 	return { state, table, originalPixels };
 }
 function assertOriginal(state: Census, before: Census["original"]) {
-	expect.soft(state.original.strokes, "store contains exactly unchanged original stroke").toEqual(before.strokes);
+	expect.soft(withoutLineAnchor(state.original.strokes), "store contains exactly unchanged original stroke").toEqual(withoutLineAnchor(before.strokes));
 	expect.soft(state.original.selectable, "original remains selectable by real lasso geometry").toEqual(["issue22-original"]);
 	expect.soft(state.surfaces.filter(s => s.editor === "note-main"), "original note has exactly one surface").toHaveLength(1);
 	expect.soft(state.surfaces.filter(s => s.editor === "unregistered"), "all ink surfaces have a known editor owner").toHaveLength(0);
@@ -484,7 +485,7 @@ for (const dpr of [1, 2]) for (const order of ["ink-first", "table-first"] as co
 				console.log("ISSUE22", JSON.stringify({ order, dpr, plant: plant ?? null, before, after, final, pixels, cleanPixels, originalPixels, retained }));
 				// Soft checks ensure store/selection failures cannot hide the visual
 				// assertion. The plant must fail the visual assertion specifically.
-				expect.soft(final.strokes, "store contains exactly unchanged original stroke").toEqual(before.strokes);
+				expect.soft(withoutLineAnchor(final.strokes), "store contains exactly unchanged original stroke").toEqual(withoutLineAnchor(before.strokes));
 				expect.soft(final.selectable, "original remains selectable by real lasso geometry").toEqual(["issue22-original"]);
 				expect.soft(retained.largest, "original remains visibly painted").toBeGreaterThan(100);
 				expect.soft(pixels.missingDark, "table paint remains present").toBeLessThan(48 * dpr * dpr);

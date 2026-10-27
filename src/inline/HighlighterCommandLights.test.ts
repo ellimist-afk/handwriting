@@ -14,6 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import commandsSource from "../commands/RegisterCommands.ts?raw";
 import { MobileTools, type MobileToolsHost } from "./MobileTools";
 import {
 	addStripSurface,
@@ -32,7 +33,8 @@ import { penInkEnabled, resetPenInkForTest } from "./PenInk";
 import { FakeDoc, FakeEl } from "../testUtils/fakeDom";
 import { routineNoticesVisible } from "../diag/RoutineNotices";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+const source = [mainSource, commandsSource].join("\n").replace(/\r\n/g, "\n");
 
 function highlighterCommand(): () => void {
 	const at = source.indexOf('id: "inline-tool-highlighter",');

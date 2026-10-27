@@ -240,7 +240,7 @@ function makeRig(): Rig {
 		scrollDOM: {
 			addEventListener: noop,
 			removeEventListener: noop,
-			classList: { add: noop, remove: noop },
+			classList: { add: noop, remove: noop, contains: () => false },
 			setCssStyles: noop,
 			style: { removeProperty: noop },
 			scrollLeft: 0,

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { attachEmbedInk, initEmbedInkRefresh, teardownEmbedInk } from "./EmbedInk";
+import { attachEmbedInk, columnInset, initEmbedInkRefresh, teardownEmbedInk } from "./EmbedInk";
 import { InkStroke } from "../ink/Stroke";
 
 /**
@@ -176,5 +176,35 @@ describe("the painted layer starts at the text column", () => {
 		const embed = embedRoot([block(468.7)]);
 		attach(embed.root);
 		expect(px(embed.layerLeft())).toBeCloseTo(24, 6);
+	});
+});
+
+describe("the column inset is in the base's own px", () => {
+	/** A base `inset` px in from a column block, drawn `ratio` of its layout width on screen (a CSS zoom on it). */
+	function zoomedBase(inset: number, ratio: number, offsetWidth: number | undefined = 764) {
+		const base = {
+			children: [] as Block[],
+			offsetWidth,
+			getBoundingClientRect: () => ({ left: 100, width: (offsetWidth ?? 0) * ratio, right: 100, top: 0, height: 20, bottom: 20 }),
+		};
+		base.children.push(block(100 + inset * ratio, 600));
+		return base as unknown as HTMLElement;
+	}
+
+	it("a base drawn at 0.8758 of its width gives the unzoomed inset, not the shrunk one", () => {
+		const base = zoomedBase(32, 0.8758);
+		expect(columnInset(base, base, base, true)).toBeCloseTo(32, 2);
+	});
+
+	it("a base at ratio 1 gives the inset unchanged", () => {
+		const base = zoomedBase(32, 1);
+		expect(columnInset(base, base, base, true)).toBeCloseTo(32, 5);
+	});
+
+	it("a base with no layout width is read as unzoomed", () => {
+		const base = zoomedBase(32, 1, 0);
+		expect(columnInset(base, base, base, true)).toBeCloseTo(32, 5);
+		const bare = zoomedBase(32, 1, undefined);
+		expect(columnInset(bare, bare, bare, true)).toBeCloseTo(32, 5);
 	});
 });

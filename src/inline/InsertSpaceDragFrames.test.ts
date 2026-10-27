@@ -6,7 +6,9 @@
  * note's rows (the cache misses, because the drag has just moved the strokes,
  * and rebuilds the rows of the whole note), plan a seam it never uses, and
  * draw the selection layer a second time for the same sample. The set of moving
- * strokes is frozen at pen-down, so none of that is read.
+ * strokes is frozen at pen-down, so none of that is read. (The drag now moves
+ * only its picture and moves the strokes at the lift; the cells hold the frame
+ * to no ask and one draw all the same.)
  *
  * Cells count calls and never time. Real `spaceMove`, `queueSpaceFeedback`,
  * `previewSpace`, `moveLive` and `InsertSpaceRows`, driven the way
@@ -152,7 +154,7 @@ describe("an insert-space drag that is live", () => {
 
 		for (let i = 1; i <= 10; i++) sample(o, 30 + i * 4);
 
-		expect(inlineInk.strokes(NOTE)[0]!.bbox.y, "the drag moved nothing, so this cell proves nothing").toBeGreaterThan(40);
+		expect(o.spaceTotalDy, "the drag moved nothing, so this cell proves nothing").toBeGreaterThan(0);
 		expect(get, "the hover frame rebuilt the note's rows during a live drag").not.toHaveBeenCalled();
 	});
 

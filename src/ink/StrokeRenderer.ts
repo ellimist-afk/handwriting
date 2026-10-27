@@ -10,7 +10,7 @@ import {
 import { SmoothSegment } from "./Smoothing";
 import { flattenStroke, RibbonPt } from "./Ribbon";
 import { centerlineSmoothed, flattenStrokeShaped, inkShapingEnabled } from "./InkShape";
-import { fillRibbon } from "./RibbonRenderer";
+import { fillRibbon, MAX_RASTER_PATH_EXTENT } from "./RibbonRenderer";
 import { InkPoint, InkStroke, InkTool } from "./Stroke";
 import { paintPurgeSentinel } from "./PurgeSentinel";
 import { strokeRev } from "./StrokeRev";
@@ -151,6 +151,14 @@ export function drawSegment(
 	ctx.lineWidth = Math.max(0.5, wWorld * cam.zoom);
 	ctx.lineCap = "round";
 	ctx.lineJoin = "round";
+	if (Math.abs(x2 - x1) + ctx.lineWidth > MAX_RASTER_PATH_EXTENT || Math.abs(y2 - y1) + ctx.lineWidth > MAX_RASTER_PATH_EXTENT) {
+		ctx.save();
+		try {
+			const hw = ctx.lineWidth / (2 * cam.zoom);
+			fillRibbon(ctx, cam, [{ x: from.x, y: from.y, hw }, { x: to.x, y: to.y, hw }], inkColorFor(style), true);
+		} finally { ctx.restore(); }
+		return;
+	}
 	ctx.beginPath();
 	ctx.moveTo(x1, y1);
 	ctx.lineTo(x2, y2);
@@ -228,6 +236,31 @@ export function drawStroke(
 	}
 }
 
+/**
+ * Whether a committed stroke's ribbon is known to fit under the raster path
+ * limit at this zoom, so fillRibbon can skip measuring it point by point.
+ * Every committed repaint of every visible stroke reaches fillRibbon, so the
+ * answer comes from what the stroke already carries: its bbox (the samples'
+ * extent, padded by twice the base width) and the widest half-width its width
+ * law can give. Shaping only thins a width (velocity) or limits its change
+ * (edge slope), never widens it, so the style's largest factor bounds every
+ * point. The width floor and the quarter-pixel disc minimum fillRibbon applies
+ * are added on top. A non-finite value anywhere answers no, and the ribbon is
+ * measured.
+ */
+function ribbonKnownSmall(
+	stroke: InkStroke,
+	style: PenStyle,
+	zoom: number,
+	floor: { backing: number; dpr: number } | undefined
+): boolean {
+	const factor = Math.max(style.minWidthFactor, style.maxWidthFactor, style.pressureOffWidthFactor);
+	const hw = Math.max((style.baseWidth * factor) / 2, floor && floor.backing > 0 ? 0.5 / floor.backing : 0);
+	const reach = 2 * Math.max(0.25, hw * zoom);
+	const b = stroke.bbox;
+	return b.width * zoom + reach < MAX_RASTER_PATH_EXTENT && b.height * zoom + reach < MAX_RASTER_PATH_EXTENT;
+}
+
 function drawStrokeUnderItsPressure(
 	ctx: CanvasRenderingContext2D,
 	cam: CameraState,
@@ -282,6 +315,7 @@ function drawStrokeUnderItsPressure(
 		// edge. Shaping implies a smoothed centerline, so this is exactly
 		// the setting-off pen and nothing else.
 		const perSegment = !smooth;
+		const small = ribbonKnownSmall(stroke, style, cam.zoom, floor);
 		if (!cacheRibbon || styleOverride !== undefined) {
 			fillRibbon(
 				ctx,
@@ -289,7 +323,8 @@ function drawStrokeUnderItsPressure(
 				flattenFor(pts, style, cam.zoom, shaping, smooth),
 				strokeStyleFor(stroke),
 				perSegment,
-				floor
+				floor,
+				small
 			);
 			return;
 		}
@@ -308,7 +343,7 @@ function drawStrokeUnderItsPressure(
 			hit.pressureProfile === stroke.pressureProfile
 		) {
 			cacheHits++;
-			fillRibbon(ctx, cam, hit.ribbon, strokeStyleFor(stroke), perSegment, floor);
+			fillRibbon(ctx, cam, hit.ribbon, strokeStyleFor(stroke), perSegment, floor, small);
 			return;
 		}
 		cacheMisses++;
@@ -324,7 +359,7 @@ function drawStrokeUnderItsPressure(
 			pressureProfile: stroke.pressureProfile,
 			ribbon: pts2,
 		});
-		fillRibbon(ctx, cam, pts2, strokeStyleFor(stroke), perSegment, floor);
+		fillRibbon(ctx, cam, pts2, strokeStyleFor(stroke), perSegment, floor, small);
 		return;
 	}
 	for (let i = 1; i < pts.length; i++) {

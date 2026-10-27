@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import css from "../../styles.css?raw";
 import { MAX_PINCH_SCALE } from "../../src/inline/PinchScale";
+import { withoutLineAnchor } from "./storedInk";
 let browser:Browser,script:string;
 beforeAll(async()=>{const b=await build({entryPoints:[fileURLToPath(new URL("./noteViewportCameraPage.ts",import.meta.url))],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:fileURLToPath(new URL("./iphoneObsidianStub.ts",import.meta.url))}});script=b.outputFiles[0]!.text;browser=await chromium.launch({headless:true});});
 afterAll(async()=>{await browser?.close();});
@@ -33,7 +34,7 @@ it("edge audit: low zoom Fit resize and upper/lower zoom rejection preserve ink 
  const refit=await call(p,"fit","edge");framed(refit);expect(refit.state.zoom).toBeLessThan(fitted.state.zoom);
  for(let i=0;i<3;i++){const smaller=await edge(p,"zoom","edge",.5);expect(smaller.accepted).toBe(true);}for(let i=0;i<2;i++){const limited=await edge(p,"zoom","edge",1e-9);expect(limited.accepted).toBe(true);expect(limited.state.zoom).toBe(.1);}const upper=await edge(p,"zoom","edge",1e9);expect(upper.state.zoom).toBe(MAX_PINCH_SCALE);expect((await edge(p,"zoom","edge",2)).state.zoom).toBe(MAX_PINCH_SCALE);
  for(let i=0;i<3;i++){await p.getByRole("button",{name:"Reset note zoom to 100%",exact:true}).click();await call(p,"settle");framed(await call(p,"fit","edge"));}
- const end=await call(p,"snap","edge");expect(end.strokes).toEqual(original.strokes);expect(end.writes).toBe(original.writes);expect(end.history).toBe(original.history);
+ const end=await call(p,"snap","edge");expect(withoutLineAnchor(end.strokes)).toEqual(withoutLineAnchor(original.strokes));expect(end.writes).toBe(original.writes);expect(end.history).toBe(original.history);
 }finally{await p.close();}},20000);
 // REVISED 2026-09-13, Alan: "when they hit fit it should allow the zoom to break
 // the 10% clamp, but they cannot do it with pinch or manually". This test used to
@@ -48,7 +49,7 @@ it.each(["below-minimum","former-far"])("Fit breaks the ten-percent floor for %s
  // Per stroke, not one bit for the note: at 0.43% and 1.9% a width-floor
  // regression would leave one stroke painting and the others invisible.
  eachStrokePainted(fitted,`${kind} at Fit's scale`);
- expect(fitted.strokes).toEqual(original.strokes);expect(fitted.writes).toBe(original.writes);expect(fitted.history).toBe(original.history);
+ expect(withoutLineAnchor(fitted.strokes)).toEqual(withoutLineAnchor(original.strokes));expect(fitted.writes).toBe(original.writes);expect(fitted.history).toBe(original.history);
  const F=fitted.state.zoom;
  // Manual zoom-out at Fit's scale: the button clamps to F, a commit below F is refused, a pinch out holds F.
  expect((await edge(p,"zoom","floor",.5)).state.zoom).toBe(F);
@@ -56,7 +57,7 @@ it.each(["below-minimum","former-far"])("Fit breaks the ten-percent floor for %s
  const pinchedOut=await edge(p,"pinchBy","floor",100,10);expect(pinchedOut.live.state.zoom).toBe(F);expect(pinchedOut.after.state.zoom).toBe(F);
  // Hit-testable: the pen lands on the far stroke at Fit's scale, and undo puts it back.
  const erased=await edge(p,"eraseOutlier","floor");expect(erased.strokes,"the far stroke was hit at Fit's scale").toHaveLength(original.strokes.length-1);
- const undone=await edge(p,"history","floor","undo");expect(undone.accepted).toBe(true);expect(undone.strokes).toEqual(original.strokes);
+ const undone=await edge(p,"history","floor","undo");expect(undone.accepted).toBe(true);expect(withoutLineAnchor(undone.strokes)).toEqual(withoutLineAnchor(original.strokes));
  // Manual zoom-in works from Fit's scale.
  const recovery=await edge(p,"zoom","floor",2);expect(recovery.state.zoom).toBe(F*2);
 }finally{await p.close();}},20000);
@@ -97,7 +98,7 @@ it("Fit floor at six percent: in to 8% allowed, back to 6% and 5% refused, minus
  // frames the same ink at a SMALLER scale than F, and zoom-out is locked there again.
  const refit=await call(p,"fit","six");expect(refit.result).toBe("fit");expect(refit.state.zoom).toBeLessThan(F);expect(refit.state.zoom).toBeLessThan(.1);
  expect((await commit(refit.state.zoom*.9)).accepted,"below Fit's new scale is refused").toBe(false);
- const end=await call(p,"snap","six");expect(end.strokes).toEqual(original.strokes);expect(end.writes).toBe(original.writes);expect(end.history).toBe(original.history);
+ const end=await call(p,"snap","six");expect(withoutLineAnchor(end.strokes)).toEqual(withoutLineAnchor(original.strokes));expect(end.writes).toBe(original.writes);expect(end.history).toBe(original.history);
 }finally{await p.close();}},20000);
 it("edge audit: erase distant outlier then undo/redo changes live Fit bounds",async()=>{const p=await mounted();try{
  const original=await call(p,"setup","history");const fitted=await call(p,"fit","history");const erased=await edge(p,"eraseOutlier","history");expect(erased.strokes).toHaveLength(1);

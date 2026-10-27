@@ -1,5 +1,5 @@
 import { Point2 } from "../ink/Smoothing";
-import { BBox, InkStroke } from "../ink/Stroke";
+import { BBox, InkStroke, scaledAnchor, translatedAnchor } from "../ink/Stroke";
 import { bumpStrokeRev } from "../ink/StrokeRev";
 
 /**
@@ -252,6 +252,8 @@ export function translateStroke(stroke: InkStroke, dx: number, dy: number): void
 		width: stroke.bbox.width,
 		height: stroke.bbox.height,
 	};
+	// The line anchor keeps its line; the stroke's own y moves with it, so the anchor still names this stroke.
+	if (stroke.lineAnchor) stroke.lineAnchor = translatedAnchor(stroke.lineAnchor, dy);
 	bumpStrokeRev(stroke);
 }
 
@@ -279,5 +281,6 @@ export function scaleStroke(stroke: InkStroke, k: number): void {
 		width: stroke.bbox.width * k,
 		height: stroke.bbox.height * k,
 	};
+	if (stroke.lineAnchor) stroke.lineAnchor = scaledAnchor(stroke.lineAnchor, k);
 	bumpStrokeRev(stroke);
 }

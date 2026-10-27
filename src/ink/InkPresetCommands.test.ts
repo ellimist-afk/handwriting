@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import mainSrc from "../main.ts?raw";
+import commandsSrc from "../commands/RegisterCommands.ts?raw";
 import {
 	PRESET_COMMANDS,
 	type PresetCommand,
@@ -81,7 +82,8 @@ describe("registerInkPresetCommands", () => {
 describe("main.ts registers them behind the extra-commands switch", () => {
 	// CRLF is what a Windows checkout hands `?raw`; every slice probe here
 	// normalises before it looks for a line, or it finds nothing and passes.
-	const code = mainSrc.replace(/\r\n/g, "\n");
+	// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+	const code = [mainSrc, commandsSrc].join("\n").replace(/\r\n/g, "\n");
 
 	// THE GATE MOVED, the guarantee did not. This slice was written against
 	// `if (this.settings.colorSizeCommands) registerInkPresetCommands(this)`,
@@ -107,7 +109,7 @@ describe("main.ts registers them behind the extra-commands switch", () => {
 	it("the adder it registers through is the one the switch gates", () => {
 		// Both ends of the slice asserted, so a moved anchor fails loudly
 		// rather than searching the whole file and finding nothing.
-		const imported = code.indexOf('from "./ink/InkPresetCommands"');
+		const imported = code.indexOf('from "../ink/InkPresetCommands"');
 		expect(imported, "main no longer imports the registrar").toBeGreaterThan(-1);
 		const from = code.indexOf(GATE);
 		expect(from, "main no longer defines addGatedCommand").toBeGreaterThan(-1);

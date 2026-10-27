@@ -133,7 +133,7 @@ beforeAll(async () => {
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "zeroLiftPage.ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: plant ? [{ name: "zero-lift-plant", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlayColumnMargin\.ts$/ }, args => {
 				const text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
 				if (text.split(PLANT.from).length !== 2) throw new Error("HW_ZERO_LIFT_PLANT: fix anchor not found once (is the fix applied?)");
 				return { loader: "ts", contents: text.replace(PLANT.from, PLANT.to) };

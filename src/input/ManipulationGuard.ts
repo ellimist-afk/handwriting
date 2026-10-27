@@ -55,6 +55,13 @@
  * fingers must scroll, leave the glass, and the pen must land with zero
  * hover inside a second.
  *
+ * NO WINDOW ON A PDF. A surface built with `nativeWindow` false never opens
+ * the touch window: the last lift of a pan leaves the guard ARMED and no
+ * re-arm is scheduled, so every finger pan is carried by the assist, as the
+ * first one is. On the PDF viewer only the assist is known to pan with one
+ * finger; a finger handed to the browser in the window moved nothing, and
+ * each later touch inside the second kept the window open.
+ *
  * Pure state machine. Timers and styles live in the router; this class is
  * fully unit-testable.
  */
@@ -81,6 +88,12 @@ const NO_CHANGE: Omit<GuardDecision, "touchAction"> = {
 export class ManipulationGuard {
 	private state: GuardState = "armed";
 	private activeTouches = 0;
+
+	/**
+	 * `nativeWindow` false: the lift of a pan never opens the touch window
+	 * (see "NO WINDOW ON A PDF" above). The note surface keeps the default.
+	 */
+	constructor(private readonly nativeWindow = true) {}
 
 	get current(): GuardState {
 		return this.state;
@@ -171,7 +184,7 @@ export class ManipulationGuard {
 		if (this.activeTouches > 0) {
 			return { ...NO_CHANGE, touchAction: this.touchActionFor(this.state) };
 		}
-		if (this.state === "armed-assist" && !panned) {
+		if (this.state === "armed-assist" && (!panned || !this.nativeWindow)) {
 			this.state = "armed";
 			return { ...NO_CHANGE, touchAction: "none" };
 		}

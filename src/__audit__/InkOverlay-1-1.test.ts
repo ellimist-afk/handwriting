@@ -271,7 +271,12 @@ describe("InkOverlay-1-1: delete-all from the second pane on one note", () => {
 	});
 
 	it("the note Snip command resolves the active pane, not the first overlay for the path", () => {
-		const source = readFileSync(fileURLToPath(new URL("../main.ts", import.meta.url)), "utf8");
+		// The command registrations live in commands/RegisterCommands.ts and RegisterExportCommands.ts, read here with main.ts.
+		const source = [
+			readFileSync(fileURLToPath(new URL("../main.ts", import.meta.url)), "utf8"),
+			readFileSync(fileURLToPath(new URL("../commands/RegisterCommands.ts", import.meta.url)), "utf8"),
+			readFileSync(fileURLToPath(new URL("../commands/RegisterExportCommands.ts", import.meta.url)), "utf8"),
+		].join("\n");
 		const start = source.indexOf('id: "snip-pdf-selection"');
 		const end = source.indexOf('id: "delete-all-pdf-ink"', start);
 		expect(start).toBeGreaterThan(0);

@@ -94,7 +94,7 @@ jobs:
       # print their readings, and a red in this step is read and recorded but
       # never blocks. The package gate runs them all on a real machine.
       - name: rendered timing (printed, never blocks)
-        if: matrix.node == 22
+        if: ${{ !cancelled() && matrix.node == 22 }}
         continue-on-error: true
         run: npm run test:render
         env:

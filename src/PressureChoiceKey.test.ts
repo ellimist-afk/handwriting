@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import HandwritingPlugin from "./main";
-import mainSource from "./main.ts?raw";
+import tabSource from "./settings/HandwritingSettingTab.ts?raw";
 
 type Settings = Record<string, unknown>;
 
@@ -58,7 +58,7 @@ describe("pressure choice key", () => {
 	});
 
 	it("the toggle writes both keys", () => {
-		const source = mainSource.replace(/\r\n/g, "\n");
+		const source = tabSource.replace(/\r\n/g, "\n");
 		const at = source.indexOf('case "pressureSensitivity":');
 		expect(at).toBeGreaterThan(0);
 		const block = source.slice(at, source.indexOf("break;", at));

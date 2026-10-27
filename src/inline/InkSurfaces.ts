@@ -107,6 +107,13 @@ export interface InkSurface {
 	readonly id: InkSurfaceId;
 	/** Root-absolute, forward slashes - the key shape `import.meta.glob` uses. */
 	readonly file: string;
+	/**
+	 * The other files that hold this surface's code, once `file` has been split
+	 * into more than one. The rules read `file` and these together as the one
+	 * surface; the membership checks read `file` alone, because that is still
+	 * where the stroke is built.
+	 */
+	readonly parts?: readonly string[];
 	readonly router: InkRouterFamily;
 	/**
 	 * Can a user get here at all? `penlab` cannot: nothing in the UI opens it.
@@ -149,17 +156,21 @@ export const INK_SURFACES: readonly InkSurface[] = [
 	{
 		id: "note",
 		file: "/src/inline/InkOverlay.ts",
+		parts: ["/src/inline/InkOverlayCursors.ts", "/src/inline/InkOverlayLassoSpace.ts", "/src/inline/InkOverlayClipboard.ts", "/src/inline/InkOverlayPaperPinch.ts", "/src/inline/InkOverlayPanSettle.ts", "/src/inline/InkOverlayViewportBox.ts", "/src/inline/InkOverlayColumnMargin.ts", "/src/inline/InkOverlayDiagnostics.ts", "/src/inline/InkOverlayMeasureHold.ts", "/src/inline/InkOverlayLayout.ts", "/src/inline/InkOverlayLifecycle.ts", "/src/inline/InkOverlayKeys.ts", "/src/inline/InkOverlayZoomApi.ts", "/src/inline/InkOverlayPinch.ts", "/src/inline/InkOverlayLineAnchors.ts", "/src/inline/InkOverlayToolState.ts", "/src/inline/InkOverlayReload.ts", "/src/inline/InkOverlayGestureEnd.ts", "/src/inline/InkOverlayOps.ts", "/src/inline/InkOverlayErase.ts", "/src/inline/InkOverlayExtent.ts", "/src/inline/InkOverlayBand.ts", "/src/inline/InkOverlayPenSupport.ts", "/src/inline/InkOverlayPenPath.ts", "/src/inline/InkOverlayRegistry.ts", "/src/inline/InkOverlayCamera.ts", "/src/inline/InkOverlayRepaint.ts", "/src/inline/InkOverlayConstants.ts"],
 		router: "InlinePenRouter",
 		userReachable: true,
 		mountsStrip: true,
+		stripFile: "/src/inline/InkOverlayLifecycle.ts",
 		honoursTipMode: true,
 	},
 	{
 		id: "pdf",
 		file: "/src/pdf/PdfInkController.ts",
+		parts: ["/src/pdf/PdfInkCursors.ts", "/src/pdf/PdfInkSelection.ts", "/src/pdf/PdfInkTools.ts", "/src/pdf/PdfInkTrace.ts", "/src/pdf/PdfInkBand.ts", "/src/pdf/PdfInkBind.ts", "/src/pdf/PdfInkPenPath.ts", "/src/pdf/PdfInkCommit.ts"],
 		router: "InlinePenRouter",
 		userReachable: true,
 		mountsStrip: true,
+		stripFile: "/src/pdf/PdfInkTools.ts",
 		honoursTipMode: true,
 	},
 	{
@@ -239,6 +250,7 @@ export const INK_SURFACES: readonly InkSurface[] = [
 		// call site.
 		id: "slides",
 		file: "/src/slides/SlidesInkSurface.ts",
+		parts: ["/src/slides/SlidesSections.ts", "/src/slides/SlidesStrokeSession.ts", "/src/slides/SlidesPersistence.ts", "/src/slides/SlidesPenGuards.ts", "/src/slides/SlidesMount.ts", "/src/slides/SlidesPointerPath.ts", "/src/slides/SlidesContact.ts", "/src/slides/SlidesBind.ts", "/src/slides/SlidesController.ts"],
 		router: "none",
 		userReachable: true,
 		mountsStrip: true,

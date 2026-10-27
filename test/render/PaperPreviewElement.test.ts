@@ -28,14 +28,12 @@
  *   NO_TILE_COPY     the copy leaves out the tile size and position (OVERRIDES, dots);
  *   SWAP_ON_RTL      a right-to-left scroller gets an element (RTL);
  *   BOX_ONCE         the element's box is not re-read on preview frames (BOX, a host inset removed mid-preview);
- *   COPY_BEFORE_PAN_OFF the copy is taken with a standing pan still in its stops (SWAP PARITY, standing pan);
  *   LATE_IN / LATE_OUT / CLASS_LATE_OUT the element goes up, or comes down, or the scroller's paper comes back, a frame
  *     late (SWAP PARITY: a frame with no paper, or with two);
  *   NO_SNAP / SNAP_BEFORE_FOLD  the element's offset is not put on the device px grid, or is folded after it is (SMEAR);
  *   SNAP_TRANSLATE_ONLY the rounding ignores the copy's phase fraction (LIFT JUMP at 130 percent);
  *   SCROLL_AREA / NO_MARGIN the element is as large as the scroll area, or has no margin (BOUNDS);
  *   LEAK             a taken-down element stays in the page (LEAK);
- *   TWO_ELEMENT_LAYERS the element carries a second, transparent background layer (SMEAR grid at 10 percent: 0 lost);
  *   NO_COLOR_COPY    the copy leaves out the scroller's background colour (SWAP PARITY under a theme colour, during);
  *   SKIP_RESTORE     the element comes down but the scroller's own background stays suppressed (SWAP PARITY under a theme
  *                    colour, after);
@@ -68,50 +66,48 @@ declare const process: { env: Record<string, string | undefined> };
 let realBrowser: Browser, script: string;
 const OBSIDIAN_CAMERA_CSS = readFileSync(fileURLToPath(new URL("./noteViewportCamera.css", import.meta.url)), "utf8");
 const DSF = 2, PITCH = 28, TOL_DEV = 2, TOL_PREVIEW_DEV = TOL_DEV + 0.5, PAGE_GREY = 255, RULE_GREY = 0x77, BAND_CUT = 0.1;
-const INK = /src[\\/]inline[\\/]InkOverlay\.ts$/, PAN = /src[\\/]inline[\\/]PaperPan\.ts$/;
+const PINCH = /src[\\/]inline[\\/]InkOverlayPinch\.ts$/, PAN = /src[\\/]inline[\\/]PaperPan\.ts$/;
+const PAPER = /src[\\/]inline[\\/]InkOverlayPaperPinch\.ts$/;
 
 const CHOKE = "\t\tconst el = this.previewPaperEl;\n\t\tif (!el) return;\n\t\tthis.previewPaperEl = null;";
 const bypass = (reason: string) => `\t\tconst el = this.previewPaperEl;\n\t\tif (!el || reason === "${reason}") return;\n\t\tthis.previewPaperEl = null;`;
-const SWAP_GATE = "\t\tif (pitch === null || cs.direction !== \"ltr\" || !previewPaperCopyable(cs)) return;\n";
+const SWAP_GATE = "\t\tif (pitch === null || cs.direction !== \"ltr\" || !previewPaperCopyable(cs, pitch)) return;\n";
 const SNAPPED = "\t\tconst tx = (Math.round(foldIntoPitch(x - this.paperScrollLeft + margin, pitch) * kd + fx) - fx) / kd;\n\t\tconst ty = (Math.round(foldIntoPitch(y - this.paperScrollTop + margin, pitch) * kd + fy) - fy) / kd;\n";
 const PLANTS: { env: string; file: RegExp; from: string; to: string }[] = [
-	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_SETTLE", file: INK, from: CHOKE, to: bypass("settle") },
-	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_CANCEL", file: INK, from: CHOKE, to: bypass("cancel") },
-	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_COMMIT", file: INK, from: CHOKE, to: bypass("commit") },
-	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_UNMOUNT", file: INK, from: CHOKE, to: bypass("unmount") },
-	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_NOTE_SWITCH", file: INK, from: CHOKE, to: bypass("note-switch") },
-	{ env: "HW_PAPER_PREVIEW_PLANT_SWAP_ON_NAN", file: INK, from: SWAP_GATE, to: "\t\tif (cs.direction !== \"ltr\" || !previewPaperCopyable(cs)) return;\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_SWAP_ON_RTL", file: INK, from: SWAP_GATE, to: "\t\tif (pitch === null || !previewPaperCopyable(cs)) return;\n" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_SETTLE", file: PINCH, from: CHOKE, to: bypass("settle") },
+	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_CANCEL", file: PINCH, from: CHOKE, to: bypass("cancel") },
+	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_COMMIT", file: PINCH, from: CHOKE, to: bypass("commit") },
+	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_UNMOUNT", file: PINCH, from: CHOKE, to: bypass("unmount") },
+	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_NOTE_SWITCH", file: PINCH, from: CHOKE, to: bypass("note-switch") },
+	// The copyable check reads the pitch, so a missing pitch skips it rather than failing it.
+	{ env: "HW_PAPER_PREVIEW_PLANT_SWAP_ON_NAN", file: PAPER, from: SWAP_GATE, to: "\t\tif (cs.direction !== \"ltr\" || (pitch !== null && !previewPaperCopyable(cs, pitch))) return;\n" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_SWAP_ON_RTL", file: PAPER, from: SWAP_GATE, to: "\t\tif (pitch === null || !previewPaperCopyable(cs, pitch)) return;\n" },
 	{ env: "HW_PAPER_PREVIEW_PLANT_PARSEFLOAT_PITCH", file: PAN, from: "\tif (!/^(\\d+\\.?\\d*|\\.\\d+)px$/.test(text)) return null;\n", to: "" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_FOLD_WRITTEN_PITCH", file: INK, from: "\t\tconst el = this.previewPaperEl, box = this.previewPaperBox, pitch = this.previewPaperPitch;\n",
+	{ env: "HW_PAPER_PREVIEW_PLANT_FOLD_WRITTEN_PITCH", file: PAPER, from: "\t\tconst el = this.previewPaperEl, box = this.previewPaperBox, pitch = this.previewPaperPitch;\n",
 		to: "\t\tconst el = this.previewPaperEl, box = this.previewPaperBox, pitch = Number.parseFloat(this.paperWritten?.get(\"--handwriting-paper-pitch\") ?? \"\");\n" },
 	{ env: "HW_PAPER_PREVIEW_PLANT_NONE_SWAPS", file: PAN, from: "\tconst image = cs.backgroundImage.trim();\n\tif (!image || image === \"none\") return false;\n", to: "\treturn true;\n\tconst image = cs.backgroundImage.trim();\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_NO_TILE_COPY", file: PAN, from: "\tel.style.backgroundSize = cs.backgroundSize;\n\tel.style.backgroundPosition = cs.backgroundPosition;\n", to: "" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_BOX_ONCE", file: INK, from: "\t\t\tconst contentTopLocal = this.contentTopLocalAt(next);\n\t\t\tthis.measurePreviewPaperBox();\n", to: "\t\t\tconst contentTopLocal = this.contentTopLocalAt(next);\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_COPY_BEFORE_PAN_OFF", file: INK,
-		from: "\t\tthis.clearScrollerPan(scroller);\n\t\tconst el = host.ownerDocument.createElement(\"div\");\n\t\tel.className = \"handwriting-paper-preview\";\n\t\tcopyPreviewPaperBackground(el, cs);\n",
-		to: "\t\tconst el = host.ownerDocument.createElement(\"div\");\n\t\tel.className = \"handwriting-paper-preview\";\n\t\tcopyPreviewPaperBackground(el, cs);\n\t\tthis.clearScrollerPan(scroller);\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_LATE_IN", file: INK, from: "\t\thost.insertBefore(el, scroller);\n", to: "\t\tthis.winRef.requestAnimationFrame(() => host.insertBefore(el, scroller));\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_LATE_OUT", file: INK, from: "\t\tel.remove();\n", to: "\t\tthis.winRef.requestAnimationFrame(() => el.remove());\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_CLASS_LATE_OUT", file: INK, from: "\t\tthis.view?.scrollDOM?.classList.remove(\"handwriting-paper-previewing\");\n",
+	{ env: "HW_PAPER_PREVIEW_PLANT_NO_TILE_COPY", file: PAN, from: "\tel.style.backgroundSize = join(cs.backgroundSize, extra?.backgroundSize ?? \"\");\n\tel.style.backgroundPosition = join(cs.backgroundPosition, extra?.backgroundPosition ?? \"\");\n", to: "" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_BOX_ONCE", file: PINCH, from: "\t\t\tthis.measurePreviewPaperBox(true);\n", to: "" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_LATE_IN", file: PAPER, from: "\t\thost.insertBefore(el, scroller);\n", to: "\t\tthis.winRef.requestAnimationFrame(() => host.insertBefore(el, scroller));\n" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_LATE_OUT", file: PINCH, from: "\t\tel.remove();\n", to: "\t\tthis.winRef.requestAnimationFrame(() => el.remove());\n" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_CLASS_LATE_OUT", file: PINCH, from: "\t\tthis.view?.scrollDOM?.classList.remove(\"handwriting-paper-previewing\");\n",
 		to: "\t\tthis.winRef.requestAnimationFrame(() => this.view?.scrollDOM?.classList.remove(\"handwriting-paper-previewing\"));\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_NO_SNAP", file: INK, from: SNAPPED,
+	{ env: "HW_PAPER_PREVIEW_PLANT_NO_SNAP", file: PAPER, from: SNAPPED,
 		to: "\t\tconst tx = foldIntoPitch(x - this.paperScrollLeft + margin, pitch);\n\t\tconst ty = foldIntoPitch(y - this.paperScrollTop + margin, pitch);\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_SNAP_BEFORE_FOLD", file: INK, from: SNAPPED,
+	{ env: "HW_PAPER_PREVIEW_PLANT_SNAP_BEFORE_FOLD", file: PAPER, from: SNAPPED,
 		to: "\t\tconst tx = foldIntoPitch((Math.round((x - this.paperScrollLeft + margin) * kd + fx) - fx) / kd, pitch);\n\t\tconst ty = foldIntoPitch((Math.round((y - this.paperScrollTop + margin) * kd + fy) - fy) / kd, pitch);\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_SNAP_TRANSLATE_ONLY", file: INK, from: "\t\tconst fx = fractionOf(this.previewPaperPhaseX * kd), fy = fractionOf(this.previewPaperPhaseY * kd);\n", to: "\t\tconst fx = 0, fy = 0;\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_SCROLL_AREA", file: INK, from: "\t\tconst right = host.clientWidth - (left + scroller.clientWidth), bottom = host.clientHeight - (top + scroller.clientHeight);\n",
+	{ env: "HW_PAPER_PREVIEW_PLANT_SNAP_TRANSLATE_ONLY", file: PAPER, from: "\t\tconst fx = fractionOf(this.previewPaperPhaseX * kd), fy = fractionOf(this.previewPaperPhaseY * kd);\n", to: "\t\tconst fx = 0, fy = 0;\n" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_SCROLL_AREA", file: PAPER, from: "\t\tconst right = host.clientWidth - (left + scroller.clientWidth), bottom = host.clientHeight - (top + scroller.clientHeight);\n",
 		to: "\t\tconst right = host.clientWidth - (left + scroller.scrollWidth), bottom = host.clientHeight - (top + scroller.scrollHeight);\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_NO_MARGIN", file: INK, from: "\t\tconst margin = (Math.ceil(pitch * kd - 1e-6) + 1) / kd;\n", to: "\t\tconst margin = 0;\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_LEAK", file: INK, from: "\t\tel.remove();\n", to: "" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_NO_MARGIN", file: PAPER, from: "\t\tconst margin = (Math.ceil(pitch * kd - 1e-6) + 1) / kd;\n", to: "\t\tconst margin = 0;\n" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_LEAK", file: PINCH, from: "\t\tel.remove();\n", to: "" },
 	// The swap-out leaves the scroller carrying what the swap-in left it, instead of the pan in force.
 	// The settle's residual carried with the wrong sign, so the lift moves the paper by twice it.
-	{ env: "HW_PAPER_PREVIEW_PLANT_RESIDUAL_WRONG_SIGN", file: INK, from: "\t\tconst carry = this.pinchPreview ? this.paperSnapResidual : null;\n", to: "\t\tconst carry = this.pinchPreview ? { x: -this.paperSnapResidual.x, y: -this.paperSnapResidual.y } : null;\n" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_STALE_AT_SWAP_OUT", file: INK, from: "\t\tthis.paperPanWritten = null;\n\t\tthis.writePaperPan();\n\t}", to: "\t}" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_RESIDUAL_WRONG_SIGN", file: PAPER, from: "\t\tconst carry = this.pinchPreview ? this.paperSnapResidual : null;\n", to: "\t\tconst carry = this.pinchPreview ? { x: -this.paperSnapResidual.x, y: -this.paperSnapResidual.y } : null;\n" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_STALE_AT_SWAP_OUT", file: PINCH, from: "\t\tthis.paperPanWritten = null;\n\t\tthis.writePaperPan();\n\t}", to: "\t}" },
 	{ env: "HW_PAPER_PREVIEW_PLANT_SKIP_PITCH_GATE", file: PAN, from: "const onPitch = (v: number, pitch: number) => Number.isFinite(v) && Math.abs(v - pitch) <= 1 / 32;", to: "const onPitch = (_v: number, _pitch: number) => true;" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_TWO_ELEMENT_LAYERS", file: PAN, from: "\tel.style.backgroundImage = cs.backgroundImage;\n", to: "\tel.style.backgroundImage = cs.backgroundImage + \", linear-gradient(transparent, transparent)\";\n" },
 	{ env: "HW_PAPER_PREVIEW_PLANT_NO_COLOR_COPY", file: PAN, from: "\tel.style.backgroundColor = cs.backgroundColor;\n", to: "" },
-	{ env: "HW_PAPER_PREVIEW_PLANT_SKIP_RESTORE", file: INK, from: "\t\tthis.view?.scrollDOM?.classList.remove(\"handwriting-paper-previewing\");\n", to: "" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_SKIP_RESTORE", file: PINCH, from: "\t\tthis.view?.scrollDOM?.classList.remove(\"handwriting-paper-previewing\");\n", to: "" },
 ];
 
 beforeAll(async () => {
@@ -122,7 +118,7 @@ beforeAll(async () => {
 		bundle: true, write: false, format: "iife", platform: "browser",
 		alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: active.length ? [{ name: "preview-paper-plants", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|PaperPan)\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|InkOverlayPaperPinch|InkOverlayPinch|PaperPan)\.ts$/ }, args => {
 				let text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
 				for (const pl of active.filter(x => x.file.test(args.path))) {
 					if (text.split(pl.from).length !== 2) throw new Error(`${pl.env}: anchor not found once`);

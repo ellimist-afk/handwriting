@@ -2,6 +2,8 @@
 
 Handwrite, highlight, erase and lasso directly on your notes and PDFs. Your notes stay Markdown.
 
+![picking a pen color, writing, highlighting, then underlining on a note in Obsidian](docs/assets/write.gif)
+
 Open a note and write. The note stays a `.md` file.
 
 ## removing the plugin
@@ -9,6 +11,8 @@ Open a note and write. The note stays a `.md` file.
 your ink is not stored "in" the markdown. it lives in a folder at your vault root, separate from the editor's text.
 
 disable the plugin and your notes STAY EXACTLY THE SAME - the ink just stops rendering. re-enable and it comes back.
+
+![turning the plugin off and back on: the ink fades out, every word stays where it was, then the ink comes back](docs/assets/plugin-off.gif)
 
 one line is written to the invisible frontmatter of a note when you first write on it - `handwriting-page-id`.
 
@@ -32,7 +36,7 @@ Here's a demonstration of some of the features: https://youtu.be/uWcOWixkxEk
 
 * data yours forever
    * your ink is all stored here: your vault's `.handwriting/` folder
-   * [what that folder looks like](https://imgur.com/a/60GBWnn)
+   * [what that folder looks like](#where-is-ink-stored)
 * pressure sensitivity
 * palm rejection
 * pen toolbar with auto-hide
@@ -91,7 +95,9 @@ https://community.obsidian.md/plugins/handwriting
 
 the toolbar sits top right by default. you can drag and drop the toolbar. you can also collapse it by tapping the arrow. there are nine spots to choose from. location and visibility can also be changed in Handwriting settings.
 
-<img width="1125" height="78" alt="toolbarhiandwritng" src="https://github.com/user-attachments/assets/bbc58b06-8eb3-4fb8-ac37-5dc76ff40fc5" />
+![the Handwriting toolbar](docs/assets/toolbar.png)
+
+![dragging the collapsed toolbar around the nine spots, then tapping it open](docs/assets/toolbar-spots.gif)
 
 ### escape
 
@@ -103,25 +109,33 @@ tap a tool and use it: pen, highlighter, eraser, lasso, insert space, or pan. ta
 
 tap the pen, highlighter, or eraser again while it is selected to open its controls.
 
+![the pen's controls: size slider and colors](docs/assets/pen-menu.png)
+
 ### keyboard button
 
 the keyboard button disables pen input so a tap can place the caret and open the on-screen keyboard. this may be useful for viewing pdfs. tap it again to get the pen back. `Handwriting: Pen on / off` does the same from the command palette.
 
-<img width="142" height="128" alt="image" src="https://github.com/user-attachments/assets/532abd8e-9036-4ff8-a455-d94838432ae5" />
+![keyboard button on, selecting text in a pdf](docs/assets/keyboard.png)
 
 ### pen side button
 
-you can change what the side button does. this is useful for android and S pen users. the choices are lasso (default) and eraser (hold to erase OneNote style). can find this option in Handwriting settings.
+you can change what the side button does. this is useful for android and S pen users but others might find it useful. android users will get a "click while hovering to toggle eraser" function while everybody else get "hold to erase OneNote style" when changing this setting. this is due to a quirk in android
 
 ### paper and infinite canvas
 
 you can turn infinite canvas or paper backgrounds on/off individually per-note with the buttons in the top right:
 
-<img width="518" height="236" alt="image_3" src="https://github.com/user-attachments/assets/49b574cb-bdb9-49b3-ac4e-d7f74804b833" />
+![the paper and infinite canvas buttons at the top right of a note](docs/assets/note-buttons.png)
 
 you can also change it via the three dot menu in the top right. But the buttons are easier. there is no difference between the two ways, frontend speaking
 
 you may also find the global option in the Handwriting settings menu. `Handwriting: Paper: none / lines / grid / dots` in the command palette cycles through the paper backgrounds.
+
+![the paper background picker: global, none, lines, grid, dots](docs/assets/paper.png)
+
+with infinite canvas on you can zoom out and keep writing past the edge of the note. `Fit` zooms so all of your ink fits on screen.
+
+![infinite canvas: zooming out, drawing off to the side, then Fit](docs/assets/canvas.gif)
 
 ### mouse input
 
@@ -148,13 +162,25 @@ the commands are hidden by default because their sheer number makes other Handwr
 
 hold the pen still for about a third of a second at the end of a stroke to snap it into a line, triangle, rectangle, circle or ellipse.
 
-<img width="1212" height="974" alt="ghostsnap" src="https://github.com/user-attachments/assets/c025f4de-d102-404b-85c1-d967afd9d101" />
+![drawing a ramp, holding still, and it snaps into a triangle](docs/assets/snap.gif)
 
 with a mouse, pause at the end of a stroke and select Snap.
+
+![the Snap button that shows up after a mouse stroke](docs/assets/snap-mouse.png)
 
 ### lasso and snip
 
 you can lasso ink to move or copy and paste it anywhere in the note, or across different notes. You can also use `Handwriting: Snip the selection to an image` to save what you lassoed as a png next to the file and copy a link to it to your clipboard, so you can paste it into a note.
+
+![lassoing two rings and dragging them somewhere else](docs/assets/lasso.gif)
+
+![a snip pasted into another note, with a link back to the pdf page](docs/assets/snip.png)
+
+### insert space
+
+tap insert space, press on a line and drag down. everything below the line follows your pen, so you get room to write.
+
+![insert space: dragging down from a line to make room, then drawing in it](docs/assets/insert-space.gif)
 
 ### boox and e-ink users
 
@@ -166,14 +192,22 @@ every redraw costs on e-ink, so it turns off smoothing, the pen reticle and anim
 
 you can annotate pdfs. same toolbar. same tools
 
+![a pdf page with a pink highlight and blue pen ink on it](docs/assets/pdf.png)
+
 * `Handwriting: Export ink as SVG (drawing only)` and `Handwriting: Export ink as PDF (drawing only)` export the drawing by itself, cropped to the ink, with no background
 * `Handwriting: Flatten ink into a copy of this PDF` draws the ink into a copy of the pdf so anyone can open it
 
+![the flattened copy open in a different pdf app, ink and all](docs/assets/pdf-flattened.png)
+
 you can also use the native Obsidian Export to PDF command. the page is shrunk to fit the paper export, so your ink should stay on its words. warning: text can come out a little smaller than a plain export.
+
+![a note exported with Export to PDF, ink on its words](docs/assets/export-pdf.png)
 
 ### ink works on slides too
 
 `Handwriting: Toggle slides ink` turns it on while you present.
+
+![ink on a slide while presenting](docs/assets/slides.png)
 
 * `Handwriting: Presentation: undo ink` and `Presentation: redo ink`
 * `Handwriting: Clear ink on this slide`
@@ -214,9 +248,13 @@ your ink is one json file per note in /.handwriting/
 
 (your vault)/.handwriting/
 
+![the .handwriting folder: one json file per note](docs/assets/ink-folder.png)
+
 sidecar is a digital photography term that refers to a small file besides a main file, that holds information about the main file. this is a useful analogy
 
 in this case, the sidecar stores your ink as coordinates - your note is linked to your ink by a single properties line in the properties field of your note. this link + the coordinates tells Obsidian where all the ink is
+
+![source view of a note: the handwriting-page-id line in the frontmatter](docs/assets/page-id.png)
 
 what this means practically is that no matter what happens to the ink, the text in your note will be safe, as the note itself is not modified (besides its frontmatter).
 
@@ -264,7 +302,7 @@ press `Upload` on that window and the report comes straight to me 🙂 paste the
 
 for those of you nervous about sending bug reports: the report holds pen strokes (coordinates and timings) and a few other non-identifying info like cursor offset and the scroll position. it never holds your note's text. 
 
-and i guarantee nothing will leave your device until you press `Upload` button. still uncomfortable with telemetry? `Copy` and `Save to Vault` buttons are offline ways to do bug reports
+and i guarantee nothing will leave your device unless you press `Upload` button. still uncomfortable with telemetry? `Copy` and `Save to Vault` buttons are offline ways to do bug reports
 
 ## coming soon
 

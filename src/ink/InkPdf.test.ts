@@ -249,9 +249,30 @@ describe("the content stream", () => {
 		expect(content.endsWith("Q")).toBe(true);
 	});
 
-	it("merges consecutive strokes of one colour into a single fill", () => {
+	it("fills each pen stroke on its own, setting the colour once per run", () => {
+		// One fill per colour run made a path of every stroke in it: a note of
+		// 4,851 pen strokes became 23 fills of about 34,000 segments each, and
+		// Obsidian's PDF viewer took 7 s to draw the page. One fill per stroke
+		// draws the same page in 0.2 s.
+		const a = stroke("pen", [10, 20], 40, "#111111");
+		const b = stroke("pen", [30, 40], 60, "#111111");
+		const content = inkPdfContent([a, b], 500);
+		expect(content.match(/ f /g)?.length ?? 0).toBe(2);
+		expect(content.match(/ rg /g)?.length ?? 0).toBe(1);
+	});
+
+	it("keeps each pen stroke's path operators byte for byte", () => {
+		const a = stroke("pen", [10, 20], 40, "#111111");
+		const b = stroke("pen", [30, 40], 60, "#111111");
+		const color = pdfColor("pen", "#111111", "#ffffff");
+		expect(inkPdfContent([a, b], 500, "GSa", "#ffffff")).toBe(
+			`q 1 0 0 -1 0 500 cm ${color} rg ${strokePdfOps(a)}f ${strokePdfOps(b)}f Q`
+		);
+	});
+
+	it("keeps a highlighter run as one fill, so a crossing stays one wash", () => {
 		const content = inkPdfContent(
-			[stroke("pen", [10, 20], 40, "#111111"), stroke("pen", [30, 40], 60, "#111111")],
+			[stroke("highlighter", [10, 20], 40, "#ffd60a"), stroke("highlighter", [30, 40], 60, "#ffd60a")],
 			500
 		);
 		expect(content.match(/ f /g)?.length ?? 0).toBe(1);

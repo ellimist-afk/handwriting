@@ -19,6 +19,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
+import claimsSource from "../pdf/PdfClaims.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { PdfInkStore } from "../pdf/PdfInkStore";
@@ -34,15 +36,17 @@ const PDF_PATH = "paper.pdf";
 
 // ---- slice production code out of main.ts ---------------------------------
 const source = mainSource.replace(/\r\n/g, "\n");
+const settingsSource = pluginSettingsSource.replace(/\r\n/g, "\n");
+const claims = claimsSource.replace(/\r\n/g, "\n");
 
 // resolvePdfId, verbatim body.
-const resolveStart = "\tprivate async resolvePdfId(\n\t\tleaf: WorkspaceLeaf,\n\t\troot: HTMLElement,\n\t\tcontroller: PdfInkController\n\t): Promise<void> {\n";
+const resolveStart = "\tasync function resolvePdfId(this: HandwritingPlugin,\n\t\tleaf: WorkspaceLeaf,\n\t\troot: HTMLElement,\n\t\tcontroller: PdfInkController\n\t): Promise<void> {\n";
 const resolveEnd = "\n\t}\n\n\t/**\n\t * Where this PDF's head can be read from";
-expect(source.split(resolveStart)).toHaveLength(2);
-expect(source.split(resolveEnd)).toHaveLength(2);
-const rs = source.indexOf(resolveStart) + resolveStart.length;
-const re = source.indexOf(resolveEnd, rs);
-const resolveBody = source.slice(rs, re);
+expect(claims.split(resolveStart)).toHaveLength(2);
+expect(claims.split(resolveEnd)).toHaveLength(2);
+const rs = claims.indexOf(resolveStart) + resolveStart.length;
+const re = claims.indexOf(resolveEnd, rs);
+const resolveBody = claims.slice(rs, re);
 expect(resolveBody).toContain("(await this.store.readPdfPaths(cid))");
 expect(resolveBody).toContain("await this.pdfStore.ensureLoaded(choice.id);");
 const resolvePdfId = new Function(
@@ -55,25 +59,26 @@ const resolvePdfId = new Function(
 
 // The pane sweep (main.ts:1364-1370), verbatim.
 const sweepStart = "\t\tfor (const [root, controller] of [...this.pdfInk]) {\n\t\t\tif (seen.has(root) && root.isConnected) continue;\n";
-expect(source.split(sweepStart)).toHaveLength(2);
-const ss = source.indexOf(sweepStart);
-const se = source.indexOf("\n\t\t}\n", ss);
-const sweepCode = source.slice(ss, se + 4);
+expect(claims.split(sweepStart)).toHaveLength(2);
+const ss = claims.indexOf(sweepStart);
+const se = claims.indexOf("\n\t\t}\n", ss);
+const sweepCode = claims.slice(ss, se + 4);
 expect(sweepCode).toContain("controller.unmount();");
 const runSweep = new Function(
 	"seen",
 	transformSync(sweepCode, { loader: "ts", target: "es2022" }).code
 );
 
-// Host wiring precondition: the pdf store's host is exactly this in main.ts.
-expect(source).toContain(
+// Host wiring precondition: the pdf store's host is exactly this in loadSettings
+// (settings/PluginSettings.ts).
+expect(settingsSource).toContain(
 	"\t\tthis.pdfStore.attachHost({\n" +
 		"\t\t\tload: (id, options) => this.store.load(id, options),\n" +
 		"\t\t\tschedule: (id, data) => this.store.schedule(id, data),\n"
 );
 // Sink precondition: a committed stroke is applyOp + replaceAll.
-expect(source).toContain("const next = applyOp(this.pdfStore.strokes(id), op);");
-expect(source).toContain("this.pdfStore.replaceAll(id, next);");
+expect(claims).toContain("const next = applyOp(this.pdfStore.strokes(id), op);");
+expect(claims).toContain("this.pdfStore.replaceAll(id, next);");
 
 // ---- fixtures ---------------------------------------------------------------
 function stroke(id: string, x: number): InkStroke {
@@ -250,6 +255,8 @@ describe("main-1-1: PDF id resolution acknowledges another device's revision", (
 		expect(w.host.pdfIds.size).toBe(0);
 		// PRECONDITION: the session record was kept (no forget anywhere in main.ts).
 		expect(source.includes("pdfStore.forget(")).toBe(false);
+		expect(claims.includes("pdfStore.forget(")).toBe(false);
+		expect(settingsSource.includes("pdfStore.forget(")).toBe(false);
 		expect(w.pdfStore.canPersist(ID)).toBe(true);
 
 		// Sync delivers the iPad's revision: A plus its new stroke B.

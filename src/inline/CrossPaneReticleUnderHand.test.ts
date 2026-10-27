@@ -177,6 +177,7 @@ function makeRig(): Rig {
 			classList: {
 				add: (c: string) => void scrollerClasses.add(c),
 				remove: (c: string) => void scrollerClasses.delete(c),
+				contains: (c: string) => scrollerClasses.has(c),
 			},
 			scrollLeft: 0,
 			scrollTop: 0,

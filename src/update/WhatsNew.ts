@@ -198,6 +198,17 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"sync fixes",
 		"toolbar fixes",
 	],
+	"1.4.24": [
+		"big latency and performance patch. hope you guys enjoy -alan :)",
+		"many reading view ink fixes",
+		"slides fixes",
+		"pdf scroll fix",
+		"keyboard popup fix",
+		"export to pdf works",
+		"faster touchpad zoom + fixes",
+		"sync fixes",
+		"android click to erase setting added",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

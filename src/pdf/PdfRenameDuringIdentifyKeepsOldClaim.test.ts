@@ -15,13 +15,15 @@ vi.mock("obsidian", async (importOriginal) => ({
 import HandwritingPlugin from "../main";
 import { TFile } from "obsidian";
 import mainSource from "../main.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { PdfInkStore } from "./PdfInkStore";
 import { isMarkdownPath } from "../util/MarkdownPath";
 import type { InkStroke } from "../ink/Stroke";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const source = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
 const eventsStart =
 	'\t\tthis.registerEvent(\n\t\t\tthis.app.vault.on("rename", (file, oldPath) => {\n\t\t\t\tif (file instanceof TFile && file.extension === "md") {\n\t\t\t\t\tinlineInk.handleRename(';
 const eventsEnd = "\t\t\tthis.pdfModifyTimers?.clear();\n\t\t});";

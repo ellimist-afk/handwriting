@@ -148,6 +148,73 @@ describe("rowsOf", () => {
 	});
 });
 
+describe("rowsOf PDF mark pass", () => {
+	it("judges every narrow row against its host as the first pass left it, not as grown by earlier joins", () => {
+		// One wide host (height 10) with narrow rows chained above it, each a pixel
+		// further left. Only m1 (gap 5) is close enough to the host itself. m2 sits
+		// 22 above the host's own top, so it stays a row even though m1 joined and
+		// the host is now taller: a joined row does not change what the next one is
+		// judged against.
+		const page = [
+			stroke("host", [pt(0, 200), pt(300, 210)]),
+			stroke("m1", [pt(-1, 186), pt(9, 195)]),
+			stroke("m2", [pt(-2, 170), pt(8, 178)]),
+			stroke("m3", [pt(-3, 146), pt(7, 156)]),
+			stroke("m4", [pt(-4, 86), pt(6, 96)]),
+			stroke("m5", [pt(-5, -54), pt(5, -44)]),
+		];
+		expect(legacyRowsOf(page)).toEqual([
+			{ top: -54, bottom: -44, ids: ["m5"] },
+			{ top: 86, bottom: 96, ids: ["m4"] },
+			{ top: 146, bottom: 156, ids: ["m3"] },
+			{ top: 170, bottom: 178, ids: ["m2"] },
+			{ top: 186, bottom: 210, ids: ["host", "m1"] },
+		]);
+	});
+
+	it("keeps both dots of a colon with their line", () => {
+		// The upper dot is 20 above the line's top, inside the line's own height of
+		// 30, so judging against the first-pass line still joins it.
+		const page = [
+			stroke("word", [pt(0, 200), pt(300, 230)]),
+			stroke("dot-low", [pt(150, 188), pt(151, 192)]),
+			stroke("dot-up", [pt(150, 176), pt(151, 180)]),
+		];
+		expect(legacyRowsOf(page)).toEqual([
+			{ top: 176, bottom: 230, ids: ["word", "dot-low", "dot-up"] },
+		]);
+	});
+
+	it("judges a mark against the host's first-pass x-span, not the span a joined mark widened", () => {
+		// A tall host. m1 sits one pixel left of it and joins. m2 sits two pixels left: inside the host's first-pass height, outside
+		// its first-pass x-span, and inside the span only once m1 has joined. Judged against the grown span it would join too.
+		const page = [
+			stroke("host", [pt(0, 200), pt(300, 230)]),
+			stroke("m1", [pt(-1, 190), pt(9, 195)]),
+			stroke("m2", [pt(-2, 180), pt(8, 185)]),
+		];
+		expect(legacyRowsOf(page)).toEqual([
+			{ top: 180, bottom: 185, ids: ["m2"] },
+			{ top: 190, bottom: 230, ids: ["host", "m1"] },
+		]);
+	});
+
+	it("judges a mark against the host's first-pass top and height, not the top a joined mark lifted", () => {
+		// Every mark sits inside the host's first-pass x-span, so only the height and gap legs decide. m1 joins (gap 5, under the
+		// host's height of 10) and lifts the live host top to 190. m2 is 14 above the first-pass top, over the first-pass height,
+		// so it stays its own row; a live height of 20 or a live gap of 4 would join it.
+		const page = [
+			stroke("host", [pt(0, 200), pt(300, 210)]),
+			stroke("m1", [pt(10, 190), pt(20, 195)]),
+			stroke("m2", [pt(10, 182), pt(20, 186)]),
+		];
+		expect(legacyRowsOf(page)).toEqual([
+			{ top: 182, bottom: 186, ids: ["m2"] },
+			{ top: 190, bottom: 210, ids: ["host", "m1"] },
+		]);
+	});
+});
+
 describe("snapLine", () => {
 	const rows = rowsOf([letter("up", 0, 100), letter("down", 0, 200)]);
 

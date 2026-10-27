@@ -150,13 +150,21 @@ window.lazyHighlight = {
 
 /**
  * The hide-blank-layers rule that failed on the device (its InkOverlay.ts change), re-expressed as anchored insertions
- * on this file. Each anchor must be found exactly once, or the plant is refused.
+ * on InkOverlay.ts, InkOverlayPaperPinch.ts and InkOverlayPinch.ts, each insertion naming its file. Each anchor must
+ * be found exactly once in its file, or the plant is refused.
  */
-const PLANT_HIDE_BLANK: { from: string; to: string }[] = [
-	{ from: "\tprivate hideBlankPinchLayers(): void {\n\t\tthis.restorePinchLayers();\n",
-		to: "\tprivate hideBlankPinchLayers(): void {\n\t\tthis.restorePinchLayers();\n\t\tthis.setLayerVisible(this.wetCanvas, true);\n" },
-	{ from: "\t\tthis.wet.beforeWrite = restore;this.highlightWet.beforeWrite = restore;this.tail.beforeWrite = restore;\n\t}\n",
-		to: "\t\tthis.wet.beforeWrite = this.layerWriteHook(this.wet, this.wetCanvas);\n\t\tthis.highlightWet.beforeWrite = this.layerWriteHook(this.highlightWet, this.highlightWetCanvas);\n\t\tthis.tail.beforeWrite = restore;\n\t}\n" +
+const INK = /src[\\/]inline[\\/]InkOverlay\.ts$/, PAPER = /src[\\/]inline[\\/]InkOverlayPaperPinch\.ts$/, PINCH = /src[\\/]inline[\\/]InkOverlayPinch\.ts$/;
+const PLANT_HIDE_BLANK: { file: RegExp; from: string; to: string }[] = [
+	{ file: PAPER, from: "\tfunction hideBlankPinchLayers(this: InkOverlayPlugin): void {\n\t\tthis.restorePinchLayers();\n",
+		to: "\tfunction hideBlankPinchLayers(this: InkOverlayPlugin): void {\n\t\tthis.restorePinchLayers();\n\t\tthis.setLayerVisible(this.wetCanvas, true);\n" },
+	{ file: PAPER, from: "\t\tthis.wet.beforeWrite = restore;this.highlightWet.beforeWrite = restore;this.tail.beforeWrite = restore;\n\t}\n",
+		to: "\t\tthis.wet.beforeWrite = this.layerWriteHook(this.wet, this.wetCanvas);\n\t\tthis.highlightWet.beforeWrite = this.layerWriteHook(this.highlightWet, this.highlightWetCanvas);\n\t\tthis.tail.beforeWrite = restore;\n\t}\n" },
+	{ file: PINCH, from: "\tfunction restorePinchLayers(this: InkOverlayPlugin): void {\n\t\tif (this.wet) this.wet.beforeWrite = undefined;\n",
+		to: "\tfunction restorePinchLayers(this: InkOverlayPlugin): void {\n\t\tconst pinchHeld = this.pinchComposite || (this.pinchHiddenCanvases?.size ?? 0) > 0;\n\t\tif (this.wet) this.wet.beforeWrite = undefined;\n" },
+	{ file: PINCH, from: "\t\tfor (const [canvas,visibility] of this.pinchHiddenCanvases ?? []) canvas.style.visibility = visibility;\n\t\tthis.pinchHiddenCanvases?.clear();\n\t}\n",
+		to: "\t\tfor (const [canvas,visibility] of this.pinchHiddenCanvases ?? []) canvas.style.visibility = visibility;\n\t\tthis.pinchHiddenCanvases?.clear();\n\t\tif (pinchHeld) this.applyLayerVisibility(); else this.armLayerHooks();\n\t}\n" },
+	{ file: INK, from: "\t\tthis.updateExtent();\n\t}\n}\n",
+		to: "\t\tthis.updateExtent();\n\t\tthis.applyLayerVisibility();\n\t}\n" +
 			"\tprivate applyLayerVisibility(): void {\n\t\tif (this.pinchComposite || this.pinchHiddenCanvases?.size) return;\n" +
 			"\t\tthis.setLayerVisible(this.committedCanvas, !this.committedBlank);\n\t\tthis.setLayerVisible(this.highlightCanvas, !this.highlightBlank);\n" +
 			"\t\tthis.setLayerVisible(this.wetCanvas, !this.wet?.provenBlank);\n\t\tthis.setLayerVisible(this.highlightWetCanvas, !this.highlightWet?.provenBlank);\n" +
@@ -165,13 +173,8 @@ const PLANT_HIDE_BLANK: { from: string; to: string }[] = [
 			"\tprivate armLayerHooks(): void {\n\t\tif (this.wet) this.wet.onBlank ??= () => this.applyLayerVisibility();\n\t\tif (this.highlightWet) this.highlightWet.onBlank ??= () => this.applyLayerVisibility();\n" +
 			"\t\tif (this.wet) this.wet.beforeWrite = this.wetCanvas?.style?.visibility === \"hidden\" ? this.layerWriteHook(this.wet, this.wetCanvas) : undefined;\n" +
 			"\t\tif (this.highlightWet) this.highlightWet.beforeWrite = this.highlightWetCanvas?.style?.visibility === \"hidden\"\n\t\t\t? this.layerWriteHook(this.highlightWet, this.highlightWetCanvas) : undefined;\n\t}\n" +
-			"\tprivate layerWriteHook(renderer, canvas) {\n\t\treturn () => {\n\t\t\tthis.restorePinchLayers();\n\t\t\tthis.setLayerVisible(canvas, true);\n\t\t\trenderer.beforeWrite = undefined;\n\t\t};\n\t}\n" },
-	{ from: "\tprivate restorePinchLayers(): void {\n\t\tif (this.wet) this.wet.beforeWrite = undefined;\n",
-		to: "\tprivate restorePinchLayers(): void {\n\t\tconst pinchHeld = this.pinchComposite || (this.pinchHiddenCanvases?.size ?? 0) > 0;\n\t\tif (this.wet) this.wet.beforeWrite = undefined;\n" },
-	{ from: "\t\tfor (const [canvas,visibility] of this.pinchHiddenCanvases ?? []) canvas.style.visibility = visibility;\n\t\tthis.pinchHiddenCanvases?.clear();\n\t}\n",
-		to: "\t\tfor (const [canvas,visibility] of this.pinchHiddenCanvases ?? []) canvas.style.visibility = visibility;\n\t\tthis.pinchHiddenCanvases?.clear();\n\t\tif (pinchHeld) this.applyLayerVisibility(); else this.armLayerHooks();\n\t}\n" },
-	{ from: "\t\tthis.updateExtent();\n\t}\n\n\t/**\n",
-		to: "\t\tthis.updateExtent();\n\t\tthis.applyLayerVisibility();\n\t}\n\n\t/**\n" },
+			"\tprivate layerWriteHook(renderer, canvas) {\n\t\treturn () => {\n\t\t\tthis.restorePinchLayers();\n\t\t\tthis.setLayerVisible(canvas, true);\n\t\t\trenderer.beforeWrite = undefined;\n\t\t};\n\t}\n" +
+			"}\n" },
 ];
 const PLANT = !!process.env.HW_LAZY_HIGHLIGHT_PLANT_HIDE_BLANK;
 /** The lag rig's flags: a GPU canvas, the kind the device draws with. */
@@ -184,9 +187,9 @@ beforeAll(async () => {
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "lazyHighlightPage.ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: PLANT ? [{ name: "lazy-highlight-plant-hide-blank", setup(pluginBuild) {
-			pluginBuild.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			pluginBuild.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|InkOverlayPaperPinch|InkOverlayPinch)\.ts$/ }, args => {
 				let text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
-				for (const pl of PLANT_HIDE_BLANK) {
+				for (const pl of PLANT_HIDE_BLANK.filter(x => x.file.test(args.path))) {
 					const found = text.split(pl.from).length - 1;
 					if (found !== 1) throw new Error(`plant hide-blank: anchor found ${found} times: ${JSON.stringify(pl.from.slice(0, 60))}`);
 					text = text.replace(pl.from, pl.to);

@@ -60,6 +60,65 @@ export function restoreSideButtonErases(): void {
 	setSideButtonErases(stored === true || stored === "true" ? true
 		: stored === false || stored === "false" ? false
 			: sideButtonStore?.defaultErases ?? false);
+	// The click-in-the-air switch is the same device's choice, restored at the same moment. Default on.
+	let air: unknown;
+	try {
+		air = sideButtonStore?.load(AIR_SWITCH_KEY);
+	} catch {
+		// A denied store keeps the default for this session.
+	}
+	airSwitch = !(air === false || air === "false");
+}
+
+/**
+ * Android's half of the side button: a click with the pen in the air switches
+ * pen and eraser (SideButtonAir.ts). Android never forwards a touch made with
+ * the button held, so the contact choice above does nothing there and this
+ * on/off switch takes its row in Settings. Kept on this device, never synced.
+ */
+export const AIR_SWITCH_KEY = "handwriting-side-button-air-switch";
+let airSwitch = true;
+
+export function airSwitchEnabled(): boolean {
+	return airSwitch;
+}
+
+/** The switch takes effect now, even if local persistence is unavailable. */
+export function saveAirSwitch(enabled: boolean): void {
+	airSwitch = enabled;
+	try {
+		sideButtonStore?.save(AIR_SWITCH_KEY, String(enabled));
+	} catch {
+		// The current session keeps the choice; no synced fallback is written.
+	}
+}
+
+/**
+ * The one-time note, "Click the pen button while hovering over the screen to
+ * switch pen and eraser.", is shown once per device: the first time Android takes a touch
+ * made with the button held. True means show it now; the device records that
+ * it was shown. Never while the switch is off. A store that cannot save still
+ * shows it only once this session.
+ */
+export const AIR_HINT_SHOWN_KEY = "handwriting-side-button-air-hint-shown";
+let airHintShownThisSession = false;
+
+export function takeAirSwitchHint(): boolean {
+	if (!airSwitch || airHintShownThisSession) return false;
+	airHintShownThisSession = true;
+	let shown: unknown;
+	try {
+		shown = sideButtonStore?.load(AIR_HINT_SHOWN_KEY);
+	} catch {
+		// Unreadable: treat as not shown; the session flag above keeps it to once.
+	}
+	if (shown === true || shown === "true") return false;
+	try {
+		sideButtonStore?.save(AIR_HINT_SHOWN_KEY, "true");
+	} catch {
+		// Shown once this session all the same.
+	}
+	return true;
 }
 
 /** The setting takes effect now, even if local persistence is unavailable. */
@@ -185,6 +244,8 @@ export function penContactIntent(buttons: number, button: number, m: TipMode): P
 export function resetTipModeForTest(): void {
 	sideButtonStore = null;
 	sideButtonErases = false;
+	airSwitch = true;
+	airHintShownThisSession = false;
 	mode = "nib";
 	listener = null;
 }

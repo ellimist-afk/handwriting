@@ -85,8 +85,14 @@ import { PageStore, PageWriter, newPageWriter } from "./PageStore";
 import { FakeAdapter } from "./FakeAdapter";
 import { PageData, emptyPage } from "../model/PageData";
 import type { InkStroke } from "../ink/Stroke";
-import mainSource from "../main.ts?raw";
+import mainOnly from "../main.ts?raw";
+import applySrc from "../PluginApply.ts?raw";
+import lifecycleSrc from "../PluginLifecycle.ts?raw";
 import { codeOnly } from "../CodeOnly";
+
+// The slides ink switch lives in PluginApply.ts and the slides ink start in
+// PluginLifecycle.ts, both read here with main.ts.
+const mainSource = [mainOnly, applySrc, lifecycleSrc].join("\n");
 
 /**
  * The shipped surface's CODE, without the shipped surface's prose.

@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import postcss from "postcss";
 import css from "../../styles.css?raw";
 import mainSrc from "../main.ts?raw";
+import commandsSrc from "../commands/RegisterCommands.ts?raw";
+import applySrc from "../PluginApply.ts?raw";
+import onloadSrc from "../PluginOnload.ts?raw";
+import settingsSrc from "../settings/PluginSettings.ts?raw";
+import tabSrc from "../settings/HandwritingSettingTab.ts?raw";
 import stripSrc from "./MobileTools.ts?raw";
+import buildRestSrc from "./MobileToolsBuildRest.ts?raw";
+import buttonsSrc from "./MobileToolsButtons.ts?raw";
 import deviceSrc from "./DeviceInput.ts?raw";
 import { codeOnly } from "../CodeOnly";
 import {
@@ -1539,11 +1546,13 @@ describe("MobileTools: a refresh does not write into the slider under a finger",
 		});
 
 		it("paints it from the input event that already reports the value", () => {
-			const at = src.indexOf('input.addEventListener("input"');
+			// The listener is built with the slider pops, in MobileToolsBuildRest.ts.
+			const built = codeOnly(stripSrc + "\n" + buildRestSrc).replace(/\r\n/g, "\n");
+			const at = built.indexOf('input.addEventListener("input"');
 			expect(at, "the slider's input listener is gone").toBeGreaterThan(-1);
-			const end = src.indexOf("});", at);
+			const end = built.indexOf("});", at);
 			expect(end, "the input listener has no end").toBeGreaterThan(at);
-			const body = src.slice(at, end);
+			const body = built.slice(at, end);
 			expect(body).toContain("paintValue(parts)");
 			// Byte for byte what the listener reported before the readout
 			// existed: the paint is an addition to this path, not a change
@@ -3465,7 +3474,8 @@ describe("MobileTools: colour lives in the nib pops and on the nib icons", () =>
  */
 describe("ink-color-cycle survives the strip button that used to exec it", () => {
 	it("is still registered, and still unconditionally", () => {
-		const src = codeOnly(mainSrc);
+		// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+		const src = codeOnly([mainSrc, commandsSrc].join("\n"));
 		const at = src.indexOf(`id: "ink-color-cycle"`);
 		expect(at, "ink-color-cycle is no longer registered in main.ts").toBeGreaterThan(-1);
 		const next = src.indexOf("this.addCommand({", at);
@@ -3479,6 +3489,7 @@ describe("ink-color-cycle survives the strip button that used to exec it", () =>
 		// source: the command id may appear in prose explaining where the
 		// cycle went, and `codeOnly` blanks that before this counts it.
 		expect(codeOnly(stripSrc)).not.toContain("handwriting:ink-color-cycle");
+		expect(codeOnly(buttonsSrc)).not.toContain("handwriting:ink-color-cycle");
 	});
 });
 
@@ -4192,17 +4203,25 @@ describe("normalizeFoldOrder: a saved order made safe", () => {
  * and read through `codeOnly` so a prose mention cannot satisfy it.
  */
 describe("main.ts reads the fold order off disk and applies it", () => {
-	const src = codeOnly(mainSrc).replace(/\r\n/g, "\n");
+	// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+	const src = codeOnly([mainSrc, commandsSrc].join("\n")).replace(/\r\n/g, "\n");
+	// loadSettings and settingsFrom moved to settings/PluginSettings.ts; the onload anchors stay in main.ts.
+	const settingsCode = codeOnly(settingsSrc).replace(/\r\n/g, "\n");
+	// The setting appliers moved to PluginApply.ts.
+	const applyCode = codeOnly(applySrc).replace(/\r\n/g, "\n");
+	// The onload phases moved to PluginOnload.ts; onload itself, which runs them in order, stays in main.ts.
+	const onloadCode = codeOnly(onloadSrc).replace(/\r\n/g, "\n");
 
-	const onlyIndexOf = (needle: string, what: string): number => {
-		const at = src.indexOf(needle);
-		expect(at, `${what} is not in main.ts any more: ${needle}`).toBeGreaterThan(-1);
-		expect(src.indexOf(needle, at + 1), `${what} is no longer unique in main.ts`).toBe(-1);
+	const onlyIndexOf = (needle: string, what: string, text = src, file = "main.ts"): number => {
+		const at = text.indexOf(needle);
+		expect(at, `${what} is not in ${file} any more: ${needle}`).toBeGreaterThan(-1);
+		expect(text.indexOf(needle, at + 1), `${what} is no longer unique in ${file}`).toBe(-1);
 		return at;
 	};
+	const inSettings = (needle: string, what: string): number => onlyIndexOf(needle, what, settingsCode, "PluginSettings.ts");
 
 	it("normalises the saved field rather than trusting it", () => {
-		onlyIndexOf("stripFoldOrder: normalizeFoldOrder(raw?.stripFoldOrder),", "the fold-order normalise");
+		inSettings("stripFoldOrder: normalizeFoldOrder(raw?.stripFoldOrder),", "the fold-order normalise");
 	});
 
 	// WITHIN loadSettings, and only within it. Both anchors below live in
@@ -4219,17 +4238,17 @@ describe("main.ts reads the fold order off disk and applies it", () => {
 	// drag, and every test in this file would stay green while a user's chosen
 	// placement quietly failed to survive a restart.
 	it("registers the placement writer inside loadSettings, and it saves", () => {
-		const hook = onlyIndexOf("setPersistToolbarCorner((corner) => {", "the placement write hook");
+		const hook = inSettings("setPersistToolbarCorner((corner) => {", "the placement write hook");
 		// loadSettings runs from its declaration to the next method, which is
 		// settingsFrom, which it calls.
-		const load = onlyIndexOf("private async loadSettings(): Promise<void> {", "loadSettings");
-		const next = onlyIndexOf("private settingsFrom(", "settingsFrom, after loadSettings");
+		const load = inSettings("async function loadSettings(this: HandwritingPlugin): Promise<void> {", "loadSettings");
+		const next = inSettings("function settingsFrom(", "settingsFrom, after loadSettings");
 		expect(hook, "the hook must be registered inside loadSettings").toBeGreaterThan(load);
 		expect(hook, "the hook must be registered inside loadSettings").toBeLessThan(next);
 
-		const end = src.indexOf("});", hook);
-		expect(end, "the hook body has no end in main.ts any more").toBeGreaterThan(hook);
-		const body = src.slice(hook, end);
+		const end = settingsCode.indexOf("});", hook);
+		expect(end, "the hook body has no end in PluginSettings.ts any more").toBeGreaterThan(hook);
+		const body = settingsCode.slice(hook, end);
 		expect(body).toContain("this.settings.toolbarCorner = corner;");
 		expect(body, "a placement that is not saved does not survive a restart").toContain(
 			"runDetached(this.persistSettings()"
@@ -4237,15 +4256,15 @@ describe("main.ts reads the fold order off disk and applies it", () => {
 	});
 
 	it("applies it inside loadSettings, after the normalise", () => {
-		const normalise = onlyIndexOf(
+		const normalise = inSettings(
 			"stripFoldOrder: normalizeFoldOrder(raw?.stripFoldOrder),",
 			"the fold-order normalise"
 		);
-		const apply = onlyIndexOf("setStripFoldOrder(this.settings.stripFoldOrder);", "the fold-order setter call");
+		const apply = inSettings("setStripFoldOrder(this.settings.stripFoldOrder);", "the fold-order setter call");
 
 		expect(normalise, "the setter must read a normalised order").toBeLessThan(apply);
 
-		const slice = src.slice(normalise, apply);
+		const slice = settingsCode.slice(normalise, apply);
 		expect(slice.length, "the bounded slice collapsed to nothing").toBeGreaterThan(100);
 		expect(slice).toContain("setToolbarCorner(this.settings.toolbarCorner);");
 	});
@@ -4254,19 +4273,28 @@ describe("main.ts reads the fold order off disk and applies it", () => {
 	// before the extension that builds strips is registered, so the fold order
 	// is in place before the session's first strip.
 	it("awaits loadSettings before registering the surface that builds strips", () => {
+		// The registration is in the views phase (PluginOnload.ts); onload runs that phase after the
+		// settings load, so the order is read in onload and the registration inside its phase.
 		const load = onlyIndexOf("await this.loadSettings();", "the settings load");
+		const views = onlyIndexOf("this.onloadViews();", "the views phase call");
+		const phase = onlyIndexOf("function onloadViews(this: HandwritingPlugin): void {", "the views phase", onloadCode, "PluginOnload.ts");
+		const after = onlyIndexOf("function onloadNoteChrome(this: HandwritingPlugin): void {", "the phase after views", onloadCode, "PluginOnload.ts");
 		const host = onlyIndexOf(
 			"this.registerEditorExtension(inkOverlayExtension());",
-			"the note surface's strip host"
+			"the note surface's strip host",
+			onloadCode,
+			"PluginOnload.ts"
 		);
-		expect(load, "settings must be read before any surface exists").toBeLessThan(host);
+		expect(load, "settings must be read before any surface exists").toBeLessThan(views);
+		expect(host, "the strip host is registered in the views phase").toBeGreaterThan(phase);
+		expect(host, "the strip host is registered in the views phase").toBeLessThan(after);
 	});
 
 	// The writer the settings control will call. It exists before the control
 	// does so that slice adds a row and nothing else.
 	it("has a write path that normalises, applies and saves", () => {
-		const at = onlyIndexOf("applyStripFoldOrder(order: readonly string[]): void {", "the fold-order writer");
-		const body = src.slice(at, at + 400);
+		const at = onlyIndexOf("applyStripFoldOrder(this: HandwritingPlugin, order: readonly string[]): void {", "the fold-order writer", applyCode, "PluginApply.ts");
+		const body = applyCode.slice(at, at + 400);
 		expect(body).toContain("normalizeFoldOrder(order)");
 		expect(body).toContain("setStripFoldOrder(next)");
 		expect(body).toContain("this.settings.stripFoldOrder = next;");
@@ -5041,12 +5069,15 @@ describe("zoom bar visibility and Infinite Canvas", () => {
 
 	// The wiring this module cannot do for itself: the strip has no way to
 	// read the setting, so main.ts must tell it at load AND at every flip of
-	// the row. Both sites, in main.ts's own source.
+	// the row. Both sites, in their own source: main.ts at load, the settings
+	// tab at the row.
 	it("main.ts tells the strip about the canvas at load and at the row", () => {
-		const code = codeOnly(mainSrc);
+		// The load site moved with the settings code to settings/PluginSettings.ts.
+		const code = codeOnly(settingsSrc);
+		const tab = codeOnly(tabSrc);
 		expect(code.includes("setZoomBarCanvasEnabled(this.settings.extendCanvasWhileScrolling)"), "at load").toBe(true);
-		expect(code.includes("setZoomBarCanvasEnabled(on)"), "at the row").toBe(true);
-		expect(code.includes("refreshNoteZoomControlsAll()"), "the push").toBe(true);
+		expect(tab.includes("setZoomBarCanvasEnabled(on)"), "at the row").toBe(true);
+		expect(tab.includes("refreshNoteZoomControlsAll()"), "the push").toBe(true);
 	});
 });
 

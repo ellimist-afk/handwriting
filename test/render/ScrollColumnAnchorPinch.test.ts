@@ -91,6 +91,20 @@ const zoomedWrites = (writes: { styleZoom: string; base: string }[]) => writes.f
 declare const process: { env: Record<string, string | undefined> };
 let browser: Browser, script: string;
 const report: unknown[] = [];
+/**
+ * Z1 PLANTS, one per run (HW_Z1_PLANT), each a source rewrite whose anchor must match exactly once. correction0: the
+ * zoom lift's line correction forced to 0 (the line under the fingers moves at the lift). settlepan: the settle's pan
+ * lands 8 px below where it aims (the focal point's own defect, with no height-map shift in it). inkoffset: the ink
+ * layer painted 36 px (1.5 rows) below its words (committed ink off its text).
+ */
+const Z1_PLANTS: Record<string, [string, string, string]> = {
+	correction0: ["InkOverlayZoomApi", "moved=this.view.lineBlockAt(fingerLine.pos).top/scaleY-fingerLine.top-(settleLineApplied.get(hold)??0);", "moved=0;"],
+	settlepan: ["InkOverlayPanSettle", "pan.x = cx; pan.y = cy;", "pan.x = cx; pan.y = settling ? cy + 8 : cy;"],
+	inkoffset: ["InkOverlayPinch", "const y = (this.previewInkOffsetY || 0) + this.panY() * s", "const y = 36 + (this.previewInkOffsetY || 0) + this.panY() * s"],
+};
+const Z1_PLANT = process.env.HW_Z1_PLANT ?? "";
+if (Z1_PLANT && !Z1_PLANTS[Z1_PLANT]) throw new Error(`unknown HW_Z1_PLANT ${Z1_PLANT}`);
+let z1PlantHits = 0;
 
 beforeAll(async () => {
 	const b = await build({
@@ -100,18 +114,24 @@ beforeAll(async () => {
 		format: "iife",
 		platform: "browser",
 		alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
-		plugins: process.env.HW_PINCH_DEMAND_PLANT ? [{ name: 'missing-settle-demand', setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => ({ loader: 'ts',
-				contents: readFileSync(args.path, 'utf8').replace('expansion: scrollExpansionEnabled && (left !== null || top !== null)', 'expansion: false && (left !== null || top !== null)') }));
+		plugins: Z1_PLANT ? [{ name: "z1-plant", setup(builder) {
+			const [file, from, to] = Z1_PLANTS[Z1_PLANT]!;
+			builder.onLoad({ filter: new RegExp(`src[\\\\/]inline[\\\\/]${file}\\.ts$`) }, args => {
+				const source = readFileSync(args.path, "utf8"), hits = source.split(from).length - 1;
+				if (hits !== 1) throw new Error(`z1 plant ${Z1_PLANT}: anchor matched ${hits} times, want 1`);
+				z1PlantHits++;
+				return { loader: "ts", contents: source.replace(from, to) };
+			});
 		} }] : process.env.HW_TAKEOVER_WALK_PLANT ? [{ name: 'takeover-margin-walk', setup(builder) {
 			// PLANT for the takeover column pin: the margin walk at takeover, the read that froze 0.
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlayViewportBox\.ts$/ }, args => {
 				const source = readFileSync(args.path, 'utf8'), from = '(box?this.ownedColumnLayoutLeft(natural.line):null)';
 				if (!source.includes(from)) throw new Error('takeover walk plant: anchor not found');
 				return { loader: 'ts', contents: source.replace(from, 'this.ownedColumnLayoutLeft(natural.line)') };
 			});
 		} }] : [],
 	});
+	if (Z1_PLANT && z1PlantHits !== 1) throw new Error(`z1 plant ${Z1_PLANT}: the planted file was bundled ${z1PlantHits} times, want 1`);
 	script = b.outputFiles[0]!.text;
 	browser = await chromium.launch({ headless: true });
 }, 180_000);
@@ -509,6 +529,31 @@ async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: 
 			// INK AGAINST THE TEXT, BOTH FROM THE SAME SCREENSHOT, in note px.
 			f.inkMinusTextNote = f.textLeftX === null || f.detectedX === null ? null : (f.detectedX - f.textLeftX) / f.scale;
 			f.backingOffDevice = f.backing?.rectMappedX == null || f.expectedX === null ? null : (f.backing.rectMappedX - f.expectedX) * dpr;
+			// The ink's detected top and bottom on screen, each only where the image edge did not cut it.
+			f.inkTop = d.n && d.minY > 3 ? f.clip.y + d.minY / dpr : null;
+			f.inkBottom = d.n && d.maxY < d.h - 4 ? f.clip.y + (d.maxY + 1) / dpr : null;
+		}
+		// THE INK AGAINST ITS WORDS (the external-scale cells). A settle lays the text out again at the new size, the lines
+		// above re-wrap and the words move; the ink follows them. So the row under the ink's top is read on every frame as a
+		// drift from home in rows (the ink's top against the top of the row it sat on at home, that row found again by its
+		// line number), and the words under the ink are whole on screen when the lines from the ink's top to its bottom at
+		// home are all drawn inside the pane.
+		const rowAt = (f: any, y: number | null): { line: number; row: number; at: number } | null => {
+			if (y === null) return null;
+			const l = (f.rows as number[][]).find(([, top, bottom]) => y >= top! && y < bottom!);
+			if (!l) return null;
+			const rows = (y - l[1]!) / l[3]!;
+			return { line: l[0]!, row: Math.floor(rows), at: rows - Math.floor(rows) };
+		};
+		const home = r.frames[0], homeTop = rowAt(home, home.inkTop), homeBottom = rowAt(home, home.inkBottom);
+		for (const f of r.frames) {
+			const l = homeTop ? (f.rows as number[][]).find(([n]) => n === homeTop.line) : undefined;
+			f.wordsDriftRows = !homeTop || !l || f.inkTop === null ? null : (f.inkTop - l[1]!) / l[3]! - (homeTop.row + homeTop.at);
+			const words = homeTop && homeBottom ? (f.rows as number[][]).filter(([n]) => n! >= homeTop.line && n! <= homeBottom.line) : [];
+			f.wordsWhole = !!homeTop && !!homeBottom && words.length === homeBottom.line - homeTop.line + 1 &&
+				words.every(([, top, bottom]) => top! >= f.clip.y && bottom! <= f.clip.y + f.clip.height);
+			const under = rowAt(f, f.inkTop);
+			f.wordsUnder = under ? `L${under.line} r${under.row}` : null;
 		}
 		// THE DETECTOR'S OWN POSITIVE CONTROL: the rest frame's pixels redrawn
 		// 20 device px to the right must read back 20 px to the right.
@@ -546,7 +591,9 @@ async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: 
 				`      colX=${f.colX === null ? "null" : f.colX.toFixed(2)} exp=(${f.expectedX === null ? "null" : f.expectedX.toFixed(2)},${f.expectedY.toFixed(2)}|line ${f.expectedYLine === null ? "null" : f.expectedYLine.toFixed(2)}) det=(${f.detectedX === null ? "null" : f.detectedX.toFixed(2)},${f.detectedY === null ? "null" : f.detectedY.toFixed(2)}) text=${f.textLeftX === null ? "null" : f.textLeftX.toFixed(2)} ` +
 				`layer=${JSON.stringify(f.before.layerT)} sizer=${JSON.stringify(f.before.sizerT)} cam=${f.before.cam} sl=${f.before.sl} st=${f.before.st} diag=${JSON.stringify(f.diag)} others=${JSON.stringify(f.others)}` +
 				(f.stable ? "" : ` after=${JSON.stringify(f.after)}`) +
-				(f.backing ? ` backingCx=${f.backing.cx} backingRectOff=${f.backingOffDevice === null ? "null" : f.backingOffDevice.toFixed(2)}` : "")).join("\n"));
+				(f.backing ? ` backingCx=${f.backing.cx} backingRectOff=${f.backingOffDevice === null ? "null" : f.backingOffDevice.toFixed(2)}` : "") +
+				// The mark's shown correction (world units, and screen px at the frame's scale) and the old-ink passes so far.
+				(f.lineAnchor ? `\n      lineAnchor anchored=${f.lineAnchor.anchored}/${f.lineAnchor.of} dy=[${f.lineAnchor.dyMin.toFixed(3)},${f.lineAnchor.dyMax.toFixed(3)}] shownDyPx=${(f.lineAnchor.dyMax * f.scale).toFixed(2)} oldInkPasses=${f.lineAnchor.passes.runs} took=${f.lineAnchor.passes.took}` : "")).join("\n"));
 
 		// LIVENESS first: a fixture that drew nothing, never pinched or never
 		// scrolled reports a clean zero.
@@ -612,6 +659,7 @@ async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: 
 			// eslint-disable-next-line no-console
 			console.log(`SCPX-EXT-ZOOM-IN ${f.label} present=${f.present} off=${f.offDevice === null ? "null" : f.offDevice.toFixed(1)} inkOffset=${f.previewInkOffset} attempts=${f.attempts} stable=${f.stable}`);
 		}
+		let wordsWholeFrames = 0;
 		for (const f of legFrames) {
 			// A capture the compositor changed under (three attempts exhausted)
 			// is recorded rather than asserted in the external cell only; its
@@ -622,13 +670,29 @@ async function pixelRegime(readable: boolean, infiniteCanvas: boolean, options: 
 				console.log(`SCPX-HELD-IN ${f.label} present=${f.present} n=${f.detected} off=${f.offDevice === null ? "null" : f.offDevice.toFixed(1)} cam=${JSON.stringify(f.before?.cam ?? null)} layer=${JSON.stringify(f.before?.layerT ?? null)} attempts=${f.attempts}`);
 			}
 			if (!(externalCell && !f.stable)) expect.soft(f.stable, `${f.label}: state changed during the capture ${JSON.stringify(f.after)}`).toBe(true);
-			expect.soft(f.inPane, `${f.label}: layout puts the mark outside the pane`).toBe(true);
 			if (f.outsidePane) expect.soft(f.outsidePane.outside, `${f.label}: ink painted outside the pane (${JSON.stringify(f.outsidePane)})`).toBe(0);
+			// The ink is judged against its words, in every cell: on the row it sat on at home, and whole on screen, on its
+			// column, only when those words are. The zoom lift holds the LINE under the fingers, so the page point the old
+			// layout box (inPane) predicted is no longer where a settle puts the words; the words are what the ink must follow.
+			// eslint-disable-next-line no-console
+			console.log(`SCPX-WORDS ${f.label} under=${f.wordsUnder} driftRows=${f.wordsDriftRows === null ? "null" : f.wordsDriftRows.toFixed(3)} wordsWhole=${f.wordsWhole} inPane=${f.inPane}`);
+			// THE DRIFT VERDICT WAITS FOR THE FINGERS TO LIFT AND THE SETTLE TO CLOSE: under a held pinch
+			// the line anchors are held and re-read only once the editor is quiet, so a preview or pause frame reads that hold,
+			// not the ink. Those frames keep presence, whole, column and outsidePane.
+			const fingersUp = !/ r=| pause/.test(f.label);
+			if (fingersUp && (f.wordsDriftRows !== null || f.wordsWhole)) expect.soft(f.wordsDriftRows === null ? Infinity : Math.abs(f.wordsDriftRows),
+				`${f.label}: the ink's top is ${f.wordsDriftRows === null ? "not found" : f.wordsDriftRows.toFixed(2) + " rows"} off the row it sat on at home (under it now: ${f.wordsUnder})`).toBeLessThan(0.5);
+			if (!f.wordsWhole) continue;
+			wordsWholeFrames++;
 			expect.soft(f.present, `${f.label}: ink not found whole on screen (${f.detected} of ${Math.round(f.area)} px, ratio ${f.areaRatio}, clipped ${f.clipped})`).toBe(true);
 			const want = f.phase === "control" ? 20 * f.scale * f.dpr : 0;
 			expect.soft(f.offDevice === null ? Infinity : Math.abs(f.offDevice - want),
 				`${f.label}: ink ${f.offDevice === null ? "not found" : f.offDevice.toFixed(2) + " device px"} from ${want ? "the +20 control position" : "the text column's layout"} (tol ${f.tol.toFixed(2)})`).toBeLessThanOrEqual(f.tol);
 		}
+		// LIVENESS for the words gate: a mark whose words are never whole on screen asserts nothing past it.
+		// eslint-disable-next-line no-console
+		console.log(`SCPX-WORDS-WHOLE ${wordsWholeFrames} of ${legFrames.length}`);
+		if (legFrames.length) expect(wordsWholeFrames, "no frame had the ink's words whole on screen, so presence and column went unasserted").toBeGreaterThan(0);
 		return out;
 	} finally {
 		await page.close();
@@ -2661,6 +2725,13 @@ for (const input of ['remove','recreate','reconfigureAll','mappedRemove','foreig
 			const r = await page.evaluate(mode => (window as any).scrollColumnAnchor.runFocal(true, true, true, 'delayed', mode), mode); report.push(r); results.push(r);
 			expect(r.heldMeasures).toBeGreaterThan(0); expect(r.cancellation.heldBefore).toBe(true); expect(r.cancellation.revokedAfter).toBe(true);
 		} finally { await page.close(); }
+	}
+	// THE RECREATE READ: per step, the scroll top, the live overlay, the strokes' line corrections, the frontier of the
+	// strokes as shown, the granted extent and the spacer, for the run and its control.
+	if (input === 'recreate') for (const r of results) {
+		// eslint-disable-next-line no-console
+		console.log(`RECREATE-STEPS ${r.cancellation.input} baseline top ${r.cancellation.baseline.top} drained top ${r.cancellation.drained?.top}\n` +
+			r.cancellation.steps.map((s: any) => '  ' + JSON.stringify(s)).join('\n'));
 	}
 	for (const r of results) {
 		expect(r.cancellation.consumerAfterCleanup).not.toContain('consumeViewportScroll');

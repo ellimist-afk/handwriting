@@ -16,7 +16,7 @@ import { SelectionModel } from "../objects/SelectionModel";
 import { DamageLedger } from "../ink/DamageLedger";
 import { StrokeIndex } from "../ink/StrokeIndex";
 import { FrontierCache } from "../inline/FrontierCache";
-import type { InkStroke } from "../ink/Stroke";
+import type { BBox, InkStroke } from "../ink/Stroke";
 
 const NOTE = "a2-drag-top.md";
 const stroke: InkStroke = {
@@ -32,6 +32,18 @@ const stroke: InkStroke = {
 	createdAt: 1,
 } as InkStroke;
 
+/**
+ * The backing the fixture's committed layers report, the stand-in's ratio, so a drag's offset is not whole backing px. The lift
+ * moves the store by the offset the picture showed: each axis's total to whole backing px at the lift's camera, in y the next
+ * px down when the nearest would put the grab's box above the note's top (shownLassoOffset).
+ */
+const K = 1.8257;
+const q = (v: number, k = K) => Math.round(v * k) / k;
+const qy = (v: number, boxY: number, k = K) => {
+	const y = Math.round(v * k);
+	return (y / k < Math.min(0, -boxY) ? Math.ceil(v * k) : y) / k;
+};
+
 const s = (x: number, y: number) => ({ x, y, pressure: 0.5, timestamp: 0, tiltX: 0, tiltY: 0 });
 const proto = InkOverlayPlugin.prototype as unknown as Record<string, (...a: unknown[]) => void>;
 
@@ -41,7 +53,8 @@ function overlay(extra: Record<string, unknown> = {}): Record<string, unknown> {
 		filePath: () => NOTE,
 		scale: 1,
 		cssScale: 1,
-		camera: { screenToWorld: (x: number, y: number) => ({ x, y }) },
+		camera: { screenToWorld: (x: number, y: number) => ({ x, y }), snapshot: { x: 0, y: 0, zoom: 1 } },
+		committedBacking: K,
 		selection: new SelectionModel(),
 		damage: new DamageLedger(),
 		strokeIndex: new StrokeIndex(),
@@ -114,14 +127,18 @@ it("the wall: the ink stops at the top, and follows again from where it stopped,
 	const o = overlay();
 	(o.selection as SelectionModel).selectExactly(["s1"]);
 	proto.lassoDown!.call(o, s(130, 50)); // grab 10 below the selection's top (40)
+	// A drag sample moves no store (the selected ink rides the tail as a picture, the lift moves the store once): the wall
+	// holds the drag's own box, which the picture and the lift follow.
+	const box = () => (proto.selectionBounds!.call(o) as unknown as BBox).y;
 	proto.lassoMove!.call(o, [s(130, -400)]);
-	expect(bboxOf().y, "stopped at the top").toBe(0);
+	expect(box(), "stopped at the top").toBe(0);
 	proto.lassoMove!.call(o, [s(130, -300)]); // the pen comes back down, still above where the ink stopped
-	expect(bboxOf().y, "no jump while the pen is above the stop point").toBe(0);
+	expect(box(), "no jump while the pen is above the stop point").toBe(0);
 	proto.lassoMove!.call(o, [s(130, 30)]); // the stop point was pen y 10; now 20 below it
-	expect(bboxOf().y, "the grab point is under the pen again").toBe(20);
+	expect(box(), "the grab point is under the pen again").toBe(20);
+	expect([o.dragTotal, bboxOf().y], "the drag's distance; the store unmoved until the lift").toEqual([{ dx: 0, dy: -20 }, 40]);
 	proto.lassoUp!.call(o);
-	expect(bboxOf().y).toBe(20);
+	expect(bboxOf().y, "the store after the lift is the wall-held box, at the offset the picture showed").toBeCloseTo(40 + qy(-20, 40), 9);
 });
 
 it("the wall for insert space: the ink stops at the top, and follows again from where it stopped, grab point under the pen", () => {
@@ -131,12 +148,16 @@ it("the wall for insert space: the ink stops at the top, and follows again from 
 		spacePlan: { y: 30, from: doc.length, lineHeight: 24, text: false, doc },
 		spaceLineY: 30, spaceFromY: 50, spaceTotalDy: 0, spaceIds: ["s1"], spaceBounds: { ...stroke.bbox }, spaceHistoryIdentity: null,
 	});
+	// A drag sample moves no store (the moving ink rides the tail as a picture, the release moves the store once): the wall
+	// holds the drag's own box, which the picture and the release follow.
+	const box = () => (o.spaceBounds as { y: number }).y;
 	proto.spaceMove!.call(o, [s(130, -400)]); // ink top 40, grab 50: stops at 0 when the pen passes 10
-	expect(bboxOf().y, "stopped at the top").toBe(0);
+	expect(box(), "stopped at the top").toBe(0);
 	proto.spaceMove!.call(o, [s(130, -300)]); // the pen comes back down, still above where the ink stopped
-	expect(bboxOf().y, "no jump while the pen is above the stop point").toBe(0);
+	expect(box(), "no jump while the pen is above the stop point").toBe(0);
 	proto.spaceMove!.call(o, [s(130, 30)]); // the stop point was pen y 10; now 20 below it
-	expect(bboxOf().y, "the grab point is under the pen again").toBe(20);
+	expect(box(), "the grab point is under the pen again").toBe(20);
+	expect([o.spaceTotalDy, bboxOf().y], "the drag's distance; the store unmoved until the release").toEqual([-20, 40]);
 });
 
 it("the wall leaves sideways movement alone", () => {
@@ -145,8 +166,9 @@ it("the wall leaves sideways movement alone", () => {
 	proto.lassoDown!.call(o, s(130, 50));
 	proto.lassoMove!.call(o, [s(300, -400)]);
 	proto.lassoUp!.call(o);
-	expect(bboxOf().x, "the whole sideways distance").toBe(100 + 170);
-	expect(bboxOf().y).toBe(0);
+	expect(bboxOf().x, "the whole sideways distance, as the picture showed it").toBeCloseTo(100 + q(170), 9);
+	expect(bboxOf().y, "at the top, as the picture showed it").toBeCloseTo(40 + qy(-40, 40), 9);
+	expect(bboxOf().y, "ink left above the top of the note").toBeGreaterThanOrEqual(0);
 });
 
 it("ink already above the top can be dragged down, not further up", () => {
@@ -156,20 +178,38 @@ it("ink already above the top can be dragged down, not further up", () => {
 	const o = overlay();
 	(o.selection as SelectionModel).selectExactly(["s1"]);
 	proto.lassoDown!.call(o, s(130, -90));
+	const box = () => (proto.selectionBounds!.call(o) as unknown as BBox).y;
 	proto.lassoMove!.call(o, [s(130, -500)]);
-	expect(bboxOf().y, "not further up").toBe(-100);
+	expect(box(), "not further up").toBe(-100);
 	proto.lassoMove!.call(o, [s(130, -60)]);
-	expect(bboxOf().y, "down by the pen's distance below the grab point").toBe(-70);
+	expect(box(), "down by the pen's distance below the grab point").toBe(-70);
+	expect([o.dragTotal, bboxOf().y], "the drag's distance; the store unmoved until the lift").toEqual([{ dx: 0, dy: 30 }, -100]);
 	proto.lassoUp!.call(o);
+	expect(bboxOf().y, "the store after the lift is the drag's box, at the offset the picture showed").toBeCloseTo(-100 + qy(30, -100), 9);
 });
 
 it("the wall at 200 percent: the top in note units, not screen pixels", () => {
-	const o = overlay({ scale: 2, cssScale: 2, camera: { screenToWorld: (x: number, y: number) => ({ x: x / 2, y: y / 2 }) } });
+	const o = overlay({ scale: 2, cssScale: 2, camera: { screenToWorld: (x: number, y: number) => ({ x: x / 2, y: y / 2 }), snapshot: { x: 0, y: 0, zoom: 2 } } });
 	(o.selection as SelectionModel).selectExactly(["s1"]);
 	proto.lassoDown!.call(o, s(260, 100)); // note (130, 50)
 	proto.lassoMove!.call(o, [s(260, -4000)]);
 	proto.lassoUp!.call(o);
-	expect(bboxOf().y).toBe(0);
+	expect(bboxOf().y, "at the top, as the picture showed it at zoom 2").toBeCloseTo(40 + qy(-40, 40, 2 * K), 9);
+	expect(bboxOf().y, "ink left above the top of the note").toBeGreaterThanOrEqual(0);
+});
+
+it("a drag at 200 percent off the wall: the lift lands at the offset the picture showed at zoom 2", () => {
+	// 39.7 note units is 144.96 backing px at 2K, so 145, and 72.48 at K, so 72: twice that is 144. A lift that rounds at the
+	// backing alone, without the camera's zoom, lands one backing px off the picture.
+	expect([Math.round(39.7 * 2 * K), 2 * Math.round(39.7 * K)], "premise: the total rounds apart at 2K and at K").toEqual([145, 144]);
+	const o = overlay({ scale: 2, cssScale: 2, camera: { screenToWorld: (x: number, y: number) => ({ x: x / 2, y: y / 2 }), snapshot: { x: 0, y: 0, zoom: 2 } } });
+	(o.selection as SelectionModel).selectExactly(["s1"]);
+	proto.lassoDown!.call(o, s(260, 100)); // note (130, 50)
+	proto.lassoMove!.call(o, [s(260 + 79.4, 100 + 79.4)]); // 39.7 note units right and down, clear of the top
+	expect(bboxOf().y, "the store unmoved until the lift").toBe(40);
+	proto.lassoUp!.call(o);
+	expect(bboxOf().x, "sideways, at the offset the picture showed at zoom 2").toBeCloseTo(100 + q(39.7, 2 * K), 9);
+	expect(bboxOf().y, "down, at the offset the picture showed at zoom 2").toBeCloseTo(40 + q(39.7, 2 * K), 9);
 });
 
 it("insert space over blank lines: the text closes up by the distance the ink moved at the wall", () => {

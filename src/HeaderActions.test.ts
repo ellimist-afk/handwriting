@@ -1,20 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "./main.ts?raw";
+import headerSource from "./view/HeaderActions.ts?raw";
+import tabSource from "./settings/HandwritingSettingTab.ts?raw";
+import onloadSource from "./PluginOnload.ts?raw";
 
-const source = mainSource.replace(/\r\n/g, "\n");
-const start = "\tregisterHeaderActions(): void {";
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const source = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
+const header = headerSource.replace(/\r\n/g, "\n");
+const tabText = tabSource.replace(/\r\n/g, "\n");
+const start = "\tfunction registerHeaderActions(this: HandwritingPlugin): void {";
 const end = "\n\t}\n";
 
 type Action = { icon: string; title: string; click: () => void; removed: boolean; classList: { add(c: string): void; contains(c: string): boolean; toggle(c: string, on: boolean): void } };
 class FakeFile { constructor(public path: string, public extension = "md") {} }
 
 function harness(global = false, initialPresence: "ink" | "none" | "unknown" = "ink", phone = false, availableIcons = new Set(["scan", "grid-3x-3", "layout-grid"])) {
-	const at = source.indexOf(start);
+	const at = header.indexOf(start);
 	expect(at, "the registered header action method exists").toBeGreaterThanOrEqual(0);
-	const stop = source.indexOf(end, at);
+	const stop = header.indexOf(end, at);
 	expect(stop).toBeGreaterThan(at);
-	const body = source.slice(at, stop + end.length).replace(start, "function () {");
+	const body = header.slice(at, stop + end.length).replace(start, "function () {");
 	const callbacks = new Map<string, ((...args: unknown[]) => void)[]>();
 	const watch = (name: string, cb: (...args: unknown[]) => void) => { callbacks.set(name, [...(callbacks.get(name) ?? []), cb]); return cb; };
 	const fire = (name: string, ...args: unknown[]) => { for (const cb of callbacks.get(name) ?? []) cb(...args); };
@@ -80,20 +86,20 @@ function harness(global = false, initialPresence: "ink" | "none" | "unknown" = "
 		return items;
 	};
 	const controlStart = "\tsetControlValue(key: string, value: unknown): void {";
-	const controlAt = source.indexOf(controlStart);
+	const controlAt = tabText.indexOf(controlStart);
 	expect(controlAt, "the settings control method exists").toBeGreaterThanOrEqual(0);
-	const controlStop = source.indexOf(end, controlAt);
+	const controlStop = tabText.indexOf(end, controlAt);
 	expect(controlStop).toBeGreaterThan(controlAt);
-	const controlBody = source.slice(controlAt, controlStop + end.length).replace(controlStart, "function (key: string, value: unknown) {");
+	const controlBody = tabText.slice(controlAt, controlStop + end.length).replace(controlStart, "function (key: string, value: unknown) {");
 	const controlDeps = { ...deps, setScrollExpansionEnabled: () => {}, setZoomBarCanvasEnabled: () => {}, refreshNoteZoomControlsAll: () => {} };
 	const controlCode = transformSync(`return (${controlBody})`, { loader: "ts", target: "es2022" }).code;
 	const control = new Function(...Object.keys(controlDeps), controlCode)(...Object.values(controlDeps)) as (this: { plugin: typeof plugin; rerender(): void }, key: string, value: unknown) => void;
 	const paintStart = "\tprivate paint(el: HTMLElement, items: readonly LegacySettingItem[]): void {";
-	const paintAt = source.indexOf(paintStart);
+	const paintAt = tabText.indexOf(paintStart);
 	expect(paintAt, "the settings painter exists").toBeGreaterThanOrEqual(0);
-	const paintStop = source.indexOf(end, paintAt);
+	const paintStop = tabText.indexOf(end, paintAt);
 	expect(paintStop).toBeGreaterThan(paintAt);
-	const paintBody = source.slice(paintAt, paintStop + end.length).replace(paintStart, "function (el: HTMLElement, items: readonly LegacySettingItem[]) {");
+	const paintBody = tabText.slice(paintAt, paintStop + end.length).replace(paintStart, "function (el: HTMLElement, items: readonly LegacySettingItem[]) {");
 	const toggleCallback = { onChange: null as ((value: boolean) => void) | null };
 	class RecordingSetting {
 		constructor(_el: unknown) {}

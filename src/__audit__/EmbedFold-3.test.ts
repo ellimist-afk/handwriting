@@ -10,7 +10,8 @@
  * damage-locked and the ink is never saved.
  *
  * Production code driven: warnUnusablePageId, notePageId and claimNotePageId
- * sliced verbatim out of main.ts and executed with a fake `this` (vault,
+ * from persistence/PageIdentity.ts, installed on a stand-in and called with a
+ * fake `this` (vault,
  * metadataCache, real PageIdIndex); the real claimMarkdown, isSafePageId,
  * InlineInkStore and PageStore (over FakeAdapter), with the inline host wired
  * as main.ts:2033-2037.
@@ -18,9 +19,11 @@
  * Assertions state the CORRECT behaviour: green = no bug, red = bug.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
-import { claimMarkdown } from "../inline/InlineClaim";
+import onloadSource from "../PluginOnload.ts?raw";
+import identitySource from "../persistence/PageIdentity.ts?raw";
+import type { HandwritingPlugin } from "../main";
+import { installPageIdentity } from "../persistence/PageIdentity";
 import { InlineInkHost, InlineInkStore } from "../inline/InlineInkStore";
 import { isSafePageId, parsePage } from "../model/PageData";
 import { parseMarkdownPage } from "../model/MarkdownPage";
@@ -29,21 +32,34 @@ import { FakeAdapter } from "../persistence/FakeAdapter";
 import { PageStore } from "../persistence/PageStore";
 import type { InkStroke } from "../ink/Stroke";
 
-// ---- slice the three production methods out of main.ts --------------------
-const source = mainSource.replace(/\r\n/g, "\n");
+// The moved methods raise their notices through obsidian's Notice; each rig points the sink at its own list.
+const noticeSink = vi.hoisted(() => ({ current: [] as string[] }));
+vi.mock("obsidian", async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	Notice: class {
+		constructor(msg: string) {
+			noticeSink.current.push(msg);
+		}
+	},
+}));
+
+// ---- the three production methods, from persistence/PageIdentity.ts --------
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const source = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
+const identity = identitySource.replace(/\r\n/g, "\n");
 
 function sliceMethod(signature: string): string {
 	const start = `\t${signature}`;
-	expect(source.split(start)).toHaveLength(2);
-	const s = source.indexOf(start);
-	const e = source.indexOf("\n\t}\n", s);
+	expect(identity.split(start)).toHaveLength(2);
+	const s = identity.indexOf(start);
+	const e = identity.indexOf("\n\t}\n", s);
 	expect(e).toBeGreaterThan(s);
-	return source.slice(s, e + 3);
+	return identity.slice(s, e + 3);
 }
 
-const warnSrc = sliceMethod("private warnUnusablePageId(path: string): void {\n");
-const readSrc = sliceMethod("private notePageId(path: string): string | null {\n");
-const claimSrc = sliceMethod("private async claimNotePageId(\n");
+sliceMethod("function warnUnusablePageId(this: HandwritingPlugin, path: string): void {\n");
+const readSrc = sliceMethod("function notePageId(this: HandwritingPlugin, path: string): string | null {\n");
+const claimSrc = sliceMethod("async function claimNotePageId(this: HandwritingPlugin,\n");
 expect(readSrc).toContain("this.warnUnusablePageId(path);");
 expect(claimSrc).toContain("const r = claimMarkdown(data, proposedId);");
 expect(claimSrc).toContain("this.pageIds.register(path, out.pageId)");
@@ -52,15 +68,9 @@ expect(source).toContain("readPageId: (path) => this.notePageId(path),");
 expect(source).toContain("claimId: (path, proposedId) => this.claimNotePageId(path, proposedId),");
 expect(source).toContain("loadSidecar: (pageId) => this.store.load(pageId),");
 
-const Sliced = new Function(
-	"Notice",
-	"isSafePageId",
-	"claimMarkdown",
-	transformSync(`return class Sliced {\n${warnSrc}\n${readSrc}\n${claimSrc}\n};`, {
-		loader: "ts",
-		target: "es2022",
-	}).code
-);
+// Installed on a stand-in, so the rig calls the module's own functions with its plugin as `this`.
+const stand = {} as HandwritingPlugin;
+installPageIdentity(stand);
 
 // ---- fixtures ---------------------------------------------------------------
 const NOTE = "n.md";
@@ -94,12 +104,7 @@ interface Rig {
 
 function rig(initial: string, cachedId: string): Rig {
 	const notices: string[] = [];
-	const NoticeCls = class {
-		constructor(msg: string) {
-			notices.push(msg);
-		}
-	};
-	const Cls = Sliced(NoticeCls, isSafePageId, claimMarkdown);
+	noticeSink.current = notices;
 	const note = { content: initial };
 	const file = { path: NOTE };
 	const pageIds = new PageIdIndex();
@@ -123,9 +128,9 @@ function rig(initial: string, cachedId: string): Rig {
 		pageIds,
 		persistOwners: () => {},
 	};
-	const warn = Cls.prototype.warnUnusablePageId;
-	const read = Cls.prototype.notePageId;
-	const claimNote = Cls.prototype.claimNotePageId;
+	const warn = stand.warnUnusablePageId;
+	const read = stand.notePageId;
+	const claimNote = stand.claimNotePageId;
 	plugin.warnUnusablePageId = (p: string) => warn.call(plugin, p);
 
 	const fake = new FakeAdapter();

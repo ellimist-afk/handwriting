@@ -10,15 +10,26 @@ vi.mock("obsidian", async (importOriginal) => ({
 import HandwritingPlugin from "../main";
 import { TFile, Notice } from "obsidian";
 import mainSource from "../main.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { PdfInkStore } from "../pdf/PdfInkStore";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const source = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
+// The PDF host is built in loadSettings, which moved to settings/PluginSettings.ts.
+const settingsSource = pluginSettingsSource.replace(/\r\n/g, "\n");
 const hostStart = "\t\tthis.pdfStore.attachHost({";
-const hostAt = source.indexOf(hostStart);
-const hostEnd = source.indexOf("\n\t\t});", hostAt);
-const installPdfHost = new Function("Notice", "blockNotice", source.slice(hostAt, hostEnd + "\n\t\t});".length));
+expect(settingsSource.split(hostStart)).toHaveLength(2);
+const hostAt = settingsSource.indexOf(hostStart);
+const hostEnd = settingsSource.indexOf("\n\t\t});", hostAt);
+// An empty slice makes installPdfHost a no-op and the test below passes without a host.
+expect(hostEnd, "the PDF host block has no closing line").toBeGreaterThan(hostAt);
+const hostBlock = settingsSource.slice(hostAt, hostEnd + "\n\t\t});".length);
+expect(hostBlock.length, "the PDF host slice is empty or too small to hold the host").toBeGreaterThan(200);
+expect(hostBlock, "the PDF host slice lost its adoption wiring").toContain("acceptExternalAdoption");
+const installPdfHost = new Function("Notice", "blockNotice", hostBlock);
 
 const renameStart = '\t\t\t\tif (file instanceof TFile && file.extension === "pdf") {\n\t\t\t\t\tfor (const [root, p] of this.pdfFiles) {';
 expect(source.split(renameStart)).toHaveLength(2);

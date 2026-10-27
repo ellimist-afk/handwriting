@@ -15,10 +15,7 @@
  *      after the release and the page never passes the rest - with nothing after it, and not where Infinite Canvas is on
  *      in the direction the page was pushed;
  *   4. a plant that leaves the offset at the overshoot turns the rest cell red (HW_BOUNCE_PLANT_LEAVE_AT_OVERSHOOT=1), one
- *      that carries the page 2 px past its rest before it ends turns the monotonic arm red (HW_BOUNCE_PLANT_OVERSHOOT=1),
- *      and one that never hands the pan to the paper turns condition 2's paper reading red (HW_PAPER_PAN_PLANT_NO_PAN=1).
- *      That last plant used to live in PaperStandingPan, whose subject - a pan standing at rest - no longer occurs: the
- *      glide is where a live pan is read now.
+ *      that carries the page 2 px past its rest before it ends turns the monotonic arm red (HW_BOUNCE_PLANT_OVERSHOOT=1).
  *   5. the paper rides the bounce as the preview element - the bounce puts it up for its own frames, with the settled
  *      zoom's rules - and it comes down on the frame the bounce ends; a contact
  *      mid-bounce takes it down before the contact is read; and a bounce after a zoom change carries the settled zoom's
@@ -884,22 +881,24 @@ const record: unknown[] = [];
 
 const CHOKE = "\t\tconst el = this.previewPaperEl;\n\t\tif (!el) return;\n\t\tthis.previewPaperEl = null;";
 const bypass = (reason: string) => `\t\tconst el = this.previewPaperEl;\n\t\tif (!el || reason === "${reason}") return;\n\t\tthis.previewPaperEl = null;`;
-const PLANTS: { env: string; from: string; to: string }[] = [
-	{ env: "HW_BOUNCE_PLANT_LEAVE_AT_OVERSHOOT", from: "const left = t >= 1 ? 0 : (1 - t) ** 3;", to: "const left = 1;" },
+const PINCH = /src[\\/]inline[\\/]InkOverlayPinch\.ts$/, MARGIN = /src[\\/]inline[\\/]InkOverlayColumnMargin\.ts$/, PAPER = /src[\\/]inline[\\/]InkOverlayPaperPinch\.ts$/;
+const PLANTS: { env: string; from: string; to: string; file?: RegExp }[] = [
+	{ env: "HW_BOUNCE_PLANT_LEAVE_AT_OVERSHOOT", file: MARGIN, from: "const left = t >= 1 ? 0 : (1 - t) ** 3;", to: "const left = 1;" },
 	// The ease runs 2 painted px past the rest before it ends: a spring, not a glide.
-	{ env: "HW_BOUNCE_PLANT_OVERSHOOT", from: "const left = t >= 1 ? 0 : (1 - t) ** 3;", to: "const left = t >= 1 ? 0 : (1 - t) ** 3 - t * 2 / Math.max(2, Math.abs(bx || by));" },
+	{ env: "HW_BOUNCE_PLANT_OVERSHOOT", file: MARGIN, from: "const left = t >= 1 ? 0 : (1 - t) ** 3;", to: "const left = t >= 1 ? 0 : (1 - t) ** 3 - t * 2 / Math.max(2, Math.abs(bx || by));" },
 	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_BOUNCE_END", from: CHOKE, to: bypass("bounce-end") },
 	{ env: "HW_PAPER_PREVIEW_PLANT_BYPASS_INPUT", from: CHOKE, to: bypass("input") },
 	// A bounce the settle itself started keeps the element: this plant leaves it carrying the gesture's zoom, not the settled one.
 	{ env: "HW_PAPER_PREVIEW_PLANT_NO_RECOPY_AT_SETTLE", from: "\t\t\tif (this.bounceState) this.rebasePreviewPaper();\n", to: "\t\t\tif (this.bounceState) {}\n" },
 	// The bounce must carry the paper on the element: this plant leaves it on the scroller's background, as the prototype did.
-	{ env: "HW_PAPER_PREVIEW_PLANT_NO_BOUNCE_SWAP", from: "\t\tthis.beginPreviewPaper();\n", to: "" },
+	// Two edits. A bounce its settle's own commit starts finds the pinch's element still up, so its own put-up returns
+	// early and the settle keeps that element for it; the second edit has the settle take it down regardless, so no
+	// route leaves an element up for the bounce.
+	{ env: "HW_PAPER_PREVIEW_PLANT_NO_BOUNCE_SWAP", file: MARGIN, from: "\t\tthis.beginPreviewPaper();\n", to: "" },
+	{ env: "HW_PAPER_PREVIEW_PLANT_NO_BOUNCE_SWAP", from: "\t\t\tif (this.bounceState) this.rebasePreviewPaper();\n\t\t\telse this.endPreviewPaper(\"settle\");\n", to: "\t\t\tthis.endPreviewPaper(\"settle\");\n" },
 	// And the copy the bounce takes must be the settled zoom's: this plant leaves that element with no background at all.
-	{ env: "HW_PAPER_PREVIEW_PLANT_NO_BOUNCE_COPY", from: "\t\tcopyPreviewPaperBackground(el, cs);\n", to: "\t\tif (!this.bounceState) copyPreviewPaperBackground(el, cs);\n" },
-	// The pan writer never hands the pan to the paper: condition 2's paper reading on the glide frames goes red.
-	// It lives here now because the glide is where a live pan is read - a resting page carries none. Carried into this
-	// table on the route(e) merge: the loop above only applies plants that are entries here.
-	{ env: "HW_PAPER_PAN_PLANT_NO_PAN", from: "\t\tthis.writePaperPan();\n\t\tthis.writeInkLayerTransform();\n", to: "\t\tthis.writeInkLayerTransform();\n" },
+	// The element a settle keeps for its bounce is re-copied where the settle rebases it; the plant blanks it there instead.
+	{ env: "HW_PAPER_PREVIEW_PLANT_NO_BOUNCE_COPY", file: PAPER, from: "\t\tif (copyable) copyPreviewPaperBackground(el, cs, grid);\n", to: "\t\tif (copyable && !this.bounceState) copyPreviewPaperBackground(el, cs, grid);\n\t\telse if (copyable) el.style.backgroundImage = \"none\";\n" },
 ];
 
 beforeAll(async () => {
@@ -908,9 +907,9 @@ beforeAll(async () => {
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "overscrollBouncePage.ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: active.length ? [{ name: "bounce-plants", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|InkOverlayPanSettle|InkOverlayColumnMargin|InkOverlayPaperPinch|InkOverlayPinch)\.ts$/ }, args => {
 				let text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
-				for (const pl of active) {
+				for (const pl of active.filter(x => (x.file ?? PINCH).test(args.path))) {
 					if (text.split(pl.from).length !== 2) throw new Error(`${pl.env}: anchor not found once`);
 					text = text.replace(pl.from, pl.to);
 					planted++;

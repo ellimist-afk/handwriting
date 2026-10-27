@@ -28,8 +28,8 @@
  * without this failing.
  */
 import { describe, expect, it } from "vitest";
-import controllerSrc from "./PdfInkController.ts?raw";
 import { codeOnly } from "../CodeOnly";
+import { surfaceCode } from "../inline/surfaceFiles.testutil";
 import {
 	PAN_EDGE_CLEAR,
 	panBatchDelta,
@@ -40,7 +40,14 @@ import {
 	type PanScrollLimit,
 } from "./PanScroll";
 
-const CONTROLLER = codeOnly(controllerSrc.replace(/\r\n/g, "\n"));
+// The pdf surface's code across every file the ink-surface ledger lists for it (surfaceCode). The glob literal stays per module.
+const ALL_TS = import.meta.glob("/src/**/*.ts", {
+	query: "?raw",
+	eager: true,
+	import: "default",
+}) as Record<string, string>;
+
+const CONTROLLER = surfaceCode("pdf", ALL_TS);
 
 /** No limit at all, for the cases that are about the delta and not the clamp. */
 const OPEN: PanScrollLimit = panScrollLimit(null);

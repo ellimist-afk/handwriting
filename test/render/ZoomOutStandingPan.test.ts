@@ -67,29 +67,17 @@
  *
  * Numbers go to HW_STANDING_PAN_OUT when set.
  *
- * Plant: HW_R1_PLANT_NO_FIT_BOUND=1 builds the overlay with the settle never
- * asking for the fitting bound - the fit test and its readout still tell the
- * truth, only the clamp is gone. Expected red under it: the clipped 100% cell
- * (its page stays 227 px outside) and the 0.75 zoom arm. Everything else green.
- * (The 150% cell with readable line length on was red here through the clamp's
- * counter until that cell gained a rest, which does not go through it.)
- *
- * The other direction: HW_R1_PLANT_CLAMP_EVERY_SETTLE=1 builds it with every
- * settle treated as a zoom - the shape that sprang a two-finger drag back by
- * 800 px. Expected red under it: both drag arms and the in-then-out edge.
- *
  * READABLE LINE LENGTH ON, WHERE THE COLUMN FITS: every settle
  * returns the centred column to its rest, so the two fitting cells with the
  * setting on no longer stand where the last preview frame stood; they assert the
  * rest once the bounce has carried the page there, and the clamp's counter stays
  * at 0 because the rest, not the window, placed it; and the two in-band drags gain
- * arms with the setting on that expect the same rest. HW_RLL_PLANT_WINDOW_SETTLE=1
- * settles those on the window again: expected red, exactly those four arms.
+ * arms with the setting on that expect the same rest.
  */
 import { beforeAll, afterAll, it, expect } from "vitest";
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import css from "../../styles.css?raw";
 import REAL_OBSIDIAN_CSS from "./obsidianReadableWidth";
@@ -340,27 +328,8 @@ const DPR = 2;
 const record: unknown[] = [];
 
 beforeAll(async () => {
-	let planted = 0;
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "standingPanPage.ts" },
-		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
-		plugins: process.env.HW_R1_PLANT_CLAMP_EVERY_SETTLE ? [{ name: "r1-clamp-every-settle", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
-				const from = "const zoomed = Number.isFinite(ratio) && (ratio < PAN_SETTLE_ZOOM_BAND.below || ratio > PAN_SETTLE_ZOOM_BAND.above);";
-				const text = readFileSync(args.path, "utf8");
-				if (text.split(from).length !== 2) throw new Error("r1 plant: band anchor not found once");
-				planted++;
-				return { loader: "ts", contents: text.replace(from, "const zoomed = Number.isFinite(ratio) || true;") };
-			});
-		} }] : process.env.HW_R1_PLANT_NO_FIT_BOUND ? [{ name: "r1-no-fit-bound", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
-				const from = "this.anchorPanTo(hold.toScale, hold, local, top, zoomed);";
-				const text = readFileSync(args.path, "utf8");
-				if (text.split(from).length !== 2) throw new Error("r1 plant: anchor not found once");
-				planted++;
-				return { loader: "ts", contents: text.replace(from, "void zoomed; this.anchorPanTo(hold.toScale, hold, local, top, false);") };
-			});
-		} }] : [] });
-	if ((process.env.HW_R1_PLANT_NO_FIT_BOUND || process.env.HW_R1_PLANT_CLAMP_EVERY_SETTLE) && !planted) throw new Error("r1 plant requested but never applied");
+		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) } });
 	script = b.outputFiles[0]!.text;
 	browser = await chromium.launch({ headless: true });
 }, 180_000);

@@ -21,6 +21,7 @@ vi.mock("obsidian", () => ({
 }));
 
 import mainSource from "../main.ts?raw";
+import commandsSource from "../commands/RegisterCommands.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { InlineInkStore } from "../inline/InlineInkStore";
@@ -152,7 +153,8 @@ describe("main-2-1: keep this device's ink after a fork", () => {
 	it("the kept ink reaches the screen and survives the next edit", async () => {
 		// Production wiring precondition: the command builds its host with
 		// forkHostFor and restores through the open note, as the probe does below.
-		const main = mainSource.replace(/\r\n/g, "\n");
+		// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+		const main = [mainSource, commandsSource].join("\n").replace(/\r\n/g, "\n");
 		expect(main).toContain("const host: ForkHost = forkHostFor({");
 		expect(main).toContain("const path = await inlineInk.restoreRevision(pageId, data);");
 

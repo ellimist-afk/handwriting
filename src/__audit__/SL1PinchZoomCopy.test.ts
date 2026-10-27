@@ -8,7 +8,7 @@ const source = (path: string) => readFileSync(fileURLToPath(new URL(`../../${pat
 // so the feature lists must say so wherever they promise pinch to zoom.
 it("#145 README and site name Infinite canvas beside the pinch-to-zoom promise", () => {
 	const readme = source("README.md").split(/\r?\n/).filter((l) => /^\* pinch to zoom/.test(l));
-	const site = source("docs/index.html").split(/\r?\n/).filter((l) => /<li>pinch to zoom/.test(l));
+	const site = source("docs/index.html").split(/\r?\n/).filter((l) => /<li>pinch to zoom/i.test(l));
 	expect(readme).toHaveLength(1);
 	expect(site).toHaveLength(1);
 	expect(readme[0]).toMatch(/infinite canvas/i);

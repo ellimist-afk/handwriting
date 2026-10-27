@@ -113,8 +113,8 @@ declare const process: { env: Record<string, string | undefined> };
  * A plant whose anchor is not in the source throws rather than passing unplanted.
  */
 const PLANTS: { env: string; file: RegExp; from: string; to: string }[] = [
-	{ env: "HW_PAPER_PAN_PLANT_NO_DRIFT", file: /src[\\/]inline[\\/]InkOverlay\.ts$/, from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal) * next;", to: "const drift = 0;" },
-	{ env: "HW_PAPER_PAN_PLANT_EXTERNAL_UNITS_DOUBLE", file: /src[\\/]inline[\\/]InkOverlay\.ts$/, from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal) * next;", to: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal) * next * (this.viewportLayout ? this.viewportLayout.externalScale : 1);" },
+	{ env: "HW_PAPER_PAN_PLANT_NO_DRIFT", file: /src[\\/]inline[\\/]InkOverlayPanSettle\.ts$/, from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;", to: "const drift = 0;" },
+	{ env: "HW_PAPER_PAN_PLANT_EXTERNAL_UNITS_DOUBLE", file: /src[\\/]inline[\\/]InkOverlayPanSettle\.ts$/, from: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next;", to: "const drift = columnLocal === null || a.columnLocal === null ? 0 : (columnLocal - a.columnLocal + (nativeLeft - a.scrollLeft) * outer) * next * outer;" },
 ];
 
 beforeAll(async () => {
@@ -125,7 +125,7 @@ beforeAll(async () => {
 		bundle: true, write: false, format: "iife", platform: "browser",
 		alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: active.length ? [{ name: "paper-pan-external-scale-plants", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlayPanSettle\.ts$/ }, args => {
 				let text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
 				for (const pl of active.filter(x => x.file.test(args.path))) {
 					if (text.split(pl.from).length !== 2) throw new Error(`${pl.env}: anchor not found once`);

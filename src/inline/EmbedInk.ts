@@ -1,5 +1,3 @@
-import { timerHost } from "../util/RuntimeScheduler";
-import { runDetached } from "../util/Detached";
 /**
  * Ink in rendered markdown (roadmap: ink showing in embeds).
  *
@@ -13,6 +11,12 @@ import { runDetached } from "../util/Detached";
  * rendered content's top-left. A rendered page wraps its text differently
  * than the editor did (narrower embed, different padding), and the ink does
  * not chase the text - it never does.
+ *
+ * One display correction is made on top: a stroke that carries a line anchor
+ * is drawn at its page position plus how far its line sits lower here than it
+ * did in the editor, read from the rendered blocks and their source lines
+ * (EmbedInkLines.ts, `placeStrokes`). Nothing stored moves; this view draws
+ * the same ink on the same words the editor does.
  *
  * An `![[embed]]`'s content box sizes itself to its TEXT, not to the ink
  * drawn on top of it, and clips whatever falls outside with `overflow: auto`
@@ -64,11 +68,54 @@ import { runDetached } from "../util/Detached";
  * holds at most a screenful of embeds between gestures.
  */
 
+import { Platform } from "obsidian";
 import { CameraState } from "../camera/coordinates";
 import { drawStroke } from "../ink/StrokeRenderer";
-import { InkStroke } from "../ink/Stroke";
-import { InkSvgRun, inkSvgLayers } from "../ink/SvgExport";
-import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
+import { InkStroke, settleLineAnchors } from "../ink/Stroke";
+import { fontZoomFactor } from "./ZoomScale";
+import { surfaceExtents } from "./SurfaceExtent";
+import { shownStrokes } from "./EmbedInkLines";
+import type { LineSignature } from "./LineAnchor";
+import { growPrintContainer, isPrintContainer, printing, printSpans, printVectorFor, releasePrintStrips } from "./EmbedInkPrint";
+import { embedInkAnchor, embedInkRootHidden, embedInkRootIsEmbed, type EmbedInkVia } from "./EmbedInkRoot";
+import { type HeldTops, lineMemos, lineSources, measureSpans } from "./EmbedInkMeasure";
+import { embedInkTile, embedInkTileHolds, embedInkUsesTile, type InkRect, type InkTile, TILE_PX, TILE_PX_MOBILE } from "./EmbedInkTile";
+import { cancelPendingWaits, pendingWaitPaths, stopAllAnchorWatches, stopAllSizeWatches, stopAnchorWatch, stopSizeWatch, sweepSizeWatches, watchAnchor, watchIfCollapsed } from "./EmbedInkWatch";
+
+export {
+	disarmPrintSwaps,
+	embedInkPrintSwaps,
+	printColumnWidth,
+} from "./EmbedInkPrint";
+export {
+	EMBED_INK_WAIT_MS,
+	embedInkAnchor,
+	embedInkDiagLine,
+	embedInkInPopover,
+	embedInkIsCollapsed,
+	embedInkIsLiveEditorBlock,
+	embedInkIsSectionEmbed,
+	embedInkKeepWaiting,
+	embedInkResolveRoot,
+	embedInkRetryDelay,
+	embedInkRoot,
+	embedInkRootFor,
+	embedInkRootIsEmbed,
+} from "./EmbedInkRoot";
+export type {
+	EmbedInkVia,
+} from "./EmbedInkRoot";
+export type {
+	EmbedInkLineSource,
+	HeldTops,
+} from "./EmbedInkMeasure";
+export {
+	attachEmbedInk,
+	attachEmbedInkOnceReady,
+	embedInkAnchorWatchCount,
+	embedInkPendingWaitCount,
+	embedInkSizeWatchCount,
+} from "./EmbedInkWatch";
 
 /**
  * Total device pixels one rendered layer may hold.
@@ -98,7 +145,7 @@ const MAX_LAYER_PX = 4_000_000;
  *  Chromium 151). WebKit 26.5 held 65,536 in the same probe, so this margin
  *  under the Chromium limit serves the iPad as well. */
 const MAX_LAYER_SIDE_PX = 65_000;
-const MARKER_ATTR = "data-handwriting-embed-ink";
+export const MARKER_ATTR = "data-handwriting-embed-ink";
 /**
  * Records the `min-height` value WE last wrote on an embed root, so it can be
  * told apart from one the theme or Obsidian set. Same discipline as the
@@ -107,7 +154,7 @@ const MARKER_ATTR = "data-handwriting-embed-ink";
  * min-height we set moves with the ink's own height, so remembering "relative"
  * would not be enough to recognise it later.
  */
-const MIN_HEIGHT_ATTR = "data-handwriting-embed-min-height";
+export const MIN_HEIGHT_ATTR = "data-handwriting-embed-min-height";
 /**
  * Marks a root whose `position: relative` WE wrote. An inline `relative` alone
  * cannot say whose it is: a host that positions its own box inline looks the
@@ -130,66 +177,33 @@ const RESERVE_ATTR = "data-handwriting-embed-left-reserve";
 const SCROLL_RESERVE_ATTR = "data-handwriting-embed-scroll-reserve";
 /** The spacer that gives a reading view the scroll range its reserve needs. */
 const SCROLL_RESERVE_CLS = "handwriting-embed-scroll-reserve";
+/**
+ * The spacer that gives a canvas note's Reading view the editor's scroll range: one hidden 1 px box at the extent the
+ * editor granted the note (`readingExtent`).
+ */
+const READING_EXTENT_CLS = "handwriting-reading-extent";
 /** Lets a reading view scroll sideways while it holds a reserve. */
 const SCROLL_AXIS_CLS = "handwriting-embed-hscroll";
-const SVG_NS = "http://www.w3.org/2000/svg";
+export const SVG_NS = "http://www.w3.org/2000/svg";
 
-/** Windows whose print swap is already wired; popouts each get their own. */
-const printArmed = new WeakSet<Window>();
-/**
- * Windows whose print is running now: set when the swap asks for the vector
- * layer, cleared when it lets go, and when the window closes. An embed that
- * attaches while its window is printing (its note was still being read) joins
- * the print; with no print the module never builds a vector layer.
- */
-const printing = new WeakSet<Window>();
-/**
- * Teardowns for the print listeners, because the WeakSet above cannot survive
- * a plugin reload. Disable and re-enable and the module is evaluated afresh:
- * the set is empty, the listeners are added again, and the previous pair is
- * still on the window calling into the old module. Printing then fires both.
- *
- * Kept per window, and a window's entry leaves when that window closes: each
- * teardown holds its Window, so a flat list emptied only at unload kept every
- * closed popout that ever rendered an embed alive until the plugin went
- * (audit 58).
- */
-const printDisarms = new Map<Window, Array<() => void>>();
-/**
- * How many times a print actually asked for the vector layer.
- *
- * `beforeprint` is not guaranteed: an export that renders through its own
- * pipeline rather than the browser's print flow may never fire it, and the
- * symptom of that is indistinguishable by eye from a swap that fired and
- * didn't help. A count settles it in one export instead of another round of
- * inference from how the ink looks.
- */
-let printSwaps = 0;
-
-export function embedInkPrintSwaps(): number {
-	return printSwaps;
-}
-
-/**
- * What the print vector layer is landing on.
- *
- * This layer exists ONLY while a print or an export is happening, and what it
- * lands on then is paper or a PDF page rather than the reading view's theme -
- * a print stylesheet drops the page to white whatever the editor looked like.
- * That is why the ink is made readable against white here and NOT against the
- * body's background: the swap is the moment the destination stops being the
- * screen. Outside the swap this module paints canvases, which are on-screen
- * surfaces and are left alone.
- */
-const PRINT_PAGE_WHITE = "#ffffff";
 
 const CAM: CameraState = { x: 0, y: 0, zoom: 1 };
 
 /** Live rendered roots, each mapped to the note path it shows. */
-const layers = new Map<HTMLElement, string>();
+export const layers = new Map<HTMLElement, string>();
 /** Bumped per path on every persisted change; part of the marker. */
 const revisions = new Map<string, number>();
-let strokesFor: ((path: string) => readonly InkStroke[]) | null = null;
+export let strokesFor: ((path: string) => readonly InkStroke[]) | null = null;
+/** The note surface's text column width for a path, px; null when no editor shows it (see `fitPrintColumn`). */
+export let columnWidthFor: ((path: string) => number | null) | null = null;
+/** Whether a note is an Infinite Canvas note, as the editor resolves it (per-note choice, else the setting); null when unwired. */
+let canvasNoteOf: ((path: string) => boolean) | null = null;
+/** The editor font size a note's ink was drawn against, px (its reference); null when none is known. */
+let fontRefFor: ((path: string) => number | null) | null = null;
+/** The signature of an editor open on a path, which its anchors are honoured under (`shownStrokes`); null when none is. */
+let lineSignatureFor: ((path: string) => LineSignature | null) | null = null;
+/** The zoom each root's canvas was last painted at: its text size over the note's reference font (`inkZoomOf`). */
+const paintedZooms = new WeakMap<HTMLElement, number>();
 /**
  * Where the one diagnostic line goes, when the setting is on.
  *
@@ -197,315 +211,13 @@ let strokesFor: ((path: string) => readonly InkStroke[]) | null = null;
  * so the line is only ever FORMATTED when someone is going to read it, which
  * matters when a scrolling reading view resolves a root per section.
  */
-let diagnose: ((via: EmbedInkVia, path: string, waitedMs: number) => void) | null = null;
-/**
- * Cancellers for waits that have not resolved yet, and for the resize
- * observers watching a collapsed root.
- *
- * Both live in someone else's document and outlast the render child that
- * started them: a plugin reload replaces this module while a pending timer or
- * a live observer goes on calling into the old one. `teardownEmbedInk` empties
- * both, which is why unload is the single place either can be leaked from.
- */
-const pendingWaits = new Set<() => void>();
-/** The note each pending wait will attach for; a rename while it waits moves it. */
-const pendingWaitPaths = new Map<() => void, { path: string }>();
-/**
- * One route-3 MutationObserver per DOCUMENT, shared by every wait on it.
- *
- * That observer is `body` + `subtree`, so it fires for every mutation
- * Obsidian makes anywhere. One per unresolved section meant a reading-view
- * note with N embeds installed N of them, each running
- * `embedInkResolveRoot` (up to two `closest` walks) on every one of those
- * mutations for up to ten seconds. The waits share one observer instead,
- * armed with the first wait on a body and disconnected when its last wait
- * goes. Keyed by body, not module-wide: a popout is its own document and
- * watching it through the main window's observer would see nothing.
- */
-const bodyWatches = new Map<HTMLElement, { observer: MutationObserver; probes: Set<() => void> }>();
-const sizeWatches = new Map<HTMLElement, () => void>();
+export let diagnose: ((via: EmbedInkVia, path: string, waitedMs: number) => void) | null = null;
 /**
  * Where each painted root's layer starts, note px: negative where ink reaches
  * left of or above the origin. Read back when a resize re-anchors the layer.
  */
-const layerOrigins = new WeakMap<HTMLElement, { x: number; y: number }>();
-/** Reading-view roots whose layer offset has to keep up with the pane. */
-const anchorWatches = new Map<HTMLElement, { stop(): void; sizer: HTMLElement | null }>();
+export const layerOrigins = new WeakMap<HTMLElement, { x: number; y: number }>();
 
-export function embedInkAnchorWatchCount(): number {
-	return anchorWatches.size;
-}
-
-/**
- * The rendered document's root for a section element, if recognizable.
- *
- * Order is a preference, not a distance: each `closest` walks the whole chain.
- *
- * The sizer used to be the reading view's root and cannot be one. The
- * virtualised renderer owns its direct children and removes an appended
- * canvas in the same millisecond (Obsidian 1.13.7); the marker attribute
- * survives, so the root looks painted while showing nothing, and nothing
- * repaints it in a session that only reads. Embeds were unaffected because
- * `.markdown-embed-content` is not reconciled.
- *
- * `.markdown-preview-view` one level up survives a re-render and is already
- * `position: relative`, so it holds the layer instead; `embedInkAnchor` undoes
- * the inset between the two. The sizer stays below it for a render context
- * with no view, and the last entry for one with no sizer either - an export
- * or a print renders into a container of its own.
- */
-export function embedInkRoot(sectionEl: HTMLElement): HTMLElement | null {
-	return (
-		sectionEl.closest<HTMLElement>(".markdown-embed-content") ??
-		sectionEl.closest<HTMLElement>(".markdown-preview-view") ??
-		sectionEl.closest<HTMLElement>(".markdown-preview-sizer") ??
-		sectionEl.closest<HTMLElement>(".markdown-rendered")
-	);
-}
-
-/**
- * A Live Preview widget is rendered Markdown inside the note's own editor.
- * Its postprocessor receives the note path, but its table/callout is not a
- * second view of that note. Walk inward-out: an explicit embed content box
- * before the editor is a real rendered note, even when nested in Live Preview.
- */
-export function embedInkIsLiveEditorBlock(
-	sectionEl: HTMLElement,
-	containerEl: HTMLElement | null | undefined
-): boolean {
-	const start = sectionEl.isConnected ? sectionEl : (containerEl ?? sectionEl);
-	for (let node: HTMLElement | null = start; node; node = node.parentElement) {
-		if (node.classList?.contains("markdown-embed-content")) return false;
-		// cm-embed-block: a callout's widget is post-processed before CodeMirror
-		// inserts it, so the detached block is the only editor mark it carries.
-		if (
-			node.classList?.contains("cm-editor") ||
-			node.classList?.contains("markdown-source-view") ||
-			node.classList?.contains("cm-embed-block")
-		) return true;
-	}
-	return false;
-}
-
-/**
- * A heading or block embed (`![[Note#Heading]]`, `![[Note#^id]]`) renders one
- * section but is post-processed with the whole note's path, and the note's ink
- * has no section coordinates to cut it by. Drawing it would lay every other
- * section's ink over the excerpt and stretch the box to the whole note's ink
- * (audit #30), so such an embed gets no ink. The nearest embed decides: a
- * whole-note embed nested inside a section embed still draws its own note.
- */
-export function embedInkIsSectionEmbed(
-	sectionEl: HTMLElement,
-	containerEl: HTMLElement | null | undefined
-): boolean {
-	const start = sectionEl.isConnected ? sectionEl : (containerEl ?? sectionEl);
-	for (let node: HTMLElement | null = start; node; node = node.parentElement) {
-		if (!node.classList?.contains("markdown-embed") && !node.classList?.contains("internal-embed")) continue;
-		const src = node.getAttribute?.("src");
-		if (src !== null && src !== undefined) return src.includes("#");
-	}
-	return false;
-}
-
-/**
- * A hover preview can render a [[Note#Heading]] section with no `src` to say
- * so, post-processed under the whole note's path. Nothing in the element tells
- * it from a whole-note preview, so a popover draws ink only when the caller
- * can prove the render was the whole note (see `attachEmbedInkOnceReady`).
- */
-export function embedInkInPopover(
-	sectionEl: HTMLElement,
-	containerEl: HTMLElement | null | undefined
-): boolean {
-	const start = sectionEl.isConnected ? sectionEl : (containerEl ?? sectionEl);
-	return start.closest?.(".hover-popover") != null;
-}
-
-/**
- * True when the root sits under an element the host hid with an inline
- * `display: none` - Obsidian's `hide()`, which is how a tab keeps its reading
- * view connected while Live Preview is showing. Inline styles only: no layout
- * read on the save path.
- */
-function embedInkRootHidden(root: HTMLElement): boolean {
-	for (let node: HTMLElement | null = root; node; node = node.parentElement) {
-		if (node.style?.display === "none") return true;
-	}
-	return false;
-}
-
-/**
- * The root for a section, or for the renderer's container when the section
- * is not yet in a tree.
- *
- * The virtualised preview renderer loads a section's MarkdownRenderChild
- * before inserting the section element into the sizer, so `embedInkRoot` on
- * the section alone often has nothing to climb from. The one thing the
- * renderer hands the post-processor for certain, attached or not, is its OWN
- * container - the sizer in the new renderer, the `.markdown-preview-view`
- * div in the old one - so that becomes the fallback anchor. Climbing from it
- * lands on the same root this returned before the renderer changed:
- * `embedInkRoot` on an embed's sizer still reaches `.markdown-embed-content`
- * (`closest()` includes the element itself, and the sizer sits inside it),
- * and on a plain reading view it returns the sizer, exactly what an already
- * -attached section would have resolved to.
- *
- * `containerEl` is not declared on MarkdownPostProcessorContext - read off
- * the shipped bundle, not the public API - so the caller passes it in only
- * after its own duck check that it is actually an element, and this stays a
- * pure fallback rather than assuming anything about its shape.
- */
-export function embedInkRootFor(
-	sectionEl: HTMLElement,
-	containerEl: HTMLElement | null | undefined
-): HTMLElement | null {
-	return embedInkResolveRoot(sectionEl, containerEl).root;
-}
-
-/**
- * Which of the routes to a root actually worked.
- *
- * `section` and `container` are the two synchronous ones above. `observer`
- * and `timer` are the deferred route - no root at post-processing time, so
- * the wait below watched for the section to land and one of its two triggers
- * got there first. `none` means the wait ran out its budget and this section
- * never gained ink; it is the line worth having from a user we cannot see.
- */
-export type EmbedInkVia = "section" | "container" | "observer" | "timer" | "none";
-
-/**
- * The root AND the route that found it.
- *
- * Same order as `embedInkRoot`'s selectors and for the same reason - the
- * section pins the coordinate origin best - but it reports which route won,
- * because on a machine we cannot see that is the difference between "the
- * renderer handed us a container" and "we waited for the DOM". `embedInkRootFor`
- * is this with the route dropped, so every existing caller is unchanged.
- */
-export function embedInkResolveRoot(
-	sectionEl: HTMLElement,
-	containerEl: HTMLElement | null | undefined
-): { root: HTMLElement | null; via: "section" | "container" | "none" } {
-	const fromSection = embedInkRoot(sectionEl);
-	if (fromSection) return { root: fromSection, via: "section" };
-	const fromContainer = containerEl ? embedInkRoot(containerEl) : null;
-	if (fromContainer) return { root: fromContainer, via: "container" };
-	return { root: null, via: "none" };
-}
-
-/**
- * How long the deferred route may wait for a section to land in the tree.
- *
- * This replaced a 30-FRAME budget, which is the wrong unit for the thing it
- * was bounding. Frames are not time: a background window throttles them to
- * nothing, a busy renderer stretches them, and a device slow enough to be the
- * reason the section is late is exactly the device whose 30 frames are worth
- * far less than half a second. Ten seconds of wall clock is the same promise
- * on every machine - and it is a ceiling, not a cost, because the observer
- * below almost always gets there first.
- */
-export const EMBED_INK_WAIT_MS = 10_000;
-
-/** Pure: is the wait still inside its budget? Time, never frames. */
-export function embedInkKeepWaiting(elapsedMs: number): boolean {
-	return elapsedMs < EMBED_INK_WAIT_MS;
-}
-
-/**
- * Pure: how long to sleep before the next check.
- *
- * Tight at first, because the ordinary case is a section that lands on the
- * very next tick and an export that is about to serialize the page; loose
- * later, because a section still missing after a second is waiting on
- * something slower than polling can help with, and the MutationObserver is
- * the one that will actually catch it. Bounded above so the whole schedule
- * costs about fifty wake-ups across ten seconds rather than six hundred.
- */
-export function embedInkRetryDelay(elapsedMs: number): number {
-	if (elapsedMs < 250) return 16;
-	if (elapsedMs < 1_000) return 50;
-	return 250;
-}
-
-/**
- * Pure: the one diagnostic line, behind the developer diagnostics setting.
- *
- * One line per section that resolved (or failed to resolve) a root, naming
- * the route. It exists for a machine we cannot get at: it is the difference
- * between "your renderer hands us no container and the section never
- * connected" and "we attached fine, the ink is elsewhere", which is otherwise
- * an afternoon of guessing per report.
- */
-export function embedInkDiagLine(via: EmbedInkVia, path: string, waitedMs: number): string {
-	return `[handwriting] embed ink root via ${via} after ${waitedMs}ms: ${path}`;
-}
-
-/**
- * Pure: has a painted root been given no size on screen?
- *
- * A root can be found, marked and painted while its box measures 0x0 - a
- * `.markdown-embed-content` inside a collapsed callout, a pane whose theme
- * lays it out a tick later, an embed rendered inside something still
- * `display: none`. The canvas is sized from the INK's extent, so it is not
- * itself zero, but nothing of it is on screen and painting once and never
- * looking again leaves it that way until the section happens to re-render.
- */
-export function embedInkIsCollapsed(rect: { width: number; height: number } | null): boolean {
-	if (!rect) return false;
-	return rect.width <= 0 || rect.height <= 0;
-}
-
-/**
- * Pure: is this rendered root an embed's content box?
- *
- * Only `.markdown-embed-content` gets grown to fit its ink (see `paint`) - a
- * plain reading view's `.markdown-preview-sizer` is a scroller whose sizing
- * the virtualised renderer already owns, and forcing a min-height onto it
- * would fight that renderer rather than fix a clip.
- */
-export function embedInkRootIsEmbed(root: { classList: { contains(cls: string): boolean } }): boolean {
-	return root.classList.contains("markdown-embed-content");
-}
-
-/**
- * The offset a reading view's layer needs, or null to leave it where the
- * stylesheet puts it.
- *
- * Ink is anchored to the sizer's top-left, PLUS the height of the sizer's own
- * `.mod-header` (the inline title and Properties block), when the sizer has
- * one. Editor y=0 is `.cm-content`'s top, which sits below that same header -
- * it is never part of `.cm-content`. Without this, ink drawn under the text
- * in the editor landed under the header instead, in reading view and in
- * print (audit 18 / GitHub #19). An embed's top is NOT covered: its root has
- * no sizer, and whether its Properties header takes height is unmeasured.
- *
- * The root is now the view outside the sizer, so the inset between them has
- * to be added back, and it is not a constant: the sizer is centred, so it
- * moves with the pane's width. Left is the text column's edge, not the
- * sizer's (`columnInset`), for a reading view and for an embed alike: one x
- * law.
- *
- * Null for every other root, whose `0, 0` is already right, for an embed
- * with no column ever measured, and for a sizer
- * with no offset parent - that is a `display: none` subtree, where every
- * offset reads 0, which is a real coordinate rather than a missing one.
- */
-export function embedInkAnchor(root: HTMLElement, remeasure = false): { left: number; top: number } | null {
-	const sizer = anchorSizer(root);
-	if (!sizer) {
-		if (embedInkRootIsEmbed(root)) {
-			const inset = columnInset(root, null, root, remeasure);
-			if (inset !== null) return { left: inset, top: 0 };
-		}
-		return printTitleBottom(root);
-	}
-	if (sizer.offsetParent !== root) return null;
-	return {
-		left: sizer.offsetLeft + (columnInset(root, sizer, sizer, remeasure) ?? 0),
-		top: sizer.offsetTop + sizerHeaderHeight(sizer),
-	};
-}
 
 /** Children measured per call, at most; one more rect read for the base. */
 const COLUMN_SAMPLE = 8;
@@ -519,7 +231,7 @@ const NOT_COLUMN = [
 	SCROLL_RESERVE_CLS,
 ];
 
-function isNotColumn(child: Element): boolean {
+export function isNotColumn(child: Element): boolean {
 	for (const cls of NOT_COLUMN) if (child.classList.contains(cls)) return true;
 	return false;
 }
@@ -546,7 +258,7 @@ const lastColumnInset = new WeakMap<HTMLElement, number>();
  * every other paint takes the memory and reads nothing. A re-rendered embed
  * is a new root and measures once. Nothing measurable keeps the memory.
  */
-function columnInset(root: HTMLElement, scope: HTMLElement | null, base: HTMLElement, remeasure: boolean): number | null {
+export function columnInset(root: HTMLElement, scope: HTMLElement | null, base: HTMLElement, remeasure: boolean): number | null {
 	const held = lastColumnInset.get(root);
 	if (held !== undefined && !remeasure) return held;
 	// A null scope is an embed's: its blocks sit in the first sizer under it,
@@ -567,31 +279,63 @@ function columnInset(root: HTMLElement, scope: HTMLElement | null, base: HTMLEle
 		if (rect.left > best) best = rect.left;
 	}
 	if (best === -Infinity) return held ?? null;
-	const baseLeft = base.getBoundingClientRect().left + (base === root ? root.clientLeft || 0 : 0);
-	const inset = best - baseLeft;
+	const baseRect = base.getBoundingClientRect();
+	const baseLeft = baseRect.left + (base === root ? root.clientLeft || 0 : 0);
+	// Both rects are in viewport px. A base under a CSS zoom (a print container shrunk to the paper) reads them shrunk by it,
+	// and the layer's `left` is set in the base's own px, so the inset is divided by the zoom the base's rect shows.
+	const zoom = base.offsetWidth > 0 && baseRect.width > 0 ? baseRect.width / base.offsetWidth : 1;
+	const inset = (best - baseLeft) / zoom;
 	lastColumnInset.set(root, inset);
 	return inset;
 }
 
 /**
  * Print / PDF export (audit 18, print half). Obsidian's print container is a
- * `.markdown-preview-view` with NO sizer whose first child is the file-name
- * `h1`; the note's sections follow it. Editor y=0 is the first text line, so
- * the layer's top is where the content after that title begins. Null for
- * every root that is not such a container (an embed, a view with a sizer, a
- * container with no title), and for one that is not laid out (offsets 0).
+ * `.markdown-preview-view` with NO sizer: the file-name `h1` first when the
+ * export includes it, then each of the note's top-level blocks in a div of its
+ * own, straight in the container. Editor x 0 is the text column's left and
+ * y 0 the first text line's top, so the layer is anchored on the first
+ * content block, not on the container's padding edge: its top is that
+ * block's `offsetTop` (the container's padding, the title and the block's own
+ * top margin all included) and its left is the column's (`columnInset`, which
+ * also takes in a theme that centres the blocks; the block's own
+ * `offsetLeft`, or the title's with no block, when no column can be read). At Obsidian's default margins the padding edge
+ * put the ink 32 px left of its words, and 48 px above them with no title.
+ *
+ * With no content block the title's bottom is the top. Null for every root
+ * that is not such a container (an embed, a view with a sizer), for one with
+ * neither a block nor a title, and for one that is not laid out (no offset
+ * parent: a `display: none` subtree, where every offset reads 0).
  */
-function printTitleBottom(root: HTMLElement): { left: number; top: number } | null {
+export function printAnchor(root: HTMLElement, remeasure: boolean): { left: number; top: number } | null {
 	if (!root.classList?.contains("markdown-preview-view")) return null;
 	const title = root.querySelector<HTMLElement>(":scope > h1");
-	if (!title) return null;
-	const first = title.nextElementSibling as HTMLElement | null;
-	const top = first ? first.offsetTop : title.offsetTop + title.offsetHeight;
-	return top > 0 ? { left: 0, top } : null;
+	const first = printFirstBlock(root, title);
+	const at = first ?? title;
+	if (!at || !at.offsetParent) return null;
+	const top = first ? first.offsetTop : at.offsetTop + at.offsetHeight;
+	const left = columnInset(root, root, root, remeasure) ?? at.offsetLeft;
+	return { left, top };
+}
+
+/**
+ * The print container's first block of the note itself: the first child that
+ * is not the file-name title, not one of our layers or spacers, and laid out.
+ */
+function printFirstBlock(root: HTMLElement, title: HTMLElement | null): HTMLElement | null {
+	const children = root.children as ArrayLike<Element> | undefined;
+	if (!children) return null;
+	for (let i = 0; i < children.length; i++) {
+		const child = children[i] as HTMLElement | undefined;
+		if (!child || child === title || isNotColumn(child)) continue;
+		if (!child.offsetParent) continue;
+		return child;
+	}
+	return null;
 }
 
 /** The sizer a reading view's layer is anchored to, if this root is one. */
-function anchorSizer(root: HTMLElement): HTMLElement | null {
+export function anchorSizer(root: HTMLElement): HTMLElement | null {
 	if (!root.classList?.contains("markdown-preview-view")) return null;
 	return root.querySelector<HTMLElement>(":scope > .markdown-preview-sizer");
 }
@@ -602,7 +346,7 @@ function anchorSizer(root: HTMLElement): HTMLElement | null {
  * or absent. `offsetHeight` is self-contained: it does not depend on which
  * element is the header's own offset parent, unlike `offsetTop`.
  */
-function sizerHeaderHeight(sizer: HTMLElement): number {
+export function sizerHeaderHeight(sizer: HTMLElement): number {
 	const header = sizer.querySelector<HTMLElement>(":scope > .mod-header");
 	if (header) {
 		const h = header.offsetHeight;
@@ -619,19 +363,157 @@ function sizerHeaderHeight(sizer: HTMLElement): number {
 /** The header height last measured on each sizer (see `sizerHeaderHeight`). */
 const lastHeaderHeight = new WeakMap<HTMLElement, number>();
 
-function anchorLayer(root: HTMLElement, el: { style: CSSStyleDeclaration }, remeasure = false): void {
+export function anchorLayer(root: HTMLElement, el: { style: CSSStyleDeclaration }, remeasure = false): void {
 	const origin = layerOrigins.get(root) ?? { x: 0, y: 0 };
 	const sizer = embedInkAnchor(root, remeasure);
 	// `offsetLeft` does not include the sizer's `translate`, so the scroll reserve is added back here.
 	const at = sizer
 		? anchorSizer(root)
 			? { left: sizer.left + scrollReserveHeld(root), top: sizer.top }
-			: { left: sizer.left + reserveHeld(root), top: sizer.top } // an embed's column; print: below the file-name title
+			: { left: sizer.left + reserveHeld(root), top: sizer.top } // an embed's column; print: the first block's column and top
 		: { left: reserveHeld(root), top: 0 };
-	// Through `style`, not `setCssStyles`: the print swap anchors an <svg>,
-	// and Obsidian's helper is an augmentation of HTMLElement.
-	el.style.left = `${at.left + origin.x}px`;
-	el.style.top = `${at.top + origin.y}px`;
+	// A Reading view tile sits at its own place inside the ink box; the box's place and the view's size are kept for
+	// the scroll listener, which reads no layout of its own.
+	const watch = tiles.get(root);
+	const tiled = watch && watch.canvas === el ? watch : null;
+	if (tiled) {
+		tiled.at = { left: at.left + origin.x, top: at.top + origin.y };
+		tiled.client = { w: root.clientWidth, h: root.clientHeight };
+	}
+	if (anchorSizer(root) && !isPrintContainer(root)) readingExtent(root, at);
+	// Through `style`: the offsets are computed on every anchor, not fixed values.
+	el.style.left = `${at.left + origin.x + (tiled?.tile?.x ?? 0)}px`;
+	el.style.top = `${at.top + origin.y + (tiled?.tile?.y ?? 0)}px`;
+	// A resize can leave part of the view off the tile.
+	if (tiled) askTile(root, tiled);
+}
+
+/**
+ * A canvas note's Reading view scrolls as far as its editor does. The editor's range is the extent it granted the note
+ * (SurfaceExtent.ts `surfaceExtents`: the ink, room to write below the text, and the room scrolling out on the canvas
+ * grew), and Reading view's was the ink's own box: scrolled far right and down, the editor reached further, and on the
+ * switch the far ink sat lower on screen. Here the view holds one hidden 1 px spacer at the note's world origin (`at`)
+ * plus that extent at the view's ink zoom, so the range ends where the editor's does. Room below and right only: the
+ * extent is never negative, and the scroll floors stay 0. The extent is only read here, never grown or shrunk: only
+ * the editor knows what it shows. No grant (no editor has laid the note out this session), a note that is not a
+ * canvas note, or an unwired flag: no spacer, the range is the ink's as before.
+ */
+function readingExtent(root: HTMLElement, at: { left: number; top: number }): void {
+	const path = layers.get(root);
+	const spacer = root.querySelector<HTMLElement>(`:scope > .${READING_EXTENT_CLS}`);
+	const extent = path !== undefined && canvasNoteOf?.(path) === true ? surfaceExtents.get(path) : null;
+	if (!extent || (extent.x <= 0 && extent.y <= 0)) {
+		spacer?.remove();
+		return;
+	}
+	const zoom = paintedZooms.get(root) ?? inkZoomOf(root, path!);
+	const el = spacer ?? root.createDiv({ cls: READING_EXTENT_CLS });
+	el.setAttribute("aria-hidden", "true");
+	el.setCssStyles({
+		position: "absolute",
+		width: "1px",
+		height: "1px",
+		visibility: "hidden",
+		pointerEvents: "none",
+		left: `${Math.round(at.left + Math.max(0, extent.x) * zoom)}px`,
+		top: `${Math.round(at.top + Math.max(0, extent.y) * zoom)}px`,
+	});
+}
+
+/** A Reading view root drawing a tile (EmbedInkTile.ts): what it draws, where its box is, and its scroll listener. */
+interface TileWatch {
+	canvas: HTMLCanvasElement;
+	drawn: readonly InkStroke[];
+	zoom: number;
+	/** The ink box, note px, as `embedInkBounds` gives it. */
+	box: { x: number; y: number; w: number; h: number };
+	dpr: number;
+	tile: InkTile | null;
+	/** The box's top-left in the view's scrolled content, css px, and the view's client size: from the last anchor. */
+	at: { left: number; top: number };
+	client: { w: number; h: number };
+	frame: number;
+	/** Set while a paint measures the box: an anchor then asks for no frame. */
+	quiet: boolean;
+	onScroll: () => void;
+}
+const tiles = new WeakMap<HTMLElement, TileWatch>();
+/** What a tile writes on the canvas beyond the whole box's width and height; taken off when the root draws whole again. */
+const TILE_PROPS = ["box-sizing", "border-style", "border-color", "border-width"];
+
+/** The view's rect in the ink box's css px. */
+function tileView(root: HTMLElement, w: TileWatch): InkRect {
+	return { x: root.scrollLeft - w.at.left, y: root.scrollTop - w.at.top, w: w.client.w, h: w.client.h };
+}
+
+/** Repaint the tile in the next frame when the view has left it; one frame however many scrolls ask. */
+function askTile(root: HTMLElement, w: TileWatch): void {
+	if (w.quiet || w.frame !== 0 || embedInkTileHolds(w.tile, { w: w.box.w, h: w.box.h }, tileView(root, w))) return;
+	const win = root.ownerDocument.defaultView ?? window;
+	w.frame = win.requestAnimationFrame(() => {
+		w.frame = 0;
+		if (tiles.get(root) !== w || !root.isConnected || !w.canvas.isConnected) return;
+		drawTile(root, w);
+	});
+}
+
+/** Stop drawing a tile on `root`: the listener and any frame go, and the canvas loses the tile's own styles. */
+function untile(root: HTMLElement): void {
+	const w = tiles.get(root);
+	if (!w) return;
+	tiles.delete(root);
+	root.removeEventListener("scroll", w.onScroll);
+	if (w.frame !== 0) (root.ownerDocument.defaultView ?? window).cancelAnimationFrame(w.frame);
+	for (const prop of TILE_PROPS) w.canvas.style.removeProperty(prop);
+}
+
+/**
+ * Draw the part of the ink box the view shows, plus a quarter view each side, at the display's ratio. The canvas's
+ * content box is the tile; transparent borders to the right and below carry its border box to the ink box's far
+ * edges, so the view's scroll range stays what the whole box gave it. The old tile stays on screen until this one is
+ * drawn, in the same task.
+ */
+function drawTile(root: HTMLElement, w: TileWatch): void {
+	const { canvas, box, zoom, dpr } = w;
+	const budget = Platform.isMobile ? TILE_PX_MOBILE : TILE_PX;
+	const tile = embedInkTile({ w: box.w, h: box.h }, tileView(root, w), (tw, th) => embedInkScale(tw, th, dpr, budget));
+	w.tile = tile;
+	const bw = tile?.bw ?? 1, bh = tile?.bh ?? 1;
+	if (canvas.width !== bw || canvas.height !== bh) {
+		canvas.width = bw;
+		canvas.height = bh;
+	}
+	const tw = tile?.w ?? 0, th = tile?.h ?? 0;
+	const right = Math.max(0, box.w - (tile?.x ?? 0) - tw), bottom = Math.max(0, box.h - (tile?.y ?? 0) - th);
+	canvas.setCssStyles({ boxSizing: "content-box", borderStyle: "solid", borderColor: "transparent" });
+	canvas.style.setProperty("border-width", `0px ${right}px ${bottom}px 0px`);
+	canvas.setCssStyles({ width: `${tw}px`, height: `${th}px` });
+	anchorLayer(root, canvas);
+	const ctx = canvas.getContext("2d");
+	if (!ctx) return;
+	ctx.setTransform(1, 0, 0, 1, 0, 0);
+	ctx.clearRect(0, 0, bw, bh);
+	if (!tile) return;
+	const s = tile.scale;
+	// The whole box's transform, moved by the tile's whole device px: a stroke lands on the same device px in any tile.
+	ctx.setTransform(s, 0, 0, s, -box.x * s - tile.bx, -box.y * s - tile.by);
+	// The tile in note px, and only the strokes that meet it. A stroke's box is padded by whoever built it, so the test
+	// allows its full width and a px of antialiasing past the box: a stroke just off the tile still paints its edge.
+	const x0 = box.x + tile.x, y0 = box.y + tile.y, x1 = x0 + tile.w, y1 = y0 + tile.h;
+	const meets = (st: InkStroke): boolean => {
+		const b = st.bbox, m = st.width * zoom + 1;
+		return b.x * zoom - m <= x1 && b.y * zoom - m <= y1 && (b.x + b.width) * zoom + m >= x0 && (b.y + b.height) * zoom + m >= y0;
+	};
+	const cam = zoom === 1 ? CAM : { x: 0, y: 0, zoom };
+	ctx.globalAlpha = 0.35;
+	for (const st of w.drawn) if (st.tool === "highlighter" && meets(st)) drawStroke(ctx, cam, st, undefined, true);
+	ctx.globalAlpha = 1;
+	for (const st of w.drawn) if (st.tool !== "highlighter" && meets(st)) drawStroke(ctx, cam, st, undefined, true);
+}
+
+/** The tile a Reading view root holds, or null when it draws its whole box. */
+export function embedInkTileOf(root: HTMLElement): InkTile | null {
+	return tiles.get(root)?.tile ?? null;
 }
 
 interface HeldReserve { prop: string; was: string; priority: string; ours: string; reserve: number }
@@ -711,7 +593,7 @@ function setScrollReserve(root: HTMLElement, sizer: HTMLElement | null, reserve:
  * margin stay where they are without it. This only gives back what an earlier
  * pass held: the padding or margin, and a reading view's scroll room.
  */
-function reserveLeft(root: HTMLElement): void {
+export function reserveLeft(root: HTMLElement): void {
 	const sizer = anchorSizer(root);
 	releaseReserve(sizer ?? root);
 	setScrollReserve(root, sizer, 0);
@@ -725,13 +607,14 @@ function reserveLeft(root: HTMLElement): void {
  * straddling one keeps its left part. Stored coordinates are untouched; only
  * the layer moves.
  */
-export function embedInkBounds(strokes: readonly InkStroke[]): { x: number; y: number; w: number; h: number } {
+export function embedInkBounds(strokes: readonly InkStroke[], zoom = 1): { x: number; y: number; w: number; h: number } {
+	// `zoom`: px per world unit, for a layer that draws the ink at its text size (`inkZoomOf`).
 	let minX = 0, minY = 0, maxX = 0, maxY = 0;
 	for (const s of strokes) {
-		minX = Math.min(minX, s.bbox.x);
-		minY = Math.min(minY, s.bbox.y);
-		maxX = Math.max(maxX, s.bbox.x + s.bbox.width);
-		maxY = Math.max(maxY, s.bbox.y + s.bbox.height);
+		minX = Math.min(minX, s.bbox.x * zoom);
+		minY = Math.min(minY, s.bbox.y * zoom);
+		maxX = Math.max(maxX, (s.bbox.x + s.bbox.width) * zoom);
+		maxY = Math.max(maxY, (s.bbox.y + s.bbox.height) * zoom);
 	}
 	const x = Math.floor(minX), y = Math.floor(minY);
 	return { x, y, w: Math.ceil(maxX) - x, h: Math.ceil(maxY) - y };
@@ -761,12 +644,13 @@ export function embedInkExtent(strokes: readonly InkStroke[]): { w: number; h: n
  * canvas limit (audit 189): below the 0.25 area floor when the page is tall
  * enough, because a canvas that silently fails to size loses every stroke,
  * and a softer picture that actually exists is always the better failure.
+ * `budget`: the device px the layer may hold; a Reading view tile passes its own (EmbedInkTile.ts).
  */
-export function embedInkScale(w: number, h: number, dpr: number): number {
+export function embedInkScale(w: number, h: number, dpr: number, budget = MAX_LAYER_PX): number {
 	if (w <= 0 || h <= 0) return 1;
 	const want = Math.max(1, dpr);
 	const area = w * h * want * want;
-	const areaScale = area <= MAX_LAYER_PX ? want : Math.max(0.25, Math.sqrt(MAX_LAYER_PX / (w * h)));
+	const areaScale = area <= budget ? want : Math.max(0.25, Math.sqrt(budget / (w * h)));
 	const sideScale = Math.min(MAX_LAYER_SIDE_PX / w, MAX_LAYER_SIDE_PX / h);
 	return Math.min(areaScale, sideScale);
 }
@@ -805,6 +689,50 @@ export function initEmbedInkRefresh(provider: (path: string) => readonly InkStro
 	strokesFor = provider;
 }
 
+/** Where a render reads a note's reference font from (the store's `fontRefPx`). Wired once at plugin load. */
+export function initEmbedInkFontRef(provider: ((path: string) => number | null) | null): void {
+	fontRefFor = provider;
+}
+
+/**
+ * The px per world unit `root` draws `path`'s ink at: its text size over the note's reference font, as the editor
+ * draws it (fontZoomFactor). Stored coordinates are px at the reference, so ink drawn at 1 beside text of another size
+ * came out that much too large or small, and too far from its line. 1 with no reference, or no text size to read.
+ * The print layer reads it too, so paper shows the ink at the size the screen does.
+ */
+export function inkZoomOf(root: HTMLElement, path: string): number {
+	const ref = fontRefFor ? fontRefFor(path) : null;
+	if (ref === null) return 1;
+	// The text's own size: a view's or an embed's sizer, else the root (a print container holds its blocks itself).
+	const text = root.querySelector<HTMLElement>(".markdown-preview-sizer") ?? root;
+	const font = Number.parseFloat(root.ownerDocument.defaultView?.getComputedStyle(text).fontSize ?? "");
+	return fontZoomFactor(font, ref);
+}
+
+/**
+ * Where a Reading view reads whether a note is an Infinite Canvas note, as the editor resolves it (`readingExtent`).
+ * Wired by the note surface beside the strokes provider.
+ */
+export function initEmbedInkCanvasNote(provider: ((path: string) => boolean) | null): void {
+	canvasNoteOf = provider;
+}
+
+/**
+ * Where a print reads the note's screen column width from: the text column of the editor showing the path, px, or
+ * null when none does. Wired by the note surface beside the strokes provider.
+ */
+export function initEmbedInkColumnWidth(provider: (path: string) => number | null): void {
+	columnWidthFor = provider;
+}
+
+/**
+ * Where a read-only view reads the signature of an editor open on a note (LineAnchor.ts), which anchors are honoured
+ * under: null when none is open. Wired by the note surface beside the strokes provider.
+ */
+export function initEmbedInkLineSignature(provider: ((path: string) => LineSignature | null) | null): void {
+	lineSignatureFor = provider;
+}
+
 /**
  * Where the diagnostic line goes. Wired once at plugin load; null silences it.
  */
@@ -814,14 +742,6 @@ export function initEmbedInkDiagnostics(
 	diagnose = sink;
 }
 
-/** Diagnostics: waits still pending, and roots still watched for a size. */
-export function embedInkPendingWaitCount(): number {
-	return pendingWaits.size;
-}
-
-export function embedInkSizeWatchCount(): number {
-	return sizeWatches.size;
-}
 
 /**
  * A note's ink was persisted: bump its revision and repaint every connected
@@ -912,459 +832,13 @@ export function embedInkFileOpened(viewEl: { contains(node: Node): boolean } | n
  * activity - a session that only READS (hover previews register roots and
  * never draws) must not accumulate detached trees and their canvases.
  */
-function sweepDisconnected(): void {
+export function sweepDisconnected(): void {
 	for (const root of [...layers.keys()]) {
 		if (!root.isConnected) layers.delete(root);
 	}
 	sweepSizeWatches();
 }
 
-/**
- * Drop the size watches whose root the DOM let go of: a root that left the
- * tree will never gain a size, so its watch is a live ResizeObserver holding
- * a detached tree alive by a strong Map key for nothing.
- *
- * Split out of `sweepDisconnected` because `paint` runs THIS half on its own
- * and the layers half above is the expensive one: `embedInkChanged` paints
- * every root showing the note, so a full sweep per paint would cost
- * O(roots) per root - quadratic in the embeds on screen, on the path every
- * save takes. This half is bounded by the number of COLLAPSED roots, which
- * is zero in the ordinary case and does not grow with the embeds that did
- * lay out; the size test keeps even the array copy off that path.
- */
-function sweepSizeWatches(): void {
-	if (anchorWatches.size > 0) {
-		for (const root of [...anchorWatches.keys()]) if (!root.isConnected) stopAnchorWatch(root);
-	}
-	if (sizeWatches.size === 0) return;
-	for (const root of [...sizeWatches.keys()]) {
-		if (!root.isConnected) stopSizeWatch(root);
-	}
-}
-
-/**
- * Attach (or refresh) the ink layer on a rendered document root and put it
- * in the registry. Idempotent per (root, path, revision): a second section
- * with the same path finds the marker and leaves the existing layer alone.
- * Registered even with zero strokes, so an embed rendered before its note
- * was ever drawn on still gains ink at the first gesture.
- */
-export function attachEmbedInk(
-	root: HTMLElement,
-	path: string,
-	strokes: readonly InkStroke[]
-): void {
-	sweepDisconnected();
-	layers.set(root, path);
-	const win = root.ownerDocument.defaultView ?? window;
-	armPrintSwap(win);
-	paint(root, path, strokes);
-	// Attached while this window is printing: part of the print, like the rest.
-	if (printing.has(win)) printVectorFor(root, path, true);
-}
-
-/**
- * Attach ink to a rendered section as soon as a root for it can be found,
- * however this build of Obsidian gets round to producing one.
- *
- * There are three routes and the code has to hold all three at once, because
- * which one applies is a property of the reader's app, not of ours:
- *
- * 1. The section is already in the tree, so `closest` walks straight up to the
- *    root. Every renderer before 1.12, and reading view once it has settled.
- * 2. The section is NOT in the tree yet - the virtualised preview renderer
- *    loads a section's render child before inserting the element - but the
- *    post-processor context carries the renderer's own `containerEl`, which
- *    is, and climbing from that lands on the same root.
- * 3. Neither: a build that hands us no container and a section that has not
- *    landed. Older desktop builds, and mobile is assumed to be here until
- *    somebody measures it. This is the route we cannot test on this machine
- *    and the one a report of "no ink in embeds" most likely lands on, so it
- *    gets belt AND braces: a MutationObserver on the document body (ONE
- *    per document, shared with every other wait on it - see `bodyWatches`),
- *    which fires the moment the renderer inserts the section whether or not
- *    frames are running, and a time-bounded poll behind it, in case a renderer
- *    reparents into a subtree the observer was not given or the section is
- *    moved by something that does not mutate `body` (an iframe-hosted
- *    document, a shadow root). Ten seconds of WALL CLOCK, not thirty frames:
- *    a backgrounded window can run no frames at all and a slow device's
- *    thirty are worth less than half a second.
- *
- * Route 1 stays SYNCHRONOUS and that is not an optimisation. An export
- * renders the note and serializes it immediately; a picture taken before a
- * promise resolves has already lost its ink.
- *
- * Returns a canceller for `child.onunload`, and registers the same canceller
- * for `teardownEmbedInk` - a render child's unload is not the plugin's, and a
- * pending wait that survives a reload is a timer calling into a dead module.
- */
-export function attachEmbedInkOnceReady(
-	el: HTMLElement,
-	container: HTMLElement | null,
-	path: string,
-	strokes: () => readonly InkStroke[],
-	/**
-	 * For a hover popover: resolves true only when the popover rendered the
-	 * whole note. Without it, or when it says no, a popover gets no ink -
-	 * wrong ink over a section is worse than none.
-	 */
-	wholeNote?: () => Promise<boolean>,
-	popoverProven = false
-): () => void {
-	if (embedInkIsLiveEditorBlock(el, container) || embedInkIsSectionEmbed(el, container)) return () => {};
-	if (!popoverProven && embedInkInPopover(el, container)) {
-		if (!wholeNote) return () => {};
-		let cancelled = false;
-		let inner: (() => void) | null = null;
-		runDetached(
-			wholeNote().then((whole) => {
-				if (whole && !cancelled) inner = attachEmbedInkOnceReady(el, container, path, strokes, undefined, true);
-			}),
-			"check whether a hover preview rendered the whole note"
-		);
-		return () => {
-			cancelled = true;
-			inner?.();
-		};
-	}
-	const immediate = embedInkResolveRoot(el, container);
-	if (immediate.root) {
-		attachEmbedInk(immediate.root, path, strokes());
-		diagnose?.(immediate.via, path, 0);
-		return () => {};
-	}
-	const view = el.ownerDocument?.defaultView ?? null;
-	const started = Date.now();
-	let timer: number | null = null;
-	let unwatchBody: (() => void) | null = null;
-	let done = false;
-	const wait = { path };
-
-	const cancel = (): void => {
-		if (done) return;
-		done = true;
-		if (timer !== null) {
-			clearTimer(view, timer);
-			timer = null;
-		}
-		unwatchBody?.();
-		unwatchBody = null;
-		pendingWaits.delete(cancel);
-		pendingWaitPaths.delete(cancel);
-	};
-
-	/** One attempt. True once a root was found and the wait is over. */
-	const settle = (via: "observer" | "timer"): boolean => {
-		if (done) return false;
-		if (
-			embedInkIsLiveEditorBlock(el, container) ||
-			embedInkIsSectionEmbed(el, container) ||
-			(!popoverProven && embedInkInPopover(el, container))
-		) {
-			cancel();
-			return true;
-		}
-		const late = embedInkResolveRoot(el, container);
-		if (!late.root) return false;
-		const waited = Date.now() - started;
-		// The note this wait is for NOW: the vault may have renamed it while the
-		// section was late, and the caller's own strokes() still answers for the
-		// old path.
-		const shown = wait.path;
-		cancel();
-		attachEmbedInk(late.root, shown, shown === path ? strokes() : strokesFor ? strokesFor(shown) : []);
-		diagnose?.(via, shown, waited);
-		return true;
-	};
-
-	const tick = (): void => {
-		timer = null;
-		if (done) return;
-		if (settle("timer")) return;
-		const elapsed = Date.now() - started;
-		if (!embedInkKeepWaiting(elapsed)) {
-			// Out of budget. The line naming `none` is the whole point of the
-			// diagnostic: it says the section never connected, which is a
-			// different bug from one that attached and drew nothing.
-			cancel();
-			diagnose?.("none", path, elapsed);
-			return;
-		}
-		timer = setTimer(view, tick, embedInkRetryDelay(elapsed));
-	};
-
-	// Registered before either trigger is armed, so there is no window in
-	// which something is running that teardown cannot reach.
-	pendingWaits.add(cancel);
-	pendingWaitPaths.set(cancel, wait);
-	// The observer first, so a section inserted between here and the first
-	// poll is caught by the cheaper of the two. Watching `body` with a
-	// subtree is broad, but it lives only until the section lands or the
-	// budget runs out, and only on the route where nothing else worked.
-	const body = el.ownerDocument?.body ?? el.ownerDocument?.documentElement ?? null;
-	unwatchBody = watchBodyForSections(view, body, () => void settle("observer"));
-	if (!done) timer = setTimer(view, tick, embedInkRetryDelay(0));
-	return cancel;
-}
-
-/**
- * Subscribe a probe to this document's shared route-3 observer, arming it if
- * this is the first wait on that body. Returns the unsubscriber (null when
- * there is no observer to be had - a host without `MutationObserver`, or a
- * detached document with no body - which is exactly the case the poll behind
- * it exists for), and disconnects the observer as the last probe leaves.
- */
-function watchBodyForSections(
-	view: Document["defaultView"],
-	body: HTMLElement | null,
-	probe: () => void
-): (() => void) | null {
-	const MO = view?.MutationObserver ?? null;
-	if (!MO || !body) return null;
-	let entry = bodyWatches.get(body);
-	if (!entry) {
-		const probes = new Set<() => void>();
-		// Over a COPY: a probe that resolves cancels its own wait, which
-		// unsubscribes it from this very set mid-iteration.
-		const observer = new MO(() => {
-			for (const p of [...probes]) p();
-		});
-		observer.observe(body, { childList: true, subtree: true });
-		entry = { observer, probes };
-		bodyWatches.set(body, entry);
-	}
-	entry.probes.add(probe);
-	return () => {
-		const live = bodyWatches.get(body);
-		if (!live) return;
-		live.probes.delete(probe);
-		if (live.probes.size > 0) return;
-		live.observer.disconnect();
-		bodyWatches.delete(body);
-	};
-}
-
-/**
- * Timers scheduled on the section's OWN window where there is one.
- *
- * A popout has its own window object, and a timer scheduled on the main one
- * for an element in a popout goes on firing after that popout has closed.
- * Falling back to the globals keeps this working under a fake view in tests
- * and anywhere `defaultView` is null (a detached document).
- */
-function setTimer(view: Window | null, fn: () => void, ms: number): number {
-	if (view && typeof view.setTimeout === "function") return view.setTimeout(fn, ms);
-	return timerHost().setTimeout(fn, ms);
-}
-
-function clearTimer(view: Window | null, handle: number): void {
-	if (view && typeof view.clearTimeout === "function") {
-		view.clearTimeout(handle);
-		return;
-	}
-	timerHost().clearTimeout(handle);
-}
-
-/** Cancel every pending wait. Called by teardown; safe to call twice. */
-function cancelPendingWaits(): void {
-	for (const cancel of [...pendingWaits]) cancel();
-	pendingWaits.clear();
-	pendingWaitPaths.clear();
-	// Cancelling every wait empties the shared observers by itself; this is
-	// the belt on that, so unload stays the single place either collection
-	// can be leaked from even if a canceller was lost.
-	for (const { observer } of bodyWatches.values()) observer.disconnect();
-	bodyWatches.clear();
-}
-
-/** Stop watching a root's size, if we were. */
-function stopSizeWatch(root: HTMLElement): void {
-	const stop = sizeWatches.get(root);
-	if (!stop) return;
-	stop();
-	sizeWatches.delete(root);
-}
-
-/** Stop every size watch. Called by teardown. */
-function stopAllSizeWatches(): void {
-	for (const stop of [...sizeWatches.values()]) stop();
-	sizeWatches.clear();
-}
-
-function stopAnchorWatch(root: HTMLElement): void {
-	const watch = anchorWatches.get(root);
-	if (!watch) return;
-	watch.stop();
-	anchorWatches.delete(root);
-}
-
-/** Stop every anchor watch. Called by teardown. */
-function stopAllAnchorWatches(): void {
-	for (const watch of [...anchorWatches.values()]) watch.stop();
-	anchorWatches.clear();
-}
-
-/**
- * Re-anchor a reading view's layer as the pane changes width.
- *
- * Only `paint` writes the offset and a resize does not repaint, so without
- * this the ink stays where the text used to be until the next gesture.
- *
- * Both boxes are observed: toggling "readable line length" resizes the sizer
- * inside a view whose own box never changes, so watching the view alone sees
- * nothing while the ink drifts by the whole centring margin.
- */
-function watchAnchor(root: HTMLElement): void {
-	if (!root.classList?.contains("markdown-preview-view") || anchorWatches.has(root)) return;
-	const RO = root.ownerDocument?.defaultView?.ResizeObserver ?? null;
-	if (!RO) return;
-	const sync = (): void => {
-		if (anchorWatches.get(root) !== watch) return;
-		if (!root.isConnected) {
-			stopAnchorWatch(root);
-			return;
-		}
-		const sizer = anchorSizer(root);
-		if (watch.sizer !== sizer) {
-			if (watch.sizer) ro.unobserve(watch.sizer);
-			watch.sizer = sizer;
-			if (sizer) ro.observe(sizer);
-		}
-		const canvas = root.querySelector<HTMLCanvasElement>(":scope > canvas.handwriting-embed-ink");
-		// The room the centring leaves moves with the pane, and the reserve with it.
-		if (canvas) reserveLeft(root);
-		// The watch tick is where the column is measured again: a
-		// resize or the readable line length toggle moves it, a paint does not.
-		if (canvas) anchorLayer(root, canvas, true);
-		const svg = root.querySelector<SVGSVGElement>(":scope > svg.handwriting-embed-ink");
-		if (svg) anchorLayer(root, svg, !canvas);
-	};
-	const ro = new RO(sync);
-	// A replacement need not repaint or resize the view. Observe only the
-	// surviving root's direct children, then move the resize watch to its
-	// current sizer; edits inside rendered sections need no observer work.
-	const MO = root.ownerDocument?.defaultView?.MutationObserver ?? null;
-	const mo = MO ? new MO(sync) : null;
-	const watch = { sizer: null as HTMLElement | null, stop: () => { ro.disconnect(); mo?.disconnect(); } };
-	anchorWatches.set(root, watch);
-	ro.observe(root);
-	mo?.observe(root, { childList: true });
-	sync();
-}
-
-/**
- * A painted root with no size on screen gets watched until it has one.
- *
- * The 1.4.11 §6 clip - an embed's content box sized to its TEXT, 24px against
- * 368px of ink - is fixed by growing `min-height`, but that fix assumes the
- * box is being LAID OUT when we paint. Under a theme that renders the embed
- * collapsed, or inside a folded callout, or on a pane the renderer has not
- * given a size to yet, the box measures 0x0 and the min-height lands on
- * something with no layout to apply it to. Drawing once and walking away
- * leaves the ink invisible until that section next re-renders, which for an
- * embed can be never.
- *
- * So the box is re-measured on the observer's tick instead: as soon as the
- * layout gives it a size, the marker is dropped and it is painted again
- * against the box it actually has. The watch stops on the first non-zero
- * measurement, on teardown, and when the root leaves the DOM.
- */
-function watchIfCollapsed(root: HTMLElement, path: string): void {
-	if (typeof root.getBoundingClientRect !== "function") return;
-	// A root the DOM has let go of measures 0x0, which `embedInkIsCollapsed`
-	// cannot tell from a collapsed root still on screen - and it will never
-	// gain a size, so arming a watch here would be a ResizeObserver on a
-	// detached tree with nothing left to fire it.
-	if (root.isConnected === false) {
-		stopSizeWatch(root);
-		return;
-	}
-	const view = root.ownerDocument?.defaultView ?? null;
-	const RO = view?.ResizeObserver ?? null;
-	if (!RO) return;
-	if (!embedInkIsCollapsed(root.getBoundingClientRect())) {
-		stopSizeWatch(root);
-		return;
-	}
-	if (sizeWatches.has(root)) return;
-	const ro = new RO(() => {
-		if (!sizeWatches.has(root)) return;
-		if (embedInkIsCollapsed(root.getBoundingClientRect())) return;
-		stopSizeWatch(root);
-		// Re-measure: the marker is what makes `paint` stand down, so drop it
-		// and paint again now the box has a size.
-		root.removeAttribute(MARKER_ATTR);
-		// The note the root shows NOW: a file-open or a rename moved it while
-		// the watch waited, and the path this watch started with is stale.
-		const shown = layers.get(root) ?? path;
-		paint(root, shown, strokesFor ? strokesFor(shown) : []);
-	});
-	ro.observe(root);
-	sizeWatches.set(root, () => ro.disconnect());
-}
-
-/**
- * Canvas on screen, vector on paper.
- *
- * The two representations are good at opposite things and the choice is not a
- * compromise, it is a switch. A canvas costs what the PAGE costs - ten strokes
- * and ten thousand render identically - so no amount of drawing can slow a
- * note down, which is the only acceptable behaviour for a surface people are
- * meant to draw freely on. But a canvas is a fixed grid of pixels, and a
- * printer wants a resolution nobody knew at render time, so ink came out of a
- * PDF visibly soft beside the text.
- *
- * Vector has exactly the inverse profile: nothing to choose a resolution for,
- * and a cost that grows with how much was drawn. So it exists only while a
- * print is actually happening - built on `beforeprint`, dropped on
- * `afterprint`, never present during ordinary use.
- *
- * If a print path never fires these events, nothing swaps and the canvas is
- * printed, which is exactly the behaviour before any of this. The failure mode
- * is the old output, not a broken one.
- */
-function armPrintSwap(win: Window): void {
-	if (printArmed.has(win)) return;
-	printArmed.add(win);
-	const disarms: Array<() => void> = [];
-	printDisarms.set(win, disarms);
-	const on = () => usePrintVector(true, win);
-	const off = () => usePrintVector(false, win);
-	win.addEventListener("beforeprint", on);
-	win.addEventListener("afterprint", off);
-	disarms.push(() => {
-		win.removeEventListener("beforeprint", on);
-		win.removeEventListener("afterprint", off);
-	});
-	// Second trigger, because the first is unreliable. A print stylesheet
-	// becoming active is a media-query change, and some print paths flip that
-	// without ever dispatching beforeprint. Both are idempotent: whichever
-	// arrives first builds the layer and the other finds it already there.
-	const mq = win.matchMedia?.("print");
-	const onMq = (e: MediaQueryListEvent) => usePrintVector(e.matches, win);
-	mq?.addEventListener?.("change", onMq);
-	if (mq) disarms.push(() => mq.removeEventListener?.("change", onMq));
-	// A popout closing lets go of its window here, not at plugin unload.
-	// pagehide rather than unload: it fires on every close, and Chromium is
-	// retiring unload.
-	const onClose = () => {
-		printing.delete(win);
-		printDisarms.delete(win);
-		// A window that outlives pagehide (kept for back/forward) arms again
-		// at its next embed.
-		printArmed.delete(win);
-		for (const d of disarms) d();
-	};
-	win.addEventListener("pagehide", onClose);
-	disarms.push(() => win.removeEventListener("pagehide", onClose));
-}
-
-/** Drop the print listeners at unload, so a reload cannot leave a pair behind. */
-export function disarmPrintSwaps(): void {
-	const all = [...printDisarms.values()];
-	printDisarms.clear();
-	for (const disarms of all) for (const d of disarms) d();
-}
 
 /**
  * Take the ink layers back out of the rendered DOM.
@@ -1390,8 +864,12 @@ export function teardownEmbedInk(): void {
 	stopAllAnchorWatches();
 	for (const root of [...layers.keys()]) {
 		if (!root.isConnected) continue;
+		untile(root);
 		root.querySelector(":scope > canvas.handwriting-embed-ink")?.remove();
+		releasePrintStrips(root);
+		printSpans.delete(root);
 		root.querySelector(":scope > svg.handwriting-embed-ink")?.remove();
+		root.querySelector(`:scope > .${READING_EXTENT_CLS}`)?.remove();
 		root.removeAttribute(MARKER_ATTR);
 		if (root.getAttribute(POSITION_ATTR) !== null && root.style.position === "relative") root.style.removeProperty("position");
 		root.removeAttribute(POSITION_ATTR);
@@ -1399,90 +877,21 @@ export function teardownEmbedInk(): void {
 		const sizer = anchorSizer(root);
 		releaseReserve(sizer ?? root);
 		setScrollReserve(root, sizer, 0);
+		lineSources.delete(root);
+		lineMemos.delete(root);
+		placements.delete(root);
+		paintedZooms.delete(root);
 	}
+	replaceQueue.clear();
 	layers.clear();
 	revisions.clear();
 	strokesFor = null;
+	canvasNoteOf = null;
+	columnWidthFor = null;
+	fontRefFor = null;
 	diagnose = null;
 }
 
-function usePrintVector(on: boolean, win?: Window): void {
-	if (on) printSwaps++;
-	if (win) {
-		if (on) printing.add(win);
-		else printing.delete(win);
-	}
-	sweepDisconnected();
-	for (const [root, path] of layers) printVectorFor(root, path, on);
-}
-
-/**
- * One root's print layer: built from the ink as it is now, or taken away.
- * Called for every root when a print starts or ends, for a root whose ink
- * changes under a print that is running (its canvas is hidden then, so the
- * vector layer is the picture), and for a root that attaches mid-print.
- */
-function printVectorFor(root: HTMLElement, path: string, on: boolean): void {
-	const canvas = root.querySelector<HTMLCanvasElement>(
-		":scope > canvas.handwriting-embed-ink"
-	);
-	const existing = root.querySelector<SVGSVGElement>(
-		":scope > svg.handwriting-embed-ink"
-	);
-	if (!on) {
-		existing?.remove();
-		canvas?.style.removeProperty("display");
-		// Back on screen: the print's room comes off and a reading view's scroll room returns.
-		if (canvas) {
-			reserveLeft(root);
-			anchorLayer(root, canvas);
-		}
-		return;
-	}
-	const strokes = strokesFor ? strokesFor(path) : [];
-	const { x, y, w, h } = embedInkBounds(strokes);
-	if (strokes.length === 0 || w <= 0 || h <= 0) {
-		// The last stroke went while the print ran: the vector layer goes too.
-		existing?.remove();
-		return;
-	}
-	layerOrigins.set(root, { x, y });
-	// createElementNS, not createEl: an <svg> built as an HTML element is
-	// an unknown tag that renders nothing.
-	const svg = existing ?? root.ownerDocument.createElementNS(SVG_NS, "svg");
-	svg.setAttribute("class", "handwriting-embed-ink");
-	svg.setAttribute("aria-hidden", "true");
-	svg.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
-	svg.setAttribute("width", `${w}`);
-	svg.setAttribute("height", `${h}`);
-	// Built as elements rather than markup. The content is safe either
-	// way - colours pass through normalizeInkColor and the rest is
-	// formatted numbers - but assigning markup is flagged on sight by
-	// the community review, and building nodes costs nothing here.
-	while (svg.firstChild) svg.removeChild(svg.firstChild);
-	const layers = inkSvgLayers(strokes, PRINT_PAGE_WHITE);
-	if (layers.highlighter.length > 0) {
-		const g = root.ownerDocument.createElementNS(SVG_NS, "g");
-		g.setAttribute("opacity", String(HIGHLIGHTER_ALPHA));
-		for (const run of layers.highlighter) g.appendChild(inkPathEl(root, run));
-		svg.appendChild(g);
-	}
-	for (const run of layers.pen) svg.appendChild(inkPathEl(root, run));
-	if (!existing) root.appendChild(svg);
-	// A print lays the page out at the paper's width, so the room is measured again.
-	reserveLeft(root);
-	anchorLayer(root, svg);
-	canvas?.setCssStyles({ display: "none" });
-}
-
-/** One merged run as an SVG <path>, in the root's own document. */
-function inkPathEl(root: HTMLElement, run: InkSvgRun): SVGPathElement {
-	const el = root.ownerDocument.createElementNS(SVG_NS, "path");
-	el.setAttribute("fill", run.color);
-	el.setAttribute("fill-rule", "nonzero");
-	el.setAttribute("d", run.d);
-	return el;
-}
 
 /**
  * Remove a min-height we set, if it is still there and still ours.
@@ -1502,7 +911,70 @@ function clearEmbedMinHeight(root: HTMLElement): void {
 	root.removeAttribute(MIN_HEIGHT_ATTR);
 }
 
-function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): void {
+/** The placement each root was last painted with (`placeStrokes`): "" when no stroke is shown moved. */
+const placements = new WeakMap<HTMLElement, string>();
+/** Roots whose placement is read again once the current task's renders are done (`queueReplace`). */
+const replaceQueue = new Set<HTMLElement>();
+
+
+/**
+ * The strokes as `root` shows them, and a key naming that placement: the list itself and "" when no stroke carries an
+ * anchor or none is shown moved. `held` is a print's block tops from before it paged the layout. `zoom` is the px per
+ * world unit the layer draws at (`inkZoomOf`); the key names it when it is not 1, so a new text size is a new placement.
+ * `path` names the note, so an editor open on it lends its signature; without it the newest anchored stroke's is used.
+ */
+export function placeStrokes(
+	root: HTMLElement,
+	strokes: readonly InkStroke[],
+	held?: HeldTops,
+	zoom = 1,
+	path?: string
+): { strokes: readonly InkStroke[]; key: string } {
+	const at = zoom === 1 ? "" : `@${zoom};`;
+	if (!strokes.some((s) => s.lineAnchor)) return { strokes, key: at };
+	// The editor brings its anchors up to date with typing when they are read or written. Reading them here is such a
+	// read: a reading view beside an editor of the same note folds the editor's anchors at each of its renders.
+	settleLineAnchors();
+	const live = path !== undefined && lineSignatureFor ? lineSignatureFor(path) : null;
+	const shown = shownStrokes(strokes, measureSpans(root, held), zoom, live);
+	if (shown === strokes) return { strokes, key: at };
+	let key = at;
+	for (let k = 0; k < strokes.length; k++) {
+		const a = strokes[k]!, b = shown[k]!;
+		if (a !== b) key += `${k}:${(b.bbox.y - a.bbox.y).toFixed(2)};`;
+	}
+	return { strokes: shown, key };
+}
+
+/**
+ * Read `root`'s placement again once the current task is done. A render post-processes its sections in one pass, each
+ * section's attach asking for the same root; they come to one read, and to one repaint only when a stroke is shown
+ * somewhere else than it was painted.
+ */
+export function queueReplace(root: HTMLElement): void {
+	if (replaceQueue.has(root)) return;
+	replaceQueue.add(root);
+	queueMicrotask(() => {
+		if (!replaceQueue.delete(root)) return;
+		replace(root);
+	});
+}
+
+function replace(root: HTMLElement): void {
+	const path = layers.get(root);
+	if (path === undefined || !root.isConnected || embedInkRootHidden(root)) return;
+	if (!root.querySelector(":scope > canvas.handwriting-embed-ink")) return;
+	const strokes = strokesFor ? strokesFor(path) : [];
+	const placed = placeStrokes(root, strokes, undefined, inkZoomOf(root, path), path);
+	if (placed.key === (placements.get(root) ?? "")) return;
+	paint(root, path, strokes, placed);
+	const win = root.ownerDocument.defaultView;
+	if (root.querySelector(":scope > svg.handwriting-embed-ink") || (win !== null && printing.has(win))) {
+		printVectorFor(root, path, true);
+	}
+}
+
+export function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[], placed: { strokes: readonly InkStroke[]; key: string } | null = null): void {
 	// Until now the size watches were swept only from `attachEmbedInk` and
 	// `embedInkChanged`, so a collapsed root that left the DOM kept its
 	// ResizeObserver until the next embed render or the next persisted
@@ -1514,24 +986,37 @@ function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): 
 	let canvas = root.querySelector<HTMLCanvasElement>(
 		":scope > canvas.handwriting-embed-ink"
 	);
-	if (!embedInkNeedsPaint(root.getAttribute(MARKER_ATTR), marker, canvas !== null)) {
+	// The ink at its text's size: read every paint, since text that changes size keeps the marker.
+	const zoom = inkZoomOf(root, path);
+	if (
+		!embedInkNeedsPaint(root.getAttribute(MARKER_ATTR), marker, canvas !== null) &&
+		(placed === null || placed.key === (placements.get(root) ?? "")) &&
+		zoom === (paintedZooms.get(root) ?? 1)
+	) {
 		// A detached view may return with its unchanged bitmap. Its old
 		// observers were stopped, so restore layout tracking without repainting.
 		if (canvas) anchorLayer(root, canvas);
 		watchAnchor(root);
+		// A section rendered since the last paint can put an anchored stroke
+		// somewhere else: its placement is read once this render is done.
+		if (placed === null && strokes.some((s) => s.lineAnchor)) queueReplace(root);
 		return;
 	}
 	root.setAttribute(MARKER_ATTR, marker);
 	const view = root.ownerDocument.defaultView ?? window;
-	const { x, y, w, h } = embedInkBounds(strokes);
-	if (strokes.length === 0 || w <= 0 || h <= 0) {
+	const stored = embedInkBounds(strokes);
+	if (strokes.length === 0 || stored.w <= 0 || stored.h <= 0) {
 		// The last stroke was erased: the picture goes too, and so does any
 		// room we grew the embed by to hold it.
+		untile(root);
 		canvas?.remove();
-		if (embedInkRootIsEmbed(root)) clearEmbedMinHeight(root);
+		if (embedInkRootIsEmbed(root) || isPrintContainer(root)) clearEmbedMinHeight(root);
 		layerOrigins.delete(root);
+		placements.delete(root);
+		paintedZooms.delete(root);
 		releaseReserve(anchorSizer(root) ?? root);
 		setScrollReserve(root, anchorSizer(root), 0);
+		root.querySelector(`:scope > .${READING_EXTENT_CLS}`)?.remove();
 		// Nothing left to become visible, so nothing left to watch for.
 		stopSizeWatch(root);
 		stopAnchorWatch(root);
@@ -1541,6 +1026,14 @@ function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): 
 		root.setCssStyles({ position: "relative" });
 		root.setAttribute(POSITION_ATTR, "");
 	}
+	// Placed once the root is positioned (its blocks' tops are read in its
+	// frame) and before anything below writes to the layout.
+	const shown = placed ?? placeStrokes(root, strokes, undefined, zoom, path);
+	placements.set(root, shown.key);
+	paintedZooms.set(root, zoom);
+	const drawn = shown.strokes;
+	// The layer's box in px: the ink's world box at the zoom it is drawn at.
+	const { x, y, w, h } = embedInkBounds(drawn, zoom);
 	if (embedInkRootIsEmbed(root)) {
 		// An embed's content box sizes itself to its TEXT and clips the ink
 		// hanging below it (measured: 24px box, 368px of ink). Growing the box
@@ -1557,15 +1050,42 @@ function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): 
 	if (!canvas) {
 		canvas = root.createEl("canvas", { cls: "handwriting-embed-ink" });
 	}
+	// The canvas is sized in DEVICE pixels and laid out in css pixels, so the
+	// strokes below can go on drawing in note units and come out sharp.
+	const dpr = view.devicePixelRatio || 1;
+	const scale = embedInkScale(w, h, dpr);
+	// A note's own Reading view (a view with its sizer: not an export's, not an embed's) whose box would be drawn
+	// under the display's ratio draws only what is on screen.
+	const tiled = embedInkUsesTile(anchorSizer(root) !== null, scale, dpr);
+	const held = tiles.get(root);
+	if (!tiled || (held && held.canvas !== canvas)) untile(root);
 	// Every paint, not only the ones that resize the backing store: a repaint
 	// can follow a resize that moved the sizer without changing the ink.
 	layerOrigins.set(root, { x, y });
 	reserveLeft(root);
+	if (tiled) {
+		let watch = tiles.get(root);
+		if (!watch) {
+			const made: TileWatch = { canvas, drawn, zoom, box: { x, y, w, h }, dpr, tile: null, at: { left: 0, top: 0 },
+				client: { w: 0, h: 0 }, frame: 0, quiet: false, onScroll: () => askTile(root, made) };
+			watch = made;
+			tiles.set(root, made);
+			root.addEventListener("scroll", made.onScroll, { passive: true });
+		}
+		Object.assign(watch, { drawn, zoom, box: { x, y, w, h }, dpr, tile: null });
+		// The box's place and the view's size, read once per paint; a scroll moves neither.
+		watch.quiet = true;
+		anchorLayer(root, canvas);
+		watch.quiet = false;
+		growPrintContainer(root, canvas, h);
+		watchAnchor(root);
+		drawTile(root, watch);
+		watchIfCollapsed(root, path);
+		return;
+	}
 	anchorLayer(root, canvas);
+	growPrintContainer(root, canvas, h);
 	watchAnchor(root);
-	// The canvas is sized in DEVICE pixels and laid out in css pixels, so the
-	// strokes below can go on drawing in note units and come out sharp.
-	const scale = embedInkScale(w, h, view.devicePixelRatio || 1);
 	const backingW = Math.max(1, Math.round(w * scale));
 	const backingH = Math.max(1, Math.round(h * scale));
 	if (canvas.width !== backingW || canvas.height !== backingH) {
@@ -1582,11 +1102,13 @@ function paint(root: HTMLElement, path: string, strokes: readonly InkStroke[]): 
 	// point where that is past the note's.
 	ctx.setTransform(scale, 0, 0, scale, -x * scale, -y * scale);
 	ctx.clearRect(x, y, w, h);
+	// World units at the text's size, through the camera as the editor draws them: the stroke's shape follows.
+	const cam = zoom === 1 ? CAM : { x: 0, y: 0, zoom };
 	// Highlighter first and translucent as a layer would be; then pen.
 	ctx.globalAlpha = 0.35;
-	for (const s of strokes) if (s.tool === "highlighter") drawStroke(ctx, CAM, s, undefined, true);
+	for (const s of drawn) if (s.tool === "highlighter") drawStroke(ctx, cam, s, undefined, true);
 	ctx.globalAlpha = 1;
-	for (const s of strokes) if (s.tool !== "highlighter") drawStroke(ctx, CAM, s, undefined, true);
+	for (const s of drawn) if (s.tool !== "highlighter") drawStroke(ctx, cam, s, undefined, true);
 	// Drawn - but drawn into a box that may have no size on screen yet. If it
 	// has none, re-measure when the layout gives it one instead of leaving a
 	// correct canvas inside a collapsed root.

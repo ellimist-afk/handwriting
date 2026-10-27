@@ -42,6 +42,18 @@ function stroke(id: string, x: number, y: number): InkStroke {
 	} as InkStroke;
 }
 
+/**
+ * The backing the fixture's committed layers report, the stand-in's ratio, so a drag's offset is not whole backing px. The lift
+ * moves the store by the offset the picture showed: each axis's total to whole backing px at the lift's camera, in y the next
+ * px down when the nearest would put the grab's box above the note's top (shownLassoOffset).
+ */
+const K = 1.8257;
+const q = (v: number, k = K) => Math.round(v * k) / k;
+const qy = (v: number, boxY: number, k = K) => {
+	const y = Math.round(v * k);
+	return (y / k < Math.min(0, -boxY) ? Math.ceil(v * k) : y) / k;
+};
+
 /** Twenty strokes, of which three are selected. */
 const SELECTED = ["a", "b", "c"];
 const ALL = [
@@ -60,6 +72,15 @@ function truthBox(): BBox {
 	return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
+/** The drag's own box (selectionBounds): the box at pen-down moved by the drag's total. */
+const dragBox = (o: Record<string, any>) => proto.selectionBounds!.call(o) as BBox;
+
+/** After the lift the store's box is the drag's own box moved from `down` by the offset the picture showed, within float rounding. */
+function expectLanded(down: BBox, box: BBox, why: string): void {
+	const t = truthBox(), at = { ...box, x: down.x + q(box.x - down.x), y: down.y + qy(box.y - down.y, down.y) };
+	for (const k of ["x", "y", "width", "height"] as const) expect(t[k], `${why} (${k})`).toBeCloseTo(at[k], 9);
+}
+
 function overlay() {
 	const o = Object.create(InkOverlayPlugin.prototype) as Record<string, any>;
 	const drawn: BBox[] = [];
@@ -74,6 +95,7 @@ function overlay() {
 		cssWidth: 800,
 		cssHeight: 600,
 		camera: { screenToWorld: (x: number, y: number) => ({ x, y }), snapshot: { x: 0, y: 0, zoom: 1 }, zoom: 1 },
+		committedBacking: K,
 		selection: new SelectionModel(),
 		damage: new DamageLedger(),
 		strokeIndex: new StrokeIndex(),
@@ -112,52 +134,72 @@ describe("a live lasso drag", () => {
 	it("ten samples: the selection's box is not computed from the strokes after pen-down", () => {
 		const { o } = overlay();
 		proto.lassoDown!.call(o, s(130, 100)); // inside the selection: grab
+		const down = truthBox();
 		const bounds = vi.spyOn(o.selection as SelectionModel, "bounds");
 
 		for (let i = 1; i <= 10; i++) proto.lassoMove!.call(o, [s(130 + i * 5, 100 + i * 7)]);
 
-		expect(inlineInk.strokes(NOTE)[0]!.bbox.x, "the drag moved nothing, so this cell proves nothing").toBeGreaterThan(100);
+		// A drag sample moves no store (the selected ink rides the tail as a picture, the lift moves the store once).
+		expect([dragBox(o).x > down.x, truthBox()], "premise: the drag's own box moved and the store stayed until the lift").toEqual([true, down]);
 		expect(bounds, "the box was recomputed from the note's strokes during the drag").not.toHaveBeenCalled();
+		proto.lassoUp!.call(o);
+		expectLanded(down, { ...down, x: down.x + 50, y: down.y + 70 }, "the store after the lift is the drag's box");
 	});
 
 	it("each sample: the box drawn equals the box computed from the strokes", () => {
 		const { o, drawn } = overlay();
 		proto.lassoDown!.call(o, s(130, 100));
+		const down = truthBox();
 		drawn.length = 0;
 
 		for (let i = 1; i <= 10; i++) {
 			proto.lassoMove!.call(o, [s(130 + i * 5, 100 + i * 7)]);
 			expect(drawn.length, "nothing was drawn for the sample").toBe(i);
-			expect(drawn[i - 1], `box after sample ${i}`).toEqual(truthBox());
+			const box = { ...down, x: down.x + i * 5, y: down.y + i * 7 };
+			expect([dragBox(o), drawn[i - 1]], `box after sample ${i}`).toEqual([box, box]);
+			expect(truthBox(), `the store moved during the drag (sample ${i})`).toEqual(down);
 		}
+		proto.lassoUp!.call(o);
+		expectLanded(down, drawn[9]!, "the store after the lift is the last box drawn");
 	});
 
 	it("dragged up into the top wall: the box drawn is the box the strokes stopped at", () => {
 		const { o, drawn } = overlay();
 		proto.lassoDown!.call(o, s(130, 100));
+		const down = truthBox();
 		drawn.length = 0;
 
+		// The wall holds the drag's own box; the store stays where it was until the lift, which lands it at the wall-held box.
 		proto.lassoMove!.call(o, [s(130, -400)]);
-		expect(truthBox().y, "the wall did not hold, so this cell proves nothing").toBe(0);
-		expect(drawn[0], "box at the wall").toEqual(truthBox());
+		expect(dragBox(o).y, "the wall did not hold, so this cell proves nothing").toBe(0);
+		expect(drawn[0], "box at the wall").toEqual({ ...down, y: 0 });
 		proto.lassoMove!.call(o, [s(130, -300)]);
-		expect(drawn[1], "box while the pen is still above the stop point").toEqual(truthBox());
-		proto.lassoMove!.call(o, [s(130, 150)]);
-		expect(drawn[2], "box after the pen came back").toEqual(truthBox());
+		expect(drawn[1], "box while the pen is still above the stop point").toEqual({ ...down, y: 0 });
+		proto.lassoMove!.call(o, [s(130, 150)]); // the stop point was pen y 40 (grab 40 below the box's top); now 110 below it
+		expect(drawn[2], "box after the pen came back").toEqual({ ...down, y: 110 });
 		expect(drawn.length).toBe(3);
+		expect(truthBox(), "the store moved during the drag").toEqual(down);
+		proto.lassoUp!.call(o);
+		expectLanded(down, drawn[2]!, "the store after the lift is the wall-held box");
 	});
 
 	it("a drag after the selection was dragged and released: the next drag starts from the new box", () => {
 		const { o, drawn } = overlay();
 		proto.lassoDown!.call(o, s(130, 100));
+		const down = truthBox();
 		proto.lassoMove!.call(o, [s(150, 130)]);
 		proto.lassoUp!.call(o);
+		expectLanded(down, { ...down, x: down.x + 20, y: down.y + 30 }, "the store after the first lift is the first drag's box");
+		const first = truthBox();
 		proto.lassoDown!.call(o, s(150, 130));
 		drawn.length = 0;
 
 		proto.lassoMove!.call(o, [s(170, 160)]);
 
-		expect(drawn[0], "the second drag drew the first drag's box").toEqual(truthBox());
+		expect(drawn[0], "the second drag drew the first drag's box").toEqual({ ...first, x: first.x + 20, y: first.y + 30 });
+		expect(truthBox(), "the store moved during the second drag").toEqual(first);
+		proto.lassoUp!.call(o);
+		expectLanded(first, drawn[0]!, "the store after the second lift is the second drag's box");
 	});
 });
 
@@ -188,6 +230,27 @@ describe("the selection changes while the pen is still down", () => {
 		proto.redrawSelectionUI!.call(o);
 
 		expect(drawn, "the frozen box outlived its selection").toEqual([]);
+	});
+});
+
+describe("a stroke pruned from the selection mid-drag", () => {
+	it("the drag's box stays the grab's box plus the total, and the top wall holds that box", () => {
+		const { o, drawn } = overlay();
+		proto.lassoDown!.call(o, s(130, 100));
+		expect(o.spaceSnapshot?.kind, "no lasso picture at the grab, so this cell proves nothing").toBe("lasso");
+		const down = truthBox();
+		proto.lassoMove!.call(o, [s(150, 130)]);
+
+		// What an ink change that removed one selected stroke does to the selection; the pen-down ids still ride the picture.
+		const live = new Set(inlineInk.strokes(NOTE).map((st) => st.id).filter((id) => id !== "c"));
+		(o.selection as SelectionModel).prune(live, new Set());
+		expect((o.selection as SelectionModel).size, "no stroke was pruned, so this cell proves nothing").toBe(SELECTED.length - 1);
+		expect(dragBox(o), "the box after the prune is not the grab's box plus the total").toEqual({ ...down, x: down.x + 20, y: down.y + 30 });
+
+		drawn.length = 0;
+		proto.lassoMove!.call(o, [s(150, -400)]);
+		expect([dragBox(o).y, drawn[0]?.y], "the top wall did not hold the drag's box, or the box drawn is another").toEqual([0, 0]);
+		expect(truthBox(), "the store moved during the drag").toEqual(down);
 	});
 });
 

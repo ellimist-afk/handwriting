@@ -117,7 +117,7 @@ const ALIAS_FLOOR_DEV = 2 * RESIZE_TOL_DEV + 1;
  * test-controlled flag, not on "is this the first call" - see the header.
  */
 const PLANTS: { env: string; file: RegExp; from: string; to: string }[] = [
-	{ env: "HW_PAPER_RESIZE_PLANT_NO_XREPLAN", file: /src[\\/]inline[\\/]InkOverlay\.ts$/, from: "  if(leftMoved)this.paperOriginLeft=left;", to: "  if(leftMoved&&!(globalThis as any).__hwFreezePaperX)this.paperOriginLeft=left;" },
+	{ env: "HW_PAPER_RESIZE_PLANT_NO_XREPLAN", file: /src[\\/]inline[\\/]InkOverlayZoomApi\.ts$/, from: "  if(leftMoved)this.paperOriginLeft=left;", to: "  if(leftMoved&&!(globalThis as any).__hwFreezePaperX)this.paperOriginLeft=left;" },
 ];
 
 beforeAll(async () => {
@@ -128,7 +128,7 @@ beforeAll(async () => {
 		bundle: true, write: false, format: "iife", platform: "browser",
 		alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: active.length ? [{ name: "paper-resize-grid-plants", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|PaperPan)\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/](InkOverlay|InkOverlayZoomApi|PaperPan)\.ts$/ }, args => {
 				let text = readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
 				for (const pl of active.filter(x => x.file.test(args.path))) {
 					if (text.split(pl.from).length !== 2) throw new Error(`${pl.env}: anchor not found once`);

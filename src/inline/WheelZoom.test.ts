@@ -134,7 +134,7 @@ describe("WheelZoomRun", () => {
 });
 
 /**
- * A touchpad pinch zooms 1.5 times as far as the same travel on a mouse wheel. The kind is
+ * A touchpad pinch zooms 2.5 times as far as the same travel on a mouse wheel. The kind is
  * decided at the run's first event and held for the run, so one gesture never changes gain halfway.
  */
 describe("the run's kind, decided once at its first event", () => {
@@ -144,7 +144,7 @@ describe("the run's kind, decided once at its first event", () => {
 		run.feed(at(16, -25));
 		run.feed(at(32, -25));
 		const last = run.feed(at(48, -25));
-		expect(TOUCHPAD_ZOOM_K).toBe(0.003);
+		expect(TOUCHPAD_ZOOM_K).toBe(0.005);
 		expect(last[0]!.ratio).toBeCloseTo(Math.exp(100 * TOUCHPAD_ZOOM_K), 12);
 		expect(run.ratio).toBeCloseTo(Math.exp(100 * TOUCHPAD_ZOOM_K), 12);
 	});

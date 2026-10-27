@@ -16,64 +16,179 @@
  *
  * `ZoomFloorLock.test.ts` and `MobileTools.test.ts` already pin the BEHAVIOUR
  * at each of these sites (a commit/preview/button reaching the real ceiling,
- * the plus button disabling at the right point). This file pins the SOURCE
- * instead: it reads the identifier each site references out of the file text
- * and requires it to be `MAX_PINCH_SCALE`, not a numeral. A literal that
- * happens to equal today's ceiling would still pass every behavioural test
- * and drift silently the next time the constant moves - which is exactly the
- * gap review caught on 772960c7 (two bare `4`s survived a change to the
- * constant because nothing read the source to check). Node only: no render,
- * no browser.
+ * the plus button disabling at the right point). That cannot tell the
+ * constant from a literal that happens to equal today's ceiling: such a
+ * literal would pass every behavioural test and drift silently the next time
+ * the constant moves - which is exactly the gap review caught on 772960c7 (two
+ * bare `4`s survived a change to the constant). So the three overlay sites are
+ * driven here with MAX_PINCH_SCALE MOVED: the overlay is handed a different
+ * ceiling, and each site must stop at that one. The plus button's check in
+ * MobileTools.ts is still read from its source. Node only: no render, no
+ * browser.
  */
 
-import { describe, expect, it } from "vitest";
-import overlaySource from "./InkOverlay.ts?raw";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+(globalThis as { window?: unknown }).window = globalThis;
+
+// The ceiling the overlay reads, movable per cell. Null means the real one;
+// every other export of PinchScale is the real module.
+const ceiling = vi.hoisted(() => ({ moved: null as number | null }));
+vi.mock("./PinchScale", async (importOriginal) => {
+	const actual = (await importOriginal()) as Record<string, unknown>;
+	return {
+		...actual,
+		get MAX_PINCH_SCALE(): number {
+			return ceiling.moved ?? (actual.MAX_PINCH_SCALE as number);
+		},
+	};
+});
+
 import stripSource from "./MobileTools.ts?raw";
-import { MAX_PINCH_SCALE, MIN_PINCH_SCALE } from "./PinchScale";
+import zoomControlsSource from "./NoteZoomControls.ts?raw";
+import { InkOverlayPlugin } from "./InkOverlay";
+import { MAX_PINCH_SCALE, MIN_PINCH_SCALE, PINCH_GIVE } from "./PinchScale";
 
-const overlay = overlaySource.replace(/\r\n/g, "\n");
-const strip = stripSource.replace(/\r\n/g, "\n");
+const strip = [stripSource, zoomControlsSource].join("\n").replace(/\r\n/g, "\n");
 
-/** applyPinchScale's preview branch: the live-pinch guard, no commit. */
-function previewCeiling(): string {
-	// A later change widened the preview ceiling by the cap give (`MAX_PINCH_SCALE * PINCH_GIVE`); the pin reads the constant either way.
-	const m = overlay.match(/this\.scaleGeometryValid === false \|\| next > (\w+)(?: \* PINCH_GIVE)? \|\|/);
-	expect(m, "applyPinchScale's preview guard was not found in InkOverlay.ts; update this pin with it").not.toBeNull();
-	return m![1]!;
+type Phase = "start" | "move" | "end";
+type Point = { x: number; y: number };
+type Fields = Record<string, unknown>;
+
+interface OverlayMethods {
+	pinch(phase: Phase, ratio: number, centroid: Point): void;
+	zoomNoteBy(factor: number): boolean;
+	commitCameraScale(next: number, scroll?: { left: number; top: number }): boolean;
 }
 
-/** The one line of `zoomNoteBy` that bounds a button or command zoom. */
-function zoomNoteByCeiling(): string {
-	const m = overlay.match(/const next=Math\.max\(Math\.min\(this\.zoomFloor,this\.pinchScaleNow\),Math\.min\((\w+),this\.pinchScaleNow\*factor\)\);/);
-	expect(m, "zoomNoteBy's clamp line was not found in InkOverlay.ts; update this pin with it").not.toBeNull();
-	return m![1]!;
-}
+/**
+ * The prototype rig from ZoomFloorLock.test.ts, trimmed to the three sites:
+ * the real `pinch` (and its `applyPinchScale` preview branch), `zoomNoteBy`
+ * and `commitCameraScale`, with only the DOM, the frame clock and layout sinks
+ * stubbed.
+ */
+function makeRig(start: number) {
+	let nextFrame = 1;
+	const frames = new Map<number, FrameRequestCallback>();
+	const win = {
+		requestAnimationFrame: vi.fn((callback: FrameRequestCallback): number => { const id = nextFrame++; frames.set(id, callback); return id; }),
+		cancelAnimationFrame: vi.fn((id: number): void => { frames.delete(id); }),
+		setTimeout: vi.fn((): number => 0),
+		clearTimeout: vi.fn(),
+	};
+	const hostStyles: Record<string, string> = {};
+	const host = {
+		clientWidth: 640, clientHeight: 480,
+		ownerDocument: { defaultView: win },
+		getBoundingClientRect: () => ({ left: 0, top: 0 }),
+		style: {
+			getPropertyValue(name: string): string { return hostStyles[name] ?? ""; },
+			setProperty(name: string, value: string): void { hostStyles[name] = value; },
+			removeProperty(name: string): void { delete hostStyles[name]; },
+		},
+		setCssStyles(styles: Record<string, string>): void { Object.assign(hostStyles, styles); },
+	};
+	const scroller = { scrollLeft: 0, scrollTop: 0, scrollWidth: 64000, scrollHeight: 48000, getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 480 }) };
 
-/** `commitCameraScale`'s refusal, the last gate a pinch passes before it is committed. */
-function commitCameraScaleCeiling(): string {
-	const m = overlay.match(/\|\|next>(\w+)\|\|!validCameraScale\(next,/);
-	expect(m, "commitCameraScale's `next>N` refusal was not found in InkOverlay.ts; update this pin with it").not.toBeNull();
-	return m![1]!;
+	const overlay = Object.create(InkOverlayPlugin.prototype) as Fields;
+	overlay.view = { dom: host, scrollDOM: scroller, contentDOM: { getBoundingClientRect: () => ({ left: 0, top: 0 }), children: [] as unknown[] }, posAtCoords: () => null, requestMeasure: vi.fn(), measure: vi.fn() };
+	overlay.container = { setCssStyles: vi.fn() };
+	overlay.frame = { locked: false };
+	// A canvas note: with the canvas off a two-finger gesture is not a zoom at all.
+	overlay.canvasMode = true;
+	overlay.cssScale = start; overlay.fontZoom = 1; overlay.scale = start;
+	overlay.pinchScaleNow = start;
+	overlay.zoomFloor = MIN_PINCH_SCALE;
+	overlay.pinchRasterScale = start;
+	overlay.pinchRefScale = null;
+	overlay.pinchStartPan = { x: 0, y: 0 };
+	overlay.pinchBand = { history: [] as number[], lastPan: { x: 0, y: 0 } };
+	overlay.pinchAnchor = null;
+	overlay.pinchPending = null;
+	overlay.pinchRaf = 0;
+	overlay.pinchScrollAt = 0;
+	overlay.pinchHiddenCanvases = new Map();
+	overlay.viewportGeneration = 0;
+	overlay.retiring = false;
+	overlay.panAnchorHold = null;
+	overlay.scrollExpansion = null;
+	overlay.getNoteViewportState = () => ({ zoom: overlay.pinchScaleNow, busy: false, fitAvailable: true });
+	overlay.prepareViewportLayout = () => true;
+	overlay.viewportLayout = { width: 640, height: 480, baseTransform: "none" };
+	overlay.filePath = () => "note.md";
+	overlay.panX = () => 0;
+	overlay.panY = () => 0;
+	for (const name of ["restorePinchLayers", "retirePanSettle", "releaseMeasures", "clearViewportPan", "updatePaperSpacing", "refreshPenCursor", "updateExtent", "reanchorPan", "scheduleRepaint", "handleResize"]) overlay[name] = vi.fn();
+	overlay.applyViewportBox = (next: number) => host.setCssStyles({ transform: `scale(${next})`, transformOrigin: "0 0" });
+	overlay.setViewportScroll = (left: number, top: number) => { scroller.scrollLeft = left; scroller.scrollTop = top; };
+	overlay.syncBand = () => "none";
+	overlay.firstSettleConsumer = () => false;
+
+	const methods = InkOverlayPlugin.prototype as unknown as OverlayMethods;
+	const centroid = { x: 320, y: 240 };
+	const scale = (): number => overlay.pinchScaleNow as number;
+	const runFrame = (): void => {
+		const entry = frames.entries().next().value as [number, FrameRequestCallback] | undefined;
+		if (!entry) throw new Error("expected one requested animation frame");
+		frames.delete(entry[0]);
+		entry[1](0);
+	};
+	const pinch = (phase: Phase, ratio: number): void => methods.pinch.call(overlay, phase, ratio, centroid);
+	const commit = (next: number): boolean => methods.commitCameraScale.call(overlay, next, { left: 0, top: 0 });
+	const button = (factor: number): boolean => methods.zoomNoteBy.call(overlay, factor);
+	/** A live preview frame, left hanging mid-gesture: the applyPinchScale preview branch only. */
+	const previewTo = (target: number): number => {
+		const from = scale();
+		pinch("start", 1);
+		pinch("move", target / from);
+		if (frames.size > 0) runFrame();
+		return scale();
+	};
+	return { scale, commit, button, previewTo };
 }
 
 /** The zoom-bar "+" button's disable check. */
 function plusButtonCeiling(): string {
 	const m = strip.match(/i\s*===\s*2\s*&&\s*state\.zoom\s*>=\s*(\w+)/);
-	expect(m, "the plus button's disable check was not found in MobileTools.ts; update this pin with it").not.toBeNull();
+	expect(m, "the plus button's disable check was not found in MobileTools.ts or NoteZoomControls.ts; update this pin with it").not.toBeNull();
 	return m![1]!;
 }
 
 describe("the note's zoom ceiling is one constant, referenced everywhere", () => {
-	it("applyPinchScale's preview guard reads MAX_PINCH_SCALE", () => {
-		expect(previewCeiling(), "the preview branch still refuses at a literal; MAX_PINCH_SCALE moved without it").toBe("MAX_PINCH_SCALE");
-	});
+	describe("with MAX_PINCH_SCALE moved to 5 for the overlay", () => {
+		// 5 is neither today's ceiling (6) nor the old one (4), so a site that
+		// kept either number as a literal stops somewhere else.
+		const MOVED = 5;
+		beforeEach(() => {
+			ceiling.moved = MOVED;
+		});
+		afterEach(() => {
+			ceiling.moved = null;
+		});
 
-	it("zoomNoteBy bounds at MAX_PINCH_SCALE", () => {
-		expect(zoomNoteByCeiling(), "zoomNoteBy still caps at its own literal; MAX_PINCH_SCALE moved without it").toBe("MAX_PINCH_SCALE");
-	});
+		it("applyPinchScale's preview guard reads MAX_PINCH_SCALE", () => {
+			expect(makeRig(4).previewTo(MOVED), "precondition: a preview frame under the moved ceiling paints").toBe(MOVED);
+			// 6 is inside the real ceiling's give, so only a guard reading the
+			// moved constant refuses it.
+			expect(
+				makeRig(4).previewTo(6),
+				"the preview branch painted past the moved ceiling; it still refuses at a literal"
+			).toBe(4);
+			expect(6).toBeGreaterThan(MOVED * PINCH_GIVE);
+		});
 
-	it("commitCameraScale refuses above MAX_PINCH_SCALE", () => {
-		expect(commitCameraScaleCeiling(), "commitCameraScale still refuses at its own literal; MAX_PINCH_SCALE moved without it").toBe("MAX_PINCH_SCALE");
+		it("zoomNoteBy bounds at MAX_PINCH_SCALE", () => {
+			const rig = makeRig(4);
+			expect(rig.button(2), "the plus step from 400% was refused outright").toBe(true);
+			expect(rig.scale(), "zoomNoteBy still caps at its own literal; MAX_PINCH_SCALE moved without it").toBe(MOVED);
+		});
+
+		it("commitCameraScale refuses above MAX_PINCH_SCALE", () => {
+			expect(makeRig(4).commit(MOVED), "precondition: a commit at the moved ceiling lands").toBe(true);
+			const rig = makeRig(4);
+			expect(rig.commit(5.5), "commitCameraScale still refuses at its own literal; MAX_PINCH_SCALE moved without it").toBe(false);
+			expect(rig.scale()).toBe(4);
+		});
 	});
 
 	it("the plus button disables at MAX_PINCH_SCALE", () => {

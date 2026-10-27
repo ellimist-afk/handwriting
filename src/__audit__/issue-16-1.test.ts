@@ -11,8 +11,8 @@
  * Production code driven:
  *  - updateStatusBarClass, sliced verbatim out of main.ts and executed with
  *    `this` = a plugin stand-in (a Proxy that logs which members it reads);
- *  - notePageId, sliced verbatim out of main.ts (the inline host's readPageId,
- *    main.ts:2034) with the real isSafePageId;
+ *  - notePageId, sliced verbatim out of persistence/PageIdentity.ts (the
+ *    inline host's readPageId) with the real isSafePageId;
  *  - the real InlineInkStore (isHandwritingPage, commit);
  *  - the real styles.css, parsed with postcss, every rule that targets the
  *    `.status-bar` element evaluated against the body classes the sliced
@@ -26,19 +26,25 @@ import { describe, expect, it } from "vitest";
 import { transformSync } from "esbuild";
 import postcss from "postcss";
 import mainSource from "../main.ts?raw";
+import applySource from "../PluginApply.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
+import identitySource from "../persistence/PageIdentity.ts?raw";
 import css from "../../styles.css?raw";
 import { InlineInkStore } from "../inline/InlineInkStore";
 import { isSafePageId, newPageId } from "../model/PageData";
 import type { InkStroke } from "../ink/Stroke";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const source = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
+const apply = applySource.replace(/\r\n/g, "\n");
+const identity = identitySource.replace(/\r\n/g, "\n");
 
 // Since 1.4.22 the closure calls the plugin method `applyStatusBarVisibility`, which reads the setting (default off)
 // and keys the class on strokes. The method body is sliced verbatim and run with the plugin as `this`.
-const methodStart = "\tapplyStatusBarVisibility(): void {\n";
-expect(source.split(methodStart)).toHaveLength(2);
-const ms = source.indexOf(methodStart) + methodStart.length;
-const methodBody = source.slice(ms, source.indexOf("\n\t}\n", ms));
+const methodStart = "\tfunction applyStatusBarVisibility(this: HandwritingPlugin): void {\n";
+expect(apply.split(methodStart)).toHaveLength(2);
+const ms = apply.indexOf(methodStart) + methodStart.length;
+const methodBody = apply.slice(ms, apply.indexOf("\n\t}\n", ms));
 expect(methodBody).toContain('"handwriting-active-page"');
 expect(methodBody).toContain("inlineInk.inkPresence(path)");
 expect(source).toContain("const updateStatusBarClass = (): void => this.applyStatusBarVisibility();");
@@ -65,12 +71,12 @@ expect(source).toContain(
 // The inline host's readPageId is notePageId (main.ts:2034).
 expect(source).toContain("readPageId: (path) => this.notePageId(path),");
 
-// ---- slice notePageId (main.ts:4998-5013), verbatim --------------------------
-const npStart = "\tprivate notePageId(path: string): string | null {\n";
-expect(source.split(npStart)).toHaveLength(2);
-const ns = source.indexOf(npStart) + npStart.length;
-const ne = source.indexOf("\n\t}\n", ns);
-const npBody = source.slice(ns, ne);
+// ---- slice notePageId (persistence/PageIdentity.ts), verbatim --------------
+const npStart = "\tfunction notePageId(this: HandwritingPlugin, path: string): string | null {\n";
+expect(identity.split(npStart)).toHaveLength(2);
+const ns = identity.indexOf(npStart) + npStart.length;
+const ne = identity.indexOf("\n\t}\n", ns);
+const npBody = identity.slice(ns, ne);
 expect(npBody).toContain('fm?.["handwriting-page-id"]');
 const notePageId = new Function(
 	"isSafePageId",

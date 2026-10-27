@@ -1,4 +1,4 @@
-import { BBox, InkPoint, InkStroke, computeBBox } from "./Stroke";
+import { BBox, InkPoint, InkStroke, computeBBox, pieceAnchor } from "./Stroke";
 
 /**
  * Whole-stroke eraser hit-testing (handoff §24, §77).
@@ -202,12 +202,15 @@ export function splitStrokeByCircle(
 			points.length === 1
 				? [points[0]!, { ...points[0]!, x: points[0]!.x + 0.01, t: points[0]!.t + 1 }]
 				: points;
-		out.push({
+		const piece: InkStroke = {
 			...stroke,
 			id: makeId(),
 			points: kept,
 			bbox: computeBBox(kept, stroke.width * 2),
-		});
+		};
+		// A piece keeps its parent's line; its own y is its own (LineAnchor.ts).
+		if (stroke.lineAnchor) piece.lineAnchor = pieceAnchor(stroke, piece);
+		out.push(piece);
 	}
 	return out;
 }

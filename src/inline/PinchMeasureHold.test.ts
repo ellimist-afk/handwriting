@@ -111,7 +111,7 @@ function makeRig(shared?: { view: Fields }) {
 		};
 		requestMeasure = vi.fn();
 		measure = vi.fn();
-		view = { dom: host, scrollDOM: scroller, contentDOM: { getBoundingClientRect: () => ({ left: 0, top: 0 }), children: [] as unknown[] }, requestMeasure, measure };
+		view = { dom: host, scrollDOM: scroller, contentDOM: { getBoundingClientRect: () => ({ left: 0, top: 0 }), children: [] as unknown[] }, posAtCoords: () => null, requestMeasure, measure };
 	}
 
 	const overlay = Object.create(InkOverlayPlugin.prototype) as Fields;

@@ -44,11 +44,89 @@ const RELEASE_MIN_TRAVEL = 3;
 export const RELEASE_MAX_MS = 50;
 
 /**
+ * Coarse-grid smoothing. Some pens report positions in whole device pixels:
+ * any screen at 100 or 125 percent scale, where a device pixel is a whole CSS
+ * pixel or close to it. Handwriting sampled every few ms moves one or two
+ * pixels per sample there, so the stored line is a staircase whose heading
+ * flips 45 degrees at almost every sample, and the finished stroke looks
+ * wavy. Measured on such strokes: 13 heading flips per stroke; averaging each
+ * sample with the one before it leaves under one, for half a sample of lag
+ * (about 2 ms at 240 Hz).
+ *
+ * The filter runs here, at intake, on NEW samples only, so the stored point
+ * is the smoothed one: the wet line and the committed stroke draw the same
+ * points, and ink already saved is never touched. Pressure, timestamps and
+ * the width law are untouched.
+ *
+ * It engages only where the samples prove the grid. A sample delta, in device
+ * pixels, is on the grid when both axes sit within COARSE_GRID_TOLERANCE of a
+ * whole number; a still sample proves nothing either way. COARSE_GRID_RUN
+ * consecutive on-grid deltas engage the filter and the same number of off-grid
+ * ones release it, so one stray delta neither starts nor stops it. The verdict
+ * is kept per surface and pointer type across strokes, because the grid is a
+ * property of the device, and it starts engaged wherever the screen's device
+ * pixel is at least COARSE_GRID_MIN_CSS CSS px. On a finer screen the filter
+ * never runs.
+ */
+export const COARSE_GRID_MIN_CSS = 0.75;
+export const COARSE_GRID_TOLERANCE = 0.02;
+export const COARSE_GRID_RUN = 6;
+
+/** The grid verdict for one surface and pointer type, and the scale of the stroke being written. */
+export class CoarseGrid {
+	engaged = true;
+	/** Consecutive deltas that disagree with `engaged`. */
+	run = 0;
+	/** Device px per world unit for the stroke being written, read at pen-down. */
+	devicePxPerWorld = 1;
+
+	observe(dx: number, dy: number): void {
+		if (dx === 0 && dy === 0) return;
+		const onGrid =
+			Math.abs(dx - Math.round(dx)) <= COARSE_GRID_TOLERANCE &&
+			Math.abs(dy - Math.round(dy)) <= COARSE_GRID_TOLERANCE;
+		if (onGrid === this.engaged) {
+			this.run = 0;
+		} else if (++this.run >= COARSE_GRID_RUN) {
+			this.engaged = onGrid;
+			this.run = 0;
+		}
+	}
+}
+
+const coarseGrids = new Map<string, CoarseGrid>();
+
+/**
+ * The grid verdict a stroke starting now passes to `StrokeBuilder.start`, or
+ * undefined where the screen's device pixel is finer than COARSE_GRID_MIN_CSS
+ * CSS px. `devicePxPerWorld` is the screen's device px per CSS px times the
+ * surface's CSS px per world unit at this pen-down.
+ */
+export function coarseGridFor(
+	surface: string,
+	pointerType: string,
+	devicePixelRatio: number,
+	devicePxPerWorld: number
+): CoarseGrid | undefined {
+	if (!(devicePixelRatio > 0) || !(devicePxPerWorld > 0)) return undefined;
+	if (1 / devicePixelRatio < COARSE_GRID_MIN_CSS) return undefined;
+	const key = `${surface}:${pointerType}`;
+	let grid = coarseGrids.get(key);
+	if (!grid) {
+		grid = new CoarseGrid();
+		coarseGrids.set(key, grid);
+	}
+	grid.devicePxPerWorld = devicePxPerWorld;
+	return grid;
+}
+
+/**
  * Accumulates world-space samples for the stroke currently being written.
  * Latency path stays trivial: push a sample, return. Cleanup (dedupe of
  * near-identical samples) happens inline and cheaply; heavier smoothing and
  * simplification is deliberately not done here
- * (handoff §11: do not aggressively simplify handwriting).
+ * (handoff §11: do not aggressively simplify handwriting). The one filter here
+ * is the two-sample mean on a proven coarse grid (see CoarseGrid above).
  */
 export class StrokeBuilder {
 	private points: InkPoint[] = [];
@@ -63,6 +141,18 @@ export class StrokeBuilder {
 	/** Min world-space movement to accept a new sample (dedupe threshold). */
 	private minDist: number;
 	private readonly pressureProfile: PressureProfile | undefined;
+	/** The grid verdict passed at start(); undefined: samples are stored as given. */
+	private grid: CoarseGrid | undefined;
+	/** The previous raw sample of this stroke, deduped or not; the filter and the grid read only raw samples. */
+	private rawX = 0;
+	private rawY = 0;
+	private rawPressure = 0;
+	private rawT = 0;
+	private rawTiltX: number | undefined;
+	private rawTiltY: number | undefined;
+	private rawHeld = false;
+	/** The previous raw sample went through the mean, so the stored end sits half its step short of it; flushRaw() stores it, with the pressure, time and tilt kept beside it. Cleared by every sample that is not averaged, so a stroke the grid released mid-way flushes nothing. */
+	private rawAveraged = false;
 
 	constructor(
 		tool: InkTool,
@@ -92,11 +182,15 @@ export class StrokeBuilder {
 		return this.pressureProfile;
 	}
 
-	start(now: number): void {
+	/** `grid` comes from coarseGridFor at this pen-down; a surface that passes none stores samples as given. */
+	start(now: number, grid?: CoarseGrid): void {
 		this.startedAt = now;
 		this.points = [];
 		this.arrivalPressure = [];
 		this.latestPressure = [];
+		this.grid = grid;
+		this.rawHeld = false;
+		this.rawAveraged = false;
 	}
 
 	/**
@@ -104,6 +198,31 @@ export class StrokeBuilder {
 	 * it was deduped (too close to the previous sample).
 	 */
 	add(x: number, y: number, pressure: number, timestamp: number, tiltX?: number, tiltY?: number): InkPoint | undefined {
+		const grid = this.grid;
+		if (grid) {
+			// The stroke's first sample is stored as given. After it, the grid
+			// hears the raw delta, and on a proven grid the candidate is the mean
+			// of this raw sample and the previous one, before the dedupe below.
+			const px = this.rawX;
+			const py = this.rawY;
+			const held = this.rawHeld;
+			this.rawX = x;
+			this.rawY = y;
+			this.rawHeld = true;
+			this.rawAveraged = false;
+			if (held) {
+				grid.observe((x - px) * grid.devicePxPerWorld, (y - py) * grid.devicePxPerWorld);
+				if (grid.engaged) {
+					x = (x + px) / 2;
+					y = (y + py) / 2;
+					this.rawAveraged = true;
+					this.rawPressure = pressure;
+					this.rawT = timestamp;
+					this.rawTiltX = tiltX;
+					this.rawTiltY = tiltY;
+				}
+			}
+		}
 		const prev = this.lastPoint;
 		if (prev) {
 			const dx = x - prev.x;
@@ -126,6 +245,23 @@ export class StrokeBuilder {
 		this.points.push(point);
 		this.arrivalPressure.push(pressure);
 		this.latestPressure.push(pressure);
+		return point;
+	}
+
+	/**
+	 * At the lift. On a proven grid the stored end is the mean of the last two
+	 * raw samples, half the last step short of where the pen lifted; this stores
+	 * that last raw sample as given, through the same dedupe. Returns the point,
+	 * or undefined: no grid, no sample yet, the last sample stored as given, or
+	 * the dedupe dropped it. Called once, after the last add().
+	 */
+	flushRaw(): InkPoint | undefined {
+		const grid = this.grid;
+		if (!grid || !this.rawHeld || !this.rawAveraged) return undefined;
+		this.rawAveraged = false;
+		this.grid = undefined;
+		const point = this.add(this.rawX, this.rawY, this.rawPressure, this.rawT, this.rawTiltX, this.rawTiltY);
+		this.grid = grid;
 		return point;
 	}
 

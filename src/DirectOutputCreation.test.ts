@@ -12,7 +12,7 @@
  * exercised here". This file exercises them.
  *
  * WHAT IS REAL HERE. The `snipNote`, `snipPdf` and `firstFreePath` bodies are
- * lifted out of `main.ts` source and transpiled, so the code under test is the
+ * lifted out of `export/Snips.ts` source and transpiled, so the code under test is the
  * shipped code rather than a restatement of it; the modal method is imported.
  * The helper is the REAL `createFreshFile` - reached through a transparent
  * wrapper that only records entry - so every caller in this file shares the one
@@ -49,12 +49,13 @@ vi.mock("obsidian", async (importOriginal) => {
 
 import { transformSync } from "esbuild";
 import { Notice, normalizePath } from "obsidian";
-import mainSource from "./main.ts?raw";
+import snipsSource from "./export/Snips.ts?raw";
+import { installMethods } from "./inline/InstallMethods";
 import { createFreshFile } from "./export/CreateFreshFile";
 import { DiagnosticTextModal } from "./diag/DiagnosticTextModal";
 import { stripMarkdownExtension } from "./util/MarkdownPath";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+const source = snipsSource.replace(/\r\n/g, "\n");
 
 /** A source slice, with both ends proven present and unique. */
 function slice(startMarker: string, endMarker: string): string {
@@ -66,19 +67,19 @@ function slice(startMarker: string, endMarker: string): string {
 }
 
 const FIRST_FREE_PATH_BLOCK = slice(
-	"\tprivate async firstFreePath(candidate: (n: number) => string): Promise<string> {",
+	"\tasync function firstFreePath(this: HandwritingPlugin, candidate: (n: number) => string): Promise<string> {",
 	"\n\t}"
 );
 const SNIP_NOTE_BLOCK = slice(
-	"\tprivate async snipNote(file: TFile, overlay: InkOverlayPlugin): Promise<void> {",
+	"\tasync function snipNote(this: HandwritingPlugin, file: TFile, overlay: InkOverlayPlugin): Promise<void> {",
 	"\n\t}"
 );
 const SNIP_BACKLINK_BLOCK = slice(
-	"\tprivate snipBacklink(file: TFile, subpath?: string, alias?: string): string {",
+	"\tfunction snipBacklink(this: HandwritingPlugin, file: TFile, subpath?: string, alias?: string): string {",
 	"\n\t}"
 );
 const SNIP_PDF_BLOCK = slice(
-	"\tprivate async snipPdf(file: TFile, controller: PdfInkController): Promise<void> {",
+	"\tasync function snipPdf(this: HandwritingPlugin, file: TFile, controller: PdfInkController): Promise<void> {",
 	"\n\t}"
 );
 
@@ -105,11 +106,16 @@ type SnipHost = {
 	snipPdf(file: unknown, controller: unknown): Promise<void>;
 };
 
-/** The three real method bodies on one prototype, so `this.firstFreePath` is the real loop. */
+/**
+ * The real method bodies installed on one prototype, as main.ts installs them,
+ * so `this.firstFreePath` is the real loop.
+ */
 const holderFor = (deps: Deps): { prototype: SnipHost } =>
-	build(`return class { ${FIRST_FREE_PATH_BLOCK}\n${SNIP_BACKLINK_BLOCK}\n${SNIP_NOTE_BLOCK}\n${SNIP_PDF_BLOCK} }`, { stripMarkdownExtension, ...deps }) as {
-		prototype: SnipHost;
-	};
+	build(
+		`"use strict";\n${FIRST_FREE_PATH_BLOCK}\n${SNIP_BACKLINK_BLOCK}\n${SNIP_NOTE_BLOCK}\n${SNIP_PDF_BLOCK}\n` +
+			"const Holder = class {};\ninstallMethods(Holder.prototype, { firstFreePath, snipBacklink, snipNote, snipPdf });\nreturn Holder;",
+		{ stripMarkdownExtension, installMethods, ...deps }
+	) as { prototype: SnipHost };
 
 /** Bytes as an exact latin1 string and back, so a payload can be compared whole. */
 const toLatin1 = (bytes: Uint8Array): string => {

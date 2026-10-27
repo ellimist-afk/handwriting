@@ -1084,8 +1084,10 @@ describe("applyViewportBox: class writes only when the class changes", () => {
 		layoutOf(overlay).ownLines = true;
 
 		apply(overlay, 0.5);
-		expect(host.classWrites, "first frame writes both tokens")
-			.toEqual(["add:handwriting-note-viewport", "toggle:handwriting-note-viewport-own-lines"]);
+		// The line-number travel class is the third: mount writes it on a real note, and this rig never mounts, so the first
+		// frame is its second writer. Guarded the same way, so the second frame writes it no more than the other two.
+		expect(host.classWrites, "first frame writes each token once")
+			.toEqual(["add:handwriting-note-viewport", "toggle:handwriting-note-viewport-own-lines", "add:handwriting-gutter-travel"]);
 		expect(host.classes.has("handwriting-note-viewport")).toBe(true);
 		expect(host.classes.has("handwriting-note-viewport-own-lines")).toBe(true);
 

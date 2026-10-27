@@ -19,15 +19,14 @@
  * prototype methods run: handleKeyDown, handleKeyUp, deleteSelectedInk, clearAllInk, applyInkOp,
  * redrawSelectionUI, selectionBounds, filePath. The one field built here, `selectionDeleteKeys`, is a
  * class-field initializer the prototype pattern cannot run; it is constructed with the exact wiring of
- * InkOverlay's selectionDeleteKeys initializer, and a source check below pins that wiring text.
+ * InkOverlay's selectionDeleteKeys initializer, and the mounted-overlay cell below checks the real one.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 (globalThis as { window?: unknown }).window = globalThis;
 
 import { InkOverlayPlugin, inlineInk } from "../inline/InkOverlay";
+import { mountOverlay } from "../inline/mountRig.test.util";
 import { InlineSelectionDeleteKeys } from "../inline/InlineSelectionDelete";
 import { onInkChanged } from "../inline/InkEvents";
 import { SelectionModel } from "../objects/SelectionModel";
@@ -77,7 +76,7 @@ function pane(path: string) {
 		dispatch: (spec: unknown) => void dispatched.push(spec),
 	};
 	o.selection = new SelectionModel();
-	// Exact production class-field wiring, pinned by the source check below.
+	// Exact production class-field wiring; the mounted-overlay cell below checks the real one.
 	o.selectionDeleteKeys = new InlineSelectionDeleteKeys(
 		() => !(o.selection as SelectionModel).isEmpty,
 		() => (o.deleteSelectedInk as () => void).call(o)
@@ -112,7 +111,7 @@ function pane(path: string) {
 	o.spacePlan = null;
 	o.builder = null;
 	// The real store emits InkEvents; production's subscription calls this
-	// same prototype method. Pin that call at the source-wiring test below.
+	// same prototype method; the mounted-overlay cell below checks the real subscription.
 	unsubscribers.push(onInkChanged((changed) => proto.pruneSelectionOnInkChange.call(o, changed)));
 	return { o, dispatched, drawn, sel: () => o.selection as SelectionModel, stripRefreshes: () => stripRefreshes };
 }
@@ -154,24 +153,52 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe("InlineStore-3 source wiring", () => {
-	it("the keyboard handler is wired as the probe rig wires it", () => {
-		const src = readFileSync(fileURLToPath(new URL("../inline/InkOverlay.ts", import.meta.url)), "utf8");
-		const allLines = src.split(/\r?\n/);
-		const start = allLines.findIndex((line) => line.includes("private readonly selectionDeleteKeys = new InlineSelectionDeleteKeys("));
-		expect(start).toBeGreaterThan(0);
-		const lines = allLines.slice(start, start + 4).map((l) => l.trim());
-		expect(lines).toEqual([
-			"private readonly selectionDeleteKeys = new InlineSelectionDeleteKeys(",
-			"() => !this.selection.isEmpty,",
-			"() => this.deleteSelectedInk()",
-			");",
-		]);
-		const handlerStart = src.indexOf("this.offInkChanged = onInkChanged((p) => {");
-		const handlerEnd = src.indexOf("\n\t\t});", handlerStart);
-		expect(handlerStart).toBeGreaterThan(0);
-		expect(handlerEnd).toBeGreaterThan(handlerStart);
-		expect(src.slice(handlerStart, handlerEnd)).toContain("this.pruneSelectionOnInkChange(p);");
+describe("InlineStore-3 wiring, on a real overlay", () => {
+	// The probe rig above builds two things by hand that a real overlay builds
+	// itself: the `selectionDeleteKeys` field (a class-field initialiser the
+	// prototype pattern cannot run) and the ink-change subscription that calls
+	// `pruneSelectionOnInkChange` (made at the end of `mount`). This cell checks
+	// both on an overlay built by its own constructor and mounted all the way
+	// (mountRig.test.util.ts), so the rig's copies answer to the real ones.
+	it("the constructor's delete keys answer to the selection, and the mount's ink-change listener prunes it", () => {
+		const path = seed();
+		const m = mountOverlay(path);
+		try {
+			const o = m.o;
+			const sel = o.selection as SelectionModel;
+			const deleted = vi.fn();
+			o.deleteSelectedInk = deleted;
+
+			// Nothing selected: the real keys pass Backspace to the editor.
+			expect(press(o, "Backspace"), "an empty selection claimed Backspace").toEqual({ claimed: false, prevented: false });
+			expect(deleted).not.toHaveBeenCalled();
+
+			// A live lasso: the real keys claim Backspace and call this overlay's delete.
+			sel.selectByLasso(
+				[
+					{ x: -50, y: -50 },
+					{ x: 500, y: -50 },
+					{ x: 500, y: 500 },
+					{ x: -50, y: 500 },
+				],
+				inlineInk.strokes(path),
+				[],
+				() => null
+			);
+			expect(sel.isEmpty, "precondition: the lasso selected the seeded ink").toBe(false);
+			expect(press(o, "Backspace").claimed, "a live selection did not claim Backspace").toBe(true);
+			expect(deleted, "the claimed key never reached deleteSelectedInk").toHaveBeenCalledTimes(1);
+
+			// The ink goes away from elsewhere (another pane's Delete all): the
+			// mount's subscription prunes this pane's selection.
+			inlineInk.applyRemove(
+				path,
+				inlineInk.strokes(path).map((s) => s.id)
+			);
+			expect(sel.isEmpty, "the ink-change listener left a selection of ink that no longer exists").toBe(true);
+		} finally {
+			m.destroy();
+		}
 	});
 });
 

@@ -4,7 +4,8 @@
  */
 import { describe, expect, it } from "vitest";
 import mainSource from "../main.ts?raw";
-import storeSource from "../persistence/PageStore.ts?raw";
+import deleteAllSource from "../ink/DeleteAllInk.ts?raw";
+import adoptSource from "../persistence/PageStoreAdopt.ts?raw";
 import { deleteAllBackupFailureText, INK_FOLDER_MOVING_TEXT } from "./DeleteAllBackupNotice";
 
 describe("delete-all backup failure text", () => {
@@ -22,9 +23,11 @@ describe("delete-all backup failure text", () => {
 		);
 	});
 	it("is the text the store throws, and both delete-all catches use the helper", () => {
-		expect(storeSource).toContain("INK_FOLDER_MOVING_TEXT");
-		const source = mainSource.replace(/\r\n/g, "\n");
+		expect(adoptSource).toContain("INK_FOLDER_MOVING_TEXT");
+		// Both catches (the note wipe and the PDF wipe) live in ink/DeleteAllInk.ts.
+		const source = deleteAllSource.replace(/\r\n/g, "\n");
 		expect(source.match(/deleteAllBackupFailureText\(err, /g)?.length).toBe(2);
 		expect(source).not.toContain("to the trash (disk error)");
+		expect(mainSource).not.toContain("to the trash (disk error)");
 	});
 });

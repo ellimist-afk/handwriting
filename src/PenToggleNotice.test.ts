@@ -45,10 +45,14 @@
 import { describe, expect, it } from "vitest";
 import { penToggleNoticeText } from "./main";
 import mainSrc from "./main.ts?raw";
+import commandsSrc from "./commands/RegisterCommands.ts?raw";
+import lifecycleSrc from "./PluginLifecycle.ts?raw";
 import { codeOnly } from "./CodeOnly";
 
 /** main.ts's registrations, without main.ts's prose about them. */
-const mainCode = codeOnly(mainSrc);
+// The command registrations live in commands/RegisterCommands.ts, read here with main.ts.
+// onunload lives in PluginLifecycle.ts, read here too.
+const mainCode = codeOnly([mainSrc, commandsSrc, lifecycleSrc].join("\n"));
 
 function occurrences(src: string, needle: string): number {
 	return src.split(needle).length - 1;
@@ -303,7 +307,7 @@ describe("the owned Notices come down with the plugin", () => {
 	});
 
 	it("onunload calls it, so a disabled plugin leaves no toast behind", () => {
-		const body = bodyOf(mainCode, "onunload(): void {", "\t");
+		const body = bodyOf(mainCode, "function onunload(this: HandwritingPlugin): void {", "\t");
 		expect(occurrences(body, "hideOwnedNotices();")).toBe(1);
 	});
 });

@@ -61,7 +61,7 @@ function makeRig() {
 
 	const overlay = Object.create(InkOverlayPlugin.prototype) as Fields;
 	const requestMeasure = vi.fn();
-	overlay.view = { dom: host, scrollDOM: scroller, contentDOM: { getBoundingClientRect: () => ({ left: 0, top: 0 }), children: [] as unknown[] }, requestMeasure, measure: vi.fn() };
+	overlay.view = { dom: host, scrollDOM: scroller, contentDOM: { getBoundingClientRect: () => ({ left: 0, top: 0 }), children: [] as unknown[] }, posAtCoords: () => null, requestMeasure, measure: vi.fn() };
 	overlay.container = { setCssStyles: vi.fn() };
  overlay.frame = { locked: false }; overlay.cssScale = 1; overlay.fontZoom = 1;
  // THIS RIG'S SUBJECT IS ZOOM MECHANICS, so its note is a CANVAS note. With the canvas off a

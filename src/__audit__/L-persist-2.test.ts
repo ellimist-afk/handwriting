@@ -20,6 +20,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
+import claimsSource from "../pdf/PdfClaims.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { emptyPage, parsePage, serializePage, type PageData } from "../model/PageData";
@@ -30,38 +32,40 @@ import { installLiveReloadPoll } from "../testUtils/LiveReloadTestHarness";
 import type { InkStroke } from "../ink/Stroke";
 
 const source = mainSource.replace(/\r\n/g, "\n");
+const settingsSource = pluginSettingsSource.replace(/\r\n/g, "\n");
+const claims = claimsSource.replace(/\r\n/g, "\n");
 
 function sliceMethod(startMarker: string): string {
-	expect(source.split(startMarker)).toHaveLength(2);
-	const start = source.indexOf(startMarker);
-	const end = source.indexOf("\n\t}\n", start);
+	expect(claims.split(startMarker)).toHaveLength(2);
+	const start = claims.indexOf(startMarker);
+	const end = claims.indexOf("\n\t}\n", start);
 	expect(end).toBeGreaterThan(start);
-	return source.slice(start, end + 3);
+	return claims.slice(start, end + 3);
 }
 
-// Production host object (main.ts:5621-5628), executed rather than rebuilt.
+// Production host object (loadSettings, settings/PluginSettings.ts), executed rather than rebuilt.
 // The slice ends at the object's own closing line, not at whatever
 // statement follows it: the settings rewrite moved the next line.
 const hostStartMarker = "\t\tthis.pdfStore.attachHost({";
 const hostEndMarker = "\n\t\t});";
-expect(source.split(hostStartMarker)).toHaveLength(2);
-const hostStart = source.indexOf(hostStartMarker);
-const hostEnd = source.indexOf(hostEndMarker, hostStart) + hostEndMarker.length;
+expect(settingsSource.split(hostStartMarker)).toHaveLength(2);
+const hostStart = settingsSource.indexOf(hostStartMarker);
+const hostEnd = settingsSource.indexOf(hostEndMarker, hostStart) + hostEndMarker.length;
 const installPdfPersistenceHost = new Function(
 	"Notice",
 	"blockNotice",
-	transformSync(source.slice(hostStart, hostEnd), { loader: "ts", target: "es2022" }).code
+	transformSync(settingsSource.slice(hostStart, hostEnd), { loader: "ts", target: "es2022" }).code
 );
 
 // Production resolvePdfId (main.ts:1382-1446) and pdfHeadSource (:1467).
-const resolveText = sliceMethod("\tprivate async resolvePdfId(").replace(
-	"\tprivate async resolvePdfId(",
-	"async function resolvePdfId("
+const resolveText = sliceMethod("\tasync function resolvePdfId(this: HandwritingPlugin,").replace(
+	"\tasync function resolvePdfId(this: HandwritingPlugin,",
+	"async function resolvePdfId(this: HandwritingPlugin,"
 );
 expect(resolveText).toContain("(await this.store.readPdfPaths(cid))");
 expect(resolveText).toContain("await this.pdfStore.ensureLoaded(choice.id);");
-const headText = sliceMethod("\tprivate pdfHeadSource(file: TFile): HeadSource {").replace(
-	"\tprivate pdfHeadSource(",
+const headText = sliceMethod("\tfunction pdfHeadSource(this: HandwritingPlugin, file: TFile): HeadSource {").replace(
+	"\tfunction pdfHeadSource(",
 	"function pdfHeadSource("
 );
 const sliced = new Function(
@@ -230,6 +234,10 @@ describe("L-persist-2: reopening a PDF in the same session", () => {
 	it("precondition: nothing in main.ts ever forgets a PdfInkStore record", () => {
 		expect(source).not.toMatch(/pdfStore\.forget\(/);
 		expect(source).not.toMatch(/pdfStore\.reloadExternal\(/);
+		expect(claims).not.toMatch(/pdfStore\.forget\(/);
+		expect(claims).not.toMatch(/pdfStore\.reloadExternal\(/);
+		expect(settingsSource).not.toMatch(/pdfStore\.forget\(/);
+		expect(settingsSource).not.toMatch(/pdfStore\.reloadExternal\(/);
 	});
 
 	it("control A: a pane kept open adopts the tablet's revision through the poll", async () => {

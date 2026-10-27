@@ -20,6 +20,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import pluginSettingsSource from "../settings/PluginSettings.ts?raw";
+import claimsSource from "../pdf/PdfClaims.ts?raw";
 import { PageStore } from "../persistence/PageStore";
 import { FakeAdapter } from "../persistence/FakeAdapter";
 import { PdfInkStore } from "../pdf/PdfInkStore";
@@ -35,15 +37,17 @@ const PDF_PATH = "lecture.pdf";
 
 // ---- production code sliced out of main.ts ---------------------------------
 const source = mainSource.replace(/\r\n/g, "\n");
+const settingsSource = pluginSettingsSource.replace(/\r\n/g, "\n");
+const claims = claimsSource.replace(/\r\n/g, "\n");
 
 const resolveStart =
-	"\tprivate async resolvePdfId(\n\t\tleaf: WorkspaceLeaf,\n\t\troot: HTMLElement,\n\t\tcontroller: PdfInkController\n\t): Promise<void> {\n";
+	"\tasync function resolvePdfId(this: HandwritingPlugin,\n\t\tleaf: WorkspaceLeaf,\n\t\troot: HTMLElement,\n\t\tcontroller: PdfInkController\n\t): Promise<void> {\n";
 const resolveEnd = "\n\t}\n\n\t/**\n\t * Where this PDF's head can be read from";
-expect(source.split(resolveStart)).toHaveLength(2);
-expect(source.split(resolveEnd)).toHaveLength(2);
-const rStart = source.indexOf(resolveStart) + resolveStart.length;
-const rEnd = source.indexOf(resolveEnd, rStart);
-const resolveBody = source.slice(rStart, rEnd);
+expect(claims.split(resolveStart)).toHaveLength(2);
+expect(claims.split(resolveEnd)).toHaveLength(2);
+const rStart = claims.indexOf(resolveStart) + resolveStart.length;
+const rEnd = claims.indexOf(resolveEnd, rStart);
+const resolveBody = claims.slice(rStart, rEnd);
 // The cited lines are in the slice being executed.
 expect(resolveBody).toContain("(await this.store.readPdfPaths(cid))");
 expect(resolveBody).toContain("await this.pdfStore.ensureLoaded(choice.id);");
@@ -59,21 +63,21 @@ const makeResolve = new Function(
 // Pane sweep: what runs when a PDF tab closes or switches file.
 const sweepStart =
 	"\t\tfor (const [root, controller] of [...this.pdfInk]) {\n\t\t\tif (seen.has(root) && root.isConnected) continue;\n";
-expect(source.split(sweepStart)).toHaveLength(2);
-const sStart = source.indexOf(sweepStart);
-const sEnd = source.indexOf("\n\t\t}\n", sStart);
-const sweepCode = source.slice(sStart, sEnd + 4);
+expect(claims.split(sweepStart)).toHaveLength(2);
+const sStart = claims.indexOf(sweepStart);
+const sEnd = claims.indexOf("\n\t\t}\n", sStart);
+const sweepCode = claims.slice(sStart, sEnd + 4);
 expect(sweepCode).toContain("controller.unmount();");
 const runSweep = new Function("seen", transformSync(sweepCode, { loader: "ts", target: "es2022" }).code);
 
 // Wiring preconditions.
-expect(source).toContain(
+expect(settingsSource).toContain(
 	"\t\tthis.pdfStore.attachHost({\n" +
 		"\t\t\tload: (id, options) => this.store.load(id, options),\n" +
 		"\t\t\tschedule: (id, data) => this.store.schedule(id, data),\n"
 );
-expect(source).toContain("const next = applyOp(this.pdfStore.strokes(id), op);");
-expect(source).toContain("this.pdfStore.replaceAll(id, next);");
+expect(claims).toContain("const next = applyOp(this.pdfStore.strokes(id), op);");
+expect(claims).toContain("this.pdfStore.replaceAll(id, next);");
 
 // ---- fixtures -------------------------------------------------------------
 function stroke(id: string, x: number): InkStroke {
@@ -250,6 +254,8 @@ describe("PageStore-1: reopening a PDF must not acknowledge an unread revision",
 		expect(d.host.pdfInk.size).toBe(0);
 		expect(d.host.pdfIds.size).toBe(0);
 		expect(source.includes("pdfStore.forget(")).toBe(false);
+		expect(claims.includes("pdfStore.forget(")).toBe(false);
+		expect(settingsSource.includes("pdfStore.forget(")).toBe(false);
 		expect(d.pdfStore.strokes(ID).map((s) => s.id)).toEqual(["A", "D"]);
 
 		// iPad annotates; sync delivers its sidecar (A, D, B).

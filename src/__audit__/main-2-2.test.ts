@@ -26,6 +26,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
+import identitySource from "../persistence/PageIdentity.ts?raw";
 import HandwritingPlugin from "../main";
 import { inlineInk } from "../inline/InkOverlay";
 import { PageStore } from "../persistence/PageStore";
@@ -34,7 +36,9 @@ import { PageIdIndex } from "../model/PageIdIndex";
 import { emptyPage, serializePage } from "../model/PageData";
 import { InkStroke } from "../ink/Stroke";
 
-const main = mainSource.replace(/\r\n/g, "\n");
+// The onload phases live in PluginOnload.ts, read here with main.ts.
+const main = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
+const identity = identitySource.replace(/\r\n/g, "\n");
 
 function sliceBlock(start: string, end: string): string {
 	const occurrences = main.split(start).length - 1;
@@ -149,9 +153,9 @@ describe("the wiring driven here is main.ts's own", () => {
 		expect(main).toMatch(
 			/metadataCache\.on\("changed", \(file\) => \{\n\t+if \(this\.pageIdWatchReady && file\.extension === "md"\) \{\n\t+this\.checkPageIdentity\(file\.path\);/
 		);
-		// The fix lengthens the grace past the save-and-index delay.
-		expect(main).toContain("const DECLAIM_GRACE_MS = 5_000;");
-		expect(main).toContain("if (this.declaimTimers.has(path)) return;");
+		// The fix lengthens the grace past the save-and-index delay (declaimLater lives in persistence/PageIdentity.ts).
+		expect(identity).toContain("const DECLAIM_GRACE_MS = 5_000;");
+		expect(identity).toContain("if (this.declaimTimers.has(path)) return;");
 		expect(INLINE_WIRING).toContain("readPageId: (path) => this.notePageId(path),");
 	});
 });

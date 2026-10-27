@@ -10,12 +10,13 @@
  * message loop runs through the whole run and records the gap between its turns; a save is the store's writePending
  * from its call to its end, and its worst task is the worst gap that overlaps it (the serialization runs several
  * awaits before the write). Asserted: no save starts while
- * the pen is down, and the page written within 1.5 s of the last pen-up. Printed, not asserted: the worst gap of any
- * kind with the pen down and up (the heap is large and collections land anywhere: 27 to 35 ms gaps away from any save
- * at base), and a save that runs into the next pen-down: how many, the worst task while the pen is down, and writes
- * during a stroke. That overlap is printed because a 9 MB page takes longer to serialize than the fixture's 100 ms
- * pen-up gap on a slow machine. The bars on it, no write and no task over 16.7 ms (one frame) with the pen down,
- * return when the save itself is fixed.
+ * the pen is down, and the page written within 1.5 s of the last pen-up. In the two runs of 600 and 3000 strokes the
+ * stroke after the bound's lift starts as that lift's save begins, so the save runs into a pen-down on any machine.
+ * That save holds no task over 16.7 ms (one frame) while the pen is down, and writes nothing during the stroke: it
+ * serializes in slices and waits for the lift.
+ * A save's task with the pen down is a gap of the message loop that ends with the pen down while that save runs.
+ * Printed, not asserted: the worst gap of any kind with the pen down and up (the heap is large and collections land
+ * anywhere: 27 to 35 ms gaps away from any save at base).
  */
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { build } from "esbuild";
@@ -59,12 +60,15 @@ function rig(count) {
 	const adapter = memoryAdapter(writes);
 	const store = new PageStore({ vault: { adapter } });
 	const page = tiled(count);
-	const state = { penDown: false };
+	const state = { penDown: false, onSave: null };
 	const writePending = PageStore.prototype.writePending;
-	store.writePending = async function (id) {
-		const save = { start: performance.now(), end: undefined, worst: 0, penDown: state.penDown, startDown: state.penDown };
+	store.writePending = async function (id, ...rest) {
+		const save = { start: performance.now(), end: undefined, worst: 0, worstDown: 0, penDown: state.penDown, startDown: state.penDown };
 		saves.push(save);
-		try { return await writePending.call(this, id); } finally { save.end = performance.now(); }
+		const onSave = state.onSave;
+		state.onSave = null;
+		onSave?.();
+		try { return await writePending.call(this, id, ...rest); } finally { save.end = performance.now(); }
 	};
 	const pen = (type, id = 7) => { state.penDown = type === "pointerdown"; window.dispatchEvent(new PointerEvent(type, { pointerType: "pen", pointerId: id, isPrimary: true })); };
 	const written = (from) => writes.filter(w => w.path.includes(page.pageId) && w.at >= from).map(w => w.at - from);
@@ -151,7 +155,7 @@ window.saveStall = {
 		await until(() => r.written(up).length > 0, 2500);
 		return { capWrite: capWrite === undefined ? null : Math.round(capWrite), capSave: capSave === undefined ? null : Math.round(capSave), duringContact, afterLift: r.written(up).map(Math.round) };
 	},
-	async run(count, strokesN = 18) {
+	async run(count, strokesN = 18, downAtSave = false) {
 		const r = rig(count), { writes, saves, store, page } = r;
 		const pageId = page.pageId;
 		// The gap probe: a message loop through the whole run. A save is the store's writePending from its call to its
@@ -162,7 +166,7 @@ window.saveStall = {
 			const now = performance.now(), gap = now - last;
 			const penDown = r.state.penDown;
 			if (penDown) { if (gap > worstDown) { worstDown = gap; worstDownAt = now; } } else if (gap > worstUp) worstUp = gap;
-			for (const save of saves) if (save.start <= now && (save.end === undefined || save.end >= last)) { save.worst = Math.max(save.worst, gap); save.penDown ||= penDown; }
+			for (const save of saves) if (save.start <= now && (save.end === undefined || save.end >= last)) { save.worst = Math.max(save.worst, gap); if (penDown) save.worstDown = Math.max(save.worstDown, gap); save.penDown ||= penDown; }
 			last = now;
 			if (running) channel.port2.postMessage(0);
 		};
@@ -171,12 +175,16 @@ window.saveStall = {
 		const t0 = performance.now();
 		const marks = [];
 		// 18 strokes: 7.2 s of writing; the first schedule at 0.3 s puts the 5 s timer at 5.3 s, inside the 14th stroke.
+		// With downAtSave, a lift that starts a save starts the next stroke as soon as the save has begun, so that stroke
+		// lands inside the save wherever its long task falls, on any machine; other lifts last 100 ms.
 		for (let i = 0; i < strokesN; i++) {
 			pen("pointerdown"); marks.push({ down: performance.now() - t0 });
 			await wait(300);
 			pen("pointerup"); marks[marks.length - 1].up = performance.now() - t0;
 			store.schedule(pageId, page);
-			await wait(100);
+			const started = downAtSave ? new Promise(resolve => { r.state.onSave = resolve; }) : null;
+			await (started ? Promise.race([wait(100), started]) : wait(100));
+			r.state.onSave = null;
 		}
 		const lastUp = performance.now();
 		const writtenSince = () => writes.filter(w => w.path.includes(pageId) && w.at >= lastUp).length;
@@ -188,7 +196,7 @@ window.saveStall = {
 			count, bytes: JSON.stringify(page).length, worstDown, worstDownAt: worstDownAt - t0, worstUp,
 			writes: writes.filter(w => w.path.includes(pageId)).map(w => ({ at: Math.round(w.at - t0), afterLastUp: Math.round(w.at - lastUp), duringStroke: inStroke(w.at), path: w.path.split("/").pop(), bytes: w.bytes })),
 			lastUp: Math.round(lastUp - t0),
-			saves: saves.map(x => ({ at: Math.round(x.start - t0), ms: Math.round((x.end - x.start) * 10) / 10, worstTask: Math.round(x.worst * 10) / 10, penDown: x.penDown, startDown: x.startDown })),
+			saves: saves.map(x => ({ at: Math.round(x.start - t0), ms: Math.round((x.end - x.start) * 10) / 10, worstTask: Math.round(x.worst * 10) / 10, worstDown: Math.round(x.worstDown * 10) / 10, penDown: x.penDown, startDown: x.startDown })),
 		};
 	},
 };
@@ -208,16 +216,18 @@ afterAll(async () => { await browser?.close(); });
 
 type Run = { count: number; bytes: number; worstDown: number; worstDownAt: number; worstUp: number; lastUp: number;
 	writes: { at: number; afterLastUp: number; duringStroke: boolean; path: string; bytes: number }[];
-	saves: { at: number; ms: number; worstTask: number; penDown: boolean; startDown: boolean }[] };
+	saves: { at: number; ms: number; worstTask: number; worstDown: number; penDown: boolean; startDown: boolean }[] };
 
-for (const count of [600, 3000]) it(`${count} strokes: no save starts with the pen down, the page is saved after it lifts; a save running into the next pen-down is printed, not asserted, until the save is fixed`, async () => {
+for (const count of [600, 3000]) it(`${count} strokes: no save starts with the pen down, the page is saved after it lifts, and a save running into the next pen-down holds no task over one frame and writes nothing during the stroke`, async () => {
 	const page = await browser.newPage();
 	const errors: string[] = [];
 	page.on("pageerror", e => errors.push(String(e.message).slice(0, 200)));
 	try {
 		await page.setContent('<!doctype html><body style="margin:0"></body>');
 		await page.addScriptTag({ content: script });
-		const r = await page.evaluate(n => (window as any).saveStall.run(n), count) as Run;
+		// The next stroke starts as the save at the bound's lift begins: the save runs into it however fast this machine
+		// serializes, and the bars below have something to read.
+		const r = await page.evaluate(n => (window as any).saveStall.run(n, 18, true), count) as Run;
 		// eslint-disable-next-line no-console
 		console.log(`SAVE STALL ${count} strokes (${(r.bytes / 1e6).toFixed(2)} MB): worst task with the pen down ${r.worstDown.toFixed(1)} ms at ${r.worstDownAt.toFixed(0)} ms, with it up ${r.worstUp.toFixed(1)} ms; last pen-up ${r.lastUp} ms; saves ${JSON.stringify(r.saves)}; writes ${JSON.stringify(r.writes)}`);
 		expect(errors, "page errors").toEqual([]);
@@ -225,8 +235,11 @@ for (const count of [600, 3000]) it(`${count} strokes: no save starts with the p
 		expect(r.writes.some(w => w.afterLastUp >= 0 && w.afterLastUp <= 1500), "no save within 1.5 s of the last pen-up").toBe(true);
 		const overlap = r.saves.filter(y => y.penDown);
 		// eslint-disable-next-line no-console
-		console.log(`SAVE OVERLAP ${count} strokes: saves that ran into a pen-down ${overlap.length}, worst task with the pen down ${Math.max(0, ...overlap.map(y => y.worstTask)).toFixed(1)} ms (one frame is ${FRAME_MS} ms), writes during a stroke ${r.writes.filter(w => w.duringStroke).length}`);
+		console.log(`SAVE OVERLAP ${count} strokes: saves that ran into a pen-down ${overlap.length}, worst task with the pen down ${Math.max(0, ...overlap.map(y => y.worstDown)).toFixed(1)} ms (one frame is ${FRAME_MS} ms), writes during a stroke ${r.writes.filter(w => w.duringStroke).length}`);
 		expect(r.saves.filter(s => s.startDown), "a save started with the pen down").toEqual([]);
+		expect(overlap.length, "premise: a save ran into a pen-down").toBeGreaterThan(0);
+		expect(overlap.filter(y => y.worstDown > FRAME_MS), `a save held a task over one frame (${FRAME_MS} ms) with the pen down`).toEqual([]);
+		expect(r.writes.filter(w => w.duringStroke), "a save wrote during a stroke").toEqual([]);
 	} finally {
 		await page.close();
 	}

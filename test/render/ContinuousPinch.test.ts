@@ -6,15 +6,28 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { build } from "esbuild";
 import { chromium, type Browser, type Page } from "playwright";
+import { withoutLineAnchor } from "./storedInk";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 const root=fileURLToPath(new URL("../../",import.meta.url));
 let browser:Browser,bundle:string;
 const timingResults:unknown[]=[];
 declare const process: { env: Record<string, string | undefined> };
+// Z1 PLANTS, one per run (HW_Z1_PLANT), each anchor matched exactly once. correction0: the zoom lift's line correction
+// forced to 0. measure0: a contact inside a zoom lift's first measure no longer runs it, so the pen retires the lift's line correction. pandrop: the router maps the pen's y without the pan. pendrift: the pen's client point read without the raster camera's pan, so a held stroke lands off its line.
+const Z1_PLANTS:Record<string,[string,string,string]>={
+ correction0:["InkOverlayZoomApi","moved=this.view.lineBlockAt(fingerLine.pos).top/scaleY-fingerLine.top-(settleLineApplied.get(hold)??0);","moved=0;"],
+ measure0:["InkOverlayLifecycle","(this.view as unknown as { measure(): void }).measure(); this.router?.refreshRect();",""],
+ pandrop:["InlinePenRouter","y: visualToNote(e.clientY - this.rect.top - panY, scale),","y: visualToNote(e.clientY - this.rect.top, scale),"],
+ pendrift:["InkOverlayPenSupport","function inkPanY(this: InkOverlayPlugin): number { return this.panY() - (this.rasterPan?.y ?? 0) * this.cssScale; }","function inkPanY(this: InkOverlayPlugin): number { return this.panY(); }"],
+};
+const Z1_PLANT=process.env.HW_Z1_PLANT??"";
+if(Z1_PLANT&&!Z1_PLANTS[Z1_PLANT])throw Error(`unknown HW_Z1_PLANT ${Z1_PLANT}`);
+let z1PlantHits=0;
 beforeAll(async()=>{
  browser=await chromium.launch({headless:true});
- bundle=(await build({entryPoints:[root+"test/render/zoomWrittenInkPage.ts"],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:root+"test/render/iphoneObsidianStub.ts"},plugins:process.env.HW_COMPOSITE_ALPHA_PLANT?[{name:'opaque-highlighter-control',setup(builder){builder.onLoad({filter:/src[\\/]inline[\\/]InkOverlay\.ts$/},args=>{const contents=readFileSync(args.path,'utf8'),needle='ctx.globalAlpha = opacity;ctx.drawImage';if(!contents.includes(needle))throw Error('missing composite plant target');return {loader:'ts',contents:contents.replace(needle,'ctx.globalAlpha = 1;ctx.drawImage')};});}}]:[]})).outputFiles[0]!.text;
+ bundle=(await build({entryPoints:[root+"test/render/zoomWrittenInkPage.ts"],bundle:true,write:false,format:"iife",platform:"browser",alias:{obsidian:root+"test/render/iphoneObsidianStub.ts"},plugins:Z1_PLANT?[{name:'z1-plant',setup(builder){const [file,from,to]=Z1_PLANTS[Z1_PLANT]!;builder.onLoad({filter:new RegExp(`src[\\\\/]inline[\\\\/]${file}\\.ts$`)},args=>{const source=readFileSync(args.path,'utf8'),hits=source.split(from).length-1;if(hits!==1)throw Error(`z1 plant ${Z1_PLANT}: anchor matched ${hits} times, want 1`);z1PlantHits++;return {loader:'ts',contents:source.replace(from,to)};});}}]:process.env.HW_COMPOSITE_ALPHA_PLANT?[{name:'opaque-highlighter-control',setup(builder){builder.onLoad({filter:/src[\\/]inline[\\/]InkOverlay\.ts$/},args=>{const contents=readFileSync(args.path,'utf8'),needle='ctx.globalAlpha = opacity;ctx.drawImage';if(!contents.includes(needle))throw Error('missing composite plant target');return {loader:'ts',contents:contents.replace(needle,'ctx.globalAlpha = 1;ctx.drawImage')};});}}]:[]})).outputFiles[0]!.text;
+ if(Z1_PLANT&&z1PlantHits!==1)throw Error(`z1 plant ${Z1_PLANT}: the planted file was bundled ${z1PlantHits} times, want 1`);
 });
 afterAll(async()=>{if(process.env.HW_PINCH_TIMING)writeFileSync(process.env.HW_PINCH_TIMING,JSON.stringify(timingResults,null,2));await browser?.close();});
 async function mount(page:Page,count:number,focus=false,desktop=false,mixed:boolean|'overlap'=false){
@@ -113,7 +126,7 @@ for(const [zoom,scaled] of [[.1,false],[.4,false],[1,false],[.1,true],[.4,true]]
    const after=await state(action);expect.soft(after.composite,action).toBe(false);expect.soft(after.visible.every((v:string)=>v==='visible'),action).toBe(true);
    if(action==='tail-clear'||action==='wet-clear'){expect.soft(after.pixels[3],action).toBe(0);expect.soft(after.blank[3],action).toBe(true);}
    if(action==='tail-clear')expect(after.pixels[4]).toBe(0);
-   if(action!=='pen')expect(after.strokes,action).toBe(before.strokes);
+   if(action!=='pen')expect(withoutLineAnchor(after.strokes),action).toBe(withoutLineAnchor(before.strokes));
    if(action==='wet'){expect(after.pixels[3]).toBeGreaterThan(0);expect(after.blank[3]).toBe(false);const fallback=await state('preview');expect(fallback.composite).toBe(false);expect(fallback.visible[3]).toBe('visible');await state('restore');const cleared=await state('wet-clear');expect(cleared.blank[3]).toBe(true);expect(cleared.pixels[3]).toBe(0);}
   }
  }finally{await page.close();}
@@ -235,7 +248,21 @@ for(const cancel of [false,true]){
   // paths is a frame apart, not a rounding apart: before the pen mapping was
   // corrected for the pan this same pair sat 842 note px from the contact.
   expect(results[0].stroke.points[0].x).toBeCloseTo(results[1].stroke.points[0].x,3);
-  expect(results[0].stroke.points[0].y).toBeCloseTo(results[1].stroke.points[0].y,3);
+  // Y AGAINST ITS LINE. The zoom lift holds the line under the fingers, so the two paths' settles can leave the lines
+  // at different page y (measured 4.27 note px apart); the pen must still land on the same line at the same height in it.
+  // The stroke's line anchor names that line and its top when the stroke was taken.
+  for(const r of results)expect(r.stroke.lineAnchor,"the held stroke carries no line anchor").toBeTruthy();
+  expect(results[0].stroke.lineAnchor.line,"the two paths put the pen on different lines").toBe(results[1].stroke.lineAnchor.line);
+  expect(results[0].stroke.points[0].y-results[0].stroke.lineAnchor.top).toBeCloseTo(results[1].stroke.points[0].y-results[1].stroke.lineAnchor.top,3);
+  // THE CONTACT'S OWN MEASURE: once on the down inside the lift's first measure (the unmeasured path), never on the
+  // down after it ran (the measured path), never on a plain down.
+  expect(results[0].measureCalls.held,"the contact inside the lift's first measure did not run it once").toBe(1);
+  expect(results[1].measureCalls.held,"a contact after the lift's measure ran a measure").toBe(0);
+  for(const r of results)expect(r.measureCalls.plain,"a plain pen down ran a measure").toBe(0);
+  // ABSOLUTE LEG: each path's first point against the note point the text's DOM gives for the contact, bar 0.1 screen
+  // px (note error times cssScale), as ScrollColumnAnchorPinch's mapping arm. The two-path compare above cannot see a
+  // drift both paths share.
+  for(const [i,r] of results.entries())expect(Math.hypot(r.stroke.points[0].x-r.expected.x,r.stroke.points[0].y-r.expected.y)*r.expected.cssScale,`path ${i?"measured":"unmeasured"}: first point off the text's note point`).toBeLessThan(.1);
  });
 }
 for(const changed of [false,true])for(const zoom of [.322,.1]){

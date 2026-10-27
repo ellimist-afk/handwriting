@@ -69,6 +69,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { allSurfaceFiles } from "./inline/surfaceFiles.testutil";
 
 /**
  * Every `.ts` under src, as text. Keys are root-absolute with forward
@@ -167,8 +168,12 @@ describe("doc comments are attached to the symbol they describe", () => {
 		// like a clean tree. The tree is ~112 source files.
 		expect(SOURCES.length).toBeGreaterThan(100);
 		const paths = SOURCES.map(([path]) => path);
-		expect(paths).toContain("/src/pdf/PdfInkController.ts");
-		expect(paths).toContain("/src/inline/InkOverlay.ts");
+		// Every file of every ink surface, as the ink-surface ledger lists
+		// them, so a file split out of a surface is required here as soon as
+		// the ledger names it.
+		const surfaces = allSurfaceFiles();
+		expect(surfaces.length, "precondition: the ledger names the surfaces' files").toBeGreaterThanOrEqual(2);
+		for (const file of surfaces) expect(paths, `the scan does not read ${file}`).toContain(file);
 		expect(paths).toContain("/src/main.ts");
 		expect(paths.filter((p) => p.endsWith(".test.ts"))).toEqual([]);
 		expect(Object.keys(ALL_TS).length).toBeGreaterThan(SOURCES.length);

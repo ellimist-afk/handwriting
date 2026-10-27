@@ -1,12 +1,16 @@
 import { expect } from "vitest";
 import { transformSync } from "esbuild";
 import mainSource from "../main.ts?raw";
+import onloadSource from "../PluginOnload.ts?raw";
+import reloadSource from "../PluginOnloadReload.ts?raw";
 
 // Execute the actual production registration and its real backoff closure.
 // Fail closed if either extraction boundary or registration shape changes.
-const source = mainSource.replace(/\r\n/g, "\n");
+// The poll and its stride live in PluginOnloadReload.ts, read here with main.ts; the
+// poll is the last statement of its phase, so the slice ends at that close.
+const source = [mainSource, onloadSource, reloadSource].join("\n").replace(/\r\n/g, "\n");
 const startMarker = "\t\tlet reloadTickBusy = false;";
-const endMarker = "\n\t\t// THE ONE PEN COMMAND";
+const endMarker = "\n\t}\n\nexport function installPluginOnloadReload(";
 expect(source.split(startMarker)).toHaveLength(2);
 expect(source.split(endMarker)).toHaveLength(2);
 const start = source.indexOf(startMarker);

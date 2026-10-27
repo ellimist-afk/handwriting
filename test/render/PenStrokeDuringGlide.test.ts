@@ -177,7 +177,7 @@ beforeAll(async () => {
 	const b = await build({ stdin: { contents: PAGE, resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "ts", sourcefile: "penProbePage.ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
 		plugins: [{ name: "cancel-log", setup(builder) {
-			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlay\.ts$/ }, args => {
+			builder.onLoad({ filter: /src[\\/]inline[\\/]InkOverlayPenSupport\.ts$/ }, args => {
 				const text = readFileSync(args.path, "utf8");
 				if (text.split(from).length !== 2) throw new Error("pen probe: cancelOverscrollBounce anchor not found once");
 				planted++;

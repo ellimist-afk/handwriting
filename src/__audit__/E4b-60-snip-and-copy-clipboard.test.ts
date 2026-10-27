@@ -3,13 +3,13 @@
  * diagnostics Copy button write through the main window's clipboard, which
  * Chromium refuses while a popout has focus.
  *
- * Claim: snipNote and snipPdf (main.ts) write the embed with the bare global
+ * Claim: snipNote and snipPdf (export/Snips.ts) write the embed with the bare global
  * `navigator.clipboard`, and DiagnosticTextModal.copyToClipboard writes the
  * report the same way. Plugin code runs in the main window's realm, so both go
  * to the main window's Clipboard, which rejects "Document is not focused"
  * while the user is working in a popout.
  *
- * Production code driven: snipNote and snipPdf sliced verbatim out of main.ts
+ * Production code driven: snipNote and snipPdf sliced verbatim out of export/Snips.ts
  * and run as src/DirectOutputCreation.test.ts runs them, with `navigator` (the
  * main window's) and `activeWindow` (Obsidian's focused window, here a popout)
  * handed in; and the real DiagnosticTextModal.prototype.copyToClipboard with a
@@ -22,7 +22,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { transformSync } from "esbuild";
-import mainSource from "../main.ts?raw";
+import snipsSource from "../export/Snips.ts?raw";
+import { installMethods } from "../inline/InstallMethods";
 
 const notices = vi.hoisted(() => ({ said: [] as string[] }));
 vi.mock("obsidian", async (importOriginal) => {
@@ -38,14 +39,14 @@ vi.mock("obsidian", async (importOriginal) => {
 import { Notice } from "obsidian";
 import { DiagnosticTextModal } from "../diag/DiagnosticTextModal";
 
-const source = mainSource.replace(/\r\n/g, "\n");
+const source = snipsSource.replace(/\r\n/g, "\n");
 function slice(startMarker: string): string {
 	expect(source.split(startMarker)).toHaveLength(2);
 	const start = source.indexOf(startMarker);
 	return source.slice(start, source.indexOf("\n\t}", start) + 3);
 }
-const SNIP_NOTE = slice("\tprivate async snipNote(file: TFile, overlay: InkOverlayPlugin): Promise<void> {");
-const SNIP_PDF = slice("\tprivate async snipPdf(file: TFile, controller: PdfInkController): Promise<void> {");
+const SNIP_NOTE = slice("\tasync function snipNote(this: HandwritingPlugin, file: TFile, overlay: InkOverlayPlugin): Promise<void> {");
+const SNIP_PDF = slice("\tasync function snipPdf(this: HandwritingPlugin, file: TFile, controller: PdfInkController): Promise<void> {");
 expect(SNIP_NOTE).toContain("clipboard.writeText(md)");
 expect(SNIP_PDF).toContain("clipboard.writeText(md)");
 
@@ -67,10 +68,12 @@ type Snipper = { snipNote(file: unknown, o: unknown): Promise<void>; snipPdf(fil
 
 function snipper(deps: Record<string, unknown>): Snipper {
 	const names = Object.keys(deps);
-	const cls = `return class { ${SNIP_NOTE}\n${SNIP_PDF} }`;
-	const Holder = new Function(...names, transformSync(cls, { loader: "ts", target: "es2022" }).code)(
+	const fns = `"use strict";\n${SNIP_NOTE}\n${SNIP_PDF}\nreturn { snipNote, snipPdf };`;
+	const methods = new Function(...names, transformSync(fns, { loader: "ts", target: "es2022" }).code)(
 		...names.map((n) => deps[n])
-	) as new () => Snipper;
+	) as Record<string, (...args: never[]) => unknown>;
+	const Holder = class {} as unknown as new () => Snipper;
+	installMethods(Holder.prototype, methods);
 	const inst = new Holder() as Snipper & Record<string, unknown>;
 	inst.firstFreePath = async (candidate: (n: number) => string) => candidate(1);
 	inst.snipBacklink = () => "[[source]]";
