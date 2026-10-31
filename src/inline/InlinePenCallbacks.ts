@@ -1,4 +1,5 @@
 import type { PenSample } from "../input/PointerRouter";
+import type { MultiFingerTapCount } from "./MultiFingerTap";
 
 export interface InlinePenCallbacks {
 	onPenDown(sample: PenSample, ev: PointerEvent): void;
@@ -6,6 +7,8 @@ export interface InlinePenCallbacks {
 	onViewportInput?(): void;
 	/** Every contact has lifted (no touch, no assist pan) and none replaced it. A cancelled ease may have left the page stranded off its rest; the overlay decides whether there is anything to resume. */
 	onAllContactsLifted?(): void;
+	/** Two or three fingers tapped together and lifted (MultiFingerTap.ts). The surface decides what that does; one that supplies nothing ignores taps. */
+	onMultiFingerTap?(fingers: MultiFingerTapCount): void;
 	/** Finish pending raster coverage before the first sample is mapped. */
 	onBeforePenDown?(): void;
 	/**

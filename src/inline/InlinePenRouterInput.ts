@@ -51,6 +51,12 @@ declare module "./InlinePenRouter" {
 			const held = sideButtonAirInterrupt();
 			if (held !== null) tr("pointerdown", e, held);
 		}
+		// Every finger is watched for a two- or three-finger tap; any other contact
+		// (the pen, a mouse) means the hand is doing something else, so it spoils one.
+		if (e.pointerType === "touch") {
+			this.fingerTaps.down(e.pointerId, e.clientX, e.clientY, performance.now());
+			if (this.activePenId !== null && !this.activeIsFinger) this.fingerTaps.spoil();
+		} else this.fingerTaps.spoil();
 		if (e.pointerType === "touch") {
 			this.lastTouchAt = performance.now();
 			scrollProbeTouch();
@@ -128,6 +134,8 @@ declare module "./InlinePenRouter" {
 				this.palmsBlocked++;
 				telemetry.bump("inline.palmBlocked");
 				this.swallowedTouches.add(e.pointerId);
+				// A palm beside the pen is never part of a tap: a resting hand must not undo.
+				this.fingerTaps.spoil();
 				// Watch it: a swipe-like start earns parole (assist pan);
 				// a resting palm stays swallowed.
 				this.paroleId = e.pointerId;
@@ -545,6 +553,7 @@ declare module "./InlinePenRouter" {
 	// ---- pointermove / pointerrawupdate -------------------------------------
 
 	function pointerMove(this: InlinePenRouter, e: PointerEvent): void {
+		if (e.pointerType === "touch") this.fingerTaps.move(e.pointerId, e.clientX, e.clientY);
 		const ownedFinger =
 			e.pointerType === "touch" && this.activeIsFinger && e.pointerId === this.activePenId;
 		if (ownedFinger && this.touchPos.has(e.pointerId)) {
@@ -904,6 +913,16 @@ declare module "./InlinePenRouter" {
 
 	function pointerUpOrCancel(this: InlinePenRouter, e: PointerEvent): void {
 		if (e.pointerType === "touch") {
+			// Answered before any branch below can return: the last finger of a clean
+			// tap lifts here whichever bookkeeping it went through on the way down.
+			if (e.type === "pointercancel") this.fingerTaps.cancel(e.pointerId);
+			else {
+				const tapped = this.fingerTaps.up(e.pointerId, performance.now());
+				if (tapped !== null) {
+					tr(e.type, e, `${tapped}-finger tap`);
+					this.cb.onMultiFingerTap?.(tapped);
+				}
+			}
 			const blockedFingerGesture = this.fingerInkBlockedUntilAllLift;
 			const ownedFinger = this.activeIsFinger && e.pointerId === this.activePenId;
 			if (ownedFinger) this.endPenStroke(e, false);

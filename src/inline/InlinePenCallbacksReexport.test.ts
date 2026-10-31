@@ -24,6 +24,7 @@ const MEMBERS = [
 	"onPenDown",
 	"onViewportInput",
 	"onAllContactsLifted",
+	"onMultiFingerTap",
 	"onBeforePenDown",
 	"onPenHover",
 	"onPenLeave",

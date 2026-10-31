@@ -143,6 +143,12 @@ Handwriting carries the first finger scroll itself, on its own glide curve.
 The first swipe after the pen has been near may not feel quite like a native
 one, and native scrolling returns a second later.
 
+Tap with two fingers to undo and three fingers to redo, the same as Ctrl+Z
+and Ctrl+Shift+Z. Every finger has to land, stay put and lift quickly: a
+two-finger scroll or pinch never undoes, and neither do fingers resting
+beside the pen. **Finger tap undo** is a switch in Settings, on by default.
+It works on notes; PDFs and Slides keep their own undo.
+
 On Windows a pen contact also raises synthetic mouse events. Those are
 suppressed during a stroke and briefly after it, so an eraser pass cannot
 drag the text caret.

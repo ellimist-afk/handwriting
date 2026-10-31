@@ -154,6 +154,8 @@ export interface HandwritingSettings {
 	penReticle: boolean;
 	/** Hold-at-end snaps the figure to a clean shape (1.0.14). Default on. */
 	shapeSnap: boolean;
+	/** Two fingers tapped together undo, three redo, on a note. Default on. */
+	multiFingerTaps: boolean;
 	/** Shows the developer diagnostics commands in the palette. */
 	devDiagnostics: boolean;
 	/**
@@ -253,6 +255,7 @@ export const DEFAULT_SETTINGS: HandwritingSettings = {
 	eraserMode: "stroke",
 	penReticle: true,
 	shapeSnap: true,
+	multiFingerTaps: true,
 	devDiagnostics: false,
 	slidesInk: true,
 	colorSizeCommands: false,

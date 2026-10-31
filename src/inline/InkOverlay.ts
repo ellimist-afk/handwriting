@@ -181,6 +181,7 @@ export {
 	setPersistToolbarCorner,
 	applyToolbarPlacement,
 	setShapeSnap,
+	setMultiFingerTaps,
 	setPenReticle,
 	penReticleEnabled,
 	setEraserWholeStrokes,
