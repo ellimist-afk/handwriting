@@ -28,7 +28,7 @@ import type { ToolbarCorner } from "./ToolbarCorner";
 
 /** A 1000x800 pane, big enough that no two anchors are near each other. */
 const PANE = { left: 0, top: 0, right: 1000, bottom: 800 };
-/** An expanded strip, and the collapsed pill's 34px circle. */
+/** An expanded strip, and the collapsed pill's 34px square. */
 const STRIP = { width: 400, height: 40 };
 const PILL = { width: 34, height: 34 };
 

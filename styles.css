@@ -2046,7 +2046,9 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
 	justify-content: center;
 	padding: 0;
 	border: 1px solid var(--background-modifier-border);
-	border-radius: 50%;
+	/* The strip's own corner, so folding reads as the strip shrinking to one
+	   button rather than turning into a different control. */
+	border-radius: 10px;
 	background: var(--background-secondary);
 	box-shadow: none;
 	color: var(--text-muted);

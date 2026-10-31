@@ -173,15 +173,15 @@ describe("styles.css - toolbar anchors clear every unsafe edge they touch", () =
 		}
 	});
 
-	// THE PILL IS A CIRCLE AT EVERY PLACEMENT, and only the middles could
+	// THE PILL IS A 34px SQUARE AT EVERY PLACEMENT, and only the middles could
 	// ever have broken it. Centring sets `width: fit-content` so the STRIP
 	// shrink-wraps and the auto margins have something to centre - but that
-	// rule names the pill too, and there it beat the 34px circle and shrank
-	// it to the width of the chevron inside: a 34px-tall ellipse under the
-	// 50% radius (alan, 2026-09-05, on bottom middle: "the icon is all
+	// rule names the pill too, and there it beat the 34px square and shrank
+	// it to the width of the chevron inside: a 34px-tall sliver under the
+	// rounded corners (then a 50% radius) (alan, 2026-09-05, on bottom middle: "the icon is all
 	// squished"). The pill re-asserts its width AFTER that rule, so what
 	// this pins is the LAST width to win, not the absence of any.
-	it("the pill is still a circle at the middles, and the strip still shrink-wraps", () => {
+	it("the pill is still square at the middles, and the strip still shrink-wraps", () => {
 		for (const corner of TOOLBAR_CORNERS.filter((c) => isCenterColumnAnchor(c))) {
 			const cls = toolbarCornerClass(corner);
 
@@ -192,7 +192,7 @@ describe("styles.css - toolbar anchors clear every unsafe edge they touch", () =
 			expect(widths, `.handwriting-pen-pill.${cls} declares no width at all`).not.toBeNull();
 			expect(
 				widths![widths!.length - 1],
-				`.handwriting-pen-pill.${cls} ends up shrink-wrapped, so its circle is an ellipse`
+				`.handwriting-pen-pill.${cls} ends up shrink-wrapped, so its square is a sliver`
 			).toMatch(/34px/);
 
 			const strip = declarationsFor(`.handwriting-mobile-tools.${cls}`).join(";");
