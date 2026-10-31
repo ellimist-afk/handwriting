@@ -9,6 +9,11 @@
  * 34x34 on `.is-phone` and desktop. The zoom bar's (0,1,1) button rule lost
  * the same way: its 30px squares came out 47px wide on a tablet.
  *
+ * The corners lose the same way. The zoom buttons set no radius, and the
+ * pill's and strip buttons' radii are single-class rules, so on a tablet the
+ * host's or theme's button radius made them circles and capsules (owner's
+ * screenshot, 2026-10-31). Each corner is tied at (0,2,1) beside its padding.
+ *
  * The fix is a (0,2,1) rule that ties the host and wins on sheet order, the
  * same mechanism as the colour swatches' tie. A unit test has no layout, so
  * this pins the stylesheet text, as CornerSafeArea.test.ts does.
@@ -42,5 +47,13 @@ describe("tablet button padding", () => {
 		const bodies = declarationsFor(".handwriting-note-viewport-controls button:not(.clickable-icon)");
 		expect(bodies.length, "the tablet padding tie for the zoom bar is missing").toBeGreaterThan(0);
 		expect(bodies.join(";")).toMatch(/(?:^|;)\s*padding\s*:\s*0 6px\s*(?:;|$)/);
+	});
+
+	it("ties each control's own corner, so a host button radius cannot round it", () => {
+		const radius = (selector: string) =>
+			declarationsFor(selector).join(";").match(/(?:^|;)\s*border-radius\s*:\s*([^;]+?)\s*(?:;|$)/)?.[1];
+		expect(radius("button.handwriting-pen-pill:not(.clickable-icon)")).toBe("10px");
+		expect(radius("button.handwriting-mobile-tool:not(.clickable-icon)")).toBe("8px");
+		expect(radius(".handwriting-note-viewport-controls button:not(.clickable-icon)")).toBe("5px");
 	});
 });
