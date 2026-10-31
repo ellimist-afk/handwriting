@@ -2067,6 +2067,16 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
 	display: flex;
 }
 
+/* The same host tie as the colour swatches below. Obsidian's
+   `.is-tablet button:not(.clickable-icon) { padding: 4px 20px }` is (0,2,1)
+   and beat the single-class `padding: 0` above, so on a tablet 40px of
+   horizontal padding forced the 34px pill to 40px wide while its height
+   held: a square stretched sideways. This selector is (0,2,1) too and wins
+   on sheet order. */
+button.handwriting-pen-pill:not(.clickable-icon) {
+	padding: 0;
+}
+
 /* ---- chrome ---- */
 
 .handwriting-toolbar {
