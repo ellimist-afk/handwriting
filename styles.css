@@ -3261,6 +3261,12 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
    not the collapsed pill. */
 .handwriting-note-viewport-controls { position:absolute; top:52px; right:8px; z-index:30; display:flex; gap:2px; padding:3px; border:1px solid var(--background-modifier-border); border-radius:8px; background:var(--background-primary); box-shadow:0 2px 8px #0002; will-change: transform, opacity; transition: opacity 60ms linear 160ms; }
 .handwriting-note-viewport-controls button { min-width:30px; height:30px; padding:0 6px; font-size:12px; }
+/* The host tie again, as the pill and the colour swatches take it. Obsidian's
+   `.is-tablet button:not(.clickable-icon) { padding: 4px 20px }` is (0,2,1) and
+   beat the (0,1,1) rule above, so on a tablet every zoom button grew 40px of
+   side padding: the 30px squares came out 47px wide. This is (0,2,1) and wins
+   on sheet order. */
+.handwriting-note-viewport-controls button:not(.clickable-icon) { padding:0 6px; }
 /* Below the pen strip and its folded pill on a phone, never over them. The fixed top above is sized for the
    desktop strip; a notched phone pushes the strip and pill down by its safe-area inset, and Android moves them
    below the notification shade (top 48 and 55 above), so there the bar sat over the pill and the strip's right
