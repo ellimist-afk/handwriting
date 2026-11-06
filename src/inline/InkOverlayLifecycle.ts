@@ -39,6 +39,7 @@ import { setHitProbeContext } from "./PenHitProbe";
 import { surfaceExtents, ZERO_EXTENT } from "./SurfaceExtent";
 import { scrollProbeScroll, scrollProbeWheel } from "./ScrollProbe";
 import { installMethods } from "./InstallMethods";
+import { multiFingerTapsOn } from "./InkOverlayToolState";
 import { applyToolbarPlacement, armMouseInkQuietlyEverywhere, commitEraserRadius, copySelectionNotice, copySelectionNoticeIsRoutine, cutSelectionNotice, cutSelectionNoticeIsRoutine, enabled, getEraserRadiusPx, getEraserWholeStrokes, getInkSizeMult, getInlineEraserMode, getInlineLassoMode, getInlinePanMode, getInlineSpaceMode, getInlineTool, INLINE_DESYNCHRONIZED, inlineInk, inlineTool, instances, metrics, OVERSCROLL_GIVE_PX, persistEraserMode, persistInkSize, pickStripColor, PINCH_SCROLL_QUIET_MS, releaseMouseInkQuietlyEverywhere, scrollExpansionEnabled, setEraserRadiusPx, setEraserWholeStrokes, setInkSizeMult, type InkOverlayPlugin } from "./InkOverlay";
 
 declare module "./InkOverlay" {
@@ -288,6 +289,13 @@ declare module "./InkOverlay" {
 				// reticle back where the hand actually is.
 				onPenUp: (ev) => this.penUp(ev),
 				onAllContactsLifted: () => this.resumeStrandedPan(),
+				// Two fingers undo, three redo: this view's own history, the same call
+				// the strip's Undo and Redo buttons make, so a tap is exactly Ctrl+Z.
+				onMultiFingerTap: (fingers) => {
+					if (!multiFingerTapsOn) return;
+					if (fingers === 2) undo(this.view);
+					else redo(this.view);
+				},
 				// Ordinary-note iPhone only. The predicate is read at contact,
 				// after a toolbar command has explicitly picked the current nib.
 				// PDF supplies no callback, so its touch behavior cannot widen.

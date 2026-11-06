@@ -2046,7 +2046,9 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
 	justify-content: center;
 	padding: 0;
 	border: 1px solid var(--background-modifier-border);
-	border-radius: 50%;
+	/* The strip's own corner, so folding reads as the strip shrinking to one
+	   button rather than turning into a different control. */
+	border-radius: 10px;
 	background: var(--background-secondary);
 	box-shadow: none;
 	color: var(--text-muted);
@@ -2063,6 +2065,26 @@ body [data-handwriting-paper]:not([data-handwriting-paper="dots"]):not([data-han
 
 .handwriting-pen-pill.is-showing {
 	display: flex;
+}
+
+/* The same host tie as the colour swatches below. Obsidian's
+   `.is-tablet button:not(.clickable-icon) { padding: 4px 20px }` is (0,2,1)
+   and beat the single-class `padding: 0` above, so on a tablet 40px of
+   horizontal padding forced the 34px pill to 40px wide while its height
+   held: a square stretched sideways. This selector is (0,2,1) too and wins
+   on sheet order. */
+button.handwriting-pen-pill:not(.clickable-icon) {
+	padding: 0;
+	/* The pill's own 10px corner, tied for the same reason: the single-class
+	   rule above loses a host or theme button radius on a tablet. */
+	border-radius: 10px;
+}
+
+/* The strip's tool buttons keep their 8px corner on a tablet by the same tie.
+   Only the corner: their resting colour, background and shadow are the
+   host's on purpose (see the AT REST note on .handwriting-mobile-tool). */
+button.handwriting-mobile-tool:not(.clickable-icon) {
+	border-radius: 8px;
 }
 
 /* ---- chrome ---- */
@@ -3249,6 +3271,15 @@ body.handwriting-boox .handwriting-mobile-tool.is-pressed:not(.is-disabled) {
    not the collapsed pill. */
 .handwriting-note-viewport-controls { position:absolute; top:52px; right:8px; z-index:30; display:flex; gap:2px; padding:3px; border:1px solid var(--background-modifier-border); border-radius:8px; background:var(--background-primary); box-shadow:0 2px 8px #0002; will-change: transform, opacity; transition: opacity 60ms linear 160ms; }
 .handwriting-note-viewport-controls button { min-width:30px; height:30px; padding:0 6px; font-size:12px; }
+/* The host tie again, as the pill and the colour swatches take it. Obsidian's
+   `.is-tablet button:not(.clickable-icon) { padding: 4px 20px }` is (0,2,1) and
+   beat the (0,1,1) rule above, so on a tablet every zoom button grew 40px of
+   side padding: the 30px squares came out 47px wide. This is (0,2,1) and wins
+   on sheet order. The radius rides the same tie: the buttons set none of their
+   own, so on a tablet the host's button radius rounded them into circles and
+   capsules. 5px is the bar's 8px corner less its 3px padding, so the inner
+   corners run concentric with the bar's. */
+.handwriting-note-viewport-controls button:not(.clickable-icon) { padding:0 6px; border-radius:5px; }
 /* Below the pen strip and its folded pill on a phone, never over them. The fixed top above is sized for the
    desktop strip; a notched phone pushes the strip and pill down by its safe-area inset, and Android moves them
    below the notification shade (top 48 and 55 above), so there the bar sat over the pill and the strip's right

@@ -6,7 +6,7 @@
  */
 import { installMethods } from "../inline/InstallMethods";
 import { Notice, Platform } from "obsidian";
-import { inlineInk, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setEraserRadiusPx, setEraserWholeStrokes, setInkSizeMult, setPenReticle, setPersistEraserMode, setPersistEraserRadius, setPersistInkSize, setPersistToolbarCorner, setShapeSnap, setToolbarCorner, setScrollExpansionEnabled } from "../inline/InkOverlay";
+import { inlineInk, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setEraserRadiusPx, setEraserWholeStrokes, setInkSizeMult, setPenReticle, setPersistEraserMode, setPersistEraserRadius, setPersistInkSize, setPersistToolbarCorner, setShapeSnap, setMultiFingerTaps, setToolbarCorner, setScrollExpansionEnabled } from "../inline/InkOverlay";
 import { clampInkSize } from "../ink/InkSize";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius } from "../ink/EraserSize";
 import { setPressureSensitivity } from "../ink/PenStyle";
@@ -458,6 +458,7 @@ declare module "../main" {
 			eraserMode: raw?.eraserMode === "reticle" ? "reticle" : "stroke",
 			penReticle: raw?.penReticle !== false,
 			shapeSnap: raw?.shapeSnap !== false,
+			multiFingerTaps: raw?.multiFingerTaps !== false,
 			devDiagnostics: raw?.devDiagnostics === true,
 			// `!== false`, so a vault that has never heard of slides ink - and
 			// every vault written by a build without it - gets the feature.
@@ -567,6 +568,7 @@ declare module "../main" {
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
 		setEraserWholeStrokes(this.settings.eraserMode === "stroke");
 		setShapeSnap(this.settings.shapeSnap);
+		setMultiFingerTaps(this.settings.multiFingerTaps);
 	}
 
 	/**

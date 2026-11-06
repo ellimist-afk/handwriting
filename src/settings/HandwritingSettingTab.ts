@@ -7,7 +7,7 @@
  */
 import { App, Notice, Platform, PluginSettingTab, Setting, SettingDefinitionItem, type SettingGroup } from "obsidian";
 import { gatedCommands, type PaletteCommand } from "../CommandPaletteSplit";
-import { applyToolbarPlacement, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setShapeSnap } from "../inline/InkOverlay";
+import { applyToolbarPlacement, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setMultiFingerTaps, setShapeSnap } from "../inline/InkOverlay";
 import { setPressureSensitivity } from "../ink/PenStyle";
 import { refreshInkTheme, setInkExportReadability, setInkThemeAdaptation } from "../ink/InkTheme";
 import { colorsFor, getInkColorHex } from "../ink/InkColor";
@@ -467,6 +467,12 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						desc: "Hold at the end of a stroke to snap it into a shape. Global setting. Default on.",
 						control: { type: "toggle", key: "shapeSnap" },
 					},
+					{
+						name: "Finger tap undo",
+						desc: "Tap with two fingers to undo and three fingers to redo. Global setting. Default on.",
+						aliases: ["gesture", "two finger", "three finger", "redo"],
+						control: { type: "toggle", key: "multiFingerTaps" },
+					},
 				],
 			},
 			{
@@ -723,6 +729,10 @@ export class HandwritingSettingTab extends PluginSettingTab {
 			case "shapeSnap":
 				s.shapeSnap = on;
 				setShapeSnap(on);
+				break;
+			case "multiFingerTaps":
+				s.multiFingerTaps = on;
+				setMultiFingerTaps(on);
 				break;
 			case "colorSizeCommands":
 				s.colorSizeCommands = on;

@@ -17,6 +17,7 @@ const contract = [
 	{"name": "Ink smoothing", "key": "inkSmoothing", "descriptions": ["Smooth and taper strokes. Global setting. Default on."]},
 	{"name": "Pen reticle", "key": "penReticle", "descriptions": ["Show a dot at the pen tip. Global setting. Default on."]},
 	{"name": "Shape snap", "key": "shapeSnap", "descriptions": ["Hold at the end of a stroke to snap it into a shape. Global setting. Default on."]},
+	{"name": "Finger tap undo", "key": "multiFingerTaps", "descriptions": ["Tap with two fingers to undo and three fingers to redo. Global setting. Default on."]},
 	{"name": "Extra commands for hotkeys", "key": "colorSizeCommands", "descriptions": ["Add tool, color, size, and quick pen commands for hotkeys. Global setting. Default off.", "Add tool, color, size, and quick pen commands for hotkeys. Global setting. Default off. Turning it off takes effect after the plugin reloads."]},
 	{"name": "Developer diagnostics", "key": "devDiagnostics", "descriptions": ["Show diagnostic commands after reloading the plugin. Global setting. Default off."]},
 	{"name": "Boox mode", "key": "booxMode", "descriptions": ["Adjust pen input and animations for e-ink screens. Global setting. Default off."]},
@@ -68,14 +69,14 @@ describe.each([true, false])("settings descriptions with command removal %s", (c
 		expect(definitions(canRemove).available).toBe(canRemove);
 	});
 
-	it("has exactly 16 unique controls and the device recalibration action", () => {
+	it("has exactly 17 unique controls and the device recalibration action", () => {
 		const rows = targets(definitions(canRemove).rows);
-		expect(rows).toHaveLength(17);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(17);
+		expect(rows).toHaveLength(18);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(18);
 		expect(rows.map((row) => row.name).sort()).toEqual(contract.map((row) => row.name).sort());
 		const controls = rows.filter((row) => row.control);
-		expect(controls).toHaveLength(16);
-		expect(new Set(controls.map((row) => row.control!.key)).size).toBe(16);
+		expect(controls).toHaveLength(17);
+		expect(new Set(controls.map((row) => row.control!.key)).size).toBe(17);
 		for (const expected of contract) {
 			const actual = uniqueRow(rows, expected.name);
 			expect(actual.control?.key ?? null, expected.name).toBe(expected.key);

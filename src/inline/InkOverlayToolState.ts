@@ -328,6 +328,13 @@ export function setShapeSnap(on: boolean): void {
 	if (!on) for (const overlay of instances) overlay.clearSnapPreview();
 }
 
+/** Two fingers tapped together undo, three redo (MultiFingerTap.ts). Read at the tap, so nothing to repaint. */
+export let multiFingerTapsOn = true;
+
+export function setMultiFingerTaps(on: boolean): void {
+	multiFingerTapsOn = on;
+}
+
 export function setPenReticle(on: boolean): void {
 	penReticleOn = on;
 }

@@ -278,6 +278,8 @@ however if you resize Obsidian, resize a window pane, change the font size, pinc
 
 if you draw, type, then erase, ctrl+z should undo those things in the order you did them
 
+on a touchscreen, tap with two fingers to undo and three to redo. it can be turned off in settings
+
 this meant Obsidian, not just Handwriting, needed to know what an ink action is and in what order
 
 each ink action had to be translated to be able to be recorded in obsidian's undo history. adding a stroke. moving a lasso selection. which strokes moved and by how much. erasing. what was removed and how much of it

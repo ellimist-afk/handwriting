@@ -21,6 +21,7 @@ import { installInlinePenRouterNav } from "./InlinePenRouterNav";
 import { installInlinePenRouterBind } from "./InlinePenRouterBind";
 import type { InlinePenCallbacks } from "./InlinePenCallbacks";
 import { installInlinePenRouterEnd } from "./InlinePenRouterEnd";
+import { MultiFingerTap } from "./MultiFingerTap";
 
 /**
  * Pen capture for the inline overlay.
@@ -334,6 +335,8 @@ export class InlinePenRouter {
 	fingerInkBlockedUntilAllLift = false;
 	/** Palm contacts we swallowed at pointerdown; their later events die too. */
 	swallowedTouches = new Set<number>();
+	/** Every finger on this surface, watched for a two- or three-finger tap (MultiFingerTap.ts). */
+	readonly fingerTaps = new MultiFingerTap();
 	// Palm parole (v0.13.3): the latest swallowed contact is watched. If it
 	// moves like a swipe it converts into the assist pan (see PalmGate.ts).
 	paroleId: number | null = null;
@@ -659,6 +662,7 @@ export class InlinePenRouter {
 		this.scrollEl.classList.remove("handwriting-no-momentum");
 		this.cancelFling();
 		this.touchPos.clear();
+		this.fingerTaps.reset();
 		this.pinchLive = false;
 		liveScrollers.delete(this.scrollEl);
 		// OUT OF THE SET IS THE WHOLE TEARDOWN, and it is why a pane closed
