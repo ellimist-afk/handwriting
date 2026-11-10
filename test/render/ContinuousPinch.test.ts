@@ -131,9 +131,12 @@ for(const [zoom,scaled] of [[.1,false],[.4,false],[1,false],[.1,true],[.4,true]]
   // interpolation edges. Keep the strict color check for flat interiors and
   // fixed scale; during scaling also require the same ink footprint and mass.
   expect(diff.corePixels).toBeGreaterThan(0);expect(diff.coreMax).toBeLessThanOrEqual(2);
-  expect(diff.missing).toBe(0);expect(diff.missingDark).toBe(0);
-  for(const arm of diff.thinArms){expect(arm.samples).toBeGreaterThan(20);expect(arm.originalPresent,`original ${arm.width}px arm`).toBe(arm.samples);expect(arm.combinedPresent,`preview ${arm.width}px arm`).toBe(arm.samples);}
-  expect(Math.abs(diff.massRatio-1)).toBeLessThan(.02);expect(Math.abs(diff.darkMassRatio-1)).toBeLessThan(.02);
+  // Footprint, thin arms and mass are read soft, each with the whole diff object, which also goes to the log: a red on
+  // another machine's raster names every number of the read at once.
+  const info=JSON.stringify({zoom,scaled,diff});console.log(`composite-pixels ${info}`);
+  expect.soft(diff.missing,`missing ${info}`).toBe(0);expect.soft(diff.missingDark,`missingDark ${info}`).toBe(0);
+  for(const arm of diff.thinArms){expect.soft(arm.samples,`${arm.width}px arm samples ${info}`).toBeGreaterThan(20);expect.soft(arm.originalPresent,`original ${arm.width}px arm ${info}`).toBe(arm.samples);expect.soft(arm.combinedPresent,`preview ${arm.width}px arm ${info}`).toBe(arm.samples);}
+  expect.soft(Math.abs(diff.massRatio-1),`massRatio ${info}`).toBeLessThan(.02);expect.soft(Math.abs(diff.darkMassRatio-1),`darkMassRatio ${info}`).toBeLessThan(.02);
   // Fixed scale: the composite and the separate layers rasterize the same ink,
   // but the two paths may round an edge pixel differently (the Linux CI runner
   // read 3). Flat interiors stay at 2 (coreMax above); edges
@@ -317,6 +320,7 @@ for(const changed of [false,true])for(const zoom of [.322,.1]){
     expect.soft(state.width).toBeGreaterThan(0);expect.soft(state.height).toBeGreaterThan(0);
    }
    expect(r.contact.hit).toBe(true);expect(r.contact.black).toBeGreaterThan(0);expect(r.error).toBeNull();
+   expect(r.pass.timer,`premise: the old-ink pass had run before the read ${JSON.stringify(r.pass)}`).toBe(0);
    expect(r.after.scale).toBeCloseTo(zoom*1.5,4);expect(r.bytesAfter).toBe(r.bytesBefore);expect(r.after.styleDirty).toBe(false);
   }finally{await page.close();}
  });
