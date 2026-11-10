@@ -286,11 +286,14 @@ it("at 286 percent with the canvas on, a view past the ink's far edge comes back
 			(window as any).__backPath = "fit-back.md";
 			await (window as any).edgeAudit.commit("back", zoom);
 			// Room the canvas grants past the ink, as a pan into empty space grants it: the scroll stepped right and down a
-			// frame at a time, each step asking the extent for more, until the view is 2000 px past the ink on both axes.
+			// frame at a time, each step asking the extent for more, until the view is 2000 px past the ink on both axes. Each
+			// step is written in a task of its own, outside the frame callbacks, as a person's pan lands: its scroll event then
+			// runs before the next frame's callbacks.
 			const o = vf.overlay("back"), sc = o.view.scrollDOM, vr = sc.getBoundingClientRect(), s = vf.snap("back");
 			const inkRight = Math.max(...s.ink.map((i: any) => i.right)) - vr.left + sc.scrollLeft, inkBottom = Math.max(...s.ink.map((i: any) => i.bottom)) - vr.top + sc.scrollTop;
 			const want = { left: Math.round(inkRight + 2000), top: Math.round(inkBottom + 2000) };
 			for (let i = 0; i < 200 && (sc.scrollLeft < want.left || sc.scrollTop < want.top); i++) {
+				await new Promise<void>(r => { const c = new MessageChannel(); c.port1.onmessage = () => r(); c.port2.postMessage(null); });
 				sc.scrollLeft = Math.min(want.left, sc.scrollLeft + 300); sc.scrollTop = Math.min(want.top, sc.scrollTop + 300);
 				await new Promise<void>(r => requestAnimationFrame(() => r()));
 			}

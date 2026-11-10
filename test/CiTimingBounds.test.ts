@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { CI_TIMING_FACTOR, CI_TIMING_RENDER_FILES, onCi, timingBound } from "./ciBounds";
+import { CI_TIMING_FACTOR, CI_TIMING_RENDER_FILES, missingDarkBound, onCi, timingBound } from "./ciBounds";
 
 /**
  * The scroll-cost render cells assert millisecond bounds written for Alan's Windows machine (2 ms a repaint, 5 ms a band
@@ -35,6 +35,17 @@ describe("timingBound: the local bound is the written number, CI widens it and n
 	});
 });
 
+describe("missingDarkBound: the composite-pixels cells allow dark pixels with no partner only on CI, and only when scaled", () => {
+	it("with CI unset, empty, 0 or false the bound is 0 for the scaled and the fixed-scale cells; with CI set it is 9 for the scaled cells and 0 for the fixed-scale cells", () => {
+		for (const env of [{}, { CI: undefined }, { CI: "" }, { CI: "0" }, { CI: "false" }, { CI: "FALSE" }]) {
+			expect([missingDarkBound(true, env), missingDarkBound(false, env)], `env ${JSON.stringify(env)}: [scaled, fixed]`).toEqual([0, 0]);
+		}
+		for (const env of [{ CI: "true" }, { CI: "1" }]) {
+			expect([missingDarkBound(true, env), missingDarkBound(false, env)], `env ${JSON.stringify(env)}: [scaled, fixed]`).toEqual([9, 0]);
+		}
+	});
+});
+
 describe("the scroll-cost render cells take their millisecond bounds from the helper", () => {
 	const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8").replace(/\r\n/g, "\n");
 	const scrollCost = read("./render/ScrollCost.test.ts");
@@ -53,6 +64,19 @@ describe("the scroll-cost render cells take their millisecond bounds from the he
 		expect(importedAtTop(scrollCostInk), "timingBound is imported by the test module, above the page source").toBe(true);
 		expect(scrollCostInk).toContain("x.paintMs >= timingBound(3)");
 		expect(scrollCostInk).not.toMatch(/x\.paintMs >= 3\b/);
+	});
+});
+
+describe("the ContinuousPinch composite cells take their missingDark bound from the helper", () => {
+	const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8").replace(/\r\n/g, "\n");
+	const continuousPinch = read("./render/ContinuousPinch.test.ts");
+
+	it("ContinuousPinch: the missingDark read goes through missingDarkBound, no literal zero read of it is left, and missing stays 0", () => {
+		const i = continuousPinch.indexOf('import { missingDarkBound } from "../ciBounds";');
+		expect(i >= 0 && i < continuousPinch.indexOf("const root="), "missingDarkBound is imported by the test module, with the other imports").toBe(true);
+		expect(continuousPinch).toContain("expect.soft(diff.missingDark,`missingDark ${info}`).toBeLessThanOrEqual(missingDarkBound(scaled))");
+		expect(continuousPinch).not.toMatch(/diff\.missingDark\b[^;]*\.(toBe|toEqual|toStrictEqual)\(\s*0\s*\)/);
+		expect(continuousPinch).toContain("expect.soft(diff.missing,`missing ${info}`).toBe(0)");
 	});
 });
 

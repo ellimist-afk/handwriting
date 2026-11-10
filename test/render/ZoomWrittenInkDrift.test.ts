@@ -53,7 +53,9 @@ describe("zoomed pen capture uses the physical text anchor",()=>{
     compare(raster,warmCorrect);
     // A new browser context loads only captured serialized bytes, never the warm singleton.
     const cold=await open(padding,raster.saved);
-    try{expect(cold.initial.loads).toBe(1);expect(cold.initial.strokes[0]).toEqual(initial.strokes[0]);expect.soft(cold.initial.strokes.at(-1).points[0].y).toBeCloseTo(200,1);
+    // As above: the old-ink pass may have anchored the old stroke before the save these bytes came from; the anchor is the
+    // one field dropped.
+    try{expect(cold.initial.loads).toBe(1);expect(withoutLineAnchor([cold.initial.strokes[0]])).toEqual(withoutLineAnchor([initial.strokes[0]]));expect.soft(cold.initial.strokes.at(-1).points[0].y).toBeCloseTo(200,1);
      const reopened=await cold.page.evaluate(()=>(window as any).zoomDrift.raster());stableOld(reopened);compare(reopened,correct);
     }finally{await cold.page.close();}
     // Sensitivity: move actual committed bitmap pixels, with stored points untouched.
