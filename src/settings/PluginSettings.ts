@@ -6,17 +6,17 @@
  */
 import { installMethods } from "../inline/InstallMethods";
 import { Notice, Platform } from "obsidian";
-import { inlineInk, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setEraserRadiusPx, setEraserWholeStrokes, setInkSizeMult, setPenReticle, setPersistEraserMode, setPersistEraserRadius, setPersistInkSize, setPersistToolbarCorner, setShapeSnap, setToolbarCorner, setScrollExpansionEnabled } from "../inline/InkOverlay";
+import { inlineInk, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setEraserRadiusPx, setEraserWholeStrokes, setInkSizeMult, setPenReticle, setPersistEraserMode, setPersistEraserRadius, setPersistInkSize, setPersistToolbarCorner, setScribbleErase, setShapeSnap, setToolbarCorner, setScrollExpansionEnabled } from "../inline/InkOverlay";
 import { clampInkSize } from "../ink/InkSize";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius } from "../ink/EraserSize";
-import { setPressureSensitivity } from "../ink/PenStyle";
+import { setLegacyInkPressure, setPressureSensitivity } from "../ink/PenStyle";
 import { refreshInkTheme, setInkExportReadability, setInkThemeAdaptation } from "../ink/InkTheme";
 import { setInkShaping } from "../ink/InkShape";
 import { normalizeInkPresets, setInkPresets } from "../ink/InkPresets";
 import { installInkPresetActions } from "../ink/InkPresetHost";
 import { discardHintSamples } from "../ink/LatencyEstimate";
 import { resetEinkHintProgress } from "../ink/EinkHint";
-import { normalizeInkColor, setInkColorHex, setPersistInkColor } from "../ink/InkColor";
+import { normalizeInkColor, normalizeInkPalette, setInkColorHex, setInkPalette, setPersistInkColor } from "../ink/InkColor";
 import { setRoutineNoticesVisible } from "../diag/RoutineNotices";
 import { setMouseInk } from "../inline/MouseInk";
 import { setPrediction, setPredictionEink } from "../inline/StrokePrediction";
@@ -28,10 +28,13 @@ import { normalizeNoteZoomControlsMode, setNoteZoomControlsMode, setZoomBarCanva
 import { normalizeBarsRestore } from "../inline/BarsToggle";
 import { normalizeFoldOrder, refreshNoteZoomControlsAll, setStripFoldOrder } from "../inline/MobileTools";
 import { runDetached } from "../util/Detached";
+import { isSafePageId } from "../model/PageData";
+import type { PartDoneFollow } from "./SettingsModel";
 import { adoptInkFolder, changeFolder, DEFAULT_INK_FOLDER, inkFolderSyncs, migrateInkFolder, normalizeInkFolder, SYNCED_INK_FOLDER } from "../persistence/InkFolder";
 import { normalizeToolbarCorner } from "../inline/ToolbarCorner";
-import { SYNC_ALL_TYPES_HINT } from "./HandwritingSettingTab";
-import { isPlainObject, pressureChoiceFrom, type HandwritingSettings } from "./SettingsModel";
+import { SCRIBBLE_ERASE_SHIPS, SYNC_ALL_TYPES_HINT } from "./HandwritingSettingTab";
+import { isPlainObject, paletteSlots, pressureChoiceFrom, type HandwritingSettings } from "./SettingsModel";
+import { lockOnSwitch, NO_FILE, takeLegacyPressureLock } from "./LegacyPressureLock";
 import { blockNotice } from "../view/Notices";
 import type { HandwritingPlugin } from "../main";
 
@@ -46,6 +49,11 @@ declare module "../main" {
 		applyRuntimeSettings(): void;
 		onExternalSettingsChange(): Promise<void>;
 		inkShapingKey(): string;
+		/** What unmarked ink draws under on this device (LegacyPressureLock.ts); null or unset: it follows the switch. */
+		legacyInkPressure?: boolean | null;
+		/** Set at the one launch that first marks the 1.4.20 cohort pending on this device: its toast shows then. */
+		legacyPressureNoticeDue?: boolean;
+		setPressureSwitch(on: boolean): void;
 		takeMergedSettings(merged: HandwritingSettings): void;
 		refreshSettingSurfaces(): void;
 		mergeSettings(fresh: Partial<HandwritingSettings> | null | undefined): {
@@ -246,6 +254,15 @@ declare module "../main" {
 		// user made: a later clean read must not treat it as one and write it
 		// over the choice the file holds.
 		if (this.settingsReadFailed) this.settingsBaseline = this.settingsSnapshot(this.settings);
+		// The pressure old ink draws under on this device, locked from the file at the first launch of this build that
+		// reads one, so the update changes nothing on screen. Device-local, never data.json: nothing to save here, and no
+		// synced file can move it. No file or an empty one: this device waits for the user's own set (the file this launch
+		// saves holds only defaults). Unreadable: no lock yet.
+		const readFile = !this.freshInstall && !this.settingsReadFailed && !blank && isPlainObject(raw);
+		const noFile = this.freshInstall || blank;
+		this.legacyInkPressure = takeLegacyPressureLock(readFile ? (raw as Partial<HandwritingSettings>) : noFile ? NO_FILE : null, () => {
+			this.legacyPressureNoticeDue = true;
+		});
 		// THE PEN LATCH, RESTORED, and restored HERE - inside the awaited
 		// `loadSettings`, which `onload` awaits before
 		// `registerEditorExtension(inkOverlayExtension())`. That ordering is
@@ -402,6 +419,9 @@ declare module "../main" {
 				pen: normalizeInkColor("pen", raw?.inkColors?.pen),
 				highlighter: normalizeInkColor("highlighter", raw?.inkColors?.highlighter),
 			},
+			// Slot by slot: a bad slot gets that slot's default, the rest are kept.
+			penPalette: paletteSlots(normalizeInkPalette("pen", raw?.penPalette)),
+			highlighterPalette: paletteSlots(normalizeInkPalette("highlighter", raw?.highlighterPalette)),
 			// Vaults written before the rename carry `inkShaping`, which drove the
 			// same toggle. Honour it once so nobody's choice is silently reset.
 			//
@@ -435,6 +455,9 @@ declare module "../main" {
 			inkPdfColorMode: normalizePdfPageAssumption(raw?.inkPdfColorMode),
 			pageOwners:
 				raw?.pageOwners && typeof raw.pageOwners === "object" ? raw.pageOwners : {},
+			// Read entry by entry: a bad entry, or one naming an id that cannot
+			// be a path name (isSafePageId), is dropped, never repaired.
+			partDoneFollows: partDoneFollowsFrom(raw?.partDoneFollows),
 			eraserRadiusPx: clampEraserRadius(raw?.eraserRadiusPx ?? DEFAULT_ERASER_RADIUS_PX),
 			mouseInk: raw?.mouseInk === true,
 			strokePrediction: raw?.strokePrediction !== false,
@@ -442,6 +465,9 @@ declare module "../main" {
 			einkHintOffered: raw?.einkHintOffered === true,
 			scribbleHintOffered: raw?.scribbleHintOffered === true,
 			paperStyle: normalizePaperStyle(raw?.paperStyle),
+			// `!== false`: ships ON, so a missing key, or anything that is not
+			// the boolean false, keeps the guides.
+			pageGuides: raw?.pageGuides !== false,
 			extendCanvasWhileScrolling: raw?.extendCanvasWhileScrolling === true,
 			// `=== true`, NOT `!== false`: this ships OFF, so a vault that has
 			// never stored the key - every vault that ever ran 1.4.19, where the
@@ -458,6 +484,10 @@ declare module "../main" {
 			eraserMode: raw?.eraserMode === "reticle" ? "reticle" : "stroke",
 			penReticle: raw?.penReticle !== false,
 			shapeSnap: raw?.shapeSnap !== false,
+			// `=== true`, NOT `!== false`: this ships OFF, so a vault with no
+			// stored value must come back OFF to match the default. `!== false`
+			// reads absence as ON and would leave the default line decorative.
+			scribbleErase: raw?.scribbleErase === true,
 			devDiagnostics: raw?.devDiagnostics === true,
 			// `!== false`, so a vault that has never heard of slides ink - and
 			// every vault written by a build without it - gets the feature.
@@ -556,17 +586,23 @@ declare module "../main" {
 		setInkSizeMult("highlighter", this.settings.inkSizes.highlighter);
 		setInkPresets(this.settings.penPresets);
 		setPressureSensitivity(this.settings.pressureSensitivity);
+		setLegacyInkPressure(this.legacyInkPressure ?? null);
 		setInkThemeAdaptation(this.settings.inkAdaptsToTheme);
 		setInkExportReadability(this.settings.inkReadableInExports);
 		// Compatibility call retained for callers from the former cached-theme
 		// implementation; `refreshInkTheme` is now a no-op.
 		refreshInkTheme(document);
 		this.applyBooxMode();
+		// The palette first: a bad selected colour falls back to the live slot 0.
+		setInkPalette("pen", this.settings.penPalette);
+		setInkPalette("highlighter", this.settings.highlighterPalette);
 		setInkColorHex("pen", this.settings.inkColors.pen);
 		setInkColorHex("highlighter", this.settings.inkColors.highlighter);
 		setEraserRadiusPx(this.settings.eraserRadiusPx);
 		setEraserWholeStrokes(this.settings.eraserMode === "stroke");
 		setShapeSnap(this.settings.shapeSnap);
+		// Held off while it does not ship; the stored choice is kept, not read here.
+		setScribbleErase(SCRIBBLE_ERASE_SHIPS && this.settings.scribbleErase);
 	}
 
 	/**
@@ -592,10 +628,32 @@ declare module "../main" {
 		if (localChanges) this.saveSettingsNow();
 	}
 
-	/** The settings that change how saved ink draws: pressure, smoothing, Boox mode, theme adaptation. */
+	/**
+	 * The settings that change how saved ink draws: the pressure unmarked ink draws under, smoothing, Boox mode, theme
+	 * adaptation. That pressure is the device's lock once taken, and the switch only until then: once locked, a flip
+	 * sets new strokes only and redraws nothing.
+	 */
 	function inkShapingKey(this: HandwritingPlugin): string {
 		const s = this.settings;
-		return `${s.pressureSensitivity}|${s.inkSmoothing}|${s.booxMode}|${s.inkAdaptsToTheme}`;
+		const unmarked = this.legacyInkPressure ?? `switch ${s.pressureSensitivity}`;
+		return `${unmarked}|${s.inkSmoothing}|${s.booxMode}|${s.inkAdaptsToTheme}`;
+	}
+
+	/**
+	 * The settings row's switch. Sets new strokes; for the 1.4.20 cohort, remembers this choice for the next launch to lock
+	 * from (LegacyPressureLock.ts); redraws only when what unmarked ink draws under moved, which once locked it never does.
+	 */
+	function setPressureSwitch(this: HandwritingPlugin, on: boolean): void {
+		const before = this.inkShapingKey();
+		this.settings.pressureSensitivity = on;
+		this.settings.pressureChoice = on;
+		this.legacyInkPressure = lockOnSwitch(on);
+		setPressureSensitivity(on);
+		setLegacyInkPressure(this.legacyInkPressure);
+		if (this.inkShapingKey() !== before) {
+			repaintAllInkOverlays();
+			embedInkRepaintAll();
+		}
 	}
 
 	/**
@@ -843,6 +901,22 @@ declare module "../main" {
 		return this.persistSettings(onHide);
 	}
 
+/** The part-done page id moves a data.json holds, each entry checked field by field; a bad one is dropped. */
+function partDoneFollowsFrom(raw: unknown): Record<string, PartDoneFollow> {
+	const out: Record<string, PartDoneFollow> = {};
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+	for (const [path, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (path === "" || !value || typeof value !== "object" || Array.isArray(value)) continue;
+		const e = value as Record<string, unknown>;
+		if (!isSafePageId(e.held) || !isSafePageId(e.id) || e.held === e.id) continue;
+		if (typeof e.rounds !== "number" || !Number.isFinite(e.rounds) || e.rounds < 0) continue;
+		if (typeof e.keptLive !== "boolean") continue;
+		if (e.wrote !== undefined && typeof e.wrote !== "string") continue;
+		out[path] = { held: e.held, id: e.id, rounds: e.rounds, keptLive: e.keptLive, ...(typeof e.wrote === "string" ? { wrote: e.wrote } : {}) };
+	}
+	return out;
+}
+
 export function installPluginSettings(proto: HandwritingPlugin): void {
 	installMethods(proto, {
 		inkFolderMoving,
@@ -854,6 +928,7 @@ export function installPluginSettings(proto: HandwritingPlugin): void {
 		applyRuntimeSettings,
 		onExternalSettingsChange,
 		inkShapingKey,
+		setPressureSwitch,
 		takeMergedSettings,
 		refreshSettingSurfaces,
 		mergeSettings,

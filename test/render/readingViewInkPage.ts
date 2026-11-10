@@ -4,8 +4,10 @@
  *
  * The note, in the editor's 1-based lines: a three-line frontmatter, three one-line paragraphs with two blank lines
  * between each, a blank line, a three-item list whose second item wraps, a fenced code block of four rows (the second
- * empty) and a paragraph of three lines joined by hard breaks (the first wraps), a blank line between each. The editor is modelled as every line 24 px with the frontmatter
- * hidden, so line 4 is at the top: a stroke `off` px under line n's top was drawn at y = (n - 4) * 24 + off, and its
+ * empty) and a paragraph of three lines joined by hard breaks (the first wraps), then two paragraphs of three lines with
+ * no hard break: one as the renderer writes it with strict line breaks on (its text keeps each source line feed and
+ * flows the lines together, the first wrapping) and one whose text kept no line feed; a blank line between each. The
+ * editor is modelled as every line 24 px with the frontmatter hidden, so line 4 is at the top: a stroke `off` px under line n's top was drawn at y = (n - 4) * 24 + off, and its
  * anchor holds that line's top. The views lay the text out by their own rules (an inline title and a Properties block
  * above the text in Reading view, paragraph margins in place of the blank lines), so page positions come off the words.
  *
@@ -35,7 +37,10 @@ const NOTE = [
 	"The underline goes under pargaph and a trick.", "",
 	"- one", `- two, ${WRAPS}`, "- three", "",
 	"```js", "const a = 1;", "", "const b = 2;", "const c = a + b;", "```", "",
-	`First, ${WRAPS}`, "a second line after a hard break", "and a third line after another",
+	`First, ${WRAPS}`, "a second line after a hard break", "and a third line after another", "",
+	`Strict, ${WRAPS}`, "a second line", "and a third line after it", "",
+	"Joined, a paragraph of three source lines", "that the renderer joined", "with no line feed left", "",
+	`Math, ${WRAPS}`, "a second line with $a$ in it", "and a third line after another",
 ];
 const TEXT = NOTE.join("\n");
 const SECTIONS = [
@@ -46,6 +51,9 @@ const SECTIONS = [
 	{ type: "list", lineStart: 11, lineEnd: 13 },
 	{ type: "code", lineStart: 15, lineEnd: 20 },
 	{ type: "paragraph", lineStart: 22, lineEnd: 24 },
+	{ type: "paragraph", lineStart: 26, lineEnd: 28 },
+	{ type: "paragraph", lineStart: 30, lineEnd: 32 },
+	{ type: "paragraph", lineStart: 34, lineEnd: 36 },
 ];
 const EDITOR_LINE = 24;
 const editorTop = (line: number) => Math.max(0, line - 4) * EDITOR_LINE;
@@ -61,9 +69,10 @@ export interface InkCase {
 	block: number;
 	/**
 	 * How the rendered line top follows from that block: its top, one line above it, its bottom, or a row inside it (a
-	 * list's item k, a code block's row k, the k-th line after a paragraph's hard breaks).
+	 * list's item k, a code block's row k, the k-th line after a paragraph's hard breaks, the rendered row holding the
+	 * first character of a paragraph's k-th source line), or the line's even share of its block's height.
 	 */
-	rule: "top" | "above" | "below" | { item: number } | { row: number } | { brk: number };
+	rule: "top" | "above" | "below" | "share" | { item: number } | { row: number } | { brk: number } | { lf: number };
 }
 
 const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -86,13 +95,20 @@ function blockHtml(line: number): string {
 	// As the renderer writes them: a code block's text ends with a line feed; a hard break is followed by one.
 	if (line === 15) return '<pre><code class="language-js">const a = 1;\n\nconst b = 2;\nconst c = a + b;\n</code></pre>';
 	if (line === 22) return `<p>First, ${WRAPS}<br>\na second line after a hard break<br>\nand a third line after another</p>`;
+	// Strict line breaks on: no br, the source line feeds kept in the text, where the layout folds them into spaces.
+	if (line === 26) return `<p>Strict, ${WRAPS}\na second line\nand a third line after it</p>`;
+	if (line === 30) return "<p>Joined, a paragraph of three source lines that the renderer joined with no line feed left</p>";
+	// Hard breaks, and inline math whose rendered text holds a line feed of its own: no source line starts there.
+	if (line === 34) return `<p>Math, ${WRAPS}<br>\na second line with <span class="math math-inline"><mjx-container class="MathJax">a\n</mjx-container></span> in it<br>\nand a third line after another</p>`;
 	return `<ul><li>one</li><li>two, ${WRAPS}</li><li>three</li></ul>`;
 }
 
 /**
  * The y the case's stroke belongs at, page px, from its block's box, each row by its own geometry rather than by the
  * code's method: a list item's own box; a code row by the code's content height shared by its rows (none wraps); a
- * hard-break line by the paragraph's rendered lines, the first source line taking all but one per later line.
+ * hard-break line by the paragraph's rendered lines, the first source line taking all but one per later line; a line
+ * of a paragraph whose lines flow together by the rendered row its first character sits on, counted from the
+ * paragraph's first character in line heights; the even share by the estimate.
  */
 function wanted(c: InkCase, el: HTMLElement): number {
 	const r = el.getBoundingClientRect();
@@ -100,6 +116,7 @@ function wanted(c: InkCase, el: HTMLElement): number {
 	if (c.rule === "top") return r.top + c.off;
 	if (c.rule === "above") return r.top - lh + c.off;
 	if (c.rule === "below") return r.bottom + c.off;
+	if (c.rule === "share") return estimated(c, el);
 	if ("item" in c.rule) return el.querySelectorAll("li")[c.rule.item]!.getBoundingClientRect().top + c.off;
 	if ("row" in c.rule) {
 		const pre = el.querySelector("pre")!;
@@ -110,6 +127,17 @@ function wanted(c: InkCase, el: HTMLElement): number {
 	}
 	const p = el.querySelector("p")!;
 	const plh = parseFloat(getComputedStyle(p).lineHeight);
+	if ("lf" in c.rule) {
+		const text = p.firstChild as Text;
+		const top = (at: number) => {
+			const range = document.createRange();
+			range.setStart(text, at);
+			range.setEnd(text, at + 1);
+			return range.getBoundingClientRect().top;
+		};
+		const at = text.data.indexOf(NOTE[c.line - 1]!);
+		return p.getBoundingClientRect().top + Math.round((top(at) - top(0)) / plh) * plh + c.off;
+	}
 	const later = p.querySelectorAll("br").length;
 	const firstTakes = Math.round(p.getBoundingClientRect().height / plh) - later;
 	return p.getBoundingClientRect().top + (firstTakes + c.rule.brk - 1) * plh + c.off;

@@ -79,7 +79,7 @@ it.each(["top-right","middle-center","bottom-right"] as const)("frames readable 
 				const pane=document.querySelector<HTMLElement>(".handwriting-fold-preview-pane")!;
 				const strip=pane.querySelector<HTMLElement>(".handwriting-mobile-tools")!;
 				const box=stage.getBoundingClientRect();
-				const buttons=Array.from(strip.querySelectorAll<HTMLElement>(":scope > button, .handwriting-mobile-tools-more > button")).filter(el=>el.offsetWidth>0).map(el=>{const r=el.getBoundingClientRect();return{name:el.dataset.tipLabel,width:r.width,left:r.left,right:r.right,top:r.top,bottom:r.bottom};});
+				const buttons=Array.from(strip.querySelector<HTMLElement>(".handwriting-mobile-tools-face")!.querySelectorAll<HTMLElement>(":scope > button, .handwriting-mobile-tools-more > button")).filter(el=>el.offsetWidth>0).map(el=>{const r=el.getBoundingClientRect();return{name:el.dataset.tipLabel,width:r.width,left:r.left,right:r.right,top:r.top,bottom:r.bottom};});
 				return {paneWidth:pane.clientWidth,stage:{left:box.left,right:box.right,top:box.top,bottom:box.bottom},buttons};
 			});
 			expect(visual.paneWidth).toBe(width);
@@ -98,7 +98,7 @@ it.each(["top-right","middle-center","bottom-right"] as const)("frames readable 
 async function snapshot(h: FoldHarness) {
 	return h.page.evaluate(() => {
 		const priority = Array.from(document.querySelectorAll<HTMLElement>(".handwriting-fold-name")).map(el => el.textContent!);
-		const strips = Array.from(document.querySelectorAll<HTMLElement>(".workspace-leaf .handwriting-mobile-tools, .handwriting-fold-preview-pane .handwriting-mobile-tools"));
+		const strips = Array.from(document.querySelectorAll<HTMLElement>(".workspace-leaf .handwriting-mobile-tools-face, .handwriting-fold-preview-pane .handwriting-mobile-tools-face"));
 		const name = (el: HTMLElement) => el.dataset.tipLabel ?? el.getAttribute("aria-label") ?? el.className;
 		return {priority, saved:window.__fold.savedOrder(), strips:strips.map(strip => ({
 			first:Array.from(strip.querySelectorAll<HTMLElement>(":scope > button")).map(name),

@@ -92,6 +92,9 @@ declare module "./MobileTools" {
 		this.el = parent.createDiv({ cls: "handwriting-mobile-tools" });
 		// The whole strip, its grip and its pops included: see the pill above.
 		this.el.dataset.ignoreSwipe = "true";
+		// The row and its look; the pops built later hang beside it, outside
+		// its opacity (see `face`).
+		this.face = this.el.createDiv({ cls: "handwriting-mobile-tools-face" });
 		// THE GRIP, and it is first so it is the strip's leading end - the row
 		// is a plain flex row, so dom order is what the user sees left to
 		// right, and the handle of a draggable thing belongs at its edge
@@ -111,7 +114,7 @@ declare module "./MobileTools" {
 		// The dots are painted by the stylesheet on a fixed-size child rather
 		// than by six spans: six elements to draw six dots is six more things
 		// for `layoutOverflow` to walk and for a theme to disagree with.
-		this.grip = this.el.createDiv({
+		this.grip = this.face.createDiv({
 			cls: "handwriting-tools-grip",
 			attr: { "aria-hidden": "true" },
 		});
@@ -123,7 +126,7 @@ declare module "./MobileTools" {
 		// can see indicates nothing. The strip is the plugin's own chrome.
 		// An INDICATOR, not a button - it appears when recording starts and
 		// disappears when recording ends, and does nothing when touched.
-		this.recordingDot = this.el.createSpan({
+		this.recordingDot = this.face.createSpan({
 			cls: "handwriting-recording-dot",
 			attr: {
 				"aria-label":
@@ -136,7 +139,7 @@ declare module "./MobileTools" {
 		// explained nothing on hover. One shared tip serves them all now,
 		// driven by pointerenter, which every input fires. Text comes from
 		// each element's aria-label - one source, editable in one place.
-		this.tip = this.el.createDiv({ cls: "handwriting-strip-tip" });
+		this.tip = this.face.createDiv({ cls: "handwriting-strip-tip" });
 		this.recordingDot.setText("●");
 		this.attachTip(this.recordingDot);
 		// The grip is built first, so that it is the row's leading element,
@@ -159,7 +162,7 @@ declare module "./MobileTools" {
 		this.recordingDot.addEventListener("pointerup", cancelHold);
 		this.recordingDot.addEventListener("pointerleave", cancelHold);
 		this.recordingDot.addEventListener("pointercancel", cancelHold);
-		const collapse = this.el.createEl("button", {
+		const collapse = this.face.createEl("button", {
 			cls: "handwriting-mobile-tool handwriting-tools-collapse",
 			attr: { "aria-label": "Collapse pen tools", type: "button" },
 		});
@@ -184,7 +187,7 @@ declare module "./MobileTools" {
 		// moment it decides to. It shows only when the row does not fit, which
 		// is `is-more-needed` below, and a strip that always fits carries two
 		// empty elements and no chevron.
-		this.moreBtn = this.el.createEl("button", {
+		this.moreBtn = this.face.createEl("button", {
 			cls: "handwriting-mobile-tool handwriting-tools-more",
 			attr: { "aria-label": "More tools", type: "button" },
 		});
@@ -196,7 +199,7 @@ declare module "./MobileTools" {
 			ev.preventDefault();
 			this.setMoreOpen(!this.moreOpen);
 		});
-		this.moreRow = this.el.createDiv({ cls: "handwriting-mobile-tools-more" });
+		this.moreRow = this.face.createDiv({ cls: "handwriting-mobile-tools-more" });
 		// THE RECORDING DOT SITS AT THE ROW'S FAR END, not beside the grip
 		// (alan, 2026-09-06: "it already has a pulse, probably move it to
 		// trailing or far edge"). It is BUILT up with the grip because the
@@ -209,7 +212,7 @@ declare module "./MobileTools" {
 		// affordance and a test pins it as the last labelled control, so the
 		// dot takes the last place a TOOL can hold rather than the last place
 		// in the row.
-		this.el.insertBefore(this.recordingDot, this.moreBtn);
+		this.face.insertBefore(this.recordingDot, this.moreBtn);
 	}
 
 	/** The three drop-down slider pops and their hover wiring. Called once, from the constructor. */

@@ -15,10 +15,11 @@ beforeAll(() => {
 });
 afterAll(() => uninstallWindow());
 
-function touch(type: string, ts: number, pointerId: number, x: number, y: number, pressure = 0) {
+function touch(type: string, ts: number, pointerId: number, x: number, y: number, pressure = 0, isPrimary = true) {
 	return penEvent(type, ts, {
 		pointerType: "touch",
 		pointerId,
+		isPrimary,
 		x,
 		y,
 		pressure: type === "pointerup" || type === "pointercancel" ? 0 : pressure,
@@ -48,6 +49,8 @@ function rig(enabled = true) {
 	);
 	const fire = (ev: PointerEvent) => {
 		const handler = el.handlers.get(ev.type);
+		// No raw listener, no raw event: a browser sends none (the router binds raw per stroke).
+		if (!handler && ev.type === "pointerrawupdate") return;
 		if (!handler) throw new Error(`missing ${ev.type} handler`);
 		handler(ev);
 	};
@@ -201,7 +204,8 @@ describe("ordinary-note iPhone finger routing", () => {
 		const h = rig();
 		h.fire(touch("pointerdown", 100, 1, 30, 40));
 		h.fire(touch("pointermove", 108, 1, 40, 40));
-		h.fire(touch("pointerdown", 112, 2, 130, 40));
+		// A second concurrent touch is never the primary pointer (Pointer Events).
+		h.fire(touch("pointerdown", 112, 2, 130, 40, 0, false));
 		expect(h.cancellations).toBe(1);
 		expect(h.rec.ups).toBe(0);
 		expect(h.router.isStroking).toBe(false);
@@ -215,7 +219,7 @@ describe("ordinary-note iPhone finger routing", () => {
 			})
 		);
 		expect(fedTimestamps(h.rec.rawCalls)).toEqual(fedBeforeLateRaw);
-		const third = touch("pointerdown", 118, 3, 210, 40);
+		const third = touch("pointerdown", 118, 3, 210, 40, 0, false);
 		let thirdPrevented = false;
 		(third as unknown as { preventDefault(): void }).preventDefault = () =>
 			void (thirdPrevented = true);
@@ -235,7 +239,7 @@ describe("ordinary-note iPhone finger routing", () => {
 
 		// A replacement contact joins the still-resting first finger; it may
 		// pinch again, but it must never resurrect the cancelled stroke.
-		h.fire(touch("pointerdown", 136, 4, 150, 40));
+		h.fire(touch("pointerdown", 136, 4, 150, 40, 0, false));
 		h.fire(touch("pointermove", 144, 4, 190, 40));
 		expect(h.rec.downs).toBe(1);
 		h.fire(touch("pointerup", 152, 4, 190, 40));
@@ -277,6 +281,20 @@ describe("ordinary-note iPhone finger routing", () => {
 		expect(h.rec.ups).toBe(2);
 		h.fire(touch("pointerup", 120, 1, 40, 50));
 		expect(h.rec.ups).toBe(2);
+	});
+
+	it("a capture loss whose target is the scroller itself ends a finger stroke before any lift", () => {
+		const h = rig();
+		h.fire(touch("pointerdown", 100, 1, 30, 40));
+		h.fire(touch("pointermove", 104, 1, 40, 50));
+		expect(h.router.isStroking).toBe(true);
+		const loss = touch("lostpointercapture", 108, 1, 40, 50) as unknown as Record<string, unknown>;
+		loss.target = h.el;
+		h.fire(loss as unknown as PointerEvent);
+		expect(h.rec.ups, "the scroller's own loss ends the stroke").toBe(1);
+		expect(h.router.isStroking, "no stroke left for the lift").toBe(false);
+		h.fire(touch("pointerup", 116, 1, 40, 50));
+		expect(h.rec.ups, "the lift finds no stroke to end again").toBe(1);
 	});
 
 	it("balances lost capture and an outside-window lift exactly once", () => {

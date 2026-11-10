@@ -69,7 +69,9 @@ function plugin(disk: Record<string, unknown>): Record<string, unknown> {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { vi.useRealTimers(); vi.mocked(repaintAllInkOverlays).mockClear(); vi.mocked(embedInkRepaintAll).mockClear(); });
 
-it("another device turning pressure off redraws every overlay and every embed on this device", async () => {
+// Since the 1.5.0 pressure lock the switch sets new strokes only: saved ink draws under
+// its own mark or this device's lock, so another device's flip changes nothing already on screen and redraws nothing.
+it("another device turning pressure off redraws nothing: the switch sets new strokes only", async () => {
 	const h = plugin({ pressureSensitivity: true, toolbarCorner: "top-right" });
 	await proto.loadSettings.call(h);
 	vi.mocked(repaintAllInkOverlays).mockClear();
@@ -77,8 +79,8 @@ it("another device turning pressure off redraws every overlay and every embed on
 	h.disk = { ...(h.disk as Record<string, unknown>), pressureSensitivity: false };
 	await proto.onExternalSettingsChange.call(h);
 	expect((h.settings as Record<string, unknown>).pressureSensitivity, "the synced value was not taken, so this cell proves nothing").toBe(false);
-	expect(vi.mocked(repaintAllInkOverlays).mock.calls.length, "the synced pressure change left every overlay's ink in its old width").toBeGreaterThan(0);
-	expect(vi.mocked(embedInkRepaintAll).mock.calls.length, "the synced pressure change left embeds and reading views in their old width").toBeGreaterThan(0);
+	expect(vi.mocked(repaintAllInkOverlays).mock.calls.length, "a synced pressure flip redrew every overlay").toBe(0);
+	expect(vi.mocked(embedInkRepaintAll).mock.calls.length, "a synced pressure flip redrew every embed").toBe(0);
 });
 
 /** Sync one key from `from` to `to`; return the two fan-outs' call counts. */

@@ -35,6 +35,9 @@ const MOVED = [
 	"noteStrokes",
 	"lineAnchorDy",
 	"retakeLineAnchors",
+	"followDocChanged",
+	"followRefAt",
+	"requestFollowMeasure",
 ] as const;
 
 describe("line anchor methods on the overlay prototype", () => {

@@ -7,7 +7,8 @@ import { getNoteZoomControlsMode, getZoomBarCanvasEnabled, noteZoomControlsVisib
 // asks what this note's mode is and subscribes to changes; who may write the
 // override is main.ts's business, not the strip's.
 import { canvasForNote, onCanvasOverrideChanged } from "./CanvasNoteOverride";
-import { MAX_PINCH_SCALE } from "./PinchScale";
+import { MAX_PINCH_SCALE, MIN_PINCH_SCALE } from "./PinchScale";
+import { nextZoomStep } from "./ZoomStep";
 import { type MobileToolsHost } from "./MobileToolsHost";
 
 const liveNoteZoomControls = new Set<NoteZoomControls>();
@@ -91,10 +92,16 @@ export class NoteZoomControls {
 		const viewport = host.noteViewport;
 		if (!viewport) throw new Error("note zoom controls need a note viewport");
 		this.element = parent.createDiv({cls:"handwriting-note-viewport-controls",attr:{role:"group","aria-label":"Note zoom"}});
+		// + and − move one quarter step on the grid (ZoomStep.ts), never double.
+		const step = (direction: 1 | -1): void => {
+			const zoom = viewport.getNoteViewportState().zoom;
+			const next = nextZoomStep(zoom, direction, MIN_PINCH_SCALE, MAX_PINCH_SCALE);
+			if (next !== zoom) viewport.zoomNoteBy(next / zoom);
+		};
 		for (const [label, value, action] of [
-			["Zoom out", "−", () => viewport.zoomNoteBy(.5)],
+			["Zoom out", "−", () => step(-1)],
 			["Reset note zoom to 100%", "100%", () => viewport.resetNoteZoom()],
-			["Zoom in", "+", () => viewport.zoomNoteBy(2)],
+			["Zoom in", "+", () => step(1)],
 			["Fit handwriting", "Fit", () => viewport.fitHandwriting()],
 		] as const) {
 			const button = this.element.createEl("button", {text:value,attr:{type:"button","aria-label":label,title:label}});
@@ -113,7 +120,9 @@ export class NoteZoomControls {
 	refresh(): void {
 		const state = this.host.noteViewport?.getNoteViewportState();
 		if (state) this.buttons.forEach((button, i) => {
-			button.disabled = state.busy || (i === 3 && !state.fitAvailable) || (i === 2 && state.zoom >= MAX_PINCH_SCALE);
+			// − and + grey where a step would not move the note: at the floor or the ceiling, and both with Fit unavailable.
+			const stuck = (direction: 1 | -1) => !state.fitAvailable || nextZoomStep(state.zoom, direction, MIN_PINCH_SCALE, MAX_PINCH_SCALE) === state.zoom;
+			button.disabled = state.busy || (i === 2 && state.zoom >= MAX_PINCH_SCALE) || (i === 0 && stuck(-1)) || (i === 2 && stuck(1)) || (i === 3 && !state.fitAvailable);
 			if (i === 1) button.textContent = `${Number((state.zoom * 100).toPrecision(3))}%`;
 		});
 		const path = this.host.notePath?.() ?? null;

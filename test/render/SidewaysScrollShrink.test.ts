@@ -23,6 +23,7 @@
  *   HW_SIDEWAYS_PLANT_NO_RELEASE_GUARD=1  the band's margin is released even when the range left would end short of the view
  *   HW_SIDEWAYS_PLANT_STEP_WHILE_SCROLLING=1  a held shrink steps on every pass, scrolled frames included
  *   HW_SIDEWAYS_PLANT_STRICT_EDGE=1       Infinite Canvas off claims sideways room only past the pane's right edge (the old rule)
+ *   HW_SIDEWAYS_PLANT_NO_CLEAR_WITH_CANVAS=1  Delete all ink with Infinite Canvas on leaves the room, as before this rule
  *
  * Run: npm run test:render. Not in `npx vitest run`.
  */
@@ -44,6 +45,7 @@ beforeAll(async () => {
 	if (process.env.HW_SIDEWAYS_PLANT_NO_RELEASE_GUARD) plants.push(["no-release-guard", "InkOverlayBand", "if (Math.max(scroller.clientWidth, spacerRight) < scroller.scrollLeft + scroller.clientWidth) return;", ""]);
 	if (process.env.HW_SIDEWAYS_PLANT_STEP_WHILE_SCROLLING) plants.push(["step-while-scrolling", "InkOverlayBand", "if (this.shrinkStepped.get(path) === due && !force) return granted;", ""]);
 	if (process.env.HW_SIDEWAYS_PLANT_STRICT_EDGE) plants.push(["strict-edge", "SurfaceExtent", "return g.originLeft + g.frontierX * g.fontZoom > g.clientWidth - EXTENT_MARGIN * g.fontZoom ? g.frontierX : 0;", "return g.originLeft + g.frontierX * g.fontZoom > g.clientWidth ? g.frontierX : 0;"]);
+	if (process.env.HW_SIDEWAYS_PLANT_NO_CLEAR_WITH_CANVAS) plants.push(["no-clear-with-canvas", "InkOverlayBand", "if (this.canvasMode && !clearing) {", "if (this.canvasMode) {"]);
 	const applied = new Set<string>();
 	const b = await build({ entryPoints: [fileURLToPath(new URL("./sidewaysScrollPage.ts", import.meta.url))], bundle: true, write: false, format: "iife", platform: "browser", target: "es2022",
 		alias: { obsidian: fileURLToPath(new URL("./iphoneObsidianStub.ts", import.meta.url)) },
@@ -322,6 +324,63 @@ it("SCROLLING LEFT THROUGH A HELD SHRINK: continuous frame to frame, never under
 	expect(quiet.grant.x, `once quiet, the held shrink steps down ${show({ removed, quiet })}`).toBeLessThan(removed.grant.x);
 	expect(quiet.width, `and still covers the view ${show(quiet)}`).toBeGreaterThanOrEqual(quiet.left + quiet.clientWidth);
 	expect(home.range, `no sideways room once home ${show(home)}`).toBeLessThanOrEqual(0);
+});
+
+/**
+ * DELETE ALL INK WITH INFINITE CANVAS ON. Clearing the page takes the sideways room back with Infinite Canvas on too,
+ * to the room Infinite Canvas starts a note with (a pane past the pane), not to nothing: the same no-jump rules as with
+ * it off, the vertical room untouched, and scrolling right still extends the page afterwards. An erase with Infinite
+ * Canvas on leaves the room as it was; undo brings the ink and its room back; turning Infinite Canvas off afterwards takes
+ * the sideways room the rest of the way, to nothing.
+ */
+it("INFINITE CANVAS ON, DELETE ALL INK scrolled out: no jump, and once home the room is a fresh note's; scrolling right still extends it", async () => {
+	const fresh = at(await scenario("ic-on-fresh"), "fresh");
+	const snaps = await scenario("far-ic-on-delete-all");
+	const seeded = at(snaps, "seeded far right"), out = at(snaps, "scrolled out"), removed = at(snaps, "removed, still scrolled out");
+	const partway = at(snaps, "partway home"), home = at(snaps, "home, still"), again = at(snaps, "scrolled right again");
+	expect(fresh.grant.x, `premise: Infinite Canvas starts a note with sideways room ${show(fresh)}`).toBeGreaterThan(0);
+	expect(seeded.grant.x, `premise: the far ink holds more than a fresh note ${show({ fresh, seeded })}`).toBeGreaterThan(fresh.grant.x);
+	expect(out.left, `premise: scrolled out ${show(out)}`).toBeGreaterThan(0);
+	expect(removed.strokes, `premise: all ink deleted ${show(removed)}`).toBe(0);
+	expect(removed.left, `scrollLeft did not move ${show(removed)}`).toBe(out.left);
+	expect((removed.lefts ?? []).every(l => l === out.left), `no scroll event moved it either ${show(removed)}`).toBe(true);
+	expect(removed.width, `the range still covers what is on screen ${show(removed)}`).toBeGreaterThanOrEqual(removed.left + removed.clientWidth);
+	expect(removed.width, `the part off screen to the right is gone ${show({ out, removed })}`).toBeLessThan(out.width);
+	expect(removed.grant.y, `the vertical grant is untouched ${show({ out, removed })}`).toBe(out.grant.y);
+	expect(partway.left, `the scroll home landed where it was sent ${show(partway)}`).toBe(partway.target);
+	expect(partway.width, `the range covers the view partway home ${show(partway)}`).toBeGreaterThanOrEqual(partway.left + partway.clientWidth);
+	expect(home.grant.x, `once home the sideways room is a fresh Infinite Canvas note's ${show({ fresh, home })}`).toBe(fresh.grant.x);
+	expect(home.range, `and so is the range ${show({ fresh, home })}`).toBe(fresh.range);
+	expect(again.range, `scrolling right still extends the page ${show({ home, again })}`).toBeGreaterThan(home.range);
+});
+
+it("INFINITE CANVAS ON, ERASE the far stroke: the room stays, as before (only Delete all ink clears it)", async () => {
+	const snaps = await scenario("far-ic-on-erase");
+	const out = at(snaps, "scrolled out"), removed = at(snaps, "removed, still scrolled out"), home = at(snaps, "home, still");
+	expect(removed.strokes, `premise: the far stroke is erased ${show(removed)}`).toBe(1);
+	expect(removed.left, `scrollLeft did not move ${show(removed)}`).toBe(out.left);
+	expect(home.grant.x, `the sideways room is kept ${show({ out, home })}`).toBeGreaterThanOrEqual(out.grant.x);
+});
+
+it("INFINITE CANVAS ON, UNDO Delete all ink: the ink comes back and so does the room to reach it", async () => {
+	const snaps = await scenario("far-ic-on-undo-delete");
+	const undone = at(snaps, "undone"), again = at(snaps, "scrolled right again");
+	expect(undone.strokes, `premise: undo restored both strokes ${show(undone)}`).toBe(2);
+	// The far stroke's right edge: 1500 + 40, plus its width allowance.
+	expect(again.left + again.clientWidth, `the far ink can be scrolled to again ${show(again)}`).toBeGreaterThanOrEqual(1542);
+});
+
+it("DELETE ALL INK WITH INFINITE CANVAS ON, THEN OFF: the sideways room goes to nothing; the vertical room stays", async () => {
+	const fresh = at(await scenario("ic-on-fresh"), "fresh");
+	const snaps = await scenario("far-ic-on-delete-all-then-off");
+	const cleared = at(snaps, "cleared, infinite canvas on"), off = at(snaps, "infinite canvas off"), still = at(snaps, "off, still");
+	expect(cleared.strokes, `premise: all ink deleted ${show(cleared)}`).toBe(0);
+	expect(cleared.grant.x, `with Infinite Canvas on the room is a fresh note's ${show({ fresh, cleared })}`).toBe(fresh.grant.x);
+	expect(off.grant.x, `Infinite Canvas off: no sideways grant ${show(off)}`).toBe(0);
+	expect(off.range, `and no sideways range ${show(off)}`).toBeLessThanOrEqual(0);
+	expect(still.range, `nor a moment later ${show(still)}`).toBeLessThanOrEqual(0);
+	// PINNED, not a claim of "like new": nothing shrinks the room below the text (a later item).
+	expect(off.grant.y, `the vertical grant is untouched ${show({ cleared, off })}`).toBe(cleared.grant.y);
 });
 
 it("LASSO DELETE the far stroke while scrolled out: the same", async () => {

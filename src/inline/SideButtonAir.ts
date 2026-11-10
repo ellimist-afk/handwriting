@@ -32,10 +32,11 @@ const AIR_HINT = "Click the pen button while hovering over the screen to switch 
 
 /**
  * "idle": no button held. "pressed": the button went down in the air and
- * nothing has touched since. "spent": the press was ended by a contact, a
- * leave or a landing nib; it stays spent, whatever rows follow, until the
- * button is released, so the held touch's own rows (1 after the leave, then 0)
- * cannot complete a click.
+ * nothing has touched since. "spent": a contact or a leave came, with or
+ * without a press, or a landing nib ended the press; it stays spent, whatever
+ * rows follow, until the button is released, so the held touch's own rows (1
+ * after the leave, then 0) and a button held through a lift cannot complete a
+ * click.
  */
 let state: "idle" | "pressed" | "spent" = "idle";
 
@@ -84,14 +85,21 @@ export function sideButtonAirHover(pointerType: string, buttons: number, pressur
  * A pointerdown or a pointerleave: a press in progress is not a click. Returns
  * the trace line when a press was cancelled, otherwise null.
  *
+ * The machine is left spent whatever its state, so after any contact a click
+ * arms only from a buttons-0 hover row. Nothing is fed while a stroke is live,
+ * so a button pressed during the stroke and still held at the lift reaches
+ * the machine as a press; without this, its release in the air was a click
+ * and the next stroke erased.
+ *
  * `leave` is the pen leaving the page with the button down: the held touch
  * Android takes for text selection. The first one on a device shows the
  * one-time note. A pointerdown is a contact the page did receive, and shows
  * nothing.
  */
 export function sideButtonAirInterrupt(leave = false): string | null {
-	if (state !== "pressed") return null;
+	const was = state;
 	state = "spent";
+	if (was !== "pressed") return null;
 	if (leave && takeAirSwitchHint()) new Notice(AIR_HINT);
 	return "side button held into a touch: no switch";
 }

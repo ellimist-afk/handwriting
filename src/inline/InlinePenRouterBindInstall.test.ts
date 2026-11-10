@@ -41,7 +41,7 @@ const FROM_ROUTER = ["InlinePenRouter", "contextMenuSuppressed"];
 const REGISTRATIONS = [
 	"scroller pointerdown true",
 	"scroller pointermove true",
-	"scroller pointerrawupdate true",
+	// No pointerrawupdate: it is bound from a stroke's claim to its end, not while the router is built.
 	"scroller pointerup true",
 	"scroller pointercancel true",
 	"scroller gotpointercapture true",

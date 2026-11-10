@@ -21,6 +21,11 @@ export class FakeAdapter implements PageAdapterLike {
 	failWriteTimes = 0;
 	failRenameTimes = 0;
 	failRenameWhen: (from: string, to: string) => boolean = () => true;
+	/**
+	 * Opt-in: a rename onto a path that already holds a file is refused, as the
+	 * desktop vault adapter refuses it. Off by default, so a rename overwrites.
+	 */
+	refuseRenameOntoFile = false;
 
 	/** While set, the operation waits on the promise before doing anything. */
 	readGate: Promise<void> | null = null;
@@ -58,6 +63,7 @@ export class FakeAdapter implements PageAdapterLike {
 		}
 		const f = this.files.get(from);
 		if (f === undefined) throw new Error(`ENOENT ${from}`);
+		if (this.refuseRenameOntoFile && this.files.has(to)) throw new Error(`EEXIST rename ${from} -> ${to}`);
 		this.files.delete(from);
 		this.files.set(to, f);
 		this.mtimes.set(to, this.mtimes.get(from) ?? ++this.clock);
@@ -75,14 +81,22 @@ export class FakeAdapter implements PageAdapterLike {
 		this.dirs.add(path);
 	}
 
-	async stat(path: string): Promise<{ mtime: number } | null> {
-		return this.files.has(path) ? { mtime: this.mtimes.get(path)! } : null;
+	/** The file's modified time and its size, as the vault adapter answers them (size in code units: the fixtures are ASCII). */
+	async stat(path: string): Promise<{ mtime: number; size?: number } | null> {
+		const f = this.files.get(path);
+		return f === undefined ? null : { mtime: this.mtimes.get(path)!, size: f.length };
 	}
 
 	/** An external process or sync tool dropping bytes into the folder. */
 	externalWrite(path: string, data: string): void {
 		this.files.set(path, data);
 		this.mtimes.set(path, ++this.clock);
+	}
+
+	/** A sync tool setting the modified time it carried from the other device, as Obsidian's write option `mtime` does. */
+	setMtime(path: string, mtime: number): void {
+		if (!this.files.has(path)) throw new Error(`ENOENT ${path}`);
+		this.mtimes.set(path, mtime);
 	}
 
 	writes(): string[] {

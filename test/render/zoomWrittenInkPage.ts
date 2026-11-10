@@ -2,7 +2,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history } from "@codemirror/commands";
 import { Platform } from "obsidian";
-import { inlineInk, inkOverlayExtension, overlayForPath, setScrollExpansionEnabled, inlineReloadCandidates, captureInlineReloadAdmission, inkExternallyReloaded } from "../../src/inline/InkOverlay";
+import { inlineInk, inkOverlayExtension, overlayForPath, setScrollExpansionEnabled, inlineReloadCandidates, captureInlineReloadAdmission, inkExternallyReloaded, setInlineTool, getInlineTool } from "../../src/inline/InkOverlay";
 import { notifyInkChanged } from "../../src/inline/InkEvents";
 import { PageStore } from "../../src/persistence/PageStore";
 import { FakeAdapter } from "../../src/persistence/FakeAdapter";
@@ -40,10 +40,20 @@ async function setup(bytes?: string, obsidianWrappers = false, referenceStroke?:
  setScrollExpansionEnabled(true);setPenInk(true);await settle();return {...snapshot(),pixels:pixels()};
 }
 function snapshot(){return {saved,loads,strokes:JSON.parse(JSON.stringify(inlineInk.strokes(path))),scaleY:view.scaleY};}
+// Touch ids down now, each with its isPrimary. Pointer Events: the primary touch is the first contact made while no
+// other touch is active; a second concurrent finger is never primary, and every event of a pointer carries its value.
+const touchesDown=new Map<number,boolean>();
+function touchPrimary(type:string,pointerId:number):boolean{
+ if(type==="pointerdown"){const primary=![...touchesDown.keys()].some(id=>id!==pointerId);touchesDown.set(pointerId,primary);return primary;}
+ const primary=touchesDown.get(pointerId)??true;
+ if(type==="pointerup"||type==="pointercancel")touchesDown.delete(pointerId);
+ return primary;
+}
 function point(type:string,x:number,y:number,pointerType="pen",pointerId=741,timestamp?:number){
  const target=document.elementFromPoint(x,y);
  if(!target||!view.scrollDOM.contains(target))throw Error(`input outside scroller: ${x},${y}`);
- const event=new PointerEvent(type,{bubbles:true,cancelable:true,pointerType,pointerId,isPrimary:true,clientX:x,clientY:y,buttons:type==="pointerup"||type==="pointercancel"?0:1,pressure:.6,width:8,height:8});
+ const isPrimary=pointerType==="touch"?touchPrimary(type,pointerId):true;
+ const event=new PointerEvent(type,{bubbles:true,cancelable:true,pointerType,pointerId,isPrimary,clientX:x,clientY:y,buttons:type==="pointerup"||type==="pointercancel"?0:1,pressure:.6,width:8,height:8});
  if(timestamp!==undefined)Object.defineProperty(event,"timeStamp",{value:timestamp});
  target.dispatchEvent(event);
 }
@@ -144,6 +154,23 @@ function blankLifecycle(){
  write(30);tail.drawHead(cam,DEFAULT_PEN,{x:30,y:100},{x:90,y:105},.7);sample('restored');
  return rows;
 }
+// THE HELD RASTER. On a pinch's first preview frame the raster held at the start zoom goes up (putUpHeldRaster): one
+// sibling of the scroller holding its pen canvas and, on a note with highlighter ink, its highlighter canvas, with the pane's
+// committed and highlight canvases hidden. watchHeldPutUp wraps that call on the instance for one gesture and reads the sibling as
+// the first call leaves it; null means the call never ran.
+function watchHeldPutUp(overlay:any){
+ let first:{up:boolean;canvases:number;paneHidden:string[]}|null=null;
+ const original=overlay.putUpHeldRaster;
+ overlay.putUpHeldRaster=function(this:any,...args:unknown[]){
+  const out=original.apply(this,args);
+  if(!first){const clip=this.heldRasterClip as HTMLElement|null;first={up:!!this.heldRaster&&!!clip&&clip.parentElement===this.view.dom&&clip.previousElementSibling===this.view.scrollDOM,canvases:clip?clip.querySelectorAll('canvas').length:0,paneHidden:[this.committedCanvas,this.highlightCanvas].map((c:HTMLCanvasElement)=>getComputedStyle(c).visibility)};}
+  return out;
+ };
+ return {first:()=>first,stop:()=>{delete overlay.putUpHeldRaster;}};
+}
+// The landing: the pane's committed canvas is shown once the raster lands, waited for as the setup action waits for the stand-in,
+// at most 4 s, so a raster that never comes down reads true and the cell reds, never hangs.
+async function waitHeldDown(overlay:any){const t0=performance.now();while(overlay.heldRaster&&performance.now()-t0<4000)await new Promise<void>(r=>requestAnimationFrame(()=>r()));return !!overlay.heldRaster;}
 async function layerVisual(action:string,zoom=.4){
  const overlay=overlayForPath(path)! as any;
  // The zoom stand-in (zoom settle design) is replaced by the sharp raster once its build is whole: the baseline is read after
@@ -152,6 +179,17 @@ async function layerVisual(action:string,zoom=.4){
  if(action==='setup'){overlay.commitCameraScale(zoom,{left:0,top:0});await settle();const t0=performance.now();
   while(overlay.standIn&&performance.now()-t0<4000)await new Promise<void>(r=>requestAnimationFrame(()=>r()));standInHeld=!!overlay.standIn;}
  if(action==='preview')overlay.hideBlankPinchLayers();
+ // THE KNOB: the extent raster and the stand-in retired by the product's own path just before the preview, so
+ // the composite these cells read is not refused for a raster the first preview frame would hold up. dropStandIn frees a stand-in
+ // already held, extentToStandIn hands the extent raster to the stand-in slot (extentRaster null), dropStandIn frees that: no
+ // raster element is left behind. heldSource is the premise, read with no side effect before the preview: heldRasterSource null.
+ let heldSource:boolean|null=null,heldFirst:ReturnType<ReturnType<typeof watchHeldPutUp>['first']>=null,heldUp:boolean|null=null;
+ if(action==='retired-preview'){
+  const strokes=()=>overlay.committedStrokes(overlay.noteStrokes(overlay.filePath()));
+  overlay.dropExtentBuild();overlay.dropStandIn();overlay.extentToStandIn(strokes());overlay.dropStandIn();
+  const cam=overlay.lastPaintCam,file=overlay.filePath();heldSource=!!(cam&&file&&overlay.heldRasterSource(file,cam,strokes()));
+  overlay.hideBlankPinchLayers();
+ }
  if(action==='thin-gap-plant'){
   // Remove a middle segment only from the borrowed preview, keeping its wash.
   const target=overlay.wetCanvas as HTMLCanvasElement,ctx=target.getContext('2d')!,cam=overlay.lastPaintCam,dpr=target.width/overlay.cssWidth;
@@ -163,7 +201,14 @@ async function layerVisual(action:string,zoom=.4){
   const target=overlay.wetCanvas as HTMLCanvasElement,ctx=target.getContext('2d')!;
   ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.globalCompositeOperation='copy';ctx.drawImage(target,Number(action.split(':')[1]??1),0);ctx.restore();
  }
- if(action==='scaled-preview'){overlay.pinch('start',1,{x:30,y:10});overlay.pinch('move',zoom===.1?4:.25,{x:30,y:10});for(let i=0;i<3;i++)await new Promise<void>(r=>requestAnimationFrame(()=>r()));overlay.pinchScrollAt=performance.now()+60000;}
+ // 4:1 bilinear drops a one-device-px hairline by its layer's sub-pixel snap, so the 0.4 cell previews at 2:1; the
+ // picture's content is checked at 4x in the 0.1 cell. The device's own 4:1 look is the stand-in hairline floor, a 1.5.1 candidate.
+ if(action==='scaled-preview'){const watch=watchHeldPutUp(overlay);try{overlay.pinch('start',1,{x:30,y:10});overlay.pinch('move',zoom===.1?4:.5,{x:30,y:10});for(let i=0;i<3;i++)await new Promise<void>(r=>requestAnimationFrame(()=>r()));}finally{heldFirst=watch.first();watch.stop();}overlay.pinchScrollAt=performance.now()+60000;}
+ // The scaled cells' landing: the fingers run back to the start zoom and lift. An end at the scale the layer was painted
+ // at takes the sibling down in endPreviewPaper with no whole paint, so the restore after it reads the same layer at the same zoom.
+ if(action==='land'){overlay.pinch('move',1,{x:30,y:10});await new Promise<void>(r=>requestAnimationFrame(()=>r()));overlay.pinch('end',1,{x:30,y:10});await settle();heldUp=await waitHeldDown(overlay);}
+ // The scaled cells' take-down mid-gesture, by the product's own path; the return reads it in the same call.
+ if(action==='held-down'){overlay.takeDownHeldRaster();heldUp=!!overlay.heldRaster;}
  if(action==='restore')overlay.restorePinchLayers();
  if(action==='tail')overlay.tail.drawSelectionBox(overlay.camera.snapshot,{x:overlay.camera.x+120,y:overlay.camera.y+120,width:80,height:60},'#ff0000');
  if(action==='tail-clear')overlay.tail.clearAll(overlay.cssWidth,overlay.cssHeight);
@@ -189,7 +234,7 @@ async function layerVisual(action:string,zoom=.4){
  if(action==='background-restore'){canvases.forEach((c,i)=>c.style.visibility=overlay.visualSavedVisibility[i]);delete overlay.visualSavedVisibility;}
  const rect=overlay.committedCanvas.getBoundingClientRect(),sx=rect.width/overlay.cssWidth,sy=rect.height/overlay.cssHeight,cam=overlay.lastPaintCam;
  const thinArms=[{width:.5,y:420},{width:2,y:450}].map(arm=>({width:arm.width,x0:rect.left+(380-cam.x)*cam.zoom*sx,x1:rect.left+(540-cam.x)*cam.zoom*sx,y:rect.top+(arm.y-cam.y)*cam.zoom*sy}));
- return {thinArms,composite:overlay.pinchComposite,visible:canvases.map(c=>getComputedStyle(c).visibility),tailBacking:{w:overlay.tailCanvas.width,h:overlay.tailCanvas.height,bandW:overlay.wetCanvas.width,bandH:overlay.wetCanvas.height},pixels:canvases.map(occupiedPixels),originalHashes:action==='setup'||action==='restore'?[rasterHash(overlay.highlightCanvas),rasterHash(overlay.committedCanvas)]:null,blank:[overlay.highlightBlank,overlay.highlightWet.provenBlank,overlay.committedBlank,overlay.wet.provenBlank,overlay.tail.provenBlank],strokes:JSON.stringify(inlineInk.strokes(path)),standInHeld};
+ return {thinArms,composite:overlay.pinchComposite,visible:canvases.map(c=>getComputedStyle(c).visibility),tailBacking:{w:overlay.tailCanvas.width,h:overlay.tailCanvas.height,bandW:overlay.wetCanvas.width,bandH:overlay.wetCanvas.height},pixels:canvases.map(occupiedPixels),originalHashes:action==='setup'||action==='restore'?[rasterHash(overlay.highlightCanvas),rasterHash(overlay.committedCanvas)]:null,blank:[overlay.highlightBlank,overlay.highlightWet.provenBlank,overlay.committedBlank,overlay.wet.provenBlank,overlay.tail.provenBlank],strokes:JSON.stringify(inlineInk.strokes(path)),standInHeld,heldSource,heldFirst,heldUp};
 }
 async function continuousPinch(target: number, cancel: boolean, measure = false, costPlant = false, diagnostic?: { startScale: number; hover: boolean; moving: boolean }) {
  const overlay=overlayForPath(path)! as any;
@@ -203,7 +248,9 @@ async function continuousPinch(target: number, cancel: boolean, measure = false,
  // Whether the scroll above released the wet canvas (the pinch's composite then sizes it once at its start).
  const wetReleasedBefore=(overlay as any).wetDeferred===true;
  let live=true,backingWrites=0,wetBackingWrites=0,liveClears=0,liveTransactions=0,finalTransactions=0;
- const dimensions=()=>({scale:overlay.pinchScaleNow,grant:{...surfaceExtents.get(path)},band:{...overlay.band},canvases:[...view.dom.querySelectorAll('canvas')].map(c=>({width:c.width,height:c.height,cssWidth:c.style.width,cssHeight:c.style.height,transform:c.style.transform,visibility:c.style.visibility,rect:c.getBoundingClientRect().toJSON()})),native:{width:view.scrollDOM.clientWidth,height:view.scrollDOM.clientHeight,scrollWidth:view.scrollDOM.scrollWidth,scrollHeight:view.scrollDOM.scrollHeight}});
+ const named:[string,HTMLCanvasElement,()=>unknown][]=[['committed',overlay.committedCanvas,()=>overlay.committedBlank],['highlight',overlay.highlightCanvas,()=>overlay.highlightBlank],['highlightWet',overlay.highlightWetCanvas,()=>overlay.highlightWet?.provenBlank],['wet',overlay.wetCanvas,()=>overlay.wet?.provenBlank],['wetTile',overlay.wetTileCanvas,()=>null],['tail',overlay.tailCanvas,()=>overlay.tail?.provenBlank]];
+ const layerOf=(c:HTMLCanvasElement)=>{const n=named.find(([,x])=>x===c);return {name:n?.[0]??'other',blank:n?n[2]():null,pinchHidden:overlay.pinchHiddenCanvases.has(c)};};
+ const dimensions=()=>({scale:overlay.pinchScaleNow,grant:{...surfaceExtents.get(path)},band:{...overlay.band},canvases:[...view.dom.querySelectorAll('canvas')].map(c=>({...layerOf(c),width:c.width,height:c.height,cssWidth:c.style.width,cssHeight:c.style.height,transform:c.style.transform,visibility:c.style.visibility,rect:c.getBoundingClientRect().toJSON()})),native:{width:view.scrollDOM.clientWidth,height:view.scrollDOM.clientHeight,scrollWidth:view.scrollDOM.scrollWidth,scrollHeight:view.scrollDOM.scrollHeight}});
  const initialDimensions=measure?dimensions():null;
  const timing={firstMotionAt:0,firstPreviewAt:0,lastMoveAt:0,frameGaps:[] as number[],pointerMs:[] as number[],oracleMs:[] as number[],previews:[] as {scale:number;queueMs:number;workMs:number}[],methods:{} as Record<string,{calls:number;ms:number;maxMs:number;rectReads:number;rectMs:number}>,reserveCalls:0,cursorPaints:0,exitRestoreMs:[] as number[]};
  const measuredMethods=new Map<string,(...args:any[])=>any>();
@@ -256,6 +303,7 @@ async function continuousPinch(target: number, cancel: boolean, measure = false,
  for(const [key,d] of descriptors)Object.defineProperty(canvasProto,key,{...d,set:function(value:number){if(live){backingWrites++;if(this===overlay.wetCanvas)wetBackingWrites++;}d.set!.call(this,value);}});
  const clear=CanvasRenderingContext2D.prototype.clearRect;
  CanvasRenderingContext2D.prototype.clearRect=function(...args:Parameters<typeof clear>){if(live&&(this===overlay.committedCtx||this===overlay.highlightCtx))liveClears++;return clear.apply(this,args);};
+ const held=watchHeldPutUp(overlay);
  try {
   if(measure)performance.mark("handwriting-preview-start");
   point("pointerdown",cx-startHalf,cy,"touch",501);point("pointerdown",cx+startHalf,cy,"touch",502);
@@ -272,20 +320,23 @@ async function continuousPinch(target: number, cancel: boolean, measure = false,
    if(measure)timing.pointerMs.push(performance.now()-inputAt);
   }
   await new Promise<void>(r=>requestAnimationFrame(()=>r()));
-  const liveScale=overlay.pinchScaleNow,liveDimensions=measure?dimensions():null;
+  const liveScale=overlay.pinchScaleNow,liveDimensions=measure?dimensions():null,liveComposite=overlay.pinchComposite;
   live=false;if(measure)performance.mark("handwriting-preview-end");
   const endX=cx+(diagnostic?.moving?-120:0),endY=cy+(diagnostic?.moving?-60:0);
   point(cancel?"pointercancel":"pointerup",endX-startHalf*target,endY,"touch",501);
   point("pointerup",endX+startHalf*target,endY,"touch",502);
   await settle();
+  // The diagnostic gestures wait for the held raster's landing before the final read; the others read as before.
+  const heldUp=diagnostic?await waitHeldDown(overlay):!!overlay.heldRaster;
   const rect=view.contentDOM.getBoundingClientRect(),a=anchor!;
   const viewport=view.scrollDOM.getBoundingClientRect();
-  return {timing:measure?timing:null,initialDimensions,liveDimensions,finalDimensions:measure?dimensions():null,backingWrites,wetBackingWrites,wetReleasedBefore,liveClears,liveTransactions,finalTransactions,liveScale,liveAnchors,
+  return {timing:measure?timing:null,initialDimensions,liveDimensions,finalDimensions:measure?dimensions():null,backingWrites,wetBackingWrites,wetReleasedBefore,liveClears,liveTransactions,finalTransactions,liveScale,liveAnchors,liveComposite,heldFirst:held.first(),heldUp,
    pane:{width:pane.width,height:pane.height},viewport:{width:viewport.width,height:viewport.height},
    finalScale:overlay.pinchScaleNow,columnBefore:column,columnAfter:view.contentDOM.offsetWidth,
    anchorError:{x:rect.left+a.worldX*target-a.x,y:rect.top+a.worldY*target-a.y,boundaryX:boundaryX(target),boundaryY:boundaryY(target),naturalBoundaryX:naturalBoundaryX(target)},
    before,after:snapshot(),pixels:diagnostic?null:pixels(),preview:overlay.pinchPreview};
  } finally {
+  held.stop();
   overlay.commitCameraScale=commit;overlay.pinch=pinch;
   for(const [key,d] of descriptors)Object.defineProperty(canvasProto,key,d);
   CanvasRenderingContext2D.prototype.clearRect=clear;
@@ -432,4 +483,16 @@ async function lateSidecar(installPoll: Function) {
  callback();await pending;await settle();
  return {before,eligible,after:{...snapshot(),pixels:pixels()},errors,live:adapter.files.get(`handwriting/${id}.json`)};
 }
-(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen,focusSeed,focusReturn,editorFocus,desktopPlatform,viewportOwnership,lateSidecar,blankLifecycle,layerVisual};
+// THE HIGHLIGHTER ARM (diagnostic, HW_Z1_HL_ARM): one highlighter stroke by the pen pointer path after a landing. Reads
+// the highlight canvas's computed and style visibility, its occupied pixels and blank flag before and after, then sets the pen back.
+async function highlighterArm(){
+ const overlay=overlayForPath(path)! as any;
+ const count=(c:HTMLCanvasElement)=>c.width>0&&c.height>0?occupiedPixels(c):0;
+ const read=()=>({visibility:getComputedStyle(overlay.highlightCanvas).visibility,style:overlay.highlightCanvas.style.visibility,pixels:count(overlay.highlightCanvas),wetPixels:count(overlay.highlightWetCanvas),blank:overlay.highlightBlank,pinchHidden:overlay.pinchHiddenCanvases.has(overlay.highlightCanvas)});
+ const before=read();let tool='';
+ setInlineTool('highlighter');
+ try{tool=getInlineTool();point('pointerdown',350,220,'pen',961);for(let i=1;i<=8;i++)point('pointermove',350+i*15,220+i*5,'pen',961);point('pointerup',470,260,'pen',961);await settle();}
+ finally{setInlineTool('pen');}
+ return {tool,before,after:read(),highlighterStrokes:inlineInk.strokes(path).filter((s:any)=>s.tool==='highlighter').length};
+}
+(window as any).zoomDrift={setup,write,raster,reference,pixels,dense,continuousPinch,pendingPinchPen,focusSeed,focusReturn,editorFocus,desktopPlatform,viewportOwnership,lateSidecar,blankLifecycle,layerVisual,highlighterArm};

@@ -52,6 +52,10 @@ describe("router feeds the side button in the air (Android)", () => {
 		h.fire(hover("pointermove", 20, 1));
 		h.fire(hover("pointermove", 30, 0));
 		expect(tipMode()).toBe("eraser");
+		// The raw listener is bound only during a stroke now, so no hover raw
+		// reaches the router in use; the raw hover path still exists for a raw
+		// that lands between a claim and the take, and this binds it by hand.
+		h.router.bindRawListener();
 		h.fire(hover("pointerrawupdate", 40, 1));
 		h.fire(hover("pointerrawupdate", 50, 0));
 		expect(tipMode()).toBe("nib");

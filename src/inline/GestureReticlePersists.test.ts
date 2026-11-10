@@ -58,10 +58,16 @@ import { EditorState } from "@codemirror/state";
 
 import {
 	InkOverlayPlugin,
+	inlineInk,
 	releaseMouseInkQuietlyEverywhere,
 	releaseTipModes,
 	setPenReticle,
+	setShapeSnap,
 } from "./InkOverlay";
+import { SnapPreviewCanvas } from "./SnapPreview";
+import { getInkColorHex, setInkColorHex } from "../ink/InkColor";
+import { StrokeIndex } from "../ink/StrokeIndex";
+import { DEFAULT_PEN } from "../ink/PenStyle";
 import { SelectionModel } from "../objects/SelectionModel";
 import { Camera } from "../camera/Camera";
 import { StrokeFrame } from "./StrokeFrame";
@@ -638,5 +644,178 @@ describe("the note surface's reticle is shown and hidden by one flag, not by a s
 		rig.proto.refreshPenCursor.call(rig.inst);
 		expect(setCssStyles, "a refresh brought a hidden ring back").not.toHaveBeenCalled();
 		expect(reticleShown(rig.cursorStyle)).toBe(false);
+	});
+});
+
+/**
+ * The shape-snap drag. Once a fitted shape
+ * shows, the pen's raw batches resize and turn it and the stroke under it stops
+ * growing - and that branch returned before anything repainted the ring, so the
+ * reticle concealed at pen-down stayed gone for the whole drag. The lasso drag
+ * keeps its ring by calling its wrapper on the newest sample of each batch; the
+ * snap drag now does the same through `showSnapCursor`.
+ *
+ * The shape is reached by the REAL dwell: `SnapPreview` arms on the overlay's own
+ * window clock, so the fake timers drive it exactly as a pen held still does.
+ * Only the preview canvas is mocked, as SnapPreviewIntegration.test.ts mocks it.
+ */
+describe("the note surface's reticle rides the shape-snap drag", () => {
+	const path = "snap-reticle-note.md";
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		setPenReticle(true);
+		releaseTipModes();
+		setShapeSnap(true);
+		inlineInk.applyRemove(path, inlineInk.strokes(path).map(stroke => stroke.id));
+		vi.spyOn(SnapPreviewCanvas.prototype, "show").mockImplementation(() => true);
+		vi.spyOn(SnapPreviewCanvas.prototype, "clear").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		inlineInk.applyRemove(path, inlineInk.strokes(path).map(stroke => stroke.id));
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+		setPenReticle(true);
+		setShapeSnap(true);
+		releaseTipModes();
+	});
+
+	/** makeRig's reticle and scroller, plus the ink-stroke fields SnapPreviewIntegration.test.ts seeds, on the window's real (faked) clock. */
+	function snapRig() {
+		const rig = makeRig();
+		const v = rig.inst as Record<string, unknown> & {
+			snapPreview: { holding: boolean } | null;
+		};
+		const noop = (): void => undefined;
+		const ctx = { beginPath: noop, moveTo: noop, lineTo: noop, closePath: noop, arc: noop, fill: noop, stroke: noop, save: noop, restore: noop };
+		const wet = { clear: noop, clearStroke: noop, countPainted: () => 0, appendPoint: noop, beginStroke: noop, contactHalfWidth: () => 1, head: () => null };
+		const setCssStyles = vi.fn((styles: Record<string, unknown>) => Object.assign(rig.cursorStyle, styles));
+		(v.penCursorEl as { setCssStyles: unknown }).setCssStyles = setCssStyles;
+		const view = v.view as { dom: { ownerDocument: { defaultView: unknown } } };
+		view.dom.ownerDocument.defaultView = {
+			setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
+			clearTimeout: (id: number) => clearTimeout(id),
+		};
+		Object.assign(v, {
+			strokePenGesture: true, strokeRawMax: 0, strokeGain: 1, builder: null, frameTicking: false, scrollsDuringStroke: 0,
+			cssWidth: 800, cssHeight: 600, container: {}, wet, penStyle: { ...DEFAULT_PEN }, highlighterStyle: { ...DEFAULT_PEN },
+			activeStyle: { ...DEFAULT_PEN }, rawLastMoveT: 0, rawLastMoveX: 0, rawLastMoveY: 0,
+			strokeIndex: new StrokeIndex(), indexDirty: true, repaintQueued: false, activeWet: wet, highlightWet: wet,
+			highlightWetCanvas: { setCssStyles: noop },
+			tail: { clear: noop, clearAll: noop, drawHead: noop, configureInlineBacking: noop, placeInline: noop, restoreFullSurface: noop, prepareLive: noop },
+			committedCtx: ctx, highlightCtx: ctx, damage: { addRect: noop, addAll: noop }, eraserEl: null,
+			frame: { end: noop, cancel: noop, begin: noop }, selectionDeleteKeys: { reset: noop },
+			erased: [], erasePieces: new Set(), eraseFrom: [], eraseWhole: false, predReal: [], predLastTail: [],
+			filePath: () => path, updateHandwritingPageClass: noop, repaintPath: noop, recordCommitDiagnostics: noop,
+			scheduleRepaint: noop, schedulePresentProbe: noop, drawPredictedTail: noop, startFrameTicker: noop, probeSample: noop,
+			backingNow: () => 1, dispatchInk: noop,
+		});
+		/** One raw batch of two samples; the second is the newest, and the one the ring must land on. */
+		const raw = (x: number, y: number, t: number): void =>
+			rig.proto.penRaw.call(v, [{ ...sample(x - 1, y), timestamp: t }, { ...sample(x, y), timestamp: t }], { timeStamp: t } as PointerEvent);
+		const down = (): void =>
+			rig.proto.penDown.call(v, sample(20, 30), { pointerType: "pen", pointerId: 7, buttons: 1, button: 0 } as unknown as PointerEvent);
+		const up = (): void =>
+			rig.proto.penUp.call(v, { type: "pointerup", pointerType: "pen", pointerId: 7, buttons: 0, pressure: 0 } as unknown as PointerEvent);
+		/** Everything a lift could do to the ring: its style writes, watchdog refreshes and the scroller's cursor classes. */
+		const ringTouch = (): { writes: number; arms: number; classes: string[] } => ({
+			writes: setCssStyles.mock.calls.length,
+			arms: rig.armSpy.mock.calls.length,
+			classes: [...rig.scrollerClasses].sort(),
+		});
+		return { ...rig, v, raw, down, up, setCssStyles, ringTouch };
+	}
+
+	/** The pen hovered in, touched down and wrote a line: the ring is concealed and no shape is up yet. */
+	function strokeUnderway(r: ReturnType<typeof snapRig>): void {
+		r.proto.showPenCursor.call(r.v, sample(10, 10), "pen");
+		expect(reticleShown(r.cursorStyle)).toBe(true);
+		r.down();
+		expect(reticleShown(r.cursorStyle), "pen-down did not conceal the ring").toBe(false);
+		for (let i = 1; i < 16; i++) r.raw(20 + i * 8, 30 + (i % 2), i * 8);
+	}
+
+	it("before the shape shows, the stroke's raw batches leave the ring concealed (unchanged)", () => {
+		const r = snapRig();
+		strokeUnderway(r);
+		r.armSpy.mockClear();
+		r.raw(150, 31, 200);
+		expect(r.v.snapPreview?.holding, "the control reached a held shape").toBe(false);
+		expect(reticleShown(r.cursorStyle), "a plain stroke batch brought the ring back").toBe(false);
+		expect(r.armSpy, "a plain stroke batch re-armed the watchdog").not.toHaveBeenCalled();
+	});
+
+	it("once the shape shows, a raw batch shows the ring at the newest sample and re-arms the watchdog", () => {
+		const r = snapRig();
+		strokeUnderway(r);
+		vi.advanceTimersByTime(350);
+		expect(r.v.snapPreview?.holding, "the dwell did not raise the shape").toBe(true);
+		expect(reticleShown(r.cursorStyle), "the shape's arrival painted the ring before any move").toBe(false);
+		r.armSpy.mockClear();
+
+		r.raw(170, 60, 400);
+		expect(reticleShown(r.cursorStyle), "the snap drag left the ring concealed").toBe(true);
+		expect(r.armSpy, "the snap drag batch did not re-arm the watchdog").toHaveBeenCalledTimes(1);
+		// The ring is centred on the sample, so its transform reads the newest sample, not the batch's first.
+		const ringAt170 = r.cursorStyle.transform;
+		r.raw(190, 80, 420);
+		expect(r.cursorStyle.transform, "the ring did not follow the newest sample").not.toBe(ringAt170);
+		expect(r.armSpy).toHaveBeenCalledTimes(2);
+		const control = snapRig();
+		control.proto.showPenCursor.call(control.v, sample(190, 80));
+		expect(r.cursorStyle.transform, "the ring sits somewhere other than the newest sample").toBe(control.cursorStyle.transform);
+	});
+
+	it("after a colour change seals the stroke mid-hold, the ring keeps following the pen's newest sample on every batch until the lift", () => {
+		const color = getInkColorHex("pen");
+		try {
+			const r = snapRig();
+			strokeUnderway(r);
+			vi.advanceTimersByTime(350);
+			r.raw(170, 60, 400);
+			expect(reticleShown(r.cursorStyle), "the snap drag left the ring concealed (control)").toBe(true);
+			const ringAt170 = r.cursorStyle.transform;
+			r.armSpy.mockClear();
+
+			setInkColorHex("pen", "#abcdef");
+			r.raw(190, 80, 420);
+			expect(r.v.snapSealed, "the colour change did not seal the stroke (premise)").toBe(true);
+			expect(r.v.snapPreview?.holding ?? false, "the shape is still held after the colour change (premise)").toBe(false);
+			const at190 = snapRig();
+			at190.proto.showPenCursor.call(at190.v, sample(190, 80));
+			expect(r.cursorStyle.transform, `the ring froze where the seal found it (${ringAt170})`).toBe(at190.cursorStyle.transform);
+
+			r.raw(230, 120, 440);
+			const at230 = snapRig();
+			at230.proto.showPenCursor.call(at230.v, sample(230, 120));
+			expect(reticleShown(r.cursorStyle), "the sealed stroke's batch hid the ring").toBe(true);
+			expect(r.cursorStyle.transform, "a later sealed batch left the ring behind the pen").toBe(at230.cursorStyle.transform);
+			expect(r.armSpy, "a sealed batch did not re-arm the watchdog").toHaveBeenCalledTimes(2);
+		} finally { setInkColorHex("pen", color); }
+	});
+
+	it("pen-up after a snap drag touches the ring no more than a plain stroke's lift does", () => {
+		const plain = snapRig();
+		strokeUnderway(plain);
+		const plainBefore = plain.ringTouch();
+		plain.up();
+		const plainAfter = plain.ringTouch();
+
+		const snap = snapRig();
+		strokeUnderway(snap);
+		vi.advanceTimersByTime(350);
+		snap.raw(170, 60, 400);
+		const snapBefore = snap.ringTouch();
+		const shownBefore = reticleShown(snap.cursorStyle);
+		snap.up();
+		const snapAfter = snap.ringTouch();
+
+		expect(plainAfter.writes - plainBefore.writes, "a plain lift wrote the ring (control)").toBe(0);
+		expect(snapAfter.writes - snapBefore.writes, "the snap lift wrote the ring").toBe(plainAfter.writes - plainBefore.writes);
+		expect(snapAfter.arms - snapBefore.arms, "the snap lift re-armed the watchdog").toBe(plainAfter.arms - plainBefore.arms);
+		expect(snapAfter.classes, "the snap lift changed the scroller's cursor").toEqual(snapBefore.classes);
+		expect(plainAfter.classes).toEqual(plainBefore.classes);
+		expect(reticleShown(snap.cursorStyle), "the lift moved the ring; the next hover sample does that").toBe(shownBefore);
 	});
 });

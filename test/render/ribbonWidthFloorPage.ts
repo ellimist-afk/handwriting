@@ -32,8 +32,9 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise<void>
  * canvas's own CSS box. Sampling after settle sidesteps it entirely, because
  * the offset is cleared before the commit re-rasters.
  */
-function committedCanvas(host: HTMLElement): HTMLCanvasElement {
-	const c = host.querySelectorAll<HTMLCanvasElement>(".handwriting-ink-layer canvas")[2];
+/** The overlay's own committed canvas, by identity: the ink layer's DOM order changes as layers are added. */
+function committedCanvas(overlay: { committedCanvas?: HTMLCanvasElement }): HTMLCanvasElement {
+	const c = overlay.committedCanvas;
 	if (!c) throw new Error("committed canvas missing");
 	return c;
 }
@@ -88,7 +89,7 @@ async function oneStrokeAt(targetZoom: number, label: string, pressure: number) 
 		t.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "pen", pointerId: 700 + steps, clientX: x, clientY: y, buttons, pressure: p }));
 	await settle();
 	const strokeCount = inlineInk.strokes(path).length;
-	const stats = alphaStats(committedCanvas(host));
+	const stats = alphaStats(committedCanvas(overlay));
 	const backing = overlay.committedBacking;
 	const dpr = overlay.dpr;
 	view.destroy(); pane.remove();
@@ -150,7 +151,7 @@ async function lockedStaleBackingCheck(pressure: number) {
 		t.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "pen", pointerId: 900, clientX: x, clientY: y, buttons, pressure: p }));
 	await settle();
 	const backingAfterMutation = overlay.committedBacking;
-	const stats = alphaStats(committedCanvas(host));
+	const stats = alphaStats(committedCanvas(overlay));
 	view.destroy(); pane.remove();
 	return { control: control.stats, mutated: stats, backingBeforeMutation, backingAfterMutation, mutatedCssScale: 8 };
 }

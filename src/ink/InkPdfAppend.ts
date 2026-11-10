@@ -54,7 +54,14 @@ import {
 	setEntries,
 } from "../pdf/PdfSyntax";
 
-export type AppendResult = { ok: true; bytes: Uint8Array } | { ok: false; reason: string };
+/**
+ * `leftOut` counts the strokes on pages past the end of the document - ink
+ * drawn before another app cut pages off it. They are not in the copy, and the
+ * caller says how many.
+ */
+export type AppendResult =
+	| { ok: true; bytes: Uint8Array; leftOut: number }
+	| { ok: false; reason: string };
 
 /**
  * What we call our alpha state inside somebody else's resources. Prefixed
@@ -171,20 +178,29 @@ export function appendInkToPdf(
 		if (at === undefined) byPage.set(s.page, [s]);
 		else at.push(s);
 	}
-	// Nothing to flatten. The file already is the answer, and appending an
-	// empty update would change its bytes - and so its ink identity - for a
-	// document that has not gained a mark.
-	if (byPage.size === 0) return { ok: true, bytes: original };
-	for (const index of byPage.keys()) {
+	let leftOut = 0;
+	for (const [index, on] of byPage) {
 		// Integer too: a page number that is not one matches no page, and the
 		// strokes carrying it would be dropped without a word.
-		if (!Number.isInteger(index) || index < 1 || index > pages.length) {
+		if (!Number.isInteger(index) || index < 1) {
 			return {
 				ok: false,
 				reason: `the ink names page ${index}, and this document has ${pages.length}`,
 			};
 		}
+		// A whole page number past the end: another app cut pages off after
+		// the ink was drawn. That ink shows nowhere and nothing can select it,
+		// so refusing would leave the user stuck. The copy goes without it and
+		// the count goes back to be said.
+		if (index > pages.length) {
+			leftOut += on.length;
+			byPage.delete(index);
+		}
 	}
+	// Nothing to flatten. The file already is the answer, and appending an
+	// empty update would change its bytes - and so its ink identity - for a
+	// document that has not gained a mark.
+	if (byPage.size === 0) return { ok: true, bytes: original, leftOut };
 
 	// New objects and rewritten ones together: an incremental update writes
 	// both the same way, and only the numbering says which is which.
@@ -412,5 +428,5 @@ export function appendInkToPdf(
 	const out = new Uint8Array(base + extra.length);
 	out.set(original, 0);
 	out.set(extra, base);
-	return { ok: true, bytes: out };
+	return { ok: true, bytes: out, leftOut };
 }

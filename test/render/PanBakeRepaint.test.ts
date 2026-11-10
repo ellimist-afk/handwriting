@@ -571,7 +571,8 @@ it("at 10 percent the extent raster is built on no pan, stroke or bounce frame",
 		const cdp = await page.context().newCDPSession(page);
 		await penStroke(cdp, penLine(mounted));
 		await sleep(500);
-		await touchPanDown(page, mounted, touch, rows);
+		const panned = tally((await touchPanDown(page, mounted, touch, rows)).strips);
+		expect(panned.rows, "premise: the pan moved the band and owed strips").toBeGreaterThan(0);
 		await page.evaluate(() => (window as any).panBake.pullAndRelease("xy", 96));
 		const all = (await rows()).slice(n0);
 		const asked = all.filter(r => r.scrollOnly || r.locked || r.bounce);

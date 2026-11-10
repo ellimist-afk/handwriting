@@ -13,7 +13,10 @@
  * stroke by target over source, so the ink keeps its look; an unknown size on
  * either side (or a PDF source) pastes unchanged.
  * Pasting back into the SOURCE note staggers by 16px per paste, or the copy
- * would sit invisibly on its original.
+ * would sit invisibly on its original. Any other note keeps the copied
+ * coordinates for its first paste and staggers each later one by 16px more,
+ * so a second paste never lands exactly on the first. Each note counts its
+ * own pastes; a new copy starts every count again, and undo does not.
  *
  * Every paste mints fresh ids. The store skips ids it already holds
  * (applyAdd's duplicate guard), and undo tracks strokes by id, so a pasted
@@ -28,7 +31,8 @@ const PASTE_STAGGER_PX = 16;
 let held: InkStroke[] = [];
 let sourcePath: string | null = null;
 let sourceFontRefPx: number | null = null;
-let pastesIntoSource = 0;
+/** Pastes so far, per destination note path, since the last copy. */
+const pastesInto = new Map<string, number>();
 let token: string | null = null;
 
 /**
@@ -86,7 +90,7 @@ export function copyInk(
 	held = strokes.map(clone);
 	sourcePath = fromPath;
 	sourceFontRefPx = fromFontRefPx;
-	pastesIntoSource = 0;
+	pastesInto.clear();
 	token = newStrokeId();
 	return held.length;
 }
@@ -102,11 +106,11 @@ export function pasteInk(intoPath: string, intoFontRefPx: number | null = null):
 		sourceFontRefPx !== null && intoFontRefPx !== null && sourceFontRefPx !== intoFontRefPx
 			? intoFontRefPx / sourceFontRefPx
 			: 1;
-	let dx = 0;
-	if (intoPath === sourcePath) {
-		pastesIntoSource++;
-		dx = PASTE_STAGGER_PX * pastesIntoSource;
-	}
+	const n = (pastesInto.get(intoPath) ?? 0) + 1;
+	pastesInto.set(intoPath, n);
+	// The source note steps the very first paste off the original; any other
+	// note lands its first paste where the ink was copied from.
+	const dx = PASTE_STAGGER_PX * (intoPath === sourcePath ? n : n - 1);
 	return held.map((s) => {
 		const c = clone(s);
 		c.id = newStrokeId();
@@ -130,6 +134,6 @@ export function clearInkClipboard(): void {
 	held = [];
 	sourcePath = null;
 	sourceFontRefPx = null;
-	pastesIntoSource = 0;
+	pastesInto.clear();
 	token = null;
 }

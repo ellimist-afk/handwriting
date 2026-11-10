@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { ChangeSet, Text } from "@codemirror/state";
-import { LineAnchors, MAX_LINE_CORRECTION, SHIFT_LOG_CAP, aboveOf, anchorHolds, changedSpanAbove, editorLineLayout, lineKey, mergeRanges, newAboveRun, takeAnchor, type LineLayout } from "./LineAnchor";
+import { LineAnchors, MAX_LINE_CORRECTION, SHIFT_LOG_CAP, aboveOf, anchorHolds, changedSpanAbove, editorLineLayout, lineKey, mergeRanges, newAboveRun, shiftedStroke, shownPointCounts, takeAnchor, type LineLayout } from "./LineAnchor";
 import { computeBBox, pieceAnchor, type InkStroke, type LineAnchor } from "../ink/Stroke";
 import { bumpInkRevision } from "../ink/StrokeRev";
 import { scaleStroke, translateStroke } from "../objects/Selection";
@@ -1033,5 +1033,47 @@ describe("line anchors: the correction bound is fixed, whatever the zoom", () =>
 		state.layout = layoutOf(before, [40, 1_000_040, 40, 40, 40, 40]);
 		anchors.layoutChanged(PATH, [s]);
 		expect(anchors.dyOf(s), "a top a million world units away is refused").toBe(0);
+	});
+});
+
+describe("shown copies build their points on first read", () => {
+	const stroke = (): InkStroke => {
+		const points = [{ x: 10, y: 20, pressure: 0.5, t: 0 }, { x: 30, y: 50, pressure: 0.6, t: 8 }, { x: 70, y: 40, pressure: 0.4, t: 16 }];
+		return { id: "lazy", tool: "pen", color: "#000", width: 2, points, bbox: computeBBox(points, 2), createdAt: 0 };
+	};
+	const xy = (s: InkStroke) => s.points.map((p) => [p.x, p.y]);
+
+	it("L1: moves the bbox at once, the points on the first read, and every later read gets the same array", () => {
+		const s = stroke(), built = shownPointCounts.built;
+		const c = shiftedStroke(s, 100, 5);
+		expect([c.bbox.x - s.bbox.x, c.bbox.y - s.bbox.y], "bbox moved at the copy").toEqual([5, 100]);
+		expect(shownPointCounts.built - built, "no points built before a read").toBe(0);
+		const first = c.points;
+		expect(xy(c), "points moved by (5, 100)").toEqual([[15, 120], [35, 150], [75, 140]]);
+		expect(c.points, "the same array on a later read").toBe(first);
+		expect(shownPointCounts.built - built, "built once").toBe(1);
+		expect(s.points.map((p) => p.y), "the source untouched").toEqual([20, 50, 40]);
+	});
+
+	it("L2: shows the points as they were at the copy when the source moved in place before the first read", () => {
+		const s = stroke(), recovered = shownPointCounts.recovered;
+		const c = shiftedStroke(s, 100);
+		translateStroke(s, 3, -40);
+		expect(xy(c), "the copy reads the source as it was, moved by 100").toEqual([[10, 120], [30, 150], [70, 140]]);
+		expect(shownPointCounts.recovered - recovered, "taken back through the source's move").toBe(1);
+	});
+
+	it("L3: shows the points as they were at the copy when the source was scaled in place before the first read", () => {
+		const s = stroke();
+		const c = shiftedStroke(s, 100, 1);
+		scaleStroke(s, 1.5);
+		const got = xy(c).map(([x, y]) => [Math.round(x! * 1e9) / 1e9, Math.round(y! * 1e9) / 1e9]);
+		expect(got, "the copy reads the source as it was, moved by (1, 100)").toEqual([[11, 120], [31, 150], [71, 140]]);
+	});
+
+	it("L4: keeps points written to the copy", () => {
+		const s = stroke(), c = shiftedStroke(s, 10), mine = [{ x: 1, y: 2, pressure: 0.5, t: 0 }];
+		c.points = mine;
+		expect(c.points).toBe(mine);
 	});
 });

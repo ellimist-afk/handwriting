@@ -51,6 +51,7 @@ import type {
 	MoreRowProbe,
 	PopBox,
 	ReadoutProbe,
+	SourceViewStripProbe,
 	StripGridProbe,
 } from "./stripPage";
 import type {
@@ -349,6 +350,30 @@ export async function openNoteZoomStrip(browser: Browser, opts: OpenOptions = {}
 				a => window.__hw.noteZoomVisibilityProbe((window as unknown as { __pane: HTMLElement }).__pane, a),
 				o,
 			),
+	};
+}
+
+/**
+ * Opens a page holding the real strip inside `div.markdown-source-view` in
+ * `div.view-content`, the pane Obsidian gives it, under the real stylesheet
+ * and any host sheets, and measures the pane's three direct children.
+ */
+export async function openSourceViewStrip(browser: Browser, opts: OpenOptions = {}): Promise<{
+	page: Page;
+	close(): Promise<void>;
+	probe(): Promise<SourceViewStripProbe>;
+}> {
+	const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+	await injectSheets(page, "source view strip", opts);
+	await page.addScriptTag({ content: await stripBundle() });
+	await page.evaluate(() => {
+		(window as unknown as { __pane: HTMLElement }).__pane = window.__hw.buildSourceViewStrip();
+	});
+	return {
+		page,
+		close: () => page.close(),
+		probe: () =>
+			page.evaluate(() => window.__hw.sourceViewStripProbe((window as unknown as { __pane: HTMLElement }).__pane)),
 	};
 }
 

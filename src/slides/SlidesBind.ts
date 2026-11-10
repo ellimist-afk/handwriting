@@ -395,6 +395,7 @@ declare module "./SlidesInkSurface" {
 		// and unconditionally: a mount that never happened leaves the override
 		// null already, and a `null` written over a `null` costs nothing.
 		setInkThemeOverride(null);
+		this.cancelFollow();
 		if (this.layers) {
 			this.layers.highlightGroup.remove();
 			this.layers.committed.remove();

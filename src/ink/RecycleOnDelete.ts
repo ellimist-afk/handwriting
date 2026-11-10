@@ -8,6 +8,7 @@ import { TFile, type TAbstractFile } from "obsidian";
 import { installMethods } from "../inline/InstallMethods";
 import { inlineInk } from "../inline/InkOverlay";
 import { isPdfInkId } from "../pdf/PdfIdentity";
+import { slidesNoteIdChanged } from "../slides/SlidesPersistence";
 import { runDetached } from "../util/Detached";
 import { isMarkdownPath, stripMarkdownExtension } from "../util/MarkdownPath";
 import type { HandwritingPlugin } from "../main";
@@ -58,7 +59,10 @@ export const RECYCLE_GRACE_MS = 10_000;
 			this.pageIds.claimOwnership(pageId, survivor);
 			this.ambiguousIds.delete(pageId);
 			inlineInk.clearDuplicateLock(survivor);
-			this.persistOwners();
+			slidesNoteIdChanged(survivor);
+			// Before the census the ledger holds only this session's claims;
+			// saving it then would drop every remembered original.
+			if (this.pageIdWatchReady) this.persistOwners();
 			return;
 		}
 		this.ambiguousIds.delete(pageId);

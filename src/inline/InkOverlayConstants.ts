@@ -4,7 +4,7 @@
  */
 import { EditorView } from "@codemirror/view";
 import { Platform } from "obsidian";
-import { pressureSensitivityEnabled } from "../ink/PenStyle";
+import { unmarkedInkPressure } from "../ink/PenStyle";
 import { inkThemeAdaptationEnabled, inkThemeOverride } from "../ink/InkTheme";
 import { inkShapingEnabled } from "../ink/InkShape";
 import { BandViewport, bandMarginMax } from "./ScrollBand";
@@ -105,13 +105,14 @@ export const EXTENT_RASTER_MAX_PX_DESKTOP = 20_000_000;
 export const EXTENT_RASTER_MAX_PX_MOBILE = 8_000_000;
 /**
  * The settings that change how a stroke paints without changing the stroke, as one number: the width law and smoothing
- * (InkShape), pressure, and the theme adaptation and its override. An extent raster drawn under one value is stale under another.
+ * (InkShape), the pressure an unmarked stroke draws under (the legacy key; a marked stroke carries its own, so the switch
+ * is not part of this), and the theme adaptation and its override. An extent raster drawn under one value is stale under another.
  * Live paint ignores the theme today (InkTheme.inkColorFor returns the stored colour on screen); the two theme bits keep the raster
  * honest if that ever changes, at no cost.
  */
 export function inkLookKey(): number {
 	const o = inkThemeOverride();
-	return (inkShapingEnabled() ? 1 : 0) | (pressureSensitivityEnabled() ? 2 : 0) | (inkThemeAdaptationEnabled() ? 4 : 0) | (o === null ? 0 : o ? 8 : 16);
+	return (inkShapingEnabled() ? 1 : 0) | (unmarkedInkPressure() ? 2 : 0) | (inkThemeAdaptationEnabled() ? 4 : 0) | (o === null ? 0 : o ? 8 : 16);
 }
 /** Whether an extent raster of w x h device px may be kept on this platform. */
 /** The longest a piece of the extent raster's build draws before it yields, in ms; one stroke may run past it (INBOX row 511). */
@@ -140,12 +141,22 @@ export const STAND_IN_MIN_FACTOR = 0.25;
  * held about a second; with it off, the layer is drawn by path, as before the stand-in.
  */
 export const ZOOM_STAND_IN_ENABLED: boolean = true;
-export function standInFactorFits(f: number): boolean {
-	return f >= STAND_IN_MIN_FACTOR - 1e-9;
+/**
+ * The largest scale a zoom stand-in is copied at when the new zoom is at or above 100 percent. There the stand-in is the committed
+ * layer scaled up, and past four times it is a blur rather than a picture, so the layer is drawn by path. Below 100 percent there is
+ * no ceiling.
+ */
+const STAND_IN_MAX_FACTOR_AT_100 = 4;
+export function standInFactorFits(f: number, atOrAbove100 = false): boolean {
+	return f >= STAND_IN_MIN_FACTOR - 1e-9 && (!atOrAbove100 || f <= STAND_IN_MAX_FACTOR_AT_100 + 1e-9);
+}
+/** The device px a build and a held stand-in may hold together (both layers of each). */
+export function extentPairCapPx(mobile: boolean = Platform.isMobile): number {
+	return EXTENT_PAIR_FACTOR * (mobile ? EXTENT_RASTER_MAX_PX_MOBILE : EXTENT_RASTER_MAX_PX_DESKTOP);
 }
 /** Whether a build of `buildPx` device px (both layers) may run beside a held stand-in of `heldPx`. */
 export function extentPairFits(buildPx: number, heldPx: number, mobile: boolean = Platform.isMobile): boolean {
-	return buildPx + heldPx <= EXTENT_PAIR_FACTOR * (mobile ? EXTENT_RASTER_MAX_PX_MOBILE : EXTENT_RASTER_MAX_PX_DESKTOP);
+	return buildPx + heldPx <= extentPairCapPx(mobile);
 }
 /**
  * THE OVERSCROLL BOUNCE. Where the settle of a zoom clamps a

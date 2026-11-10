@@ -30,6 +30,7 @@ const MOVED = [
 	"runExtentPiece",
 	"dropExtentBuild",
 	"usableExtent",
+	"extentHolds",
 	"extentToStandIn",
 	"takeStandIn",
 	"usableStandIn",

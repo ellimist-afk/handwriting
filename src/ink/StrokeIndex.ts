@@ -53,15 +53,22 @@ export class StrokeIndex {
 	 * what the index did for every stroke before it existed.
 	 */
 	private oversized: InkStroke[] = [];
+	/** Store depth of each stroke the last rebuild's list left out as pending, by its store stroke. */
+	private pending: ReadonlyMap<InkStroke, number> | null = null;
 
-	rebuild(strokes: readonly InkStroke[]): void {
+	/**
+	 * `depths`, when given, is each stroke's place in the store (the list may leave pending strokes out); `pending` the
+	 * store depth of each stroke left out, so a first read goes in at the depth a rebuild after it would give.
+	 */
+	rebuild(strokes: readonly InkStroke[], depths?: readonly number[] | null, pending?: ReadonlyMap<InkStroke, number> | null): void {
 		this.buckets.clear();
 		this.zOf.clear();
 		this.oversized = [];
 		this.all = strokes;
+		this.pending = pending ?? null;
 		for (let z = 0; z < strokes.length; z++) {
 			const s = strokes[z]!;
-			this.zOf.set(s, z);
+			this.zOf.set(s, depths ? depths[z]! : z);
 			const b = s.bbox;
 			const x0 = Math.floor(b.x / BUCKET_WORLD);
 			const y0 = Math.floor(b.y / BUCKET_WORLD);
@@ -138,7 +145,81 @@ export class StrokeIndex {
 		// ?? 0 matches query's own fallback for a stroke with no recorded
 		// depth; in practice the original was indexed or the caller would
 		// have rebuilt first.
-		this.zOf.set(s, this.zOf.get(original) ?? 0);
+		this.insertAt(s, this.zOf.get(original) ?? 0);
+	}
+
+	/**
+	 * A stroke shown at a new place (a group's correction moved): `now` takes `old`'s place and paint depth.
+	 * When both boxes span the same cells, each bucket's entry is swapped in place; otherwise as remove then insertLike.
+	 */
+	replaceMoved(old: InkStroke, now: InkStroke): void {
+		const a = cellSpan(old.bbox), b = cellSpan(now.bbox);
+		if (!a || !b || a.x0 !== b.x0 || a.y0 !== b.y0 || a.x1 !== b.x1 || a.y1 !== b.y1) {
+			this.remove(old);
+			this.insertLike(now, old);
+			return;
+		}
+		this.zOf.set(now, this.zOf.get(old) ?? 0);
+		for (let by = a.y0; by <= a.y1; by++) {
+			for (let bx = a.x0; bx <= a.x1; bx++) {
+				const key = `${bx},${by}`;
+				const list = this.buckets.get(key);
+				const at = list ? list.indexOf(old) : -1;
+				if (at >= 0) list![at] = now;
+				else if (list) list.push(now);
+				else this.buckets.set(key, [now]);
+			}
+		}
+	}
+
+	/**
+	 * A stroke the index holds, moved in place from box `was` (a group's shown copy at its new correction):
+	 * its bbox is already the new one. The same object keeps its depth; its buckets change only where its cell span did, so
+	 * a move inside its cells costs no bucket edit. False, nothing changed, when the index does not hold it.
+	 */
+	moveInPlace(s: InkStroke, was: BBox): boolean {
+		if (!this.zOf.has(s)) return false;
+		const a = cellSpan(was), n = cellSpan(s.bbox);
+		if (a && n && a.x0 === n.x0 && a.y0 === n.y0 && a.x1 === n.x1 && a.y1 === n.y1) return true;
+		if (!a) {
+			const at = this.oversized.indexOf(s);
+			if (at >= 0) this.oversized.splice(at, 1);
+		} else {
+			for (let by = a.y0; by <= a.y1; by++) {
+				for (let bx = a.x0; bx <= a.x1; bx++) {
+					const key = `${bx},${by}`;
+					const list = this.buckets.get(key);
+					if (!list) continue;
+					const at = list.indexOf(s);
+					if (at >= 0) list.splice(at, 1);
+					if (list.length === 0) this.buckets.delete(key);
+				}
+			}
+		}
+		this.insertAt(s, this.zOf.get(s)!);
+		return true;
+	}
+
+	/** Whether the index knows a depth for `s`: replaceMoved then puts a stroke in its place. */
+	holds(s: InkStroke): boolean {
+		return this.zOf.has(s);
+	}
+
+	/**
+	 * A group member read for the first time: `s` goes in at
+	 * the store depth of `stored`, the store stroke the last rebuild left out
+	 * as pending, or at its depth when it was indexed. False, and nothing
+	 * inserted, when the index knows no depth for it: the caller rebuilds.
+	 */
+	insertFirst(s: InkStroke, stored: InkStroke): boolean {
+		const z = this.zOf.get(stored) ?? this.pending?.get(stored);
+		if (z === undefined) return false;
+		this.insertAt(s, z);
+		return true;
+	}
+
+	private insertAt(s: InkStroke, z: number): void {
+		this.zOf.set(s, z);
 		const span = cellSpan(s.bbox);
 		if (!span) {
 			this.oversized.push(s);
@@ -216,6 +297,16 @@ export class StrokeIndex {
 		out.sort((a, b) => (this.zOf.get(a) ?? 0) - (this.zOf.get(b) ?? 0));
 		return out;
 	}
+}
+
+/**
+ * The strokes of `strokes` whose bbox intersects the world rect, in list order: one bbox test per stroke, no index. The
+ * cull of a moving paint while the index is dirty, so the rebuild waits for the still paint or idle.
+ */
+export function strokesIn(strokes: readonly InkStroke[], rect: BBox): InkStroke[] {
+	const out: InkStroke[] = [];
+	for (const s of strokes) if (hits(s.bbox, rect)) out.push(s);
+	return out;
 }
 
 /**

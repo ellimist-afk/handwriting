@@ -28,6 +28,7 @@ const MOVED = [
 	"applyRuntimeSettings",
 	"onExternalSettingsChange",
 	"inkShapingKey",
+	"setPressureSwitch",
 	"takeMergedSettings",
 	"refreshSettingSurfaces",
 	"mergeSettings",

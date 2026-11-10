@@ -16,6 +16,7 @@
  * Everything here is pure or takes its filesystem as an argument, so the
  * rules that protect the files are testable without a vault.
  */
+import { isSyncToolCopyName } from "./SyncToolCopies";
 
 export const DEFAULT_INK_FOLDER = ".handwriting";
 
@@ -107,6 +108,9 @@ export async function adoptInkFolder(
  * and `<id>.damaged-<mtime>` (PageStore.ts freeConflictPath, freeDamagedPath)
  * are the residue of an accident, one of them being the residue of the very
  * fork this release closes; a folder holding only residue holds no pages.
+ * A sync tool's conflict copy (`SyncToolCopies.ts`) is residue the same way:
+ * the fork scan lists it against its live page, and nothing counts it as one.
+ * Any name holding `.sync-conflict-` is Syncthing's, whatever follows it.
  * `.json.tmp` fails the suffix test and is excluded with them.
  *
  * Separate from `isSidecarFile`, which answers a different question - "is this
@@ -120,7 +124,9 @@ export function isLiveSidecarName(name: string): boolean {
 		!name.includes(".conflict-") &&
 		!name.includes(".damaged-") &&
 		!name.includes(".superseded-") &&
-		!name.includes(".flush-conflict-")
+		!name.includes(".flush-conflict-") &&
+		!name.includes(".sync-conflict-") &&
+		!isSyncToolCopyName(name)
 	);
 }
 

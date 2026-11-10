@@ -12,9 +12,11 @@ import type { InkStroke } from "../ink/Stroke";
 import { calibrationStrokes } from "./PdfCalibration";
 import { readPdfHead, type HeadSource, type RangedHandle } from "./PdfHead";
 import { chooseInstance, familyOf, pdfInkIdFromHead, type InstanceClaim } from "./PdfIdentity";
+import { setViewTurnSource } from "./PdfInkBand";
 import { PdfInkController } from "./PdfInkController";
 import { applyOp } from "./PdfInkHistory";
 import type { PdfDeleteContext } from "./PdfInkStore";
+import { readViewTurn } from "./PdfViewerProbe";
 import { runDetached } from "../util/Detached";
 import type { HandwritingPlugin } from "../main";
 
@@ -24,7 +26,8 @@ declare module "../main" {
 		releasePdfId(id: string): void;
 		schedulePdfModified(path: string, panes?: ReadonlySet<HTMLElement>): void;
 		onPdfModified(path: string, panes?: ReadonlySet<HTMLElement> | null): Promise<void>;
-		resolvePdfId(leaf: WorkspaceLeaf, root: HTMLElement, controller: PdfInkController): Promise<void>;
+		resolvePdfId(leaf: WorkspaceLeaf, root: HTMLElement, controller: PdfInkController, carryOld?: boolean): Promise<void>;
+		carryFromOldContent(family: string, path: string, now: string, current: () => boolean): Promise<boolean>;
 		pdfHeadSource(file: TFile): HeadSource;
 		movePdfClaimOnRename(file: TFile, oldPath: string): Promise<void>;
 		pdfIdForPath(path: string): string | null;
@@ -45,6 +48,9 @@ const PDF_PENDING_DELETES_KEY = "handwriting-pdf-pending-deletes";
  * between writes reads a document that never existed.
  */
 const PDF_MODIFY_SETTLE_MS = 1_000;
+const CARRIED_NOTICE = "Handwriting: this PDF changed on disk. Your ink was carried over to its new version.";
+/** Per plugin, per new ink id: the ids of every stroke carried into it from an older version (carryInk). */
+const carriedInto = new WeakMap<HandwritingPlugin, Map<string, Set<string>>>();
 
 /** The slice of node's `fs` this needs, typed locally to avoid node typings. */
 interface NodeFileHandle {
@@ -288,6 +294,8 @@ async function openRangedFile(fullPath: string): Promise<RangedHandle> {
 					return id !== undefined && this.pdfStore.inkReady(id);
 				}
 			);
+			// The viewer's page turn, read off the leaf live at every paint.
+			setViewTurnSource(controller, () => readViewTurn(leaf.view, root));
 			controller.mount();
 			this.pdfInk.set(root, controller);
 			runDetached(this.resolvePdfId(leaf, root, controller), "identify a pdf for ink", () =>
@@ -388,7 +396,7 @@ async function openRangedFile(fullPath: string): Promise<RangedHandle> {
 			if (was) this.releasePdfId(was);
 			controller.forgetHistory();
 			resolutions.push(
-				this.resolvePdfId(leaf, root, controller).catch(() => {
+				this.resolvePdfId(leaf, root, controller, false).catch(() => {
 					new Notice("Handwriting: could not identify this PDF - ink is disabled for it. Reopening the file retries.");
 				})
 			);
@@ -396,23 +404,89 @@ async function openRangedFile(fullPath: string): Promise<RangedHandle> {
 		if (held.size > 0) this.schedulePdfModified(path, held);
 		await Promise.all(resolutions);
 		// New content means a new ink file (PdfIdentity). The ink drawn before the change is copied into it when
-		// the new file is fresh and the old record was sound, so the page keeps its ink; the copy is the same
-		// stroke objects, so saved ink looks exactly as it did. The old record and its file are never written.
-		// A locked old record, or a new file that already has ink, keeps the old ink where it is. Said once per
-		// file, not once per pane. No id means the resolution failed and has said so already.
-		let changed = false, carried = false;
+		// the old record was sound, so the page keeps its ink; the copy is the same stroke objects, so saved ink
+		// looks exactly as it did. The old record and its file are never written. A pane busy during the change
+		// is identified later, after another pane already carried the ink: its copy adds only the strokes drawn
+		// since, by id (carryInk). A new file that already has ink of its own, and was not filled by a carry this
+		// session (the bytes went back to a version that has its own ink file), keeps the old ink where it is,
+		// as does a locked old record. Said once per file, not once per pane. No id means the resolution failed
+		// and has said so already.
+		let kept = false, carried = false;
 		for (const { root, was, strokes, sound } of inked) {
 			const now = this.pdfIds.get(root);
 			if (now === undefined || now === was) continue;
-			changed = true;
-			if (sound && this.pdfStore.inkReady(now) && !this.pdfStore.hasInk(now)) {
-				this.pdfStore.replaceAll(now, strokes);
-				for (const [pane, id] of this.pdfIds) if (id === now) this.pdfInk.get(pane)?.refresh();
-				carried = true;
-			}
+			const carryTarget = !this.pdfStore.hasInk(now) || carriedInto.get(this)?.has(now) === true;
+			if (sound && this.pdfStore.inkReady(now) && carryTarget) carried = carryInk(this, now, strokes) || carried;
+			else kept = true;
 		}
-		if (carried) new Notice("Handwriting: this PDF changed on disk. Your ink was carried over to its new version.");
-		else if (changed) new Notice("Handwriting: this PDF changed on disk. Ink drawn before the change is kept in its old ink file; new ink goes to a new one.");
+		if (carried) new Notice(CARRIED_NOTICE);
+		else if (kept) new Notice("Handwriting: this PDF changed on disk. Ink drawn before the change is kept in its old ink file; new ink goes to a new one.");
+	}
+
+	/**
+	 * Copy the ink an older version of a PDF holds into its new ink file, adding
+	 * only the strokes the new file does not have and has not been given before.
+	 * The second half is the ledger: a stroke carried once and then erased in
+	 * the new file stays erased when a later copy from the same old file (a
+	 * pane that was busy during the change) arrives. True when anything was
+	 * added. The strokes are the old record's own objects, written unchanged.
+	 */
+	function carryInk(plugin: HandwritingPlugin, now: string, strokes: readonly InkStroke[]): boolean {
+		let ledger = carriedInto.get(plugin);
+		if (!ledger) carriedInto.set(plugin, (ledger = new Map<string, Set<string>>()));
+		let given = ledger.get(now);
+		if (!given) ledger.set(now, (given = new Set()));
+		const present = new Set(plugin.pdfStore.strokes(now).map((s) => s.id));
+		const added = strokes.filter((s) => !present.has(s.id) && !given.has(s.id));
+		for (const s of strokes) given.add(s.id);
+		if (added.length === 0) return false;
+		plugin.pdfStore.replaceAll(now, [...plugin.pdfStore.strokes(now), ...added]);
+		for (const [pane, id] of plugin.pdfIds) if (id === now) plugin.pdfInk.get(pane)?.refresh();
+		return true;
+	}
+
+	/**
+	 * A PDF opened under a fresh ink id whose path an older version's ink file
+	 * still claims: its bytes changed while no pane showed it (another program,
+	 * a sync, or while Obsidian was closed), so onPdfModified had no pane to
+	 * carry the ink for. The claimant is found here, among the other content
+	 * families' ink files, and its ink is carried the same way. Each past change
+	 * leaves its old file claiming the path, so the newest file decides, even
+	 * when it holds no ink; a tie goes to the larger stroke count, then the id.
+	 * The old file is loaded to read it and released, never written.
+	 *
+	 * Cost: one listing of the ink folders and one stat per other PDF ink file
+	 * on each fresh open; a file is read and parsed only the first time this
+	 * session, or again once it changed on disk (PageStore.readPdfClaim). No
+	 * other family, no stat.
+	 */
+	async function carryFromOldContent(this: HandwritingPlugin, family: string, path: string, now: string,
+		current: () => boolean): Promise<boolean> {
+		const others = (await this.store.listIds("pdf-")).filter((id) => familyOf(id) !== family);
+		if (others.length === 0) return false;
+		const claimants: { id: string; mtime: number }[] = [];
+		for (const id of others) {
+			const claim = await this.store.readPdfClaim(id);
+			if (!claim?.paths?.includes(path)) continue;
+			claimants.push({ id, mtime: claim.mtime });
+		}
+		if (!current() || claimants.length === 0) return false;
+		const newest = Math.max(...claimants.map((c) => c.mtime));
+		const tied = claimants.filter((c) => c.mtime === newest).map((c) => c.id);
+		const loaded: string[] = [];
+		try {
+			for (const id of tied) {
+				await this.pdfStore.ensureLoaded(id);
+				loaded.push(id);
+				if (!current()) return false;
+			}
+			if (!tied.every((id) => this.pdfStore.inkReady(id))) return false;
+			const from = [...tied].sort((a, b) =>
+				this.pdfStore.strokes(b).length - this.pdfStore.strokes(a).length || (a < b ? -1 : a > b ? 1 : 0))[0]!;
+			return carryInk(this, now, this.pdfStore.strokes(from));
+		} finally {
+			for (const id of loaded) this.releasePdfId(id);
+		}
 	}
 
 	/**
@@ -427,7 +501,8 @@ async function openRangedFile(fullPath: string): Promise<RangedHandle> {
 	async function resolvePdfId(this: HandwritingPlugin,
 		leaf: WorkspaceLeaf,
 		root: HTMLElement,
-		controller: PdfInkController
+		controller: PdfInkController,
+		carryOld = true
 	): Promise<void> {
 		const file = (leaf.view as unknown as { file?: TFile }).file;
 		if (!file) return;
@@ -541,6 +616,12 @@ async function openRangedFile(fullPath: string): Promise<RangedHandle> {
 		// moves here.
 		if (file.path !== started) this.pdfStore.renamePath(choice.id, started, file.path);
 		else this.pdfStore.claimPath(choice.id, file.path);
+		// onPdfModified carries for the panes it identifies again; this is the open of a file that changed
+		// while no pane showed it.
+		if (carryOld && choice.action === "fresh" && this.pdfStore.inkReady(choice.id) && !this.pdfStore.hasInk(choice.id)) {
+			if (await this.carryFromOldContent(family, file.path, choice.id, current)) new Notice(CARRIED_NOTICE);
+			if (!current()) return;
+		}
 		controller.refresh();
 		// canPasteInk flips the moment documentId() stops being null, but
 		// nothing repaints the strip for it: refresh() above only repaints
@@ -726,6 +807,7 @@ export function installPdfClaims(proto: HandwritingPlugin): void {
 		schedulePdfModified,
 		onPdfModified,
 		resolvePdfId,
+		carryFromOldContent,
 		pdfHeadSource,
 		movePdfClaimOnRename,
 		pdfIdForPath,

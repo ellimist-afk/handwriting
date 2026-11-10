@@ -537,8 +537,20 @@ const SELECTION_GRAB_PAD_PX = 8;
 			);
 			return;
 		}
-		this.emit({ type: "add", path: id, strokes: pasted });
+		const added = this.emit({ type: "add", path: id, strokes: pasted });
+		// The pasted ink is what is selected now, as after a paste in a note: the old selection would leave the
+		// originals marked, so a Delete or a drag straight after took them instead of the copies. Ink pasted across
+		// more than one page has no single page to hold a selection, so nothing stays selected then.
+		this.clearSelection();
+		const pages = new Set(pasted.map((st) => st.page!));
+		if (added && pages.size === 1) {
+			this.selected = pasted.map((st) => st.id);
+			this.selectionPage = pasted[0]!.page!;
+		}
+		this.refreshStrip();
 		this.refresh();
+		const box = this.selected.length > 0 ? this.frameBox(this.selectionPage) : null;
+		if (box) this.drawLasso(box);
 		const n = pasted.length;
 		this.notify(n === 1 ? "Handwriting: pasted 1 stroke" : `Handwriting: pasted ${n} strokes`);
 	}

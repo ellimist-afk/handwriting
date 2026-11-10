@@ -4,10 +4,12 @@
  */
 import { InkStroke } from "../ink/Stroke";
 import { translateStroke } from "../objects/Selection";
-import { bumpInkRevision } from "../ink/StrokeRev";
+import { bumpInkListRevision, bumpInkRevision, bumpStrokeRev } from "../ink/StrokeRev";
 import { notifyInkChanged } from "./InkEvents";
 import { installMethods } from "./InstallMethods";
 import type { NoteRecord, InlineInkStore } from "./InlineInkStore";
+import { replaceMembers } from "./InkAttachments";
+import type { StrokeShape } from "./LassoTransform";
 
 declare module "./InlineInkStore" {
 	interface InlineInkStore {
@@ -15,7 +17,7 @@ declare module "./InlineInkStore" {
 		commitGesture(path: string, strokes: readonly InkStroke[]): void;
 		applyAdd(path: string, strokes: readonly InkStroke[], indices?: readonly number[], neighbours?: { next?: readonly (string | null)[]; prev?: readonly (string | null)[] }): void;
 		applyAddLive(path: string, strokes: readonly InkStroke[], indices?: readonly number[]): void;
-		reinsertLive(path: string, groups: ReadonlyArray<{ readonly index: number; readonly pieces: readonly InkStroke[] }>): void;
+		reinsertLive(path: string, groups: ReadonlyArray<{ readonly index: number; readonly pieces: readonly InkStroke[]; readonly parent?: string; readonly fresh?: boolean }>): void;
 		insert(rec: NoteRecord, strokes: readonly InkStroke[], indices?: readonly number[], neighbours?: { next?: readonly (string | null)[]; prev?: readonly (string | null)[] }): void;
 		applyRemove(path: string, ids: readonly string[]): Array<{ stroke: InkStroke; index: number }>;
 		takeLive(path: string, ids: readonly string[]): Array<{ stroke: InkStroke; index: number }>;
@@ -24,6 +26,7 @@ declare module "./InlineInkStore" {
 		recordIds(path: string): string[];
 		take(path: string, ids: readonly string[]): Array<{ stroke: InkStroke; index: number }>;
 		moveStrokes(path: string, ids: readonly string[], dx: number, dy: number): void;
+		rewriteStrokes(path: string, edits: ReadonlyArray<{ readonly id: string; readonly shape: StrokeShape }>): void;
 	}
 }
 
@@ -46,6 +49,7 @@ declare module "./InlineInkStore" {
 			rec.localStrokeIds.add(stroke.id);
 		}
 		bumpInkRevision();
+		bumpInkListRevision();
 		rec.mutationGeneration++;
 		this.persist(path, rec);
 		// Once per pen gesture: the most common mutation of all was the one
@@ -107,10 +111,16 @@ declare module "./InlineInkStore" {
 	 * `groups` holds one entry for every stroke `takeLive` returned, with
 	 * empty `pieces` for a stroke the eraser took whole: the shift counts
 	 * entries as strokes taken, so a missing entry moves the rest too far.
+	 *
+	 * `parent`, the id of the stroke an entry's pieces were cut from: they
+	 * join its attached groups. An original stays listed while
+	 * erased, so the erase's undo and redo change no record; a parent that
+	 * is itself a piece of this session leaves when its pieces join. No
+	 * write: the pen-up save carries the list.
 	 */
 	function reinsertLive(this: InlineInkStore,
 		path: string,
-		groups: ReadonlyArray<{ readonly index: number; readonly pieces: readonly InkStroke[] }>
+		groups: ReadonlyArray<{ readonly index: number; readonly pieces: readonly InkStroke[]; readonly parent?: string; readonly fresh?: boolean }>
 	): void {
 		const sorted = [...groups].sort((a, b) => a.index - b.index);
 		const strokes: InkStroke[] = [];
@@ -124,6 +134,20 @@ declare module "./InlineInkStore" {
 			placed += group.pieces.length;
 		});
 		if (strokes.length > 0) this.insert(this.record(path), strokes, at);
+		const list = this.attachments(path);
+		if (list.length === 0) return;
+		// A parent stays listed beside its pieces: an undo of the gesture puts it back as a member. Only a piece the same
+		// gesture made (`fresh`) leaves for its own pieces, so a long drag lists no intermediate piece; a piece an earlier
+		// gesture made is in that gesture's history step and stays.
+		const family = new Map<string, string[]>();
+		for (const g of groups) {
+			if (g.parent === undefined || (g.pieces.length === 1 && g.pieces[0]!.id === g.parent)) continue;
+			const ids = g.pieces.map((p) => p.id);
+			family.set(g.parent, g.fresh ? ids : [g.parent, ...ids]);
+		}
+		if (family.size === 0) return;
+		const next = replaceMembers(list, family);
+		if (next.some((a, i) => a !== list[i])) this.setAttachments(path, next, false);
 	}
 
 	function insert(this: InlineInkStore,
@@ -182,6 +206,7 @@ declare module "./InlineInkStore" {
 		// without the page changing would refuse adoptions for no reason.
 		if (insertions.length > 0) {
 			bumpInkRevision();
+			bumpInkListRevision();
 			rec.mutationGeneration++;
 		}
 	}
@@ -268,6 +293,7 @@ declare module "./InlineInkStore" {
 		}
 		if (removed.length > 0) {
 			bumpInkRevision();
+			bumpInkListRevision();
 			rec.mutationGeneration++;
 		}
 		removed.reverse(); // ascending original indices
@@ -293,6 +319,35 @@ declare module "./InlineInkStore" {
 		if (moved > 0) rec.mutationGeneration++;
 	}
 
+	/**
+	 * Give exactly the listed strokes a new shape in place: points, width, bbox and the line anchor's y, each a copy of the shape's, so
+	 * the shape the history keeps never becomes the live stroke's. The lasso's resize and rotate lands here, and its undo and redo
+	 * put back the before and after copies. Like moveStrokes, the objects and ids stay, which the history, the other panes and
+	 * the ribbon cache (by stroke rev) depend on; the ids go local and the generation moves, so a reference-holding snapshot and
+	 * the sync guard see the change. Missing ids are skipped.
+	 */
+	function rewriteStrokes(this: InlineInkStore, path: string, edits: ReadonlyArray<{ readonly id: string; readonly shape: StrokeShape }>): void {
+		if (edits.length === 0) return;
+		const rec = this.record(path);
+		const byId = new Map(edits.map((e) => [e.id, e.shape]));
+		let changed = 0;
+		for (const s of rec.strokes) {
+			const shape = byId.get(s.id);
+			if (!shape) continue;
+			s.points = shape.points.map((p) => ({ ...p }));
+			s.width = shape.width;
+			s.bbox = { ...shape.bbox };
+			// The line the stroke rides stays the live one, as a move's does (translatedAnchor): text typed since the copy was
+			// taken, here or in another pane, has moved that line, and the copy's would put the ink back off it. Only y follows the shape.
+			if (shape.lineAnchor) s.lineAnchor = s.lineAnchor ? { ...s.lineAnchor, y: shape.lineAnchor.y } : { ...shape.lineAnchor };
+			else delete s.lineAnchor;
+			bumpStrokeRev(s);
+			rec.localStrokeIds.add(s.id);
+			changed++;
+		}
+		if (changed > 0) rec.mutationGeneration++;
+	}
+
 export function installInlineInkStoreCommit(proto: InlineInkStore): void {
 	installMethods(proto, {
 		commit,
@@ -308,5 +363,6 @@ export function installInlineInkStoreCommit(proto: InlineInkStore): void {
 		recordIds,
 		take,
 		moveStrokes,
+		rewriteStrokes,
 	});
 }

@@ -678,6 +678,120 @@ window.bounce = {
 		return { cycles: out, atRest: past(), allowance };
 	},
 	/**
+	 * A TWO-FINGER DRAG ON A SCROLLED NOTE. Infinite Canvas on. The note is scrolled to (sl, st) first, then two fingers
+	 * 300 px apart (spread 12 px for one frame to engage, as the ratchet does) drag (dx, dy) client px over steps frames,
+	 * optionally after zooming to zoomTo in the same gesture and holding the spread still for hold frames. Every frame
+	 * reads the page's painted position (the content's client rect, which carries the scroll, the pan and the spring) against
+	 * the fingers' own travel since the drag began, plus the drag band's readout. After the lift the same read runs until
+	 * the spring is done. rll turns Readable line length on first; past() is the ratchet's measure taken against the live
+	 * scroll: painted px past the page's own origin edge.
+	 */
+	async dragScrolled(o) {
+		const { view, overlay, pane } = rig, router = overlay.router, sd = view.scrollDOM;
+		setPenInk(false);
+		if (o.rll) { pane.classList.add("is-readable-line-width"); view.requestMeasure(); }
+		await settle(8);
+		sd.scrollLeft = o.sl; sd.scrollTop = o.st; view.requestMeasure();
+		await settle(8);
+		await new Promise(res => setTimeout(res, 1200));
+		await settle(4);
+		const scrolled = { left: sd.scrollLeft, top: sd.scrollTop, rangeX: sd.scrollWidth - sd.clientWidth, rangeY: sd.scrollHeight - sd.clientHeight,
+			columnW: +(view.contentDOM.firstElementChild || view.contentDOM).getBoundingClientRect().width.toFixed(2), paneW: sd.clientWidth };
+		const box = sd.getBoundingClientRect(), x0 = box.left + box.width / 2, y0 = box.top + box.height / 2;
+		const ev = type => new PointerEvent(type, { pointerId: 912, pointerType: "touch" });
+		let fx = x0, fy = y0;
+		const put = (x, y, w) => { const h = (w || 300) / 2; fx = x; fy = y; router.touchPos.set(911, { x: x - h, y }); router.touchPos.set(912, { x: x + h, y }); };
+		const allowance = router.cb.overscrollAllowancePx();
+		const at = () => { const r = view.contentDOM.getBoundingClientRect(); return { x: r.left, y: r.top }; };
+		const past = () => {
+			const p = overlay.viewportPan, b = overlay.overscrollBounceReadout(), rest = overlay.boundReadout.restCeilX || 0;
+			const e = overlay.pinchScaleNow * (overlay.viewportLayout ? overlay.viewportLayout.externalScale : 1);
+			return { x: +((p.x + b.x) - rest - sd.scrollLeft * e).toFixed(3), y: +((p.y + b.y) - sd.scrollTop * e).toFixed(3) };
+		};
+		const band = () => { const q = overlay.boundReadout; return { rawX: +(+q.rawX).toFixed(2), cx: +(+q.cx).toFixed(2), rawY: +(+q.rawY).toFixed(2), cy: +(+q.cy).toFixed(2), drag: !!q.dragFrame }; };
+		put(x0, y0); router.beginPinch(ev("pointerdown"));
+		put(x0, y0, 312); router.updatePinch(ev("pointermove")); await rendered();
+		put(x0, y0); router.updatePinch(ev("pointermove")); await rendered();
+		const zoom = [];
+		if (o.zoomTo) {
+			const n = 20;
+			for (let i = 1; i <= n; i++) { put(x0, y0, 300 * (1 + (o.zoomTo - 1) * i / n)); router.updatePinch(ev("pointermove")); await rendered(); zoom.push({ k: overlay.pinchScaleNow, ...band() }); }
+			for (let i = 0; i < (o.hold || 0); i++) { put(x0, y0, 300 * o.zoomTo); router.updatePinch(ev("pointermove")); await rendered(); zoom.push({ k: overlay.pinchScaleNow, ...band() }); }
+		}
+		const spread = 300 * (o.zoomTo || 1);
+		const p0 = at(), f0 = { x: fx, y: fy }, start = { past: past(), scrollLeft: sd.scrollLeft, scrollTop: sd.scrollTop, k: overlay.pinchScaleNow };
+		const rows = [];
+		for (let i = 1; i <= o.steps; i++) {
+			put(f0.x + o.dx * i / o.steps, f0.y + o.dy * i / o.steps, spread); router.updatePinch(ev("pointermove")); await rendered();
+			const p = at();
+			rows.push({ i, fingerX: +(fx - f0.x).toFixed(2), fingerY: +(fy - f0.y).toFixed(2), pageX: +(p.x - p0.x).toFixed(2), pageY: +(p.y - p0.y).toFixed(2),
+				past: past(), k: overlay.pinchScaleNow, scrollLeft: sd.scrollLeft, scrollTop: sd.scrollTop, ...band() });
+		}
+		router.endPinch(ev("pointerup"), { x: fx, y: fy }); router.touchPos.clear();
+		const after = [];
+		for (let j = 1; j <= 90; j++) {
+			await rendered();
+			const p = at(), b = overlay.overscrollBounceReadout();
+			after.push({ j, pageX: +(p.x - p0.x).toFixed(2), pageY: +(p.y - p0.y).toFixed(2), past: past(), active: !!b.active, preview: !!overlay.pinchPreview,
+				scrollLeft: sd.scrollLeft, scrollTop: sd.scrollTop, k: overlay.pinchScaleNow });
+			if (j > 8 && !b.active && !overlay.pinchPreview) break;
+		}
+		await settle(4);
+		const p = at();
+		const rest = { pageX: +(p.x - p0.x).toFixed(2), pageY: +(p.y - p0.y).toFixed(2), past: past(), scrollLeft: sd.scrollLeft, scrollTop: sd.scrollTop, k: overlay.pinchScaleNow };
+		return { scrolled, allowance, zoom, start, rows, after, rest };
+	},
+	/**
+	 * THE TWO-FINGER RATCHET ON A SCROLLED NOTE: the ratchet above with the note scrolled to (sl, st) first, every read of
+	 * how far past the bound the page stands taken against the LIVE scroll (the page's own origin edge), and the first
+	 * drag long enough to cross that edge by more than the allowance.
+	 */
+	async pinchRatchetScrolled(cycles, sl, st) {
+		const { view, overlay } = rig, router = overlay.router, sd = view.scrollDOM;
+		setPenInk(false);
+		await settle(8);
+		sd.scrollLeft = sl; sd.scrollTop = st; view.requestMeasure();
+		await settle(8);
+		await new Promise(res => setTimeout(res, 1200));
+		await settle(4);
+		const scrolled = { left: sd.scrollLeft, top: sd.scrollTop };
+		const box = sd.getBoundingClientRect(), x0 = box.left + box.width / 2, y0 = box.top + box.height / 2;
+		const ev = type => new PointerEvent(type, { pointerId: 912, pointerType: "touch" });
+		const put = (x, y, w) => { const h = (w || 300) / 2; router.touchPos.set(911, { x: x - h, y }); router.touchPos.set(912, { x: x + h, y }); };
+		const allowance = router.cb.overscrollAllowancePx();
+		const past = () => {
+			const p = overlay.viewportPan, b = overlay.overscrollBounceReadout(), rest = overlay.boundReadout.restCeilX || 0;
+			return { x: +((p.x + b.x) - rest - sd.scrollLeft).toFixed(3), y: +((p.y + b.y) - sd.scrollTop).toFixed(3) };
+		};
+		const steps = 12;
+		const out = [];
+		for (let n = 0; n < cycles; n++) {
+			const atLand = past(), at = { scrollLeft: sd.scrollLeft, scrollTop: sd.scrollTop };
+			// Long enough to cross the live edge by three allowances, whatever scroll this grab starts on.
+			const travelX = sd.scrollLeft + 3 * allowance, travelY = sd.scrollTop + 3 * allowance;
+			put(x0, y0); router.beginPinch(ev("pointerdown"));
+			put(x0, y0, 312); router.updatePinch(ev("pointermove")); await rendered();
+			put(x0 + 2, y0 + 2); router.updatePinch(ev("pointermove")); await rendered();
+			const engaged = past();
+			for (let i = 1; i <= steps; i++) { put(x0 + 2 + travelX * i / steps, y0 + 2 + travelY * i / steps); router.updatePinch(ev("pointermove")); await rendered(); }
+			const held = past(), drag = !!overlay.boundReadout.dragFrame, scale = overlay.pinchScaleNow;
+			router.endPinch(ev("pointerup"), { x: x0 + 2 + travelX, y: y0 + 2 + travelY }); router.touchPos.clear();
+			let regrab = null;
+			for (let j = 0; j < 40; j++) {
+				await rendered();
+				const b = overlay.overscrollBounceReadout();
+				const owed = Math.hypot(b.x, b.y), from = Math.hypot(b.fromX, b.fromY);
+				if (b.active && from > 0 && owed >= 0.5 * from) { regrab = { frame: j, owed: +owed.toFixed(2), from: +from.toFixed(2) }; break; }
+				if (!b.active && j > 2) break;
+			}
+			out.push({ at, atLand, engaged, held, drag, scale, regrab });
+			if (!regrab) break;
+		}
+		for (let j = 0; j < 120; j++) { await rendered(); if (!overlay.overscrollBounceReadout().active) break; }
+		await settle(4);
+		return { scrolled, cycles: out, atRest: past(), allowance, final: { scrollLeft: sd.scrollLeft, scrollTop: sd.scrollTop } };
+	},
+	/**
 	 * A FLICK INTO AN END (Alan, device, 2026-09-20: "it takes too long for the bounce to happen, when i
 	 * scroll left multiple times, especially if i do with momentum, it will hang for a bit too long").
 	 * One finger flicked LEFT on a note with no sideways range, from the middle of a tall note so the
@@ -882,6 +996,7 @@ const record: unknown[] = [];
 const CHOKE = "\t\tconst el = this.previewPaperEl;\n\t\tif (!el) return;\n\t\tthis.previewPaperEl = null;";
 const bypass = (reason: string) => `\t\tconst el = this.previewPaperEl;\n\t\tif (!el || reason === "${reason}") return;\n\t\tthis.previewPaperEl = null;`;
 const PINCH = /src[\\/]inline[\\/]InkOverlayPinch\.ts$/, MARGIN = /src[\\/]inline[\\/]InkOverlayColumnMargin\.ts$/, PAPER = /src[\\/]inline[\\/]InkOverlayPaperPinch\.ts$/;
+const SETTLE = /src[\\/]inline[\\/]InkOverlayPanSettle\.ts$/;
 const PLANTS: { env: string; from: string; to: string; file?: RegExp }[] = [
 	{ env: "HW_BOUNCE_PLANT_LEAVE_AT_OVERSHOOT", file: MARGIN, from: "const left = t >= 1 ? 0 : (1 - t) ** 3;", to: "const left = 1;" },
 	// The ease runs 2 painted px past the rest before it ends: a spring, not a glide.
@@ -898,6 +1013,12 @@ const PLANTS: { env: string; from: string; to: string; file?: RegExp }[] = [
 	{ env: "HW_PAPER_PREVIEW_PLANT_NO_BOUNCE_SWAP", from: "\t\t\tif (this.bounceState) this.rebasePreviewPaper();\n\t\t\telse this.endPreviewPaper(\"settle\");\n", to: "\t\t\tthis.endPreviewPaper(\"settle\");\n" },
 	// And the copy the bounce takes must be the settled zoom's: this plant leaves that element with no background at all.
 	// The element a settle keeps for its bounce is re-copied where the settle rebases it; the plant blanks it there instead.
+	// The drag band measured from pan 0 again: the live scroll's room before the page's own edge is not counted.
+	{ env: "HW_BOUNCE_PLANT_DRAG_NO_SCROLL_TERM", file: SETTLE, from: "Math.max(nativeLeft * effective + restCeilX + give, lastX)", to: "Math.max(restCeilX + give, lastX)" },
+	{ env: "HW_BOUNCE_PLANT_DRAG_NO_SCROLL_TERM", file: SETTLE, from: "Math.max(nativeTop * effective + give, lastY)", to: "Math.max(give, lastY)" },
+	// No drag band at all with Infinite Canvas on: a drag frame takes the ask as it comes.
+	{ env: "HW_BOUNCE_PLANT_DRAG_CEILING_OFF", file: SETTLE, from: "this.canvasMode ? Math.min(rawX, Math.max(nativeLeft * effective + restCeilX + give, lastX)) : plainX", to: "this.canvasMode ? rawX : plainX" },
+	{ env: "HW_BOUNCE_PLANT_DRAG_CEILING_OFF", file: SETTLE, from: "this.canvasMode ? Math.min(rawY, Math.max(nativeTop * effective + give, lastY)) : plainY", to: "this.canvasMode ? rawY : plainY" },
 	{ env: "HW_PAPER_PREVIEW_PLANT_NO_BOUNCE_COPY", file: PAPER, from: "\t\tif (copyable) copyPreviewPaperBackground(el, cs, grid);\n", to: "\t\tif (copyable && !this.bounceState) copyPreviewPaperBackground(el, cs, grid);\n\t\telse if (copyable) el.style.backgroundImage = \"none\";\n" },
 ];
 
@@ -1248,6 +1369,122 @@ it("INFINITE CANVAS ON: two fingers grabbed mid-spring and dragged out again, si
 			expect(Math.abs(c.engaged.x - c.atLand.x) <= 3 && Math.abs(c.engaged.y - c.atLand.y) <= 3, `grab ${i + 1}: engaging moved the page no more than the fingers' 2 px (${at(i)})`).toBe(true);
 		}
 		expect(Math.max(Math.abs(r.atRest.x), Math.abs(r.atRest.y)), `the page comes home after the last lift (${JSON.stringify(r.atRest)})`).toBeLessThanOrEqual(0.5);
+	} finally { await page.close(); }
+}, 240_000);
+
+/**
+ * TWO FINGERS DRAGGED ON A SCROLLED NOTE (Gesture end state, Alan 2026-09-18: "At the lift the page stays exactly where the
+ * fingers left it, which is where the last preview frame painted it"). Infinite Canvas on. A drag at a fixed spread toward the
+ * page's own top-left edge has the scroll's whole room before that edge: the page follows the fingers every frame until it
+ * reaches the edge, may then go one allowance past it, and nothing moves at the lift unless it stands past the edge.
+ */
+const offFingers = (rows: any[]) => rows.filter((w: any) => Math.abs(w.pageX - w.fingerX) > 1 || Math.abs(w.pageY - w.fingerY) > 1)
+	.map((w: any) => `frame ${w.i}: fingers ${w.fingerX},${w.fingerY} page ${w.pageX},${w.pageY} (rawX ${w.rawX} cx ${w.cx} rawY ${w.rawY} cy ${w.cy} drag ${w.drag})`);
+const movedAfterLift = (r: any) => r.after.filter((w: any) => Math.abs(w.pageX - r.rows.at(-1).pageX) > 1 || Math.abs(w.pageY - r.rows.at(-1).pageY) > 1)
+	.map((w: any) => `after ${w.j}: page ${w.pageX},${w.pageY} vs last preview ${r.rows.at(-1).pageX},${r.rows.at(-1).pageY}`);
+const dragCell = async (tag: string, o: any) => {
+	const { page, errors } = await open(tag, true);
+	try {
+		const r = await call(page, "dragScrolled", o) as any;
+		record.push({ cell: tag, ...r });
+		expect(errors).toEqual([]);
+		return r;
+	} finally { await page.close(); }
+};
+
+it("INFINITE CANVAS ON, SCROLLED 600, 600: two fingers at a fixed spread dragged 300 px right and down - the page follows the fingers within 1 px on every frame and does not jump at the lift", async () => {
+	const r = await dragCell("drag-scrolled", { sl: 600, st: 600, dx: 300, dy: 300, steps: 20 });
+	const s = show({ scrolled: r.scrolled, start: r.start });
+	expect([r.scrolled.left, r.scrolled.top], `premise: the note is scrolled to 600, 600 (${s})`).toEqual([600, 600]);
+	expect(r.rows.every((w: any) => w.drag), `premise: every frame is a drag frame (${show(r.rows.map((w: any) => w.drag))})`).toBe(true);
+	expect(offFingers(r.rows), `the page follows the fingers within 1 px on every frame (${s})`).toEqual([]);
+	expect(movedAfterLift(r), `the page stays where the last preview frame painted it (${show(r.rest)})`).toEqual([]);
+}, 120_000);
+
+it("INFINITE CANVAS ON, SCROLLED 600, 600, CONTROL: the same drag left and up follows the fingers within 1 px and does not jump at the lift", async () => {
+	const r = await dragCell("drag-scrolled-left-up", { sl: 600, st: 600, dx: -300, dy: -300, steps: 20 });
+	const s = show({ scrolled: r.scrolled, start: r.start });
+	expect([r.scrolled.left, r.scrolled.top], `premise: the note is scrolled to 600, 600 (${s})`).toEqual([600, 600]);
+	expect(r.rows.every((w: any) => w.drag), "premise: every frame is a drag frame").toBe(true);
+	expect(offFingers(r.rows), `the page follows the fingers within 1 px on every frame (${s})`).toEqual([]);
+	expect(movedAfterLift(r), `the page stays where the last preview frame painted it (${show(r.rest)})`).toEqual([]);
+}, 120_000);
+
+it("INFINITE CANVAS ON, SCROLL 0, CONTROL: the drag right and down still stops one allowance past the page's own top-left edge, and the lift eases it back onto the edge", async () => {
+	const r = await dragCell("drag-scroll-zero", { sl: 0, st: 0, dx: 300, dy: 300, steps: 20 });
+	const s = show({ scrolled: r.scrolled, start: r.start, last: r.rows.at(-1), rest: r.rest });
+	expect([r.scrolled.left, r.scrolled.top], "premise: the note is at its top-left").toEqual([0, 0]);
+	expect(r.rows.every((w: any) => w.drag), "premise: every frame is a drag frame").toBe(true);
+	// Before the allowance is spent the page follows; after it, it stands one allowance past the edge.
+	expect(r.rows.filter((w: any) => Math.abs(w.pageX - Math.min(w.fingerX, r.allowance - r.start.past.x)) > 1 || Math.abs(w.pageY - Math.min(w.fingerY, r.allowance - r.start.past.y)) > 1)
+		.map((w: any) => `frame ${w.i}: fingers ${w.fingerX},${w.fingerY} page ${w.pageX},${w.pageY} past ${show(w.past)}`), `the page follows to the allowance and stops there (${s})`).toEqual([]);
+	expect(Math.abs(r.rows.at(-1).past.x - r.allowance) <= 1 && Math.abs(r.rows.at(-1).past.y - r.allowance) <= 1, `held one allowance past the edge (${s})`).toBe(true);
+	expect(r.after.some((w: any) => w.active), `the lift starts the ease (${s})`).toBe(true);
+	expect(Math.max(Math.abs(r.rest.past.x), Math.abs(r.rest.past.y)), `the ease ends on the edge (${s})`).toBeLessThanOrEqual(0.5);
+}, 120_000);
+
+it("INFINITE CANVAS ON, SCROLLED 100, 100: a 300 px drag right and down follows the fingers to the edge, stops one allowance past it, and eases back onto the edge at the lift", async () => {
+	const r = await dragCell("drag-scrolled-100", { sl: 100, st: 100, dx: 300, dy: 300, steps: 20 });
+	const s = show({ scrolled: r.scrolled, start: r.start, last: r.rows.at(-1), rest: r.rest });
+	expect([r.scrolled.left, r.scrolled.top], "premise: the note is scrolled to 100, 100").toEqual([100, 100]);
+	expect(r.rows.every((w: any) => w.drag), "premise: every frame is a drag frame").toBe(true);
+	const capX = r.allowance - r.start.past.x, capY = r.allowance - r.start.past.y;
+	expect(r.rows.filter((w: any) => Math.abs(w.pageX - Math.min(w.fingerX, capX)) > 1 || Math.abs(w.pageY - Math.min(w.fingerY, capY)) > 1)
+		.map((w: any) => `frame ${w.i}: fingers ${w.fingerX},${w.fingerY} page ${w.pageX},${w.pageY} past ${show(w.past)} (rawX ${w.rawX} cx ${w.cx} rawY ${w.rawY} cy ${w.cy})`),
+		`the page follows the fingers to the edge and one allowance past it, no further (${s})`).toEqual([]);
+	expect(Math.abs(r.rows.at(-1).past.x - r.allowance) <= 1 && Math.abs(r.rows.at(-1).past.y - r.allowance) <= 1, `held one allowance past the edge (${s})`).toBe(true);
+	expect(r.after.some((w: any) => w.active), `the lift starts the ease (${s})`).toBe(true);
+	expect(Math.max(Math.abs(r.rest.past.x), Math.abs(r.rest.past.y)), `the ease ends on the edge (${s})`).toBeLessThanOrEqual(0.5);
+}, 120_000);
+
+it("INFINITE CANVAS ON, READABLE LINE LENGTH ON, A FITTING COLUMN, SCROLLED DOWN 600: x keeps the column's rest plus one allowance, y follows the fingers, and only x eases at the lift", async () => {
+	const r = await dragCell("drag-rll-fitting", { sl: 0, st: 600, dx: 300, dy: 300, steps: 20, rll: true });
+	const s = show({ scrolled: r.scrolled, start: r.start, last: r.rows.at(-1), rest: r.rest });
+	expect(r.scrolled.top, "premise: the note is scrolled down 600").toBe(600);
+	// Infinite Canvas grants sideways room whatever the column, so the fit is the column against the pane, not the range.
+	expect(r.scrolled.columnW, `premise: the readable column fits the pane with room beside it (${s})`).toBeLessThan(r.scrolled.paneW - 50);
+	expect(r.rows.every((w: any) => w.drag), "premise: every frame is a drag frame").toBe(true);
+	const capX = r.allowance - r.start.past.x;
+	expect(r.rows.filter((w: any) => Math.abs(w.pageX - Math.min(w.fingerX, capX)) > 1 || Math.abs(w.pageY - w.fingerY) > 1)
+		.map((w: any) => `frame ${w.i}: fingers ${w.fingerX},${w.fingerY} page ${w.pageX},${w.pageY} past ${show(w.past)} (rawX ${w.rawX} cx ${w.cx} rawY ${w.rawY} cy ${w.cy})`),
+		`x follows to the rest plus the allowance, y follows the fingers (${s})`).toEqual([]);
+	expect(Math.abs(r.rows.at(-1).past.x - r.allowance), `held one allowance past the column's rest (${s})`).toBeLessThanOrEqual(1);
+	expect(Math.abs(r.rest.past.x), `x eases back onto the column's rest (${s})`).toBeLessThanOrEqual(0.5);
+	expect(Math.abs(r.rest.pageY - r.rows.at(-1).pageY), `y stays where the fingers left it (${s})`).toBeLessThanOrEqual(1);
+}, 120_000);
+
+it("INFINITE CANVAS ON, SCROLLED 600, 600: a drag after a zoom in the same gesture follows the fingers within 1 px on every frame once the spread holds, and the page rests where the last preview frame painted it", async () => {
+	// 600 px, so the ask passes the give from pan 0 on both axes (the zoom leaves the pan near -350, -200), still inside the
+	// scroll's room at 150 percent.
+	const r = await dragCell("drag-after-zoom", { sl: 600, st: 600, dx: 600, dy: 600, steps: 40, zoomTo: 1.5, hold: 12 });
+	const s = show({ scrolled: r.scrolled, start: r.start, zoom: r.zoom.slice(-3), rest: r.rest });
+	expect([r.scrolled.left, r.scrolled.top], "premise: the note is scrolled to 600, 600").toEqual([600, 600]);
+	expect(Math.abs(r.start.k - 1.5), `premise: the gesture zoomed to 150 percent (${s})`).toBeLessThanOrEqual(0.02);
+	// A still spread sends no frame (measured: the twelve held frames did not fill the window), so the window fills on the
+	// drag's own first frames; every frame from the eighth on is a drag frame.
+	expect(r.rows.slice(7).every((w: any) => w.drag), `premise: the drag is a drag frame once the window fills (${show(r.rows.map((w: any) => w.drag))})`).toBe(true);
+	expect(Math.min(r.rows.at(-1).rawX, r.rows.at(-1).rawY), `premise: the ask passes the give from pan 0 on both axes (${show(r.rows.at(-1))})`).toBeGreaterThan(r.allowance + 50);
+	expect(offFingers(r.rows), `the page follows the fingers within 1 px on every frame (${s})`).toEqual([]);
+	expect(Math.abs(r.rest.pageX - r.rows.at(-1).pageX) <= 1 && Math.abs(r.rest.pageY - r.rows.at(-1).pageY) <= 1, `the page rests where the last preview frame painted it (${s})`).toBe(true);
+}, 120_000);
+
+it("INFINITE CANVAS ON, SCROLLED 100, 100: two fingers grabbed mid-spring and dragged out again, sixty times, never carry the page further past its own edge than the one allowance, and it comes home", async () => {
+	const { page, errors } = await open("pinch-ratchet-scrolled", true);
+	try {
+		const r = await call(page, "pinchRatchetScrolled", 60, 100, 100) as any;
+		record.push({ cell: "pinch-ratchet-scrolled", ...r });
+		expect(errors).toEqual([]);
+		const at = (i: number) => JSON.stringify(r.cycles[i]);
+		expect([r.scrolled.left, r.scrolled.top], "premise: the note is scrolled to 100, 100").toEqual([100, 100]);
+		expect(r.cycles[0].held.x, `the first drag reaches the allowance past the edge on x (${at(0)})`).toBeGreaterThanOrEqual(r.allowance - 1);
+		expect(r.cycles[0].held.y, `the first drag reaches the allowance past the edge on y (${at(0)})`).toBeGreaterThanOrEqual(r.allowance - 1);
+		expect(r.cycles.length, `sixty grabs (${JSON.stringify(r.cycles.slice(-2))})`).toBe(60);
+		for (let i = 0; i < r.cycles.length; i++) expect(r.cycles[i].drag, `grab ${i + 1}: a drag frame (${at(i)})`).toBe(true);
+		const worst = { x: Math.max(...r.cycles.map((c: any) => c.held.x)), y: Math.max(...r.cycles.map((c: any) => c.held.y)) };
+		expect(r.cycles.map((c: any, i: number) => `grab ${i + 1}: x ${c.held.x <= r.allowance + 1 ? "within" : "past"}, y ${c.held.y <= r.allowance + 1 ? "within" : "past"}`),
+			`held no further past the edge than the allowance (worst x ${worst.x}, y ${worst.y})`)
+			.toEqual(r.cycles.map((_: any, i: number) => `grab ${i + 1}: x within, y within`));
+		expect(Math.max(Math.abs(r.atRest.x), Math.abs(r.atRest.y)), `the page comes home after the last lift (${JSON.stringify(r.atRest)}, ${JSON.stringify(r.final)})`).toBeLessThanOrEqual(0.5);
 	} finally { await page.close(); }
 }, 240_000);
 

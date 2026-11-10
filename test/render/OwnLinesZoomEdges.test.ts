@@ -123,7 +123,7 @@ window.ownLinesZoom = {
 		rig = { pane, view, overlay, sizer, path };
 		const t = textBox(inkLine()), x = t.left + 40, y = t.cy;
 		const pen = (type, px, py, buttons) => document.elementFromPoint(px, py)?.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "pen", pointerId: 901, isPrimary: true, clientX: px, clientY: py, buttons, pressure: buttons ? 0.5 : 0 }));
-		pen("pointerdown", x, y, 1); for (let i = 1; i <= 4; i++) pen("pointermove", x + 20 * i, y, 1); pen("pointerup", x + 80, y, 0);
+		if (!cfg || cfg.ink !== false) { pen("pointerdown", x, y, 1); for (let i = 1; i <= 4; i++) pen("pointermove", x + 20 * i, y, 1); pen("pointerup", x + 80, y, 0); }
 		await settle(12);
 		return { strokes: inlineInk.strokes(path).length, natural: sample("natural"), word: { x: x + 40, y }, pane: pane.getBoundingClientRect().toJSON() };
 	},
@@ -173,7 +173,7 @@ afterAll(async () => {
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
-async function open(paneW: number) {
+async function open(paneW: number, ink = true) {
 	const page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: DPR, hasTouch: true });
 	const errors: string[] = [];
 	page.on("pageerror", e => errors.push(String(e.message).slice(0, 200)));
@@ -181,15 +181,17 @@ async function open(paneW: number) {
 	await page.addStyleTag({ content: css + REAL_OBSIDIAN_CSS + "\n.markdown-source-view img:not([width]) { max-width: 100%; }\n" });
 	await page.addStyleTag({ content: THEME_CSS });
 	await page.addScriptTag({ content: script });
-	const m = await page.evaluate(cfg => (window as any).ownLinesZoom.mount(cfg), { paneW }) as any;
-	expect(m.strokes, "the stroke committed").toBe(1);
+	const m = await page.evaluate(cfg => (window as any).ownLinesZoom.mount(cfg), { paneW, ink }) as any;
+	expect(m.strokes, ink ? "the stroke committed" : "premise: the twin has no ink").toBe(ink ? 1 : 0);
 	return { page, m, errors };
 }
 const pinch = (page: any, m: any, to: number) => page.evaluate(([t, cx, cy]: number[]) => (window as any).ownLinesZoom.pinch(t, 30, cx, cy), [to, m.word.x, m.word.y]);
 // Same theme, zoomed to 200% in an 800 px pane, then the pane narrowed to 641 px. The line's natural width at 641 px is
 // read from a second note opened at that width at 100%. The claim, at rest: the line-width variable is that content
 // width, and the line is that box width times the zoom.
-it("zoomed in under a theme that sizes its own lines, a narrowed pane gives the line its new width (Minimal, 800 to 641 px)", async () => {
+// With Infinite Canvas on, an inked note's column is held at the width its ink was drawn at in any pane: narrowing the pane
+// leaves the line-width variable and the line where they were at 800 px. The uninked twin below keeps the old claim.
+it("zoomed in under a theme that sizes its own lines, an inked note keeps its line at the held width when the pane narrows (Minimal, 800 to 641 px)", async () => {
 	const fresh = await open(641);
 	const want = fresh.m.natural;
 	await fresh.page.close();
@@ -201,6 +203,29 @@ it("zoomed in under a theme that sizes its own lines, a narrowed pane gives the 
 		record.push({ cell: "narrow", want, rest: z, narrowed: w });
 		// eslint-disable-next-line no-console
 		console.log("EDGES-NARROW " + JSON.stringify({ k: w.k, ownLines: w.ownLines, lineVar800: z.lineVar, lineVar: w.lineVar, wantContent: want.lineContentPx, wantBox: want.lineW, lineW: w.lineW, wantLineW: r2(want.lineW * w.k), paneLeft: w.paneLeft, paneRight: w.paneRight }));
+		expect(z.ownLines, "premise: the overlay measured a theme that sizes its own lines").toBe(true);
+		expect(w.k, "still at 200%").toBeCloseTo(2, 3);
+		expect(w.paneRight - w.paneLeft, "premise: the pane is 641 px").toBeCloseTo(641, 0);
+		expect(Math.abs(want.lineW - m.natural.lineW), "premise: the line's natural width differs between the two panes").toBeGreaterThan(20);
+		expect.soft(Math.abs(parseFloat(w.lineVar) - parseFloat(z.lineVar)), `the line-width variable keeps its held value (${w.lineVar} against ${z.lineVar} at 800 px)`).toBeLessThanOrEqual(1);
+		expect.soft(Math.abs(w.lineW - z.lineW), `the line keeps its held width x k (${w.lineW} against ${z.lineW} at 800 px)`).toBeLessThanOrEqual(1);
+		expect(errors).toEqual([]);
+	} finally { await page.close(); }
+}, 180_000);
+
+// The uninked twin, the control: a note with no ink has no width to hold, so the line still follows the pane.
+it("zoomed in under a theme that sizes its own lines, a narrowed pane gives an uninked note's line its new width (Minimal, 800 to 641 px)", async () => {
+	const fresh = await open(641, false);
+	const want = fresh.m.natural;
+	await fresh.page.close();
+	const { page, m, errors } = await open(800, false);
+	try {
+		await pinch(page, m, 2);
+		const z = await page.evaluate(() => (window as any).ownLinesZoom.later(400, "rest")) as any;
+		const w = await page.evaluate(() => (window as any).ownLinesZoom.narrow(641, "narrowed")) as any;
+		record.push({ cell: "narrow uninked", want, rest: z, narrowed: w });
+		// eslint-disable-next-line no-console
+		console.log("EDGES-NARROW-UNINKED " + JSON.stringify({ k: w.k, ownLines: w.ownLines, lineVar800: z.lineVar, lineVar: w.lineVar, wantContent: want.lineContentPx, wantBox: want.lineW, lineW: w.lineW, wantLineW: r2(want.lineW * w.k) }));
 		expect(z.ownLines, "premise: the overlay measured a theme that sizes its own lines").toBe(true);
 		expect(w.k, "still at 200%").toBeCloseTo(2, 3);
 		expect(w.paneRight - w.paneLeft, "premise: the pane is 641 px").toBeCloseTo(641, 0);

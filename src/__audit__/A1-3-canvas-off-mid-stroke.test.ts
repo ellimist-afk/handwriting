@@ -38,7 +38,6 @@ function overlay() {
 		strokeRawMax: 0,
 		mouseStroke: false,
 		snapPreview: null,
-		snapContactId: 1,
 		mode: "ink",
 		bandSyncDeferred: false,
 		resizeDeferred: false,

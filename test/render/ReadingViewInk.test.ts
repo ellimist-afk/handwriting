@@ -8,12 +8,14 @@
  *
  * The note (readingViewInkPage.ts): a frontmatter, three one-line paragraphs with two blank lines between each, a
  * three-item list whose second item wraps, a fenced code block of four rows (the second empty) and a paragraph of three
- * lines joined by hard breaks (the first wraps); the editor is modelled as 24 px lines with the frontmatter hidden. One
+ * lines joined by hard breaks (the first wraps), a paragraph of three lines with strict line breaks on (no br, the
+ * source line feeds kept in its text, the lines flowing together) and one whose text kept no line feed; the editor is modelled as 24 px lines with the frontmatter hidden. One
  * stroke per case, anchored where the editor would anchor it, painted in the view, and its painted centre compared
  * with where it belongs: its block's top plus its offset under its line (a paragraph's first line, exact), one rendered
  * line above the block or at its bottom (a blank line, riding the nearest paragraph), or its row's own top inside a
  * block of several lines (a list item, a code row, a line after a hard break; exact, where the line's share of the
- * block's height would not be).
+ * block's height would not be; with strict line breaks on, the rendered row its line's first character sits on). A
+ * paragraph whose rows cannot be told from its text keeps the line's share of the block's height.
  * Reading view is post-processed per section with section info; the export once with none, from cached sections.
  * Three reading view cells follow the sections the virtualised renderer attaches and detaches in the sizer on
  * scroll: a section attached after the paint is placed again, a batch of such changes reads no layout and queues one
@@ -55,6 +57,9 @@ const CASES: InkCase[] = [
 	{ name: "a code block's empty row", line: 18, off: 10, block: 15, rule: { row: 1 } },
 	{ name: "a code block's last row, after an empty one", line: 20, off: 10, block: 15, rule: { row: 3 } },
 	{ name: "the third line of a hard-break paragraph whose first line wraps", line: 25, off: 12, block: 22, rule: { brk: 2 } },
+	{ name: "strict line breaks: the third line of a paragraph whose lines flow together, on its first character's row", line: 29, off: 12, block: 26, rule: { lf: 2 } },
+	{ name: "a paragraph whose text kept no line feed: its third line keeps the even share", line: 33, off: 12, block: 30, rule: "share" },
+	{ name: "a hard-break paragraph holding inline math with a line feed in it: its third line after its breaks", line: 37, off: 12, block: 34, rule: { brk: 2 } },
 ];
 const NAMED = CASES.map((c) => [c.name, c] as const);
 

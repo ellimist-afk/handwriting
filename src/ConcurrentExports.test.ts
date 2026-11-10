@@ -256,6 +256,7 @@ describe("two overlapping exports keep both snapshots", () => {
 				const stub: PluginStub = {
 					app: { workspace: { getActiveViewOfType: () => null, getActiveFile: () => ({ path: "note.md", extension: "md" }) }, vault: host.vault },
 					firstFreePath: firstFreePathOn(host.vault),
+					exportedStrokes: () => strokes,
 					pdfStore: { strokes: () => strokes },
 					// `flattenPdf` reads the pdf ink colour mode off the plugin,
 					// so the lifted block needs one here or it throws before it
@@ -330,6 +331,7 @@ describe("two overlapping exports keep both snapshots", () => {
 			const stub: PluginStub = {
 				app: { workspace: { getActiveViewOfType: () => null, getActiveFile: () => ({ path: "note.md", extension: "md" }) }, vault: host.vault },
 				firstFreePath: firstFreePathOn(host.vault),
+				exportedStrokes: () => strokes,
 			};
 			const spec = registerCommand(SVG_BLOCK, {
 				inlineInk: { hasInk: () => true, strokes: () => strokes },
@@ -353,6 +355,7 @@ describe("two overlapping exports keep both snapshots", () => {
 		const stub: PluginStub = {
 			app: { workspace: { getActiveViewOfType: () => null, getActiveFile: () => ({ path: "note.md", extension: "md" }) }, vault: host.vault },
 			firstFreePath: firstFreePathOn(host.vault),
+			exportedStrokes: () => SNAPSHOT_A,
 		};
 		const spec = registerCommand(SVG_BLOCK, {
 			inlineInk: { hasInk: () => true, strokes: () => SNAPSHOT_A },

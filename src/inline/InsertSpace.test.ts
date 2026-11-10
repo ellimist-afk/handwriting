@@ -494,7 +494,7 @@ describe("InsertSpaceRows.shift", () => {
 		expect(new InsertSpaceRows().get(strokes).map(row => row.ids.slice().sort().join("+")), "premise: after the move a rebuild hangs the dot on the row").toContain("dot+short+tall");
 	});
 
-	it("anything else changed since the rows were read, or a partly moved row, refuses the shift", () => {
+	it("anything else changed since the rows were read refuses the shift; a partly moved row is taken in two parts", () => {
 		const strokes = page(3, 30), cache = new InsertSpaceRows(), before = cache.get(strokes);
 		const ids = idsBelow(strokes, 400, before);
 		drag(strokes, ids, [24]);
@@ -502,12 +502,12 @@ describe("InsertSpaceRows.shift", () => {
 		translateStroke(other, 0, 0.5);
 		expect(cache.shift(strokes, before, ids, [24])).toBe(false);
 		expect(cache.get(strokes)).toEqual(new InsertSpaceRows().get(strokes));
-		// Two overlapping letters are one group; moving one of them is not a move of whole groups.
+		// Two overlapping letters are one group; moving one of them splits it, and the shift regroups both parts.
 		const pair = [stroke("a", [pt(0, 0), pt(10, 20)]), stroke("b", [pt(5, 2), pt(15, 22)])];
 		const fresh = new InsertSpaceRows(), rows = fresh.get(pair);
 		expect(rows.length, "premise: one row").toBe(1);
 		drag(pair, ["a"], [24]);
-		expect(fresh.shift(pair, rows, ["a"], [24])).toBe(false);
+		expect(fresh.shift(pair, rows, ["a"], [24])).toBe(true);
 		expect(fresh.get(pair)).toEqual(new InsertSpaceRows().get(pair));
 	});
 

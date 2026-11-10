@@ -1,4 +1,5 @@
 import { PageData } from "../model/PageData";
+import { isOpaqueAttachment } from "../inline/InkAttachments";
 
 /**
  * Union two revisions of ONE page so that nothing already on disk is dropped.
@@ -38,7 +39,12 @@ export function mergePages(disk: PageData, mine: PageData): PageData {
 	const strokes = keepMissing(disk.strokes, mine.strokes);
 	const textBoxes = keepMissing(disk.textBoxes, mine.textBoxes);
 	const images = keepMissing(disk.images, mine.images);
-	if (strokes.length === 0 && textBoxes.length === 0 && images.length === 0) {
+	// Ink attached to text: a record only the disk carries is kept when every member is in the merged strokes and none
+	// is in a group of ours (a stroke is in one group at most); ours wins on a shared id; an opaque record as found.
+	const held = new Set([...mine.strokes, ...strokes].map((s) => s.id));
+	const grouped = new Set((mine.attachments ?? []).flatMap((a) => (isOpaqueAttachment(a) ? [] : a.strokeIds)));
+	const attachments = keepMissing(disk.attachments ?? [], mine.attachments ?? []).filter((a) => isOpaqueAttachment(a) || a.strokeIds.every((id) => held.has(id) && !grouped.has(id)));
+	if (strokes.length === 0 && textBoxes.length === 0 && images.length === 0 && attachments.length === 0) {
 		// Nothing on disk that `mine` lacks: the writers agree about content,
 		// so hand back the caller's own object untouched rather than an equal
 		// copy. `pending` holds live references and identity is cheap to keep.
@@ -53,6 +59,7 @@ export function mergePages(disk: PageData, mine: PageData): PageData {
 		strokes: [...mine.strokes, ...strokes],
 		textBoxes: [...mine.textBoxes, ...textBoxes],
 		images: [...mine.images, ...images],
+		...(attachments.length ? { attachments: [...(mine.attachments ?? []), ...attachments] } : {}),
 		// A newer build's fields, per §"unknownTop": ours wins key by key, and
 		// the disk copy contributes keys we do not carry. Both documents were
 		// parsed from the same file, so in practice these are equal; the merge

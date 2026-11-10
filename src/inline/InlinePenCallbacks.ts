@@ -6,6 +6,14 @@ export interface InlinePenCallbacks {
 	onViewportInput?(): void;
 	/** Every contact has lifted (no touch, no assist pan) and none replaced it. A cancelled ease may have left the page stranded off its rest; the overlay decides whether there is anything to resume. */
 	onAllContactsLifted?(): void;
+	/**
+	 * A lone finger landed and lifted without panning, pinching or drawing, within the tap's travel and time: a tap into the
+	 * page. True when the surface took the tap (it selected attached ink): the router then keeps it from the text, the lift
+	 * and the touch's trailing mouse events and click, so the cursor does not move and the keyboard does not rise.
+	 */
+	onTapLift?(sample: PenSample, ev: PointerEvent): boolean | void;
+	/** Whether the surface's own ease (the overscroll bounce) is playing now: a finger landing on it catches a scroll. */
+	easePlaying?(): boolean;
 	/** Finish pending raster coverage before the first sample is mapped. */
 	onBeforePenDown?(): void;
 	/**
@@ -163,6 +171,12 @@ export interface InlinePenCallbacks {
 	 * fingers stay the browser's and the host pinches the way it does with no plugin loaded.
 	 */
 	pinchZoom?(): boolean;
+	/**
+	 * Does a lone finger landing here belong to the selection (its padded box, a handle, the Attach button, a pin)? Then
+	 * the router claims it only once it passes the tap limit, and hands it to onPenDown with the sample where it landed;
+	 * a lift inside the limit stays a tap. Undefined means no, which keeps PDF and every existing caller unchanged.
+	 */
+	claimTouch?(sample: PenSample): boolean;
 	/** Drop the provisional finger stroke before handing two contacts to pinch. */
 	onFingerInkCancelled?(): void;
 	/**

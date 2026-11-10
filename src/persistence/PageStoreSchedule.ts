@@ -6,7 +6,13 @@ import { ensureFolder } from "./InkFolder";
 import { PageData, serializePage } from "../model/PageData";
 import { runDetached } from "../util/Detached";
 import { installMethods } from "../inline/InstallMethods";
-import { folderOf, MAX_DIRTY_MS, type PageWriter, type PageStore } from "./PageStore";
+import { contentStamp, folderOf, MAX_DIRTY_MS, type PageWriter, type PageStore } from "./PageStore";
+
+/**
+ * Where keepAsideUnder put the old id's file. `stamp`, on a move that made it the new id's live file: the content stamp
+ * (contentStamp) of the exact text that move wrote there, for a later round of the same move to pass back as `own`.
+ */
+export type KeptAside = { kind: "moved"; to: string; stamp?: string } | { kind: "absent" } | { kind: "held" };
 
 declare module "./PageStore" {
 	interface PageStore {
@@ -26,8 +32,8 @@ declare module "./PageStore" {
 		flush(): Promise<void>;
 		beginFlush(pageId: string | null): () => void;
 		flushingPage(pageId: string): boolean;
-		keepAsideUnder(oldId: string, newId: string): Promise<{ kind: "moved"; to: string } | { kind: "absent" } | { kind: "held" }>;
-		keepAsideUnderNow(oldId: string, newId: string): Promise<{ kind: "moved"; to: string } | { kind: "absent" } | { kind: "held" }>;
+		keepAsideUnder(oldId: string, newId: string, own?: string, named?: () => boolean): Promise<KeptAside>;
+		keepAsideUnderNow(oldId: string, newId: string, own?: string): Promise<KeptAside>;
 	}
 }
 
@@ -44,6 +50,7 @@ const DEBOUNCE_MS = 700;
 	 * for the next write; writes for one page stay serialized on the queue.
 	 */
 	function schedule(this: PageStore, pageId: string, data: PageData, writer?: PageWriter): void {
+		this.scheduled.set(pageId, (this.scheduled.get(pageId) ?? 0) + 1);
 		this.displaceForeignBatch(pageId, writer);
 		this.pending.set(pageId, data);
 		this.pendingWriter.set(pageId, writer);
@@ -171,9 +178,12 @@ const DEBOUNCE_MS = 700;
 	 * identity claim, where the 700 ms were already spent waiting for the id.
 	 * Serialized on the queue like every other write. Resolves when the
 	 * attempt is over: the rename has landed, or the failure has re-queued
-	 * the state for the bounded retry path.
+	 * the state for the bounded retry path. Counted in `scheduled` like a
+	 * queued save, so an id move that asks what was saved under the old id
+	 * meanwhile (a deck's teardown flush) sees this one too.
 	 */
 	async function saveNow(this: PageStore, pageId: string, data: PageData, writer?: PageWriter): Promise<void> {
+		this.scheduled.set(pageId, (this.scheduled.get(pageId) ?? 0) + 1);
 		this.displaceForeignBatch(pageId, writer);
 		this.pending.set(pageId, data);
 		this.pendingWriter.set(pageId, writer);
@@ -388,8 +398,11 @@ const DEBOUNCE_MS = 700;
 			for (const pageId of new Set([...this.timers.keys(), ...this.maxTimers.keys()])) {
 				this.clearTimers(pageId);
 			}
+			// Every page's save starts now and they are awaited together: the unload does not wait for this, and one page
+			// after another left a process that ended partway with the later pages never started. Each page's own saves
+			// still run in order on its chain.
 			const ids = [...this.pending.keys()];
-			for (const id of ids) await this.writePending(id);
+			await Promise.all(ids.map((id) => this.writePending(id)));
 			await Promise.all([...this.tails.values()]);
 			// Everything held for a pen is written above; the next `schedule` watches again.
 			this.unwatchPens();
@@ -421,6 +434,16 @@ const DEBOUNCE_MS = 700;
 	}
 
 	/**
+	 * The content stamp of a file's text now, as keepAsideUnder compares it across rounds; null when it cannot be read.
+	 * The bytes, not the modified time and size: a sync tool sets the other device's write time, and a revision of the
+	 * same length written at the same time is another revision all the same.
+	 */
+	async function liveStamp(adapter: PageStore["app"]["vault"]["adapter"], path: string): Promise<string | null> {
+		const text = await adapter.read(path).catch(() => null);
+		return text === null ? null : contentStamp(text);
+	}
+
+	/**
 	 * A note open here now names `newId`, an id the other device gave it, and
 	 * the ink this device drew sits in `oldId`'s file. Nothing names that file
 	 * any more, so it is set beside the new page where fix ink de-sync finds
@@ -435,23 +458,51 @@ const DEBOUNCE_MS = 700;
 	 * write leaves the file where it is. Answers where the file went, that
 	 * there was nothing to move, or that it stayed because the queue did not
 	 * land; a failed read, write or rename throws and moves nothing further.
+	 *
+	 * `own`: the stamp of the file an earlier round of the same move made the
+	 * new id's live file (`stamp` in that round's answer): the content stamp of
+	 * the text it wrote, taken from that text, not from a read after the write.
+	 * While that file is unchanged since (the same text) it is no other revision,
+	 * only this move's own older copy of the old file: the old file takes its
+	 * place the same way it would with no live file, and no copy is set aside.
+	 * Changed since, by another device or a sync tool, it is kept and the old
+	 * file set beside it. No stamp to compare keeps it too.
 	 */
 	async function keepAsideUnder(this: PageStore,
 		oldId: string,
-		newId: string
-	): Promise<{ kind: "moved"; to: string } | { kind: "absent" } | { kind: "held" }> {
+		newId: string,
+		own?: string,
+		named?: () => boolean
+	): Promise<KeptAside> {
 		const end = this.beginFlush(oldId);
+		// `??=`: a unit rig built with Object.create never runs the field initialisers.
+		const moving = (this.moving ??= new Map());
+		moving.set(oldId, (moving.get(oldId) ?? 0) + 1);
 		try {
-			return await this.keepAsideUnderNow(oldId, newId);
+			const kept = await this.keepAsideUnderNow(oldId, newId, own);
+			// Remembered for a save that lands under the old id later (writePending): the round's own stamp, or, when this
+			// round set the file beside the live one as a copy, the stamp an earlier round of the same move left there. `named`
+			// is kept with it: writePending follows the move only while no note names the old id.
+			if (named !== undefined && kept.kind === "moved") {
+				const movedIds = (this.movedIds ??= new Map());
+				const before = movedIds.get(oldId);
+				const stamp = kept.stamp ?? (before?.to === newId ? before.stamp : undefined);
+				movedIds.set(oldId, { to: newId, named, ...(stamp !== undefined ? { stamp } : {}) });
+			}
+			return kept;
 		} finally {
+			const left = (moving.get(oldId) ?? 1) - 1;
+			if (left > 0) moving.set(oldId, left);
+			else moving.delete(oldId);
 			end();
 		}
 	}
 
 	async function keepAsideUnderNow(this: PageStore,
 		oldId: string,
-		newId: string
-	): Promise<{ kind: "moved"; to: string } | { kind: "absent" } | { kind: "held" }> {
+		newId: string,
+		own?: string
+	): Promise<KeptAside> {
 		this.clearTimers(oldId);
 		await this.writePending(oldId);
 		if (this.pending.has(oldId)) return { kind: "held" };
@@ -460,16 +511,30 @@ const DEBOUNCE_MS = 700;
 			const old = await this.findSidecar(oldId);
 			if (!old.found) return { kind: "absent" as const };
 			const target = await this.resolveFor(newId);
+			// The new id's live file is still what an earlier round of this move wrote there.
+			const ours = target.found && own !== undefined && (await liveStamp(adapter, target.path)) === own;
 			let to: string;
-			if (target.found) {
+			let stamp: string | undefined;
+			if (target.found && !ours) {
 				const st = await adapter.stat(old.path).catch(() => null);
 				to = await this.freeConflictPath(target.path, st?.mtime ?? 0);
 				await adapter.rename(old.path, to);
 			} else {
+				// MOVE, THEN JUDGE, as writeNow does. The old file is first moved
+				// whole to a free copy name beside the new page, and only THOSE
+				// bytes are read: nothing else writes that name, so the bytes read
+				// are the bytes later removed, and from this instant on the ink is
+				// a listed copy of the new page whatever happens next. Read in
+				// place and removed in place, a sync write landing in between was
+				// deleted.
+				await ensureFolder(adapter, folderOf(target.path));
+				const st = await adapter.stat(old.path).catch(() => null);
+				const aside = await this.freeConflictPath(target.path, st?.mtime ?? 0);
+				await adapter.rename(old.path, aside);
 				// It becomes the new id's page, so it declares the new id: a
 				// reload under the new path reads the id the note names. Only
 				// that one top-level value changes.
-				const text = await adapter.read(old.path);
+				const text = await adapter.read(aside);
 				let raw: Record<string, unknown> | null = null;
 				try {
 					const parsed: unknown = JSON.parse(text.startsWith("\uFEFF") ? text.slice(1) : text);
@@ -478,20 +543,56 @@ const DEBOUNCE_MS = 700;
 					raw = null;
 				}
 				if (raw === null) {
-					// Bytes that do not parse are never rewritten: they are kept
-					// as they are beside where the new page will live, so the
-					// note can follow its id and nothing is lost.
-					const st = await adapter.stat(old.path).catch(() => null);
-					await ensureFolder(adapter, folderOf(target.path));
-					to = await this.freeConflictPath(target.path, st?.mtime ?? 0);
-					await adapter.rename(old.path, to);
+					// Bytes that do not parse are never rewritten: they stay as
+					// they are, the copy beside where the new page will live, so
+					// the note can follow its id and nothing is lost.
+					to = aside;
 				} else {
 					to = target.path;
-					await ensureFolder(adapter, folderOf(to));
 					raw.pageId = newId;
-					await adapter.write(to, JSON.stringify(raw));
-					await adapter.remove(old.path);
+					const written = JSON.stringify(raw);
+					// The stamp of what this round wrote, never of what a look after the write finds: a file another device lands
+					// there in between is then no match for the next round, and is kept.
+					stamp = contentStamp(written);
+					// The new text goes to a tmp first and is renamed into place
+					// last; writing straight over the new path wrote over any
+					// revision a sync tool landed there meanwhile. The tmp is a
+					// name only this move makes: a page id has no "+", so no
+					// save's tmp and no conflict copy is ever this name. The new
+					// id's own tmp was shared with a save of the new id, which
+					// runs on another queue: its bytes were renamed into place
+					// here and the old ink's copy then removed.
+					const tmp = `${to.replace(/\.json$/, "")}+from-${oldId}.json.tmp`;
+					await adapter.write(tmp, written);
+					// The new id's live file now, moved aside and judged by those
+					// bytes: an earlier round's own file (`own`) is removed, any
+					// other revision stays as a copy beside the new page.
+					if (await adapter.exists(to)) {
+						const lst = await adapter.stat(to).catch(() => null);
+						const live = await this.freeConflictPath(to, lst?.mtime ?? 0);
+						await adapter.rename(to, live);
+						const cur = own === undefined ? null : await adapter.read(live).catch(() => null);
+						if (cur !== null && contentStamp(cur) === own) await adapter.remove(live);
+					}
+					// Anything at the live path now landed after that move: it is
+					// kept the same way. A file landing after this check makes the
+					// rename below fail (the vault adapter refuses an existing
+					// destination), and the copies made so far keep every byte.
+					if (await adapter.exists(to)) {
+						const lst = await adapter.stat(to).catch(() => null);
+						await adapter.rename(to, await this.freeConflictPath(to, lst?.mtime ?? 0));
+					}
+					await adapter.rename(tmp, to);
+					// The copy holds exactly the bytes just written under the new id.
+					await adapter.remove(aside);
 				}
+			}
+			// A revision of the old id's file that landed after the move took it
+			// would sit where nothing names it: it is set beside the new page too.
+			if (await adapter.exists(old.path)) {
+				const lst = await adapter.stat(old.path).catch(() => null);
+				await ensureFolder(adapter, folderOf(target.path));
+				await adapter.rename(old.path, await this.freeConflictPath(target.path, lst?.mtime ?? 0));
 			}
 			// The old id's file is gone from where this store pinned it.
 			this.resolved.delete(oldId);
@@ -503,7 +604,7 @@ const DEBOUNCE_MS = 700;
 			this.observedMissing.delete(oldId);
 			this.lastWriter.delete(oldId);
 			this.consumedSeq.delete(oldId);
-			return { kind: "moved" as const, to };
+			return { kind: "moved" as const, to, ...(stamp !== undefined ? { stamp } : {}) };
 		});
 	}
 

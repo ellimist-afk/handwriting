@@ -271,10 +271,14 @@ describe("pressure sensitivity is stored, not pinned", () => {
 
 	it("applies the loaded value at startup", () => {
 		expect(SETTINGS).toContain("setPressureSensitivity(this.settings.pressureSensitivity);");
-		// Two call sites since the row was restored: this one at startup, and
-		// the `setControlValue` case that the toggle goes through.
-		expect((MAIN + SETTINGS).match(/setPressureSensitivity\(/g), "the startup call site, main.ts and PluginSettings.ts").toHaveLength(1);
-		expect(TAB.match(/setPressureSensitivity\(/g), "the toggle's call site in the settings tab").toHaveLength(1);
+		// Two call sites, both in PluginSettings.ts: this one at startup, and
+		// setPressureSwitch, which the settings row's case hands the toggle to
+		// since the 1.5.0 pressure lock (it has to read what unmarked ink drew
+		// under before the switch moves).
+		expect((MAIN + SETTINGS).match(/setPressureSensitivity\(/g), "startup and setPressureSwitch, main.ts and PluginSettings.ts").toHaveLength(2);
+		expect(SETTINGS).toContain("function setPressureSwitch(");
+		expect(TAB.match(/setPressureSensitivity\(/g), "the settings tab sets no switch itself").toBeNull();
+		expect(TAB).toContain("this.plugin.setPressureSwitch(on);");
 	});
 });
 

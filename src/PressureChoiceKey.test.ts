@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import HandwritingPlugin from "./main";
 import tabSource from "./settings/HandwritingSettingTab.ts?raw";
+import settingsSource from "./settings/PluginSettings.ts?raw";
 
 type Settings = Record<string, unknown>;
 
@@ -57,12 +58,19 @@ describe("pressure choice key", () => {
 		expect("pressureSensitivity" in settingsFrom({ pressureChoice: false })).toBe(true);
 	});
 
+	// Since the 1.5.0 pressure lock the row hands the switch to setPressureSwitch (PluginSettings.ts), which has to read
+	// what unmarked ink drew under before it writes the keys; the two writes moved there with it.
 	it("the toggle writes both keys", () => {
 		const source = tabSource.replace(/\r\n/g, "\n");
 		const at = source.indexOf('case "pressureSensitivity":');
 		expect(at).toBeGreaterThan(0);
 		const block = source.slice(at, source.indexOf("break;", at));
-		expect(block).toContain("s.pressureSensitivity = on;");
-		expect(block).toContain("s.pressureChoice = on;");
+		expect(block).toContain("this.plugin.setPressureSwitch(on);");
+		const settings = settingsSource.replace(/\r\n/g, "\n");
+		const fn = settings.indexOf("function setPressureSwitch(");
+		expect(fn, "premise: setPressureSwitch found").toBeGreaterThan(0);
+		const body = settings.slice(fn, settings.indexOf("\n\t}\n", fn));
+		expect(body).toContain("this.settings.pressureSensitivity = on;");
+		expect(body).toContain("this.settings.pressureChoice = on;");
 	});
 });

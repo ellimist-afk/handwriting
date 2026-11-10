@@ -12,6 +12,7 @@ import { canvasForNote } from "./CanvasNoteOverride";
 import { validCameraScale, zoomScalesClientRects } from "./ZoomScale";
 import { surfaceExtents, surfaceOriginInScroller } from "./SurfaceExtent";
 import { scrollProbeExtent } from "./ScrollProbe";
+import { armRasterProbe } from "./RasterProbe";
 import { installMethods } from "./InstallMethods";
 import { settleAnchorLines } from "./InkOverlayPinch";
 
@@ -35,10 +36,11 @@ declare module "./InkOverlay" {
 		canvasModeOn(): boolean;
 		zoomNoteBy(factor:number): boolean;
 		resetNoteZoom(): boolean;
-		zoomAroundCenter(next:number): boolean;
+		zoomAroundCenter(next:number, rest?:boolean): boolean;
+		centreSettleHold(next:number, rect:DOMRect): NonNullable<InkOverlayPlugin["panAnchorHold"]>|null;
 		fitHandwriting(): "fit"|"empty"|"busy"|"unrepresentable";
-		commitCameraScale(next:number, scroll?:{left:number;top:number}, settleHold?:object|null, preserveScrollDemand?: boolean, bypassFloor?: boolean, restore?: boolean): boolean;
-		payCommitRepaint(): void;
+		commitCameraScale(next:number, scroll?:{left:number;top:number;rest?:boolean}, settleHold?:object|null, preserveScrollDemand?: boolean, bypassFloor?: boolean, restore?: boolean): boolean;
+		payCommitRepaint(site?: string): void;
 	}
 }
 
@@ -155,6 +157,7 @@ declare module "./InkOverlay" {
   this.canvasMode=on;
   this.router?.setCanvasMomentumDisabled(on);
   this.canvasOffResetPending=false;
+  this.applyColumnHold();
   if(!on){
    // The room the canvas granted sideways is no longer asked for: owe the shrink for THIS note, the way
    // the global setter owes it for every note.
@@ -165,6 +168,8 @@ declare module "./InkOverlay" {
    if(this.pinchScaleNow!==1) this.canvasOffResetPending=true;
    this.retryCanvasOffReset();
   }
+  // The guides are a canvas note's: they come with the canvas and go with it, in this task.
+  this.syncPageGuideBox();
   if(was!==on) this.scheduleRepaint("canvas-mode");
  }
  /** End a wheel run, a two-finger pinch or an easing give where it stands; see applyCanvasMode. */
@@ -181,35 +186,86 @@ declare module "./InkOverlay" {
   if(!this.canvasOffResetPending) return false;
   if(this.canvasMode||this.pinchScaleNow===1){this.canvasOffResetPending=false;return false;}
   if(!this.container||this.frame.locked||this.builder!==null) return false;
-  if(!this.zoomAroundCenter(1)) return false;
+  // Lands at 100 percent: the same left rest as a zoom step that lands there.
+  if(!this.zoomAroundCenter(1,true)) return false;
   this.canvasOffResetPending=false;
   return true;
  }
  /** Read-only, for the zoom bar and the tests. */
  function canvasModeOn(this: InkOverlayPlugin):boolean { return this.canvasMode; }
  function zoomNoteBy(this: InkOverlayPlugin, factor:number):boolean {
-  if(this.getNoteViewportState().busy||!Number.isFinite(factor)||factor<=0) return false;
+  // A live pinch or ctrl+wheel run owns the zoom: the tap is refused, and the run's own end still settles it.
+  if(this.getNoteViewportState().busy||this.wheelZoomRun?.isLive||this.pinchHeld()||this.pinchGive||!Number.isFinite(factor)||factor<=0) return false;
   // Below the floor the lower bound is the current scale: minus is a no-op
   // there, never a jump in to the floor.
   const next=Math.max(Math.min(this.zoomFloor,this.pinchScaleNow),Math.min(MAX_PINCH_SCALE,this.pinchScaleNow*factor));
-  return next===this.pinchScaleNow || this.zoomAroundCenter(next);
+  // A STEP THAT LANDS AT 100 PERCENT PUTS THE NOTE BACK WHERE IT OPENS (Alan, 2026-10-30). The bar asks for next / zoom, so
+  // the product carries a float residue: within 1e-9 of 1 is 100 percent.
+  const snapped=Math.abs(next-1)<=1e-9;
+  const at=snapped?1:next;
+  return at===this.pinchScaleNow || this.zoomAroundCenter(at,snapped);
  }
  function resetNoteZoom(this: InkOverlayPlugin):boolean {
+  if(this.wheelZoomRun?.isLive||this.pinchHeld()||this.pinchGive) return false;
   // With the canvas off every zoom control is busy, but a note still left zoomed must be resettable.
-  if(!this.canvasMode&&this.pinchScaleNow!==1&&!this.frame.locked&&this.builder===null) return this.zoomAroundCenter(1);
-  return !this.getNoteViewportState().busy && this.zoomAroundCenter(1);
+  // The 100 percent button settles on the note's left rest, as a zoom step that lands at 100 percent does.
+  if(!this.canvasMode&&this.pinchScaleNow!==1&&!this.frame.locked&&this.builder===null) return this.zoomAroundCenter(1,true);
+  return !this.getNoteViewportState().busy && this.zoomAroundCenter(1,true);
  }
- function zoomAroundCenter(this: InkOverlayPlugin, next:number):boolean {
-  const scroller=this.view.scrollDOM,rect=scroller.getBoundingClientRect();
+ function zoomAroundCenter(this: InkOverlayPlugin, next:number, rest=false):boolean {
+  const scroller=this.view.scrollDOM;
+  // A residual pan from an earlier gesture comes off first, as the commit would take it off: the centre is read on the page
+  // as it will stand, and the hold below keeps the commit from clearing a pan it now owns.
+  if(next!==this.pinchScaleNow&&(this.panX()!==0||this.panY()!==0))this.clearViewportPan();
+  const rect=scroller.getBoundingClientRect();
   const external=this.cssScale/this.pinchScaleNow;
   // The left target is handed over UNCLAMPED: the column-margin debt this commit books is paid against the true anchor,
   // and only then clamped to the range. Clamping first dropped the part below 0 and paid the whole debt on top of it.
   const left=scroller.scrollLeft+(rect.width/2)*(1/this.cssScale-1/(next*external));
-  return this.commitCameraScale(next,{left:Number.isFinite(left)?left:0,top:anchoredScroll(scroller.scrollTop,rect.height/2,this.cssScale,next*external)});
+  const hold=next!==this.pinchScaleNow?this.centreSettleHold(next,rect):null;
+  const committed=this.commitCameraScale(next,{left:Number.isFinite(left)?left:0,top:anchoredScroll(scroller.scrollTop,rect.height/2,this.cssScale,next*external),rest},hold??undefined);
+  if(!committed&&hold&&this.panAnchorHold===hold)this.retirePanSettle("the zoom commit was refused");
+  return committed;
+ }
+ /**
+  * THE ZOOM BUTTONS HOLD THE LINE AT THE VIEWPORT'S CENTRE, as a pinch holds the line under its fingers. A scale change makes
+  * CodeMirror rebuild its height map, and the blocks it has not drawn take a one-line estimate: on a note of image embeds the
+  * lines above the centre lost three slides (GitHub issue 48, 1503 px on the render cell), so the text under the centre was
+  * three slides further down, and the ink, anchored to its line, went with that line off the screen. The settle hold is the
+  * pinch's, built from the centre as a still pair of fingers there would build it (InkOverlayPinch, the takeover and the
+  * lift), and the centre's line is read as the takeover reads the fingers' line, so the settle measure moves the scroll by
+  * what that line moved. No `.cm-sizer`, no hold, as for the pinch: the commit then runs as before.
+  */
+ function centreSettleHold(this: InkOverlayPlugin, next:number, rect:DOMRect):NonNullable<InkOverlayPlugin["panAnchorHold"]>|null {
+  if(!this.panSizer())return null;
+  const x=rect.left+rect.width/2,y=rect.top+rect.height/2,scroller=this.view.scrollDOM;
+  this.previewPanEngaged=false;
+  const columnLocal=this.columnLocalAt(this.pinchScaleNow),origin=this.previewHostOrigin,contentTopLocal=this.contentTopLocalAt(this.pinchScaleNow);
+  this.retirePanSettle("a zoom button");
+  const hold:NonNullable<InkOverlayPlugin["panAnchorHold"]>={
+   expansion:null,focalX:x,focalY:y,targetX:x,targetY:y,
+   hostLeft:(origin?.valid?origin.left:rect.left)+this.panX(),hostTop:(origin?.valid?origin.top:rect.top)+this.panY(),
+   columnLocal,contentTopLocal,fromScale:this.pinchScaleNow,scrollLeft:scroller.scrollLeft,scrollTop:scroller.scrollTop,toScale:next,
+   generation:this.viewportGeneration+1,path:this.filePath(),container:this.container,
+   left:scroller.scrollLeft,top:scroller.scrollTop,ready:false,outcome:"pending",attempts:0,request:null,issuance:[],
+  };
+  // The centre's line where it is PAINTED, in document layout px (InkOverlayPinch, "THE LINE UNDER THE FINGERS"). Only a
+  // line the centre is on: beside or below the text there is no line, and the settle keeps its target as it stands.
+  const pos=this.view.posAtCoords({x,y},false);
+  let el:Node|null=pos===null?null:this.view.domAtPos(pos).node;
+  while(el&&!(el.nodeType===1&&(el as Element).classList.contains("cm-line")))el=el.parentNode===this.view.contentDOM?null:el.parentNode;
+  const box=el&&el.nodeType===1?(el as Element).getBoundingClientRect():null;
+  if(pos!==null&&box&&y>=box.top&&y<box.bottom){
+   const paintScale=Number.isFinite(this.cssScale)&&this.cssScale>0?this.cssScale:(this.view.scaleY||1);
+   const painted=(box.top-this.view.documentTop)/paintScale;
+   if(Number.isFinite(painted))settleAnchorLines.set(hold,{pos:this.view.state.doc.lineAt(pos).from,top:painted,paintScale,dpr:this.dpr});
+  }
+  this.panAnchorHold=hold;
+  return hold;
  }
 
  function fitHandwriting(this: InkOverlayPlugin):"fit"|"empty"|"busy"|"unrepresentable" {
-  if(this.getNoteViewportState().busy) return "busy";
+  if(this.getNoteViewportState().busy||this.wheelZoomRun?.isLive||this.pinchHeld()||this.pinchGive) return "busy";
   const refuse=()=>{new Notice("Handwriting: this ink cannot fit in the current view.");return "unrepresentable" as const;};
   const path=this.filePath()!;
   const scroller=this.view.scrollDOM,rect=scroller.getBoundingClientRect();
@@ -263,7 +319,7 @@ declare module "./InkOverlay" {
   * as it was saved (restoreNoteCamera alone passes it): its scroll is absolute, taken with the column already at its
   * margin for that zoom, so no margin debt is booked or paid.
   */
- function commitCameraScale(this: InkOverlayPlugin, next:number,scroll?:{left:number;top:number},settleHold?:object|null,preserveScrollDemand=false,bypassFloor=false,restore=false):boolean {
+ function commitCameraScale(this: InkOverlayPlugin, next:number,scroll?:{left:number;top:number;rest?:boolean},settleHold?:object|null,preserveScrollDemand=false,bypassFloor=false,restore=false):boolean {
   this.commitDepth=(this.commitDepth||0)+1;
   try {
 	this.restorePinchLayers();
@@ -367,6 +423,12 @@ declare module "./InkOverlay" {
   // already closed elsewhere, and the rest belongs in the margin, which now holds it.
   // The fit predicate itself, now that there is no centred rest to stand in for it.
   if (this.columnFitsPane(next, effective)) target.left = 0;
+  // A ZOOM STEP THAT LANDS AT 100 PERCENT SETTLES ON THE NOTE'S LEFT REST, scroll 0, where the note sits when it opens,
+  // whatever point the zoom in held: only the view slides sideways, and up and down keep the centre's hold. Under Infinite
+  // Canvas too, which the fit predicate above leaves out. A column wider than the pane keeps the centre's hold. The hold
+  // keeps only its vertical half: with no column to hold, its settle leaves the pan's x where it is (anchorPanTo), and
+  // holding it moved the text 140 px left of the rest as pan, after a zoom in at the pen point.
+  else if (scroll?.rest && this.columnFitsPane(next, effective, true)) { target.left = 0; if (hold) hold.columnLocal = null; }
   // ONE SYNC, AFTER THE PAN WRITE. reanchorPan decides the settle's ease and starts it; the sync below then re-pins
   // the band to the committed scroll and widens it by the ease on the side the ease uncovers (syncBand), one bake.
   this.setViewportScroll(target.left,target.top);if(diagnosticsEnabled())scrollProbeExtent(`settle scroll target ${target.left.toFixed(2)},${target.top.toFixed(2)} actual ${this.view.scrollDOM.scrollLeft.toFixed(2)},${this.view.scrollDOM.scrollTop.toFixed(2)}`);this.reanchorPan();if(hold&&diagnosticsEnabled())this.traceSettlePaper("measure commit");
@@ -374,7 +436,7 @@ declare module "./InkOverlay" {
   // Finish its coverage before the router can map and lock the next pen down.
   if(this.syncBand()!=="none")this.handleResize();
   // The one whole repaint this commit's reallocations left owed (handleResize), after the last of them.
-  this.payCommitRepaint();
+  this.payCommitRepaint("first pass");
   const settledLeft=this.view.scrollDOM.scrollLeft,settledTop=this.view.scrollDOM.scrollTop;
   if(hold && this.firstSettleConsumer()) {
    // Use a real currently visible document position. Issue separately from
@@ -420,7 +482,7 @@ declare module "./InkOverlay" {
     if(Number.isFinite(moved)&&Math.abs(moved)>band){target.top=Math.max(0,Math.min(MAX_VIEWPORT_LAYOUT,target.top+moved));if(hold.contentTopLocal!==null)hold.contentTopLocal-=moved;settleLineApplied.set(hold,(settleLineApplied.get(hold)??0)+moved);}}}
     this.setViewportScroll(target.left,target.top);if(diagnosticsEnabled())scrollProbeExtent(`settle scroll target ${target.left.toFixed(2)},${target.top.toFixed(2)} actual ${this.view.scrollDOM.scrollLeft.toFixed(2)},${this.view.scrollDOM.scrollTop.toFixed(2)}`);this.reanchorPan();if(diagnosticsEnabled())this.traceSettlePaper(`measure attempt ${hold.attempts+1}`);
     // Paid in the finally: a throw after handleResize would otherwise leave the owed flag set and the layer blank.
-    if(this.syncBand()!=="none")this.handleResize();}finally{this.commitDepth--;this.payCommitRepaint();}
+    if(this.syncBand()!=="none")this.handleResize();}finally{this.commitDepth--;this.payCommitRepaint(`attempt ${hold.attempts+1}`);}
     // Partial: whatever the steps above damaged, and the repaint plan's own camera test, decide the work. A whole-world ask here
     // repainted every stroke a third time with the camera unchanged.
     this.scheduleRepaint("partial");
@@ -454,14 +516,14 @@ declare module "./InkOverlay" {
    if(!valid||!owns()||!matchesScroll()){finish();return;}
    this.handleResize();this.updateExtent(true);this.setViewportScroll(target.left,target.top);this.reanchorPan();
    if(this.syncBand()!=="none")this.handleResize();
-   this.payCommitRepaint();
+   this.payCommitRepaint("write");
    this.scheduleRepaint("partial");
    const complete=()=>{
     if(!owns()){finish();return;}
     this.setViewportScroll(target.left,target.top);this.reanchorPan();
     this.updateExtent(true);this.reanchorPan();
     if(this.syncBand()!=="none")this.handleResize();
-    this.payCommitRepaint();
+    this.payCommitRepaint("complete");
     this.scheduleRepaint("partial");
     finish();
    };
@@ -475,11 +537,15 @@ declare module "./InkOverlay" {
   }
   this.mobileTools?.refresh();
   this.noteZoomControls?.refresh();
+  this.noteCameraMoved();
+  // The first commit of the session that changed the scale measures, on idle, what a scaled draw of the pane costs on
+  // this device (the zoom report's raster probe line). A flag check per commit; nothing per frame.
+  if(next!==previous)armRasterProbe(this.winRef,this.view.dom);
   return true;
   } finally {
    this.commitDepth--;
    // A commit that returned after a reallocation, before its own payment, still pays: the layers must not be left blank.
-   if(this.commitDepth===0)this.payCommitRepaint();
+   if(this.commitDepth===0)this.payCommitRepaint("finally");
   }
  }
 
@@ -487,10 +553,11 @@ declare module "./InkOverlay" {
   * Pay the whole repaint a camera commit's reallocations left owed, once, in the caller's task: what handleResize itself did before
   * the commit took it over (a synchronous repaint, or the queued frame's while a stroke is being built or another tool is active).
   */
- function payCommitRepaint(this: InkOverlayPlugin):void {
+ function payCommitRepaint(this: InkOverlayPlugin,site="unnamed"):void {
   if(!this.commitRepaintOwed)return;
   this.commitRepaintOwed=false;
-  if(this.builder===null&&this.mode==="ink")this.repaint();
+  // The call site, for the whole-paint counters: a wasted paint names who paid it. A queued payment paints in a later frame, unnamed.
+  if(this.builder===null&&this.mode==="ink"){this.wholePaintSite=site;try{this.repaint();}finally{this.wholePaintSite=null;}}
   else this.scheduleRepaint("resize");
  }
 
@@ -510,6 +577,7 @@ export function installZoomApi(proto: InkOverlayPlugin): void {
 		zoomNoteBy,
 		resetNoteZoom,
 		zoomAroundCenter,
+		centreSettleHold,
 		fitHandwriting,
 		commitCameraScale,
 		payCommitRepaint,

@@ -74,8 +74,8 @@ interface TapCandidate {
 	source: "mouse" | "touch";
 }
 
-const TAP_MAX_MOVE_PX = 8;
-const TAP_MAX_MS = 500;
+export const TAP_MAX_MOVE_PX = 8;
+export const TAP_MAX_MS = 500;
 
 interface TouchState {
 	x: number;

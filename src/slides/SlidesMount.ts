@@ -56,14 +56,28 @@ declare module "./SlidesInkSurface" {
 			// changes the slide with no pointer event of any kind, so nothing
 			// on the input path can see this coming.
 			this.endStrokeForSlideChange();
+			const from = l.index;
+			// A second change while the first is still moving: the first follow ends at rest on the slide that was
+			// present, so the main pair holds that slide's ink, and the new follow starts from it.
+			if (this.follow) {
+				this.cancelFollow();
+				this.repaint();
+			}
 			l.index = index;
 			this.actionsChanged();
 			if (diagnosticsEnabled()) {
 				log(
-					`slide ${index} now present: repainting ` +
-						`${(this.strokes.get(index) ?? []).length} stroke(s)`
+					`slide ${index} now present: ${(this.strokes.get(index) ?? []).length} stroke(s)`
 				);
 			}
+			// While the follow runs, the main pair keeps the OUTGOING slide's ink and is not repainted for the new
+			// index: the land repaints it once the new slide has arrived (SlidesTransition.ts). Input, erase and
+			// saving read `l.index` and are on the new slide from here, as before.
+			if (this.startFollow(from, index)) return;
+		} else if (this.follow) {
+			// The class observer or `slidechanged` for the change already being followed: nothing to repaint before
+			// the land.
+			return;
 		}
 		this.refresh();
 	}
@@ -314,8 +328,13 @@ declare module "./SlidesInkSurface" {
 
 	/** Re-measure, then redraw. The one entry point after any layout move. */
 	function refresh(this: SlidesDeck): void {
+		// A resize or a deck refresh mid-change ends the follow at rest, before the stores are resized under it.
+		this.cancelFollow();
 		this.syncGeometry();
 		this.repaint();
+		// The resize threw away the wet and tail pixels of a stroke still on
+		// the glass; the committed repaint above cannot bring them back.
+		this.redrawLiveStroke();
 	}
 
 	/**
@@ -488,6 +507,7 @@ declare module "./SlidesInkSurface" {
 		this.remounting = true;
 		try {
 			const index = l.index;
+			this.cancelFollow();
 			l.highlightGroup.remove();
 			l.committed.remove();
 			l.wetCanvas.remove();
@@ -507,8 +527,13 @@ declare module "./SlidesInkSurface" {
 	/**
 	 * Redraw the current slide's COMMITTED ink. Slide change, load, erase and
 	 * resize only - never per sample (A2). That is the lag fix.
+	 *
+	 * Any repaint ends a slide-change follow first (SlidesTransition.ts): an
+	 * erase, an undo, a load, a theme or settings change, a pen contact or the
+	 * land itself all paint the present slide at rest, as before the follow.
 	 */
 	function repaint(this: SlidesDeck): void {
+		this.cancelFollow();
 		if (!this.ensureCanvasesMounted()) return;
 		const l = this.layers;
 		if (!l) return;

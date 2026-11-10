@@ -475,12 +475,12 @@ describe("a blur with a finger down strands no touch bookkeeping", () => {
  */
 describe("abandonActiveStroke with touch contacts but no pen stroke (deferral 2, §17)", () => {
 	/** A finger's pointerdown - same shape as the blur-block's own helper. */
-	const fingerDown = (el: unknown, pointerId: number, x = 300, y = 400) =>
+	const fingerDown = (el: unknown, pointerId: number, x = 300, y = 400, isPrimary = true) =>
 		({
 			type: "pointerdown",
 			pointerType: "touch",
 			pointerId,
-			isPrimary: true,
+			isPrimary,
 			target: el,
 			clientX: x,
 			clientY: y,
@@ -512,7 +512,8 @@ describe("abandonActiveStroke with touch contacts but no pen stroke (deferral 2,
 		h.fireWin(fingerTouchStart(h.el, 21));
 		// Second finger: `touchPos.size === 2` on this pointerdown is exactly
 		// what `pointerDown()` reads to start the pinch (`beginPinch`).
-		h.fire(fingerDown(h.el, 22, 340, 420));
+		// A second concurrent touch is never the primary pointer (Pointer Events).
+		h.fire(fingerDown(h.el, 22, 340, 420, false));
 		h.fireWin(fingerTouchStart(h.el, 22));
 
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any

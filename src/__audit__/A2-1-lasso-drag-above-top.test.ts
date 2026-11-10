@@ -49,6 +49,8 @@ const proto = InkOverlayPlugin.prototype as unknown as Record<string, (...a: unk
 
 function overlay(extra: Record<string, unknown> = {}): Record<string, unknown> {
 	const o = Object.create(InkOverlayPlugin.prototype) as Record<string, unknown>;
+	// A shown frame after every sample: the frame runs at once and returns null, as a number would leave a stale frame id.
+	Object.defineProperty(o, "winRef", { value: { requestAnimationFrame: (cb: () => void) => { cb(); return null; }, cancelAnimationFrame: () => {} } }); o.container = {};
 	Object.assign(o, {
 		filePath: () => NOTE,
 		scale: 1,

@@ -83,6 +83,8 @@ function expectLanded(down: BBox, box: BBox, why: string): void {
 
 function overlay() {
 	const o = Object.create(InkOverlayPlugin.prototype) as Record<string, any>;
+	// A shown frame after every sample: the frame runs at once and returns null, as a number would leave a stale frame id.
+	Object.defineProperty(o, "winRef", { value: { requestAnimationFrame: (cb: () => void) => { cb(); return null; }, cancelAnimationFrame: () => {} } }); o.container = {};
 	const drawn: BBox[] = [];
 	const noop = () => {};
 	const tail = new Proxy({}, {
@@ -90,6 +92,8 @@ function overlay() {
 	});
 	Object.assign(o, {
 		filePath: () => NOTE,
+		// The Attach button's colours read the theme off view.dom; with none they fall back.
+		view: { dom: null },
 		scale: 1,
 		cssScale: 1,
 		cssWidth: 800,
@@ -217,6 +221,57 @@ describe("the selection changes while the pen is still down", () => {
 
 		expect(drawn, "a box was drawn for a selection that no longer exists").toEqual([]);
 		expect(truthBox(), "the strokes kept moving after the selection was cleared").toEqual(letGo);
+	});
+
+	it("Escape mid-drag: the redraw keeps the full tail and draws the picture at the let-go offset, and the lift moves the store by it", () => {
+		const { o, drawn } = overlay();
+		proto.lassoDown!.call(o, s(130, 100));
+		expect(o.spaceSnapshot?.kind, "no lasso picture at the grab, so this cell proves nothing").toBe("lasso");
+		const down = truthBox();
+		proto.lassoMove!.call(o, [s(150, 130)]);
+		const letGo = { ...o.dragTotal };
+
+		// The tail calls and the offset each picture draw used, from here on.
+		const calls: string[] = [], pictures: { dx: number; dy: number }[] = [];
+		o.tail = new Proxy({}, {
+			get: (_t, name) => (name === "drawSelectionBox" ? (_cam: unknown, box: BBox) => drawn.push({ ...box }) : () => { calls.push(String(name)); }),
+		});
+		const picture = proto.drawSpacePicture!;
+		o.drawSpacePicture = function (this: unknown, ...a: unknown[]) { pictures.push({ ...o.dragTotal }); return picture.apply(this, a); };
+
+		(o.selection as SelectionModel).clear(); // what Escape does
+		drawn.length = 0;
+		proto.redrawSelectionUI!.call(o);
+		proto.lassoMove!.call(o, [s(300, 300)]);
+		proto.redrawSelectionUI!.call(o);
+
+		expect(drawn, "a box was drawn for a selection that no longer exists").toEqual([]);
+		expect(calls.filter((c) => c === "prepareLive"), "the redraw compacted the tail under the picture").toEqual([]);
+		expect(pictures, "the redraws did not draw the picture at the let-go offset").toEqual([letGo, letGo]);
+		expect(truthBox(), "the store moved before the lift").toEqual(down);
+		proto.lassoUp!.call(o);
+		expectLanded(down, { ...down, x: down.x + letGo.dx, y: down.y + letGo.dy }, "the lift did not move the store by the let-go offset");
+		expect(o.spaceSnapshot ?? null, "the lift did not end the picture").toBeNull();
+	});
+
+	it("Escape mid-drag: a tail shrink queued before the grab and run after the key leaves the full tail to the picture", () => {
+		const { o } = overlay();
+		proto.lassoDown!.call(o, s(130, 100));
+		expect(o.spaceSnapshot?.kind, "no lasso picture at the grab, so this cell proves nothing").toBe("lasso");
+		proto.lassoMove!.call(o, [s(150, 130)]);
+
+		// A full tail, so the shrink would run; the calls it makes from here on.
+		const calls: string[] = [];
+		o.tail = new Proxy({}, {
+			get: (_t, name) => (name === "inlineGrid" ? { mode: "full" } : () => { calls.push(String(name)); }),
+		});
+		(o.selection as SelectionModel).clear(); // what Escape does
+		expect(proto.selectionBounds!.call(o), "premise: the cleared selection still has a box").toBeNull();
+		o.tailShrinkQueued = true;
+		proto.shrinkTailNow!.call(o); // the task of a shrink queued before the grab
+
+		expect(calls, "the shrink wiped the tail under the live picture").toEqual([]);
+		expect(o.tailShrinkQueued, "the shrink task did not clear its flag").toBe(false);
 	});
 
 	it("the ink changes under the drag and the selected strokes are gone: no box is drawn", () => {

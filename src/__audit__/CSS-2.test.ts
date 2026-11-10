@@ -214,12 +214,15 @@ function pill(bodyCls: string[], inset = 0) {
 /** Rightmost strip button (flex-end row: the last shown button sits at the right end). */
 function stripRightButton(bodyCls: string[], inset = 0) {
 	const chain = [{ tag: "div", classes: new Set(["handwriting-mobile-tools", "handwriting-corner-top-right"]) }, pane, body(bodyCls)];
-	const r = resolve(chain, ["top", "right", "padding", "border", "z-index", "position"]);
-	const b = resolve([{ tag: "button", classes: new Set(["handwriting-mobile-tool"]) }, ...chain], ["width", "height"]);
+	// The padding and border are the face's: the row and its look live there, inside the root.
+	const faceChain = [{ tag: "div", classes: new Set(["handwriting-mobile-tools-face"]) }, ...chain];
+	const r = resolve(chain, ["top", "right", "z-index", "position"]);
+	const f = resolve(faceChain, ["padding", "border"]);
+	const b = resolve([{ tag: "button", classes: new Set(["handwriting-mobile-tool"]) }, ...faceChain], ["width", "height"]);
 	const top = px(r.won.top?.value, inset);
 	const right = px(r.won.right?.value, 0);
-	const pad = px(r.won.padding?.value);
-	const border = firstPx(r.won.border?.value);
+	const pad = px(f.won.padding?.value);
+	const border = firstPx(f.won.border?.value);
 	const bw = px(b.won.width?.value);
 	const bh = px(b.won.height?.value);
 	const box: Box = { top: top + border + pad, bottom: top + border + pad + bh, rNear: right + border + pad, rFar: right + border + pad + bw, z: Number(r.won["z-index"]?.value) };

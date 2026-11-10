@@ -12,6 +12,13 @@
  * Null means "PDF ink is off this session". It never means a partial state,
  * and nothing here throws.
  *
+ * One read reaches past the DOM: `readViewTurn`, the turn the viewer applies
+ * to its pages. No geometry can give it - a half turn leaves every box the
+ * same size, and a document can open already turned. It is optional and
+ * guarded like everything else here, and when it answers null the PDF ink
+ * behaves exactly as it did before turns were read. Every other read stays
+ * geometric.
+ *
  * M0 uses this to answer, from the live app, what the design could only
  * guess: which element scrolls, what a page div looks like, where the scale
  * lives, and whether the optional internal path exists.
@@ -312,4 +319,34 @@ export function probeInternalPath(view: unknown): string {
 	}
 	const cs = step(cur, "currentScale");
 	return `view.${path.join(".")} present; currentScale ${typeof cs === "number" ? cs : "absent"}`;
+}
+
+/**
+ * The turn the viewer applies to every page, in degrees clockwise: 0, 90, 180
+ * or 270. Read live from `view` on every call and never cached, because the
+ * user turns pages with R and Shift+R and the viewer reopens a document at the
+ * turn it was left at.
+ *
+ * Obsidian's view child holds the pdf.js application object as `pdfViewer`;
+ * the page viewer that owns `pagesRotation` is that object's own `pdfViewer`.
+ * Null when `view` no longer shows `root`, when any step is missing, when the
+ * value is not one of the four turns, or when a read throws.
+ */
+export function readViewTurn(view: unknown, root: HTMLElement): number | null {
+	try {
+		const step = (obj: unknown, key: string): unknown =>
+			obj !== null && typeof obj === "object" ? (obj as Record<string, unknown>)[key] : undefined;
+		if (step(view, "containerEl") !== root) return null;
+		let cur: unknown = view;
+		for (const key of ["viewer", "child", "pdfViewer", "pdfViewer"]) {
+			cur = step(cur, key);
+			if (cur === undefined || cur === null) return null;
+		}
+		const deg = step(cur, "pagesRotation");
+		if (typeof deg !== "number" || !Number.isFinite(deg)) return null;
+		const turn = ((deg % 360) + 360) % 360;
+		return turn === 0 || turn === 90 || turn === 180 || turn === 270 ? turn : null;
+	} catch {
+		return null;
+	}
 }

@@ -34,6 +34,7 @@ declare module "./InkOverlay" {
 		restoreReticleAfterPan(ev?: PointerEvent): void;
 		showSpaceCursor(sample: PenSample): void;
 		hideSpaceCursor(): void;
+		showSnapCursor(sample: PenSample): void;
 	}
 }
 
@@ -315,6 +316,9 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		// neighbouring rule.
 		this.view.scrollDOM.classList.remove(PAN_DRAG_CLASS);
 		this.concealPenCursor();
+		// The Attach button's words go with the reticle: Obsidian's tooltip has no timer, and a pen leaving hover range
+		// sends no pointerout it would hear.
+		this.attachHoverOff();
 	}
 
 	/** Hide the reticle by opacity only: a compositor change, never a layout or root repaint. */
@@ -509,6 +513,18 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		this.hidePenCursor();
 	}
 
+	/**
+	 * The reticle while the pen drags a snapped shape, which resizes and turns
+	 * it. Pen-down concealed the ring for the stroke; once the shape shows, the
+	 * pen is steering it rather than inking, so the ring comes back the way the
+	 * lasso drag keeps its own. See showLassoCursor. No hide twin: the lift does
+	 * nothing to the ring, as a plain stroke's lift does nothing - the next
+	 * hover sample moves it, and the watchdog takes a pen that left.
+	 */
+	function showSnapCursor(this: InkOverlayPlugin, sample: PenSample): void {
+		this.showPenCursor(sample);
+	}
+
 export function installCursors(proto: InkOverlayPlugin): void {
 	installMethods(proto, {
 		showPenCursor,
@@ -526,5 +542,6 @@ export function installCursors(proto: InkOverlayPlugin): void {
 		restoreReticleAfterPan,
 		showSpaceCursor,
 		hideSpaceCursor,
+		showSnapCursor,
 	});
 }

@@ -22,7 +22,7 @@
  * prevent, and the settings row would promise ids nothing registered.
  */
 
-import { HIGHLIGHTER_COLORS, PEN_COLORS } from "./ink/InkColor";
+import { HIGHLIGHTER_COLORS, PEN_COLORS, inkColorLabel } from "./ink/InkColor";
 import { INK_SIZE_STEPS } from "./ink/InkSize";
 import { PRESET_COMMANDS } from "./ink/InkPresetCommands";
 
@@ -68,6 +68,8 @@ export const ALWAYS_COMMANDS: readonly PaletteCommand[] = [
 	{ id: "cut-selected-ink", name: "Lasso: cut selection" },
 	{ id: "delete-selected-ink", name: "Lasso: delete selection" },
 	{ id: "paste-ink", name: "Lasso: paste" },
+	{ id: "attach-ink-to-text", name: "Lasso: attach ink to text" },
+	{ id: "detach-ink", name: "Lasso: detach ink from text" },
 ];
 
 /**
@@ -99,10 +101,24 @@ export const GATED_FIXED_COMMANDS: readonly PaletteCommand[] = [
 export function gatedGeneratedCommands(): PaletteCommand[] {
 	const out: PaletteCommand[] = [];
 	for (const step of INK_SIZE_STEPS) out.push({ id: `ink-size-${step.name}`, name: `Ink size: ${step.name}` });
-	for (const name of inkColorNames()) out.push({ id: `ink-color-${name}`, name: `Ink color: ${name}` });
-	for (const c of HIGHLIGHTER_COLORS)
-		out.push({ id: `highlighter-color-${c.name}`, name: `Highlighter color: ${c.name}` });
+	for (const name of inkColorNames())
+		out.push({ id: `ink-color-${name}`, name: `Ink color: ${inkColorCommandLabel(name)}` });
+	for (const [i, c] of HIGHLIGHTER_COLORS.entries())
+		out.push({ id: `highlighter-color-${c.name}`, name: `Highlighter color: ${inkColorLabel("highlighter", i)}` });
 	return out;
+}
+
+/**
+ * What an `ink-color-<name>` command is called: the live label of the pen slot
+ * with that default name, or the highlighter slot's for a highlighter-only
+ * name. Ids stay the default names, so hotkeys survive any slot edit; the
+ * label shows the slot's default name until the colour is edited, then its hex.
+ */
+export function inkColorCommandLabel(name: string): string {
+	const pen = PEN_COLORS.findIndex((c) => c.name === name);
+	if (pen >= 0) return inkColorLabel("pen", pen);
+	const hl = HIGHLIGHTER_COLORS.findIndex((c) => c.name === name);
+	return hl >= 0 ? inkColorLabel("highlighter", hl) : name;
 }
 
 /** The union main.ts's `ink-color-*` loop walks, in its order. */

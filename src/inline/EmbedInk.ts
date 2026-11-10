@@ -74,7 +74,8 @@ import { drawStroke } from "../ink/StrokeRenderer";
 import { InkStroke, settleLineAnchors } from "../ink/Stroke";
 import { fontZoomFactor } from "./ZoomScale";
 import { surfaceExtents } from "./SurfaceExtent";
-import { shownStrokes } from "./EmbedInkLines";
+import { attachedDx, shownStrokes } from "./EmbedInkLines";
+import type { AttachmentData } from "./InkAttachments";
 import type { LineSignature } from "./LineAnchor";
 import { growPrintContainer, isPrintContainer, printing, printSpans, printVectorFor, releasePrintStrips } from "./EmbedInkPrint";
 import { embedInkAnchor, embedInkRootHidden, embedInkRootIsEmbed, type EmbedInkVia } from "./EmbedInkRoot";
@@ -202,6 +203,8 @@ let canvasNoteOf: ((path: string) => boolean) | null = null;
 let fontRefFor: ((path: string) => number | null) | null = null;
 /** The signature of an editor open on a path, which its anchors are honoured under (`shownStrokes`); null when none is. */
 let lineSignatureFor: ((path: string) => LineSignature | null) | null = null;
+/** A note's attached groups as its store holds them (`shownStrokes` draws each member at its group's kept dx). */
+let attachmentsFor: ((path: string) => readonly AttachmentData[]) | null = null;
 /** The zoom each root's canvas was last painted at: its text size over the note's reference font (`inkZoomOf`). */
 const paintedZooms = new WeakMap<HTMLElement, number>();
 /**
@@ -734,6 +737,14 @@ export function initEmbedInkLineSignature(provider: ((path: string) => LineSigna
 }
 
 /**
+ * Where a read-only view reads a note's attached groups: each member is drawn at its group's kept sideways move, as the
+ * editor shows it. Wired by the note surface beside the strokes provider.
+ */
+export function initEmbedInkAttachments(provider: ((path: string) => readonly AttachmentData[]) | null): void {
+	attachmentsFor = provider;
+}
+
+/**
  * Where the diagnostic line goes. Wired once at plugin load; null silences it.
  */
 export function initEmbedInkDiagnostics(
@@ -886,6 +897,7 @@ export function teardownEmbedInk(): void {
 	layers.clear();
 	revisions.clear();
 	strokesFor = null;
+	attachmentsFor = null;
 	canvasNoteOf = null;
 	columnWidthFor = null;
 	fontRefFor = null;
@@ -931,17 +943,20 @@ export function placeStrokes(
 	path?: string
 ): { strokes: readonly InkStroke[]; key: string } {
 	const at = zoom === 1 ? "" : `@${zoom};`;
-	if (!strokes.some((s) => s.lineAnchor)) return { strokes, key: at };
+	const records = path !== undefined && attachmentsFor ? attachmentsFor(path) : null;
+	if (!strokes.some((s) => s.lineAnchor) && !attachedDx(records)) return { strokes, key: at };
 	// The editor brings its anchors up to date with typing when they are read or written. Reading them here is such a
 	// read: a reading view beside an editor of the same note folds the editor's anchors at each of its renders.
 	settleLineAnchors();
 	const live = path !== undefined && lineSignatureFor ? lineSignatureFor(path) : null;
-	const shown = shownStrokes(strokes, measureSpans(root, held), zoom, live);
+	const shown = shownStrokes(strokes, measureSpans(root, held), zoom, live, records);
 	if (shown === strokes) return { strokes, key: at };
 	let key = at;
 	for (let k = 0; k < strokes.length; k++) {
 		const a = strokes[k]!, b = shown[k]!;
-		if (a !== b) key += `${k}:${(b.bbox.y - a.bbox.y).toFixed(2)};`;
+		if (a === b) continue;
+		const dx = b.bbox.x - a.bbox.x;
+		key += `${k}:${(b.bbox.y - a.bbox.y).toFixed(2)}${dx === 0 ? "" : `,${dx.toFixed(2)}`};`;
 	}
 	return { strokes: shown, key };
 }

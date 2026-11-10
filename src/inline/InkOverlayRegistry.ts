@@ -11,13 +11,14 @@ import { markPenSeen, releaseMouseInkQuietly } from "./PenToolsMode";
 import { StrokeMetrics } from "../ink/StrokeMetrics";
 import { ribbonCacheStats } from "../ink/StrokeRenderer";
 import { InlineInkStore } from "./InlineInkStore";
-import { embedInkLayerCount, embedInkPrintSwaps, initEmbedInkCanvasNote, initEmbedInkColumnWidth, initEmbedInkLineSignature, printColumnWidth } from "./EmbedInk";
+import { embedInkLayerCount, embedInkPrintSwaps, initEmbedInkAttachments, initEmbedInkCanvasNote, initEmbedInkColumnWidth, initEmbedInkLineSignature, printColumnWidth } from "./EmbedInk";
 import { initEmbedInkPrintCanvas } from "./EmbedInkPrint";
 import { canvasForNote } from "./CanvasNoteOverride";
 import { setNoteChoiceSource } from "./NoteChoiceHint";
 import { armMouseInkQuietly, mouseInkEnabled, toolPickedHere } from "./MouseInk";
 import { surfaceExtents } from "./SurfaceExtent";
 import { tipModeHeld, releaseTipModes, repaintSurfaces, hideCursorSurfaces, endStrokeSurfaces, refreshStripSurfaces } from "./InkOverlayToolState";
+import { rasterProbeLine } from "./RasterProbe";
 import type { InkOverlayPlugin } from "./InkOverlay";
 
 const sessionStartMs = Date.now();
@@ -115,6 +116,7 @@ initEmbedInkColumnWidth((path) => { const p = overlayForPath(path); const line =
 // Reading view honours a note's anchors as its editor does, under the editor's signature (see EmbedInkLines.ts). An editor hidden
 // by Reading view keeps its last measured one: a measure of width 0 is never taken (InkOverlayLineAnchors lineSignatureMeasured).
 initEmbedInkLineSignature((path) => overlayForPath(path)?.lineAnchorState?.sig ?? null);
+initEmbedInkAttachments((path) => inlineInk.attachments(path));
 // A native export of an Infinite Canvas note prints the text and the ink on it only (see EmbedInkPrint.ts); the overlay answers whether the note shows the canvas.
 initEmbedInkPrintCanvas((path) => canvasForNote(path, scrollExpansionEnabled));
 // A canvas note's Reading view scrolls as far as the editor granted the note (see EmbedInk.ts readingExtent); the same answer.
@@ -389,11 +391,12 @@ export function copyInlineInkMetrics(): string {
 
 /**
  * A note's ink was replaced by an external reload: the overlays showing it
- * drop any lasso selection (its stroke ids may no longer exist) and repaint.
+ * repaint, and drop any lasso selection when the strokes changed (its stroke
+ * ids may no longer exist; with the same strokes every one still does).
  * Path-scoped on purpose - other notes' overlays have nothing to redraw.
  */
-export function inkExternallyReloaded(path: string): void {
-	for (const p of instances) p.noteExternallyReloaded(path);
+export function inkExternallyReloaded(path: string, strokesChanged = true): void {
+	for (const p of instances) p.noteExternallyReloaded(path, strokesChanged);
 }
 
 export interface InlineReloadBinding {
@@ -443,7 +446,8 @@ export function captureInlineReloadAdmission(path: string): (() => boolean) | nu
 /** Zoom diagnostics for every live editor. Run at 100% and at zoom, then diff. */
 export function copyInlineZoomReport(): string {
 	if (instances.size === 0) return "Handwriting zoom report: no editors mounted";
-	const parts = [`Handwriting zoom report: ${instances.size} editor(s)`];
+	// What a scaled draw of the pane costs on this device, measured once at the first zoom (RasterProbe.ts).
+	const parts = [`Handwriting zoom report: ${instances.size} editor(s)`, rasterProbeLine()];
 	let n = 0;
 	for (const p of instances) parts.push(`\n--- editor ${++n} ---`, p.zoomReport());
 	return parts.join("\n");

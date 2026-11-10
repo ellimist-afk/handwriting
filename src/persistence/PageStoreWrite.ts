@@ -161,6 +161,23 @@ const nextTask = (): Promise<void> => new Promise((resolve) => window.setTimeout
 			if (left.length > 0) this.inFlight.set(pageId, left);
 			else this.inFlight.delete(pageId);
 		}
+		// A save that landed under an id this store moved this session (a deck's closing save under the id it was opened
+		// with, after the move took that file) sits where nothing names it. One more round of the same move takes it, on
+		// the old id's chain, with that move's stamp: the round decides live file or listed copy as it always does. Not
+		// while a round of that move is running (it writes the queue first itself), and not for a save that went back to
+		// the queue: that one comes here again when it lands. Not once a note names the old id again: the save is that
+		// note's own, so it stays under the old id, and the entry goes for the rest of the session.
+		const move = this.movedIds?.get(pageId);
+		if (move !== undefined && move.named()) {
+			this.movedIds.delete(pageId);
+		} else if (move !== undefined && !this.moving?.has(pageId) && !this.pending.has(pageId)) {
+			// The save itself landed: a round that throws leaves the file where it is, as before this round, and says so.
+			try {
+				await this.keepAsideUnder(pageId, move.to, move.stamp, move.named);
+			} catch (err) {
+				console.error("[handwriting] could not move a save that landed under a moved page id beside the new page", pageId, move.to, err);
+			}
+		}
 	}
 
 	/**

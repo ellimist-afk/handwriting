@@ -9,7 +9,7 @@ import { PenSample } from "../input/PointerRouter";
 import { Band, bandCovers, bandFor, bandMargin, bandNeedsMove, BandViewport } from "./ScrollBand";
 import { ExtentInputs, sameExtentInputs } from "./FrontierCache";
 import { shiftPlan } from "../ink/DamageLedger";
-import { Extent, inkClaimX, leftReserve, onScreenFloorX, ScrollExpansionDemand, SHRINK_SCROLL_IDLE_MS, shrunkAxis, spacerPosition, surfaceExtents, surfaceOriginInScroller, writeFrontier, writeFrontierApplies, ZERO_EXTENT, zoomFrontier } from "./SurfaceExtent";
+import { Extent, infiniteCanvasStartX, inkClaimX, leftReserve, onScreenFloorX, ScrollExpansionDemand, SHRINK_SCROLL_IDLE_MS, shrunkAxis, spacerPosition, surfaceExtents, surfaceOriginInScroller, writeFrontier, writeFrontierApplies, ZERO_EXTENT, zoomFrontier } from "./SurfaceExtent";
 import { scrollProbeExtent } from "./ScrollProbe";
 import { installMethods } from "./InstallMethods";
 import { CAMERA_STILL_BACKING_PX, cameraWithin, inlineInk, instances, type RasterCamera, travelledEaseRoom, type InkOverlayPlugin } from "./InkOverlay";
@@ -146,7 +146,7 @@ declare module "./InkOverlay" {
 		if (!resized && last) {
 			const held = this.camera.snapshot, path = this.filePath();
 			if (cameraWithin(last.x, last.y, last.zoom, held.x, held.y, held.zoom, this.committedBacking ?? 0, CAMERA_STILL_BACKING_PX)
-				&& this.paintedStrokeCount === (path ? inlineInk.strokes(path).length : 0)) {
+				&& this.paintedStrokeCount === (path ? this.freeStrokes(path).length : 0)) {
 				if (this.carryBandUnderLock(band) === "moved") {
 					this.bandCarriedThisFrame = true;
 					return "moved";
@@ -354,7 +354,7 @@ declare module "./InkOverlay" {
 			scrollRevision,
 			granted: surfaceExtents.get(path),
 			path,
-			frontier: (() => { const f = this.frontierCache.get(path, this.noteStrokes(path)); this.pageInkX = f.x; return f; })(),
+			frontier: (() => { const f = this.inkReach(path).frontier; this.pageInkX = f.x; return f; })(),
 			writtenOn,
 			camX: cam.x,
 			camY: cam.y,
@@ -509,7 +509,7 @@ declare module "./InkOverlay" {
 		}
 		// The grant is one of the box's two size terms, so it follows the spacer - only when the spacer moved,
 		// which is not a scrolled frame.
-		if (moved) this.syncGridPaperBox();
+		if (moved) { this.syncGridPaperBox(); this.syncPageGuideBox(); }
 		// The grant shrank since this editor's last pass, here or in another pane
 		// showing the note. Not on first sight of a note: a note switch is not a shrink.
 		const shrinks = surfaceExtents.shrinkCount(path), shrinksSeen = this.shrinksSeen.get(path);
@@ -571,8 +571,10 @@ declare module "./InkOverlay" {
 	 * editor showing the note, since the grant is the note's and every pane's
 	 * spacer follows it. The part off to the right of every view goes now; the
 	 * rest stays due until the views move left or a later pass finds it clear.
-	 * The vertical grant is not touched. While Infinite Canvas is on nothing
-	 * shrinks: the grant holds room scrolling demanded, which no frontier knows.
+	 * The vertical grant is not touched. While Infinite Canvas is on the grant
+	 * also holds room scrolling demanded, which no frontier knows, so an erase or
+	 * a lasso delete leaves it; Delete all ink clears the page, and takes the
+	 * room back to where Infinite Canvas starts a note (infiniteCanvasStartX).
 	 *
 	 * WHEN. A shrink takes its first step at the pass that made it due, which
 	 * follows the removal or the setting. What a view held back steps again only
@@ -587,7 +589,9 @@ declare module "./InkOverlay" {
 		this.sidewaysView = { path, scrollLeft: scroller.scrollLeft, clientWidth: scroller.clientWidth, originLeft, fontZoom: this.fontZoom };
 		const due = surfaceExtents.shrinkDue(path);
 		if (due === undefined) return granted;
-		if (this.canvasMode) {
+		// With Infinite Canvas on only Delete all ink takes the room back, and only to where Infinite Canvas starts a note.
+		const clearing = surfaceExtents.shrinkIsClear(path);
+		if (this.canvasMode && !clearing) {
 			surfaceExtents.settleShrinkX(path);
 			return granted;
 		}
@@ -598,7 +602,10 @@ declare module "./InkOverlay" {
 			const view = p.sidewaysView;
 			if (view && view.path === path) floor = Math.max(floor, onScreenFloorX(view));
 		}
-		const shrunk = shrunkAxis(granted.x, neededX, floor);
+		const need = this.canvasMode
+			? Math.max(neededX, infiniteCanvasStartX({ clientWidth: scroller.clientWidth, originLeft, fontZoom: this.fontZoom }))
+			: neededX;
+		const shrunk = shrunkAxis(granted.x, need, floor);
 		if (shrunk.complete) surfaceExtents.settleShrinkX(path);
 		if (shrunk.value === granted.x) return granted;
 		scrollProbeExtent(`x grant ${granted.x} -> ${shrunk.value}${shrunk.complete ? "" : " (held by a view)"}`);
@@ -708,7 +715,7 @@ declare module "./InkOverlay" {
 	 */
 	function holdLeftReserve(this: InkOverlayPlugin, path: string, origin: { left: number; top: number }): number {
 		const sizer = this.panSizer();
-		const reach = this.frontierCache.leftReach(path, this.noteStrokes(path));
+		const reach = this.inkReach(path).left;
 		// `> 0`, not the field alone: a unit rig built with Object.create never runs the initialiser.
 		const held = this.leftReserveHeld > 0 ? this.leftReserveHeld : 0;
 		const want = sizer ? leftReserve({ reachNote: reach, naturalMargin: origin.left - held, fontZoom: this.fontZoom }) : 0;

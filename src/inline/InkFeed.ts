@@ -12,38 +12,50 @@
  * length in PlatformCapabilities.ts: `"onpointerrawupdate" in window` is
  * false on the Chromium this plugin ships for. A platform check would lie
  * too: Obsidian on Android is a Chromium webview where raw fires fine. The
- * only honest signal is an arrival. One pen raw of any kind, hover
- * included, proves the channel exists, and on Chromium the approach hover
- * latches it before the first stroke of a session ever starts.
+ * only honest signal is an arrival.
  *
- * The latch alone leaves one race: the session's first stroke on Chromium,
- * cold strike, zero prior hover. Raw is withheld during gesture arbitration
- * and flushed later; if a frame-aligned move ever dispatched out of that
- * flush ahead of the first raw, it would feed samples the raw is about to
- * feed again. The timestamp gate makes every ordering correct: each stroke
- * feeds a sample once, whichever event delivers it first, and duplicates
- * drop by timestamp. It also discards approach-hover samples WebKit may
- * fold into the first move's coalesced list (stamped before the down).
+ * PER STROKE. The router listens for raw only while a stroke is in flight
+ * (a hovering pen with a raw listener costs a raw dispatch every 4 ms; with
+ * none, Chromium sends no raw at all). So the listener is new at every
+ * claim, and the browser learns of it a few ms later: each stroke's first
+ * samples can arrive as moves before its raw stream starts. Moves therefore
+ * feed every stroke until that stroke's own first raw. On WebKit no raw
+ * ever comes and moves carry the whole stroke, as before.
+ *
+ * The timestamp gate makes every ordering correct: each stroke feeds a
+ * sample once, whichever event delivers it first, and duplicates drop by
+ * timestamp. A raw flushing samples the moves already fed drops them; a
+ * withheld-then-flushed cold strike is the same case. It also discards
+ * approach-hover samples WebKit may fold into the first move's coalesced
+ * list (stamped before the down).
  *
  * Split the way GuardStyle and PlatformCapabilities are split: no obsidian
  * import, no DOM types beyond the numbers themselves, loads under vitest.
  * The router owns the events; this class owns the decision.
  */
 
+/** What the owner does at a stroke's start and end: the router binds and unbinds its raw listener here. */
+export interface InkFeedHooks {
+	strokeStarted?(): void;
+	strokeEnded?(): void;
+}
+
 export class InkFeedArbiter {
-	/** Latched for the session by the first pen `pointerrawupdate`. */
-	private rawChannelSeen = false;
+	/** Set by this stroke's first pen `pointerrawupdate`, cleared at every stroke start. */
+	private rawThisStroke = false;
 	/** Newest timestamp fed to ink this stroke. */
 	private lastFedTs = Infinity;
 
-	/** Any pen raw, hover or stroke, proves the channel. */
+	constructor(private readonly hooks: InkFeedHooks = {}) {}
+
+	/** A pen raw arrived: from here this stroke inks from raw. */
 	noteRawChannel(): void {
-		this.rawChannelSeen = true;
+		this.rawThisStroke = true;
 	}
 
-	/** True while ink must come from `pointermove` (no raw ever seen). */
+	/** True while ink must come from `pointermove` (no raw yet this stroke). */
 	moveFeedsInk(): boolean {
-		return !this.rawChannelSeen;
+		return !this.rawThisStroke;
 	}
 
 	/**
@@ -52,11 +64,14 @@ export class InkFeedArbiter {
 	 */
 	strokeStart(downTs: number): void {
 		this.lastFedTs = downTs;
+		this.rawThisStroke = false;
+		this.hooks.strokeStarted?.();
 	}
 
 	/** No stroke in flight: nothing feeds until the next strokeStart. */
 	strokeEnd(): void {
 		this.lastFedTs = Infinity;
+		this.hooks.strokeEnded?.();
 	}
 
 	/**

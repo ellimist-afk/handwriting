@@ -5,6 +5,8 @@
  * re-exports migratePageData and DecodeLoss, so importers keep their paths.
  */
 import { InkPoint, InkTool, computeBBox } from "../ink/Stroke";
+import { validColumnRef } from "../ink/ColumnRef";
+import { isOpaqueAttachment, KNOWN_ATTACHMENT, liveAttachments, readAttachment, type AttachmentData } from "../inline/InkAttachments";
 import {
 	coord,
 	emptyPage,
@@ -81,6 +83,10 @@ export interface DecodeLoss {
 	unreadableBoxList: boolean;
 	/** Same for `images`: the key was there and was not an array. */
 	unreadableImageList: boolean;
+	/** Attachment records dropped because the entry was not an object, had no usable id, or a version 1 field was wrong. */
+	unusableAttachments: number;
+	/** Same for `attachments`: the key was there and was not an array. */
+	unreadableAttachmentList: boolean;
 }
 
 export function emptyDecodeLoss(): DecodeLoss {
@@ -97,6 +103,8 @@ export function emptyDecodeLoss(): DecodeLoss {
 		unreadableStrokeList: false,
 		unreadableBoxList: false,
 		unreadableImageList: false,
+		unusableAttachments: 0,
+		unreadableAttachmentList: false,
 	};
 }
 
@@ -113,7 +121,9 @@ export function wasLossy(loss: DecodeLoss): boolean {
 		loss.unreadableStrokes > 0 ||
 		loss.unreadableStrokeList ||
 		loss.unreadableBoxList ||
-		loss.unreadableImageList
+		loss.unreadableImageList ||
+		loss.unusableAttachments > 0 ||
+		loss.unreadableAttachmentList
 	);
 }
 
@@ -143,10 +153,12 @@ export function describeDecodeLoss(loss: DecodeLoss): string {
 	if (loss.unreadableImages > 0) images.push(`${loss.unreadableImages} unreadable`);
 	if (loss.unusableImages > 0) images.push(`${loss.unusableImages} with no usable id or position`);
 	if (images.length > 0) groups.push(`images ${images.join(", ")}`);
+	if (loss.unusableAttachments > 0) groups.push(`attachments ${loss.unusableAttachments} unusable`);
 	const lists: string[] = [];
 	if (loss.unreadableStrokeList) lists.push("strokes");
 	if (loss.unreadableBoxList) lists.push("text boxes");
 	if (loss.unreadableImageList) lists.push("images");
+	if (loss.unreadableAttachmentList) lists.push("attachments");
 	if (lists.length > 0) groups.push(`${lists.join(", ")} not a readable list`);
 	return `partly decodable sidecar: ${groups.join("; ")}`;
 }
@@ -223,6 +235,8 @@ export function migratePageData(
 	if (typeof o.fontRefPx === "number" && Number.isFinite(o.fontRefPx) && o.fontRefPx > 0) {
 		page.fontRefPx = o.fontRefPx;
 	}
+	// A whole number of px above zero, else absent, for the same reason.
+	if (validColumnRef(o.columnRefPx)) page.columnRefPx = o.columnRefPx;
 	if (Array.isArray(o.pdfPaths)) {
 		const paths = o.pdfPaths.filter((p): p is string => typeof p === "string" && p !== "");
 		if (paths.length > 0) page.pdfPaths = paths;
@@ -430,6 +444,28 @@ export function migratePageData(
 			if (s.lineAnchor !== undefined && !lineAnchor) extra.lineAnchor = s.lineAnchor;
 			if (Object.keys(extra).length > 0) page.unknownByObject[id] = extra;
 		}
+	}
+
+	// Ink attached to text (InkAttachments.ts), read after the strokes so a group keeps only members the page holds; a
+	// group left with none is dropped here, which is where an erase's empty group goes. A version this build cannot read
+	// is kept as found and written back as found. A version 1 record with a wrong field, or any record without a safe id
+	// (see the textBoxes loop), is dropped and counted.
+	if (loss && unreadableList(o.attachments)) loss.unreadableAttachmentList = true;
+	if (Array.isArray(o.attachments)) {
+		const read: AttachmentData[] = [];
+		for (const item of o.attachments) {
+			const a = item && typeof item === "object" && !Array.isArray(item) ? readAttachment(item as Record<string, unknown>, isSafePageId) : null;
+			if (!a) {
+				if (loss) loss.unusableAttachments++;
+				continue;
+			}
+			read.push(a);
+			if (isOpaqueAttachment(a)) continue;
+			const extra = unknownKeys(item as Record<string, unknown>, KNOWN_ATTACHMENT);
+			if (Object.keys(extra).length > 0) page.unknownByObject[a.id] = extra;
+		}
+		const live = liveAttachments(read, new Set(page.strokes.map((s) => s.id)));
+		if (live.length > 0) page.attachments = live;
 	}
 	return page;
 }

@@ -1,5 +1,6 @@
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { tr } from "./InlinePenRouterTrace";
+import { describeEl } from "./PenHitProbe";
 
 /**
  * Claimed pen events are cancelled before Chromium can focus CodeMirror.
@@ -64,7 +65,7 @@ export function focusClaimedPenEditor(
  * overlay when the editor is reconfigured, so the owner calls it on destroy.
  */
 export function holdKeyboardForEveryPen(
-	view: { readonly hasFocus: boolean; readonly contentDOM?: HTMLElement; readonly dom?: HTMLElement },
+	view: { readonly hasFocus: boolean; readonly contentDOM?: HTMLElement; readonly dom?: HTMLElement; readonly scrollDOM?: HTMLElement },
 	skip: () => string | null
 ): () => void {
 	if (typeof view.dom?.addEventListener !== "function" || !view.contentDOM) return () => {};
@@ -85,10 +86,93 @@ export function holdKeyboardForEveryPen(
 				`keyboard at pen-down: editor focused=${focused ? "yes" : "no"}, inputmode before=${shown(before)} after=${shown(content.getAttribute("inputmode"))}, ` +
 					`hold=${why !== null ? `no (${why})` : held ? "already" : "placed"}`
 			);
+			armFocusinRow(content, view.scrollDOM ?? null, ev);
 		}
 	};
 	root.addEventListener("pointerdown", onPenDown, true);
 	return () => root.removeEventListener("pointerdown", onPenDown, true);
+}
+
+/**
+ * Issue 30: a pen-down snapped the view back to the caret (Windows 11, Page
+ * Scroll plugin installed). Our own focus call should not scroll, so the
+ * question is who brings focus to the editor and whether the view moves when
+ * it does. While recording, each pen-down arms one focusin listener on the
+ * editor content; the first focusin within FOCUSIN_ROW_MS writes one row: the
+ * active element before the pen-down and at the focusin, scrollTop at the
+ * pen-down, at the focusin and one frame later, and the first three stack
+ * frames below the listener (empty when the browser focused it natively).
+ * With recording off nothing is armed, so no listener exists.
+ */
+const FOCUSIN_ROW_MS = 1000;
+const focusinRows = new WeakMap<HTMLElement, () => void>();
+
+function armFocusinRow(content: HTMLElement, scroller: HTMLElement | null, ev: PointerEvent): void {
+	focusinRows.get(content)?.();
+	const doc = content.ownerDocument;
+	const win = doc.defaultView;
+	const activeBefore = describeEl(doc.activeElement);
+	const topAtDown = scroller ? scroller.scrollTop : null;
+	const onFocusin = () => {
+		disarm();
+		const topAtFocusin = scroller ? scroller.scrollTop : null;
+		const activeNow = describeEl(doc.activeElement);
+		const stack = focusStackNote(new Error().stack ?? "");
+		const write = () =>
+			tr(
+				"guard",
+				ev,
+				`focusin after pen-down: active before=${activeBefore} now=${activeNow}, ` +
+					`scrollTop at down=${topAtDown} at focusin=${topAtFocusin} next frame=${scroller ? scroller.scrollTop : null}, ` +
+					`stack: ${stack || "(none)"}`
+			);
+		if (win) win.requestAnimationFrame(write);
+		else write();
+	};
+	// The note's own window's timer: a popout's clock and lifetime are its own.
+	const timer = win?.setTimeout(() => disarm(), FOCUSIN_ROW_MS);
+	const disarm = () => {
+		if (timer !== undefined) win?.clearTimeout(timer);
+		content.removeEventListener("focusin", onFocusin);
+		focusinRows.delete(content);
+	};
+	content.addEventListener("focusin", onFocusin);
+	focusinRows.set(content, disarm);
+}
+
+/**
+ * The focusin row's stack note: the three frames below the listener, each
+ * reduced to its function name and origin, joined. Reduction happens per
+ * frame, so no line, column, path or query can reach the note.
+ */
+export function focusStackNote(stack: string): string {
+	return stack
+		.split("\n")
+		.slice(2, 5)
+		.filter((frame) => frame.trim() !== "")
+		.map(reduceStackFrame)
+		.join(" | ");
+}
+
+/**
+ * One frame to `fn origin`. The origin is `plugin:<id>` for a plugin, `app://obsidian.md`
+ * for the app, and `(script)` for anything else; the name stays when the frame has one.
+ */
+function reduceStackFrame(frame: string): string {
+	const trimmed = frame.trim();
+	// V8 frames always start with "at ". Only a frame without that prefix may take the JavaScriptCore form.
+	const v8 = trimmed.startsWith("at ");
+	const text = v8 ? trimmed.slice(3).trimStart() : trimmed;
+	// V8 `fn (location)` or a bare location; JavaScriptCore `fn@location`, where the name holds no "/", "\" or ":".
+	const paren = /^(.*?)\s+\((.*)\)$/.exec(text);
+	const named = paren ?? (!v8 ? /^([^@/\\:]*)@(.*)$/.exec(text) : null);
+	const name = (named?.[1] ?? "").trim();
+	const location = named ? (named[2] ?? "") : text;
+	const where = location.replace(/:\d+(?::\d+)?$/, "");
+	const plugin = /^plugin:[^:/?#\s]+/.exec(where);
+	const app = /^app:\/\/obsidian\.md(?=[/?#:]|$)/.exec(where);
+	const origin = plugin?.[0] ?? app?.[0] ?? "(script)";
+	return name ? `${name} ${origin}` : origin;
 }
 
 /** Editors whose keyboard is held down for the pen, and how to give it back. */

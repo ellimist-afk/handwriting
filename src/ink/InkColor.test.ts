@@ -3,6 +3,7 @@ import {
 	HIGHLIGHTER_COLORS,
 	PEN_COLORS,
 	colorsFor,
+	defaultColorsFor,
 	getInkColorHex,
 	nextInkColor,
 	normalizeInkColor,
@@ -88,7 +89,10 @@ describe("per-tool selection state", () => {
 	});
 
 	it("colorsFor routes to the right palette", () => {
-		expect(colorsFor("pen")).toBe(PEN_COLORS);
-		expect(colorsFor("highlighter")).toBe(HIGHLIGHTER_COLORS);
+		expect(defaultColorsFor("pen")).toBe(PEN_COLORS);
+		expect(defaultColorsFor("highlighter")).toBe(HIGHLIGHTER_COLORS);
+		// The live palette starts as the defaults, slot for slot.
+		expect(colorsFor("pen").map((c) => [c.name, c.hex])).toEqual(PEN_COLORS.map((c) => [c.name, c.hex]));
+		expect(colorsFor("highlighter").map((c) => [c.name, c.hex])).toEqual(HIGHLIGHTER_COLORS.map((c) => [c.name, c.hex]));
 	});
 });

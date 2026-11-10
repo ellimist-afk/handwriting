@@ -7,6 +7,7 @@ import { stripPenUp } from "./StripPenChrome";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
 import { eraseRemovalIndices } from "./InkHistory";
 import { installMethods } from "./InstallMethods";
+import { surfaceExtents } from "./SurfaceExtent";
 import { inlineInk, metrics, type InkOverlayPlugin } from "./InkOverlay";
 
 declare module "./InkOverlay" {
@@ -236,6 +237,8 @@ declare module "./InkOverlay" {
 		this.selection.clear();
 		this.lassoPts = [];
 		this.lassoActive = false;
+		this.pinPress = null;
+		this.attachPress = null;
 		this.dragFrom = null;
 		this.dragTotal = null;
 		this.dragBox = null;
@@ -287,6 +290,8 @@ declare module "./InkOverlay" {
 			strokes.map((s) => s.id)
 		);
 		this.dispatchInk({ type: "remove", path, strokes, indices });
+		// The sideways room the ink bought goes with it, Infinite Canvas on or off (shrinkSideways takes it at the next pass).
+		surfaceExtents.oweShrinkXForClear(path);
 		if (this.selection.clear()) this.redrawSelectionUI();
 		this.scheduleRepaint();
 		this.repaintPath(path);

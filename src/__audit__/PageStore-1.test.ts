@@ -41,7 +41,7 @@ const settingsSource = pluginSettingsSource.replace(/\r\n/g, "\n");
 const claims = claimsSource.replace(/\r\n/g, "\n");
 
 const resolveStart =
-	"\tasync function resolvePdfId(this: HandwritingPlugin,\n\t\tleaf: WorkspaceLeaf,\n\t\troot: HTMLElement,\n\t\tcontroller: PdfInkController\n\t): Promise<void> {\n";
+	"\tasync function resolvePdfId(this: HandwritingPlugin,\n\t\tleaf: WorkspaceLeaf,\n\t\troot: HTMLElement,\n\t\tcontroller: PdfInkController,\n\t\tcarryOld = true\n\t): Promise<void> {\n";
 const resolveEnd = "\n\t}\n\n\t/**\n\t * Where this PDF's head can be read from";
 expect(claims.split(resolveStart)).toHaveLength(2);
 expect(claims.split(resolveEnd)).toHaveLength(2);
@@ -55,7 +55,7 @@ expect(resolveBody).toContain("this.pdfStore.claimPath(choice.id, file.path);");
 const makeResolve = new Function(
 	"readPdfHead", "pdfInkIdFromHead", "familyOf", "chooseInstance", "window",
 	transformSync(
-		`return async function resolvePdfId(leaf: any, root: any, controller: any): Promise<void> {\n${resolveBody}\n};`,
+		`return async function resolvePdfId(leaf: any, root: any, controller: any, carryOld = false): Promise<void> {\n${resolveBody}\n};`,
 		{ loader: "ts", target: "es2022" }
 	).code
 );

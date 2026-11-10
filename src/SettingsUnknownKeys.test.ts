@@ -33,6 +33,7 @@ import { clampInkSize } from "./ink/InkSize";
 import { clampEraserRadius } from "./ink/EraserSize";
 import { normalizePenToolsMode, resetPenToolsForTest } from "./inline/PenToolsMode";
 import { normalizeNoteZoomControlsMode, resetNoteZoomControlsForTest } from "./inline/NoteZoomControlsMode";
+import { scribbleEraseOn, setScribbleErase } from "./inline/InkOverlayToolState";
 
 const proto = HandwritingPlugin.prototype as unknown as {
 	loadSettings(this: unknown): Promise<void>;
@@ -114,7 +115,7 @@ describe("settings control consistency preserves saved behavior", () => {
 		expect(exported.control).toEqual({ type: "dropdown", key: "inkReadableInExports", options: { auto: "Automatic readability", keep: "Keep original colors" } });
 		expect(pdf.control?.type).toBe("dropdown");
 		expect(pdf.control?.options).toEqual({ darken: "Darken for light pages", lighten: "Lighten for dark pages", keep: "Keep original colors" });
-		expect(rows.find(row => row.name === "Paper background")?.desc).toBe("Lined, grid, or dotted paper. Global setting. A note can override it with handwriting-paper in its frontmatter. Default none.");
+		expect(rows.find(row => row.name === "Paper background")?.desc).toBe("Lined, grid, or dotted paper. Global setting. Default none.");
 		// The zoom bar's option labels are copied verbatim from the Toolbar
 		// visibility row beside it - the two settings behave identically.
 		const toolbarVisibility = rows.find(row => row.name === "Toolbar visibility")!;
@@ -286,6 +287,66 @@ describe("loadSettings carries keys this build does not know", () => {
  * moves. A source-text assertion would not: it would pin the spelling of one
  * of the two and say nothing about what a vault actually loads.
  */
+describe("scribble to erase is off unless a vault turned it on", () => {
+	it("loads off for a vault that never stored the key, and the note overlay reads it off", async () => {
+		ensureDocument();
+		setScribbleErase(true);
+		const plugin = fakePlugin({ shapeSnap: false });
+		await proto.loadSettings.call(plugin);
+
+		expect(plugin.settings.scribbleErase, "a vault with no stored choice gets the default").toBe(false);
+		expect(scribbleEraseOn).toBe(false);
+		setScribbleErase(false);
+	});
+
+	it("loads on for a vault that turned it on, and the note overlay reads it off", async () => {
+		ensureDocument();
+		setScribbleErase(false);
+		const plugin = fakePlugin({ scribbleErase: true });
+		await proto.loadSettings.call(plugin);
+
+		expect(plugin.settings.scribbleErase, "a stored choice is never reset").toBe(true);
+		expect(scribbleEraseOn).toBe(false);
+		setScribbleErase(false);
+	});
+
+	it("loads off for a vault that turned it off, and the note overlay reads it off", async () => {
+		ensureDocument();
+		setScribbleErase(true);
+		const plugin = fakePlugin({ scribbleErase: false });
+		await proto.loadSettings.call(plugin);
+
+		expect(plugin.settings.scribbleErase).toBe(false);
+		expect(scribbleEraseOn).toBe(false);
+		setScribbleErase(false);
+	});
+});
+
+describe("scribble to erase is held off in this release, whatever a vault stored", () => {
+	it("a vault that stored it on loads with the pen's scribble off and keeps its stored choice", async () => {
+		ensureDocument();
+		setScribbleErase(true);
+		const plugin = await loadThenSave({ scribbleErase: true });
+
+		expect(scribbleEraseOn, "the pen does not erase on a scribble").toBe(false);
+		expect(plugin.saved?.scribbleErase, "the stored choice rides through the save untouched").toBe(true);
+		setScribbleErase(false);
+	});
+
+	it("the settings tab builds no scribble row for a vault that stored it on", async () => {
+		const plugin = await loadThenSave({ scribbleErase: true });
+		(plugin as unknown as Record<string, unknown>).manifest = { version: "1.5.0" };
+		const tab = Object.create(HandwritingSettingTab.prototype);
+		tab.plugin = plugin;
+		type Row = { name?: string; items?: Row[]; control?: { key: string } };
+		const flatten = (items: Row[]): Row[] => items.flatMap(item => item.items ? flatten(item.items) : [item]);
+		const rows = flatten(tab.getSettingDefinitions());
+		expect(rows.length, "the tab built its rows").toBeGreaterThan(10);
+		expect(rows.filter(row => row.control?.key === "scribbleErase" || /scribble/i.test(row.name ?? "")).map(row => row.name)).toEqual([]);
+		setScribbleErase(false);
+	});
+});
+
 describe("ink theme adaptation is off unless a vault asks for it", () => {
 	it("defaults off for a vault that has never stored the key", async () => {
 		ensureDocument();

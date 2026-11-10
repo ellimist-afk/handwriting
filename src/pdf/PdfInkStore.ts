@@ -314,6 +314,8 @@ export class PdfInkStore {
 	private pendingDeleted = new Map<string, PendingPdfDeletion>();
 	/** Where the deletions above outlive a restart; none until the plugin attaches one. */
 	private pendingStore: PdfPendingDeleteStore | null = null;
+	/** Saves parked behind a sidecar read, until each has run. */
+	private parkedPersists = new Set<Promise<void>>();
 
 	/**
 	 * Best-effort unload: wait (bounded) for in-flight sidecar reads. A stroke
@@ -344,6 +346,14 @@ export class PdfInkStore {
 		} finally {
 			scheduler.clearTimeout(timer);
 		}
+	}
+
+	/**
+	 * Ink is waiting to be saved: a stroke's save parked behind a read. A settle that gave up with none parked left
+	 * only a read open, and no ink rides on it; the unload notice asks this.
+	 */
+	parkedInk(): boolean {
+		return this.parkedPersists.size > 0;
 	}
 
 	/** No host = session-memory mode, which is how the tests run it. */
@@ -951,10 +961,11 @@ export class PdfInkStore {
 			// this session's strokes and, written, replace the persisted ones.
 			// Persist again once the merge has happened; every mutation path
 			// arrives here, so nothing is dropped by waiting.
-			runDetached(
-				rec.loadInFlight.then(() => this.persist(id, rec)),
-				`persist pdf ink after loading ${id}`
-			);
+			const parked: Promise<void> = rec.loadInFlight
+				.then(() => this.persist(id, rec))
+				.finally(() => this.parkedPersists.delete(parked));
+			this.parkedPersists.add(parked);
+			runDetached(parked, `persist pdf ink after loading ${id}`);
 			return;
 		}
 		const page = this.snapshot(id, rec);

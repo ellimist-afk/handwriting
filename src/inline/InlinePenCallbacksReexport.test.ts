@@ -24,6 +24,8 @@ const MEMBERS = [
 	"onPenDown",
 	"onViewportInput",
 	"onAllContactsLifted",
+	"onTapLift",
+	"easePlaying",
 	"onBeforePenDown",
 	"onPenHover",
 	"onPenLeave",
@@ -40,6 +42,7 @@ const MEMBERS = [
 	"onStrokeAbandoned",
 	"fingerInk",
 	"pinchZoom",
+	"claimTouch",
 	"onFingerInkCancelled",
 	"onHandOnGlass",
 ] as const;

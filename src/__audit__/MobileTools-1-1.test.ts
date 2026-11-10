@@ -376,8 +376,10 @@ describe("MobileTools-1-1: zoom bar over the collapsed pen pill", () => {
 		expect(bar!.style, "no inline placement on zoom bar").toEqual({});
 		// Last strip BUTTON is the More chevron (right end of a flex-end row);
 		// the divs after it are the folded row and the absolute pops.
-		const btns = el!.children.filter((c) => c.tag === "button");
-		console.log("[probe] strip children after last button:", JSON.stringify(el!.children.slice(el!.children.indexOf(btns[btns.length - 1]!) + 1).map((c) => `${c.tag}.${[...c.classes].join(".")}`)));
+		// The buttons are the face's children (the strip's visible row).
+		const face = el!.children.find((c) => c.classes.has("handwriting-mobile-tools-face"))!;
+		const btns = face.children.filter((c) => c.tag === "button");
+		console.log("[probe] strip children after last button:", JSON.stringify(face.children.slice(face.children.indexOf(btns[btns.length - 1]!) + 1).map((c) => `${c.tag}.${[...c.classes].join(".")}`)));
 		expect(btns[btns.length - 1]!.classes.has("handwriting-tools-more")).toBe(true);
 		strip.destroy();
 	});
@@ -434,12 +436,14 @@ describe("MobileTools-1-1: zoom bar over the collapsed pen pill", () => {
 			{ tag: "div", classes: new Set() },
 			{ tag: "body", classes: new Set(["is-mobile", "handwriting-android"]) },
 		];
-		const s = cascade(chain, ["top", "right", "padding", "border", "z-index"]).won;
+		const s = cascade(chain, ["top", "right", "z-index"]).won;
+		// The padding and border are on the face, inside the root.
+		const f = cascade([{ tag: "div", classes: new Set(["handwriting-mobile-tools-face"]) }, ...chain], ["padding", "border"]).won;
 		const b = cascade(
 			[{ tag: "button", classes: new Set(["handwriting-mobile-tool", "handwriting-tools-more"]) }, ...chain],
 			["width", "height"]
 		).won;
-		const top = px(s.top!.value), right = px(s.right!.value), pad = px(s.padding!.value), border = parseFloat(s.border!.value);
+		const top = px(s.top!.value), right = px(s.right!.value), pad = px(f.padding!.value), border = parseFloat(f.border!.value);
 		const bw = px(b.width!.value), bh = px(b.height!.value);
 		const btn: Box = { top: top + border + pad, bottom: top + border + pad + bh, rIn: right + border + pad, rOut: right + border + pad + bw, z: Number(s["z-index"]!.value) };
 		console.log("[probe] Android strip rightmost button:", JSON.stringify(btn), JSON.stringify({ top: s.top?.selector, bw: b.width?.selector }));

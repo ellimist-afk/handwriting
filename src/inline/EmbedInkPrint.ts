@@ -180,6 +180,11 @@ export function printVectorFor(root: HTMLElement, path: string, on: boolean): vo
 	}
 	// The ink at its text's size, as the canvas draws it (`inkZoomOf`): px per world unit. Read before the fit.
 	const zoom = inkZoomOf(root, path);
+	// The ink's side edges as it will be drawn: an attached group's member is placed sideways by its group's move (dx), so the
+	// fit and the reach are measured from the placed strokes. Their sideways move does not wait on the column width; their
+	// tops do, and they are placed again below once it holds.
+	const across = placeStrokes(root, all, undefined, zoom, path).strokes;
+	const acrossBox = embedInkBounds(across);
 	// An Infinite Canvas note can hold ink anywhere. While all of it lies on the text's pages the note prints as any note does
 	// (the width fit of all the ink, the room grown for it). Once ink leaves those pages the export is one page: the text and every
 	// stroke are fitted together, as Fit shows them (`wantsOnePage`). The screen call lays the text out at the column width first,
@@ -190,10 +195,10 @@ export function printVectorFor(root: HTMLElement, path: string, on: boolean): vo
 	// The print-media call keeps the layout the screen call chose; a print with no screen call keeps the plain layout.
 	const chosen = onCanvas ? printFits.get(root)?.onePage === true : false;
 	// Ink left of the text is on the page: the container is padded by the reach. Ink above the text likewise, once it is placed.
-	const reachLeft = chosen ? Math.max(0, -embedInkBounds(all, zoom).x) : 0;
+	const reachLeft = chosen ? Math.max(0, -embedInkBounds(across, zoom).x) : 0;
 	// Before the layer is anchored: the text re-wraps at the column width, so the first block is measured after.
-	// A placed stroke moves down or up only, so the ink's right edge is the stored one, drawn at the zoom.
-	const fit = fitPrintColumn(root, path, (box.x + box.w) * zoom, reachLeft);
+	// The ink's right edge is the placed one (a member's sideways move counted), drawn at the zoom.
+	const fit = fitPrintColumn(root, path, (acrossBox.x + acrossBox.w) * zoom, reachLeft);
 	spans = fit ? null : spans !== undefined ? spans : holdPrintSpans(root, path);
 	holdReach(root, reachLeft, 0);
 	// Placed once the column width holds. The print-media call has paged the layout, and a block on a later page reads a
@@ -201,6 +206,9 @@ export function printVectorFor(root: HTMLElement, path: string, on: boolean): vo
 	const held = fit ? printSpans.get(root) : undefined;
 	const blocks = held ? printBlocks(root) : [];
 	const strokes = placeStrokes(root, all, held && blocks.length === held.tops.length ? { blocks, tops: held.tops } : undefined, zoom, path).strokes;
+	// The placed ink's right edge and its reach left of the text, px at the zoom: what the screen call decides the layout on.
+	const placedBox = embedInkBounds(strokes);
+	const placedRight = (placedBox.x + placedBox.w) * zoom, placedReach = Math.max(0, -embedInkBounds(strokes, zoom).x);
 	// The layer's box in px, as the canvas's; the viewBox is that box in world units, so the svg draws them at the zoom.
 	const { x, y, w, h } = embedInkBounds(strokes, zoom);
 	layerOrigins.set(root, { x, y });
@@ -232,11 +240,11 @@ export function printVectorFor(root: HTMLElement, path: string, on: boolean): vo
 	if (!fit && onCanvas && foot !== null) {
 		const inkFoot = Number.parseFloat(root.style.minHeight ?? "");
 		const shown = inkReachOf(strokes, zoom);
-		onePage = wantsOnePage(root, path, { x: shown.x, y: shown.y, bottom: Number.isFinite(inkFoot) ? inkFoot : y + h, right: (box.x + box.w) * zoom }, foot);
+		onePage = wantsOnePage(root, path, { x: shown.x, y: shown.y, bottom: Number.isFinite(inkFoot) ? inkFoot : y + h, right: placedRight }, foot);
 		const heldFit = printFits.get(root);
 		if (heldFit) heldFit.onePage = onePage;
 		if (onePage !== chosen) {
-			holdReach(root, onePage ? Math.max(0, -embedInkBounds(all, zoom).x) : 0, onePage ? Math.max(0, -y) : 0);
+			holdReach(root, onePage ? placedReach : 0, onePage ? Math.max(0, -y) : 0);
 			anchorLayer(root, svg);
 			growPrintContainer(root, svg, h);
 		}
@@ -245,7 +253,7 @@ export function printVectorFor(root: HTMLElement, path: string, on: boolean): vo
 	const strips = fit ? buildPrintStrips(root, svg, { x, y, w, h }, strokes, zoom) : 0;
 	canvas?.setCssStyles({ display: "none" });
 	// At the screen call (no fit yet), after the layer is placed from the unzoomed flow: the zoom for the page count.
-	const screened = fit ? null : holdScreenZoom(root, path, (box.x + box.w) * zoom, onePage && foot !== null ? { reachLeft: Math.max(0, -embedInkBounds(all, zoom).x), reachTop: Math.max(0, -y), foot } : undefined);
+	const screened = fit ? null : holdScreenZoom(root, path, placedRight, onePage && foot !== null ? { reachLeft: placedReach, reachTop: Math.max(0, -y), foot } : undefined);
 	noteExport(root, path, fit ?? screened, spans, strips);
 }
 
@@ -487,6 +495,16 @@ let paperSettingsFor: (() => unknown) | null = null;
 
 export function initEmbedInkPrintPaper(provider: (() => unknown) | null): void {
 	paperSettingsFor = provider;
+}
+
+/** The dialog's saved settings as the provider gives them now, or null with no provider or one that throws. */
+export function savedPaperSettings(): unknown {
+	try {
+		return paperSettingsFor ? paperSettingsFor() : null;
+	} catch {
+		// The config is unofficial API: a provider that throws is no settings.
+		return null;
+	}
 }
 
 /** Page sizes the export dialog offers, in inches (portrait width, height). */

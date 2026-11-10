@@ -59,8 +59,10 @@ function rig(lines: number, strokes: number) {
 	const doc = Text.of(Array.from({ length: lines }, (_, i) => `line ${i + 1}`));
 	const timers: number[] = [];
 	let file = path;
-	// The overlay reaches its window through winRef, a prototype getter over the view's document: the pass's timer lands here.
-	const win = { setTimeout: vi.fn((_f: () => void, ms: number) => { timers.push(ms); return timers.length; }), clearTimeout: () => undefined };
+	// The overlay reaches its window through winRef, a prototype getter over the view's document: the pass's timer lands here,
+	// and the ink load's box read asks it for a frame, which never comes.
+	const win = { setTimeout: vi.fn((_f: () => void, ms: number) => { timers.push(ms); return timers.length; }), clearTimeout: () => undefined,
+		requestAnimationFrame: () => 1, cancelAnimationFrame: () => undefined };
 	const view = { viewport: { from: 0, to: 0 }, defaultLineHeight: LINE_PX, defaultCharacterWidth: 9, state: { doc }, requestMeasure: () => undefined,
 		dom: { ownerDocument: { defaultView: win } } };
 	// Every line LINE_PX tall, over the document the view shows now.

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { setPressureSensitivity } from "./PenStyle";
 
 import { RELEASE_MAX_MS, StrokeBuilder } from "./StrokeBuilder";
 
@@ -314,4 +315,43 @@ describe("a held pen's later pressure stays off the saved point", () => {
 		b.add(8, 0, 0.02, 2020);
 		expect(b.finishReleaseFiltered()[0]!.points.map((p) => p.x)).toEqual([0, 4]);
 	});
+});
+
+describe("every new stroke carries the pressure setting it was drawn under", () => {
+	afterEach(() => setPressureSensitivity(true));
+
+	function drawnWith(device?: "mouse", widthMode?: "uniform", tool: "pen" | "highlighter" = "pen", points = 2): StrokeBuilder {
+		const value = new StrokeBuilder(tool, "#377dff", 2, 0.15, device, widthMode);
+		value.start(1000);
+		for (let i = 0; i < points; i++) value.add(i * 6, i * 2, 0.5, 1000 + i * 8);
+		return value;
+	}
+
+	for (const value of ["on", "off"] as const) {
+		it(`with the switch ${value}, pen, mouse, tap, uniform finger ink and highlighter strokes are all stamped "${value}", from finish and from the release filter`, () => {
+			setPressureSensitivity(value === "on");
+			const cases = {
+				pen: drawnWith(),
+				mouse: drawnWith("mouse"),
+				tap: drawnWith(undefined, undefined, "pen", 1),
+				"uniform finger ink": drawnWith(undefined, "uniform"),
+				highlighter: drawnWith(undefined, undefined, "highlighter"),
+			};
+			for (const [name, b] of Object.entries(cases)) {
+				expect(b.finish()!.pressureSensitivity, `${name}, finish`).toBe(value);
+			}
+			const again = {
+				pen: drawnWith(),
+				mouse: drawnWith("mouse"),
+				tap: drawnWith(undefined, undefined, "pen", 1),
+				"uniform finger ink": drawnWith(undefined, "uniform"),
+				highlighter: drawnWith(undefined, undefined, "highlighter"),
+			};
+			for (const [name, b] of Object.entries(again)) {
+				const filtered = b.finishReleaseFiltered();
+				expect(filtered.length, `${name}, release filter, premise`).toBeGreaterThan(0);
+				for (const st of filtered) expect(st.pressureSensitivity, `${name}, release filter`).toBe(value);
+			}
+		});
+	}
 });

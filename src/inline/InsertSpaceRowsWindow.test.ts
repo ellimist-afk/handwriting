@@ -12,6 +12,9 @@
  * it has taken, as the production pass does. Both passes once judged a host
  * grown, so each mark it took could qualify the next row above it, and on a
  * heavy page one row ran most of the page's height (InsertSpaceHeavyPage).
+ *
+ * A mark is also small against the editor's letters: under half the letter size handed in (a label of letter height over a
+ * drawing is no mark of it). Each page is grouped with no letter size, where the ratio rule decides alone, and with one.
  */
 import { describe, expect, it } from "vitest";
 import { InsertSpaceRows, type InkRow } from "./InsertSpace";
@@ -33,7 +36,7 @@ function extentOf(stroke: InkStroke): { top: number; bottom: number; left:number
 	return { top, bottom, left, right };
 }
 
-function referenceRows(strokes: readonly InkStroke[]): InkRow[] {
+function referenceRows(strokes: readonly InkStroke[], letterPx?: number): InkRow[] {
 	const items = strokes
 		.map((s) => ({ id: s.id, ...extentOf(s) }))
 		.sort((a, b) => a.top - b.top || a.left-b.left);
@@ -90,9 +93,10 @@ function referenceRows(strokes: readonly InkStroke[]): InkRow[] {
 		const hosts=rows.filter(host=>{
 			if(host===mark)return false;
 			const c=host.g,height=c.bottom-c.top,gap=c.top-m.bottom;
-			return height>0 && gap>=0 && gap<=height && m.bottom-m.top<=height*.34 &&
+			if(!(height>0 && gap>=0 && gap<=height && m.bottom-m.top<=height*.34 &&
 				m.right-m.left<=Math.max(c.right-c.left,height*.25)*.34 &&
-				m.left>=c.left-height*.1 && m.right<=c.right+height*.1;
+				m.left>=c.left-height*.1 && m.right<=c.right+height*.1))return false;
+			return letterPx===undefined||m.bottom-m.top<letterPx*.5;
 		}).sort((a,b)=>(a.g.top-m.bottom)-(b.g.top-m.bottom)||
 			Math.abs(a.g.left+a.g.right-m.left-m.right)-Math.abs(b.g.left+b.g.right-m.left-m.right)||a.g.left-b.g.left);
 		const host=hosts[0];
@@ -156,12 +160,15 @@ describe("insert-space row grouping, windowed mark pass", () => {
 	it("groups 60 random pages exactly as the all-rows pass", () => {
 		// Every seed is compared, so a failure lists all the pages that differ, not the first.
 		const same = (a: unknown, b: unknown) => { try { expect(a).toEqual(b); return true; } catch { return false; } };
-		const differ: number[] = [];
-		for (let seed = 1; seed <= 60; seed++) {
-			const strokes = page(20 + (seed % 7) * 15, seed);
-			if (!same(new InsertSpaceRows().get(strokes), referenceRows(strokes))) differ.push(seed);
-		}
-		expect(differ, "seeds whose rows differ from the all-rows pass").toEqual([]);
+		const differ: string[] = [];
+		for (const letterPx of [undefined, 20])
+			for (let seed = 1; seed <= 60; seed++) {
+				const strokes = page(20 + (seed % 7) * 15, seed);
+				const cache = new InsertSpaceRows();
+				cache.letterPx = letterPx;
+				if (!same(cache.get(strokes), referenceRows(strokes, letterPx))) differ.push(`${seed}@${letterPx}`);
+			}
+		expect(differ, "seeds (at a letter size) whose rows differ from the all-rows pass").toEqual([]);
 	});
 
 	it("a mark between two identical hosts joins the one the all-rows pass chooses", () => {
@@ -182,5 +189,9 @@ describe("insert-space row grouping, windowed mark pass", () => {
 			mk("m3", 124, 54, 126, 56),
 		];
 		expect(new InsertSpaceRows().get(strokes)).toEqual(referenceRows(strokes));
+		// At a letter size of 40 the top mark of the stack (20 tall) is too tall to be one; the two small ones still are.
+		const sized = new InsertSpaceRows();
+		sized.letterPx = 40;
+		expect(sized.get(strokes)).toEqual(referenceRows(strokes, 40));
 	});
 });

@@ -34,6 +34,7 @@ const MOVED = [
 	"restoreReticleAfterPan",
 	"showSpaceCursor",
 	"hideSpaceCursor",
+	"showSnapCursor",
 ] as const;
 
 describe("cursor methods on the overlay prototype", () => {

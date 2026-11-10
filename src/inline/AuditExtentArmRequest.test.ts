@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 
 import { InkOverlayPlugin } from "./InkOverlay";
+import { SelectionModel } from "../objects/SelectionModel";
 
 function overlay() {
 	const proto = Object.create(InkOverlayPlugin.prototype) as object;
@@ -19,6 +20,8 @@ function overlay() {
 		},
 	}) as Record<string, unknown>;
 	const armed: number[] = [];
+	o.selection = new SelectionModel();
+	o.filePath = () => null;
 	o.committedBacking = 1;
 	o.dpr = 1;
 	o.extentMayBuild = false;

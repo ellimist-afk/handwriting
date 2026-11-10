@@ -44,6 +44,7 @@
  */
 import type { InkStroke } from "../ink/Stroke";
 import { strokeRev } from "../ink/StrokeRev";
+import { isOpaqueAttachment, type AttachmentData } from "./InkAttachments";
 import { aboveOf, lineKey, newAboveRun, shiftedStroke, underSignature, type AboveRun, type LineSignature } from "./LineAnchor";
 
 /** A rendered block's place, px, in the layer's own frame (the frame the ink is drawn in). */
@@ -204,25 +205,47 @@ function aboveIn(lines: readonly string[], i: number): number {
  * honours none); left out, the anchor's own is taken, for a caller reading one stroke's correction alone.
  */
 export function embedInkDy(s: InkStroke, spans: LineSpans | null, zoom = 1, sig?: LineSignature | null): number {
+	return anchoredDy(s, spans, zoom, sig) ?? 0;
+}
+
+/** As embedInkDy, but null when a guard fails: 0 then means the anchor holds and its line has not moved. */
+function anchoredDy(s: InkStroke, spans: LineSpans | null, zoom: number, sig?: LineSignature | null): number | null {
 	const a = s.lineAnchor;
-	if (!a || !spans) return 0;
-	if (sig !== undefined && !underSignature(a, sig)) return 0;
-	if (!Number.isInteger(a.line) || a.line < 1 || a.line > spans.lines.length) return 0;
-	if (Math.abs(a.y - s.bbox.y) > Y_SLACK) return 0;
+	if (!a || !spans) return null;
+	if (sig !== undefined && !underSignature(a, sig)) return null;
+	if (!Number.isInteger(a.line) || a.line < 1 || a.line > spans.lines.length) return null;
+	if (Math.abs(a.y - s.bbox.y) > Y_SLACK) return null;
 	// The anchor's line is 1-based (the editor's); the view's lines are 0-based (the renderer's).
 	const i = a.line - 1;
-	if (spans.skip.some((r) => i >= r.from && i <= r.to)) return 0;
-	if (lineKey(spans.lines[i]!) !== a.key) return 0;
-	if (a.above !== undefined && a.above !== aboveIn(spans.lines, i)) return 0;
+	if (spans.skip.some((r) => i >= r.from && i <= r.to)) return null;
+	if (lineKey(spans.lines[i]!) !== a.key) return null;
+	if (a.above !== undefined && a.above !== aboveIn(spans.lines, i)) return null;
 	const top = lineTopIn(spans, i);
-	if (top === null) return 0;
+	if (top === null) return null;
 	const dy = top / zoom - a.top;
-	if (!Number.isFinite(dy) || Math.abs(dy) < SAME_DY) return 0;
-	return dy;
+	if (!Number.isFinite(dy)) return null;
+	return Math.abs(dy) < SAME_DY ? 0 : dy;
 }
 
 /** Shown copies, one per stroke shown away from its page position, kept while its correction and geometry stand. */
-const copies = new WeakMap<InkStroke, { dy: number; rev: number; copy: InkStroke }>();
+const copies = new WeakMap<InkStroke, { dx: number; dy: number; rev: number; copy: InkStroke }>();
+
+/**
+ * Each member's sideways correction, world units: its group's kept dx (the record's `shown`), the move the editor shows
+ * it at sideways. Its dy is never taken here: the member's anchor, taken at the place its group shows it, carries it.
+ * Null when no group is moved sideways.
+ */
+export function attachedDx(records: readonly AttachmentData[] | null | undefined): ReadonlyMap<string, number> | null {
+	if (!records) return null;
+	let out: Map<string, number> | null = null;
+	for (const r of records) {
+		if (isOpaqueAttachment(r)) continue;
+		const dx = r.shown?.dx ?? 0;
+		if (!Number.isFinite(dx) || Math.abs(dx) < SAME_DY) continue;
+		for (const id of r.strokeIds) (out ??= new Map()).set(id, dx);
+	}
+	return out;
+}
 
 /**
  * The signature anchors are honoured under with no editor open on the note: the newest anchored stroke's width and
@@ -238,27 +261,32 @@ export function newestAnchorSignature(strokes: readonly InkStroke[]): LineSignat
 /**
  * The strokes as this view shows them: the list itself when no correction moves any, else a new list holding a copy of
  * each moved stroke (the stored one untouched) and every other stroke as it is. `zoom` as for `embedInkDy`. `live` is
- * the signature of an editor open on the note, or null for none (the newest anchored stroke's is taken).
+ * the signature of an editor open on the note, or null for none (the newest anchored stroke's is taken). `records` are
+ * the note's attached groups: a member is drawn at its anchor's dy plus its group's kept dx (`attachedDx`), the dx only
+ * while its anchor passes every guard.
  */
-export function shownStrokes(strokes: readonly InkStroke[], spans: LineSpans | null, zoom = 1, live: LineSignature | null = null): readonly InkStroke[] {
+export function shownStrokes(strokes: readonly InkStroke[], spans: LineSpans | null, zoom = 1, live: LineSignature | null = null, records?: readonly AttachmentData[] | null): readonly InkStroke[] {
 	if (!spans) return strokes;
 	const sig = live ?? newestAnchorSignature(strokes);
+	const dxs = attachedDx(records);
 	let out: InkStroke[] | null = null;
 	for (let k = 0; k < strokes.length; k++) {
 		const s = strokes[k]!;
-		const dy = embedInkDy(s, spans, zoom, sig);
-		if (dy === 0) {
+		// A member's dx is its group's shown move, which its anchor was taken at: with the anchor failing a guard (an edit
+		// made outside the plugin, another width or font) the member is drawn at its stored place, never moved sideways only.
+		const a = anchoredDy(s, spans, zoom, sig), dy = a ?? 0, dx = a === null ? 0 : dxs?.get(s.id) ?? 0;
+		if (dy === 0 && dx === 0) {
 			if (out) out.push(s);
 			continue;
 		}
 		out ??= strokes.slice(0, k);
 		const rev = strokeRev(s), held = copies.get(s);
-		if (held && held.dy === dy && held.rev === rev) {
+		if (held && held.dy === dy && held.dx === dx && held.rev === rev) {
 			out.push(held.copy);
 			continue;
 		}
-		const copy = shiftedStroke(s, dy);
-		copies.set(s, { dy, rev, copy });
+		const copy = shiftedStroke(s, dy, dx);
+		copies.set(s, { dx, dy, rev, copy });
 		out.push(copy);
 	}
 	return out ?? strokes;

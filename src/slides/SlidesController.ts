@@ -6,6 +6,7 @@ import { type SlidesActions } from "./SlidesActions";
 import { timerHost } from "../util/RuntimeScheduler";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { SlidesDeck, type SlidesInkHost } from "./SlidesInkSurface";
+import { setSlidesLiveDeck } from "./SlidesPersistence";
 
 // ---- module-level controller ----------------------------------------------
 
@@ -107,6 +108,9 @@ export function scanForSlides(): void {
 		observers.has(doc) && docs.indexOf(doc) === i);
 	const found = ordered.map(findDeck).find(Boolean) ?? null;
 	if (found) {
+		// The one live deck is the one a note's id change reaches (slidesNoteIdChanged). Told here, at run time, not
+		// when this file loads: the two files import each other, and either may load first.
+		setSlidesLiveDeck(() => deck);
 		deck = new SlidesDeck(found.container, found.reveal, found.slides, host);
 	}
 }
@@ -192,6 +196,25 @@ export async function settleSlidesInk(maxWaitMs = 2000): Promise<boolean> {
 	} finally {
 		scheduler.clearTimeout(timer);
 	}
+}
+
+/**
+ * Presentation ink is waiting to be saved: a closed deck's drain (made only for ink parked at teardown), the live
+ * deck's page id claim (opened only by a stroke), or its sidecar read with a save parked behind it or ink not yet
+ * written. The same states teardown counts as parked (SlidesBind.ts:351). A settle that gave up with none of these
+ * left only a read open, and no ink rides on it; the unload notice asks this.
+ */
+export function slidesParkedInk(): boolean {
+	return drains.size > 0 || deck?.claimInFlight != null || (deck?.loadInFlight != null && (deck.saveAfterLoad || deck.dirty));
+}
+
+/**
+ * Commit the live deck's stroke in progress, the path a tool switch takes (SlidesDeck.finishGesture), so the
+ * app going to the background writes it. That path records the stroke's end as "slide-change", and keeps the
+ * navigation guard up until the real lift.
+ */
+export function finishSlidesGesture(): void {
+	deck?.finishGesture();
 }
 
 /**

@@ -17,7 +17,7 @@ declare module "./InkOverlay" {
 		columnMarginDebtScrollLeft(effective: number, left: number): number;
 		columnRestPan(next: number, effective: number): number | null;
 		ownLinesPageBoxScrollLeft(next: number, effective: number, left: number): number;
-		columnFitsPane(next: number, effective: number): boolean;
+		columnFitsPane(next: number, effective: number, canvas?: boolean): boolean;
 		columnRestCentred(_next: number, _effective: number): number | null;
 		holdOverscrollGive(x: number, y: number): void;
 		releaseOverscrollGive(): void;
@@ -225,10 +225,11 @@ declare module "./InkOverlay" {
 	 * gone that answer went false everywhere, and the 25 -> 100 round trip missed the text by 1079 px.
 	 * The predicate is the fit half of what columnRestCentred used to compute, and only that.
 	 */
-	function columnFitsPane(this: InkOverlayPlugin, next: number, effective: number): boolean {
+	function columnFitsPane(this: InkOverlayPlugin, next: number, effective: number, canvas = false): boolean {
 		const layout = this.viewportLayout;
 		if (!layout || !layout.columnInset || !(next > 0) || !(effective > 0)) return false;
-		if (this.canvasMode) return false;
+		// `canvas` asks the fit alone, with Infinite Canvas on as well (a zoom step landing at 100 percent).
+		if (this.canvasMode && !canvas) return false;
 		const width = this.pageContentWidth() * effective;
 		const span = layout.width * layout.externalScale - layout.gutterScreen;
 		return width > 0 && width <= span + PAN_FIT_SLACK_PX;

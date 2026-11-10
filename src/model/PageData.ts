@@ -1,5 +1,7 @@
 import { InkPoint, InkStroke, LineAnchor, settleLineAnchors } from "../ink/Stroke";
 import { strokeRev } from "../ink/StrokeRev";
+import { validColumnRef } from "../ink/ColumnRef";
+import { isOpaqueAttachment, type AttachmentData } from "../inline/InkAttachments";
 import { describeDecodeLoss, emptyDecodeLoss, migratePageData, onlyUnknownPointKeys, wasLossy } from "./PageMigrate";
 export { migratePageData, type DecodeLoss } from "./PageMigrate";
 
@@ -149,6 +151,16 @@ export interface PageData {
 	 */
 	fontRefPx?: number;
 	/**
+	 * The editor's content width in layout px that this note's ink was first
+	 * drawn against: with Infinite Canvas on, the note surface holds the text
+	 * column at this width so the text wraps as it did under the ink
+	 * (ColumnRef.ts). Written once and never changed, by a re-take of the
+	 * anchors or a save at another width included. Absent on a note with no
+	 * anchored ink and on every note that predates it. Additive, like
+	 * fontRefPx: an older build keeps it as an unknown top-level field.
+	 */
+	columnRefPx?: number;
+	/**
 	 * This note's own Infinite Canvas and paper background choices. Absent:
 	 * the note follows the global setting. They live here and not in the
 	 * note's properties, which hold the page id alone. Additive, like
@@ -158,6 +170,12 @@ export interface PageData {
 	noteCanvas?: boolean;
 	notePaper?: NotePaperKind;
 	textBoxes: TextBoxData[];
+	/**
+	 * Ink attached to text (InkAttachments.ts): one record per group. Absent when the note has none, and then not
+	 * written, so a note without groups keeps its bytes. Additive: an older build keeps the key as an unknown top-level
+	 * field, so the schema version stays.
+	 */
+	attachments?: AttachmentData[];
 	images: ImageData[];
 	strokes: InkStroke[];
 	/**
@@ -313,9 +331,11 @@ export const KNOWN_TOP = new Set([
 	"deck",
 	"slides",
 	"fontRefPx",
+	"columnRefPx",
 	"noteCanvas",
 	"notePaper",
 	"textBoxes",
+	"attachments",
 	"images",
 	"strokes",
 ]);
@@ -525,6 +545,7 @@ function pageRecord(page: PageData, version: number, strokes: unknown): Record<s
 			...(typeof page.fontRefPx === "number" && Number.isFinite(page.fontRefPx) && page.fontRefPx > 0
 				? { fontRefPx: page.fontRefPx }
 				: {}),
+			...(validColumnRef(page.columnRefPx) ? { columnRefPx: page.columnRefPx } : {}),
 			...(typeof page.noteCanvas === "boolean" ? { noteCanvas: page.noteCanvas } : {}),
 			...(page.notePaper !== undefined && NOTE_PAPER_KINDS.includes(page.notePaper)
 				? { notePaper: page.notePaper }
@@ -541,6 +562,7 @@ function pageRecord(page: PageData, version: number, strokes: unknown): Record<s
 					page.unknownByObject[b.id]
 				)
 			),
+			...(page.attachments?.length ? { attachments: page.attachments.map((a) => attachmentRecord(page, a)) } : {}),
 			images: page.images.map((im) =>
 				withUnknown(
 					{
@@ -557,6 +579,28 @@ function pageRecord(page: PageData, version: number, strokes: unknown): Record<s
 			strokes,
 		},
 		page.unknownTop
+	);
+}
+
+/**
+ * One attachment as written: a record this build cannot read goes back exactly as it was read; a version 1 record is
+ * written field by field, coordinates at the stroke precision, with whatever keys it carried that this build does not
+ * know.
+ */
+function attachmentRecord(page: PageData, a: AttachmentData): Record<string, unknown> {
+	if (isOpaqueAttachment(a)) return a.raw;
+	return withUnknown(
+		{
+			v: a.v,
+			id: a.id,
+			strokeIds: a.strokeIds,
+			target: { kind: a.target.kind, from: a.target.from, to: a.target.to, text: a.target.text, before: a.target.before, after: a.target.after },
+			ref: { x: round(a.ref.x, 2), y: round(a.ref.y, 2) },
+			layout: { width: round(a.layout.width, 2), font: round(a.layout.font, 2) },
+			probe: { id: a.probe.id, x: round(a.probe.x, 2), y: round(a.probe.y, 2) },
+			...(a.shown ? { shown: { dx: round(a.shown.dx, 2), dy: round(a.shown.dy, 2) } } : {}),
+		},
+		page.unknownByObject[a.id]
 	);
 }
 

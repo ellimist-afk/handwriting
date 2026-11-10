@@ -199,7 +199,7 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"toolbar fixes",
 	],
 	"1.4.24": [
-		"big latency and performance patch. hope you guys enjoy -alan :)",
+		"BIG BIG latency and performance patch. hope you guys enjoy -alan :)",
 		"many reading view ink fixes",
 		"slides fixes",
 		"pdf scroll fix",
@@ -208,6 +208,25 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"faster touchpad zoom + fixes",
 		"sync fixes",
 		"android click to erase setting added",
+	],
+	"1.5.0": [
+		"new feature release 1.5.0 :)",
+		"attach ink to text",
+		"lasso resize and rotate ink",
+		"custom colors!",
+		"shape snap resize and rotate + 5 more shapes (arrow, pentagon, hexagon, octagon, star)",
+		"zoom v2.0",
+		"",
+		"fixes:",
+		"more performance fixes",
+		"pressure sens toggle now changes how new ink looks (no longer global toggle, pls message me if you want old behavior back)",
+		"zoom with image embeds fix (ty woominKO)",
+		"ink + typing fixes",
+		"palm rejection small fix",
+		"pdf dead input fix (linux users)",
+		"side button setting works",
+		"zoombar+toolbar polish and compatibility fix",
+		"ui fixes",
 	],
 };
 
@@ -326,7 +345,8 @@ function notesSince(
 	for (const v of chosen) {
 		const lines: string[] = [];
 		for (const line of notes[v] ?? []) {
-			if (seenLines.has(line)) continue;
+			// The landed release's own list is shown as written: a line an older list also holds stays in it.
+			if (v !== current && seenLines.has(line)) continue;
 			seenLines.add(line);
 			lines.push(line);
 		}
@@ -379,6 +399,11 @@ function collapseOlderGroups(groups: NotesGroup[]): NotesGroup[] {
  * A group with `collapsedCount` set (see `collapseOlderGroups`) stands for
  * every release older than the two most recent: it renders as its one
  * summary line, with no version label and no list of its own.
+ *
+ * A blank line ("") in a release's notes renders as an empty gap row
+ * (`handwriting-whats-new-gap`: no bullet, one line tall, styles.css), so a
+ * list can be split in two the way it was typed; every other line is a
+ * normal bulleted row.
  */
 export function whatsNewFragment(
 	version: string,
@@ -405,17 +430,34 @@ export function whatsNewFragment(
 				});
 			}
 			const list = frag.createEl("ul", { cls: "handwriting-whats-new-list" });
-			for (const line of group.notes) list.createEl("li", { text: line });
+			for (const line of group.notes) noteRow(list, line);
 		});
 	} else {
 		const list = frag.createEl("ul", { cls: "handwriting-whats-new-list" });
-		for (const line of notes) list.createEl("li", { text: line });
+		for (const line of notes) noteRow(list, line);
 	}
 	return frag;
 }
 
+/** One row of a notes list: a blank line is a bullet-less gap row with no text, any other line a normal row. */
+function noteRow(list: HTMLElement, line: string): void {
+	if (line === "") list.createEl("li", { cls: "handwriting-whats-new-gap" });
+	else list.createEl("li", { text: line });
+}
+
 /** Long enough to read four short lines; a click dismisses it sooner. */
 export const WHATS_NEW_MS = 15000;
+
+/**
+ * The one release whose notes stay up until tapped: no timeout, closed by a tap or click, and the version is recorded
+ * on that tap, not at launch, so they come back every launch until someone taps them. Every other release keeps the
+ * timed toast.
+ */
+export const WHATS_NEW_UNTIL_TAPPED = "1.5.0";
+
+export function whatsNewStaysUntilTapped(version: string): boolean {
+	return version === WHATS_NEW_UNTIL_TAPPED;
+}
 
 /**
  * How long the toast stays up, scaled to how much there is to read.

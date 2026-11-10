@@ -173,9 +173,12 @@ it("ink stays on the column through a scroll, and when the column recentres", as
 		`the scrollbar plant did not move the column: ${JSON.stringify(scrollbar.columnXs)}. ` +
 			`overflow-y:scroll is inert under headless Chromium's overlay scrollbars; padding-right is what reproduces a classic scrollbar.`
 	).toBeGreaterThan(1);
+	// The recentre plant narrows the pane below the inked note's held width
+	// (700 px), the one path that still moves the column of an inked note
+	// with Infinite Canvas off. A plant that moves nothing exercised nothing.
 	expect(
 		recentre.columnXs.length,
-		`the recentre plant did not move the column: ${JSON.stringify(recentre.columnXs)}`
+		`not exercised: the recentre plant (pane narrowed below the held width) did not move the column: ${JSON.stringify(recentre.columnXs)}`
 	).toBeGreaterThan(1);
 
 	// THE BEHAVIOUR THIS FILE PROTECTS. Committed ink stays on the text column

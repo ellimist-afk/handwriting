@@ -12,7 +12,7 @@ import { type PreviewPaperEnd } from "./PaperPan";
 import { scrollProbeExtent } from "./ScrollProbe";
 import { installMethods } from "./InstallMethods";
 import { settleHostBlank, settlePaintedHost } from "./InkOverlayPanSettle";
-import { CONTENT_ORIGIN_EPSILON, inlineInk, type InkOverlayPlugin } from "./InkOverlay";
+import { CONTENT_ORIGIN_EPSILON, type InkOverlayPlugin } from "./InkOverlay";
 
 /**
  * The line under the fingers when a pinch takes over: its document position and its top in CodeMirror's height map, in
@@ -444,7 +444,8 @@ declare module "./InkOverlay" {
 			this.previewSettleOwed = false;
 			this.previewPaintedBlank = null;
 			// The paper leaves the scroller for its preview element on the first frame, before this frame's box write.
-			if (!this.pinchPreview) this.beginPreviewPaper();
+			const firstFrame = !this.pinchPreview;
+			if (firstFrame) this.beginPreviewPaper();
 			this.pinchPreview = true;
 			this.pinchScrollAt = performance.now();
 			this.pinchScaleNow = next;
@@ -465,6 +466,18 @@ declare module "./InkOverlay" {
 			// ...and keep that reused raster on the column, which the box above
 			// has just re-centred under Readable line length.
 			this.applyPreviewInkOffset(next);
+			// THE INK THE START VIEW DID NOT HOLD (1.4.25): on the gesture's first frame, a raster held at the start zoom goes up in its
+			// own element, read here where columnLocalAt has already flushed this frame's layout.
+			// A first frame that held nothing and was no zoom out (the fingers spread a little first) tries once more on the first
+			// zoom-out frame, for a clipped pick only.
+			const zoomOut = next < anchor.fromScale;
+			if (firstFrame) {
+				this.putUpHeldRaster();
+				this.heldRetryOwed = !this.heldRaster && !zoomOut;
+			} else if (this.heldRetryOwed && zoomOut) {
+				this.heldRetryOwed = false;
+				if (!this.heldRaster) this.putUpHeldRaster(true);
+			}
 			// THE FOCAL ANCHOR, and it deliberately does not touch the scroll.
 			// A preview frame that wrote the scroll could only ever anchor in
 			// the directions the surface already extends into - measured on
@@ -570,10 +583,10 @@ declare module "./InkOverlay" {
 		// exact pan and the ink is sharp again. A page at rest bakes to the exact pan and redraws.
 		return this.restPanX() > 0 || this.restPanY() > 0 ? { x: sx, y: sy } : { x, y };
 	}
-	/** carryBakedPan's guard, read before the bake: a raster of the zoom now held, painted while the store held this many strokes. */
+	/** carryBakedPan's guard, read before the bake: a raster of the zoom now held, painted from the list the repaint paints (free ink, less a drag's moving strokes). */
 	function bakeCanCarry(this: InkOverlayPlugin): boolean {
 		const last = this.lastPaintCam, path = this.filePath();
-		return !!last && last.zoom === this.camera.snapshot.zoom && this.paintedStrokeCount === (path ? inlineInk.strokes(path).length : 0);
+		return !!last && last.zoom === this.camera.snapshot.zoom && this.paintedStrokeCount === (path ? this.committedStrokes(this.freeStrokes(path)).length : 0);
 	}
 	/** A bake is owed when the snapped target differs from the raster pan, never for the remainder the target leaves. */
 	function rasterPanNeedsBake(this: InkOverlayPlugin): boolean {
@@ -753,7 +766,7 @@ declare module "./InkOverlay" {
 	 * the centring margin has moved, and the focal pan that holds the note under
 	 * the fingers. Two methods each assigning `style.transform` is not two
 	 * corrections, it is whichever ran last - which is how the first attempt at
-	 * this lane lost the column offset on every frame the pan moved. Summing
+	 * this fix lost the column offset on every frame the pan moved. Summing
 	 * them in one place is the whole fix.
 	 *
 	 * UNITS. The offset is already in the layer's own px (`columnLocalAt`
@@ -769,6 +782,8 @@ declare module "./InkOverlay" {
 		const x = this.previewInkOffset + this.panX() * s - (this.rasterPan?.x ?? 0);
 		const y = (this.previewInkOffsetY || 0) + this.panY() * s - (this.rasterPan?.y ?? 0);
 		layer.style.transform = x === 0 && y === 0 ? "" : `translate(${x}px,${y}px)`;
+		// The held raster's element takes the same numbers, from this one writer.
+		if (this.heldRaster) this.writeHeldRaster(x, y);
 		this.releaseWetIfIdle();
 	}
 
@@ -784,7 +799,8 @@ declare module "./InkOverlay" {
 	function onContentResize(this: InkOverlayPlugin, width?: number): void {
 		// The content's width moved (a pane resize, a readable-length change): the line anchors' signature is read here, where
 		// layout is done, and taken at once; no measure is asked for. Its height moves on every re-measure and reads nothing here.
-		if (width !== undefined && width !== this.contentWidthSeen) {
+		const widthChanged = width !== undefined && width !== this.contentWidthSeen;
+		if (widthChanged) {
 			this.contentWidthSeen = width;
 			this.lineSignatureMeasured(this.readLineSignature(this.view));
 		}
@@ -796,7 +812,10 @@ declare module "./InkOverlay" {
 			Math.abs(this.lastSyncDocumentTop - top) > CONTENT_ORIGIN_EPSILON ||
 			this.scale !== scale;
 		if (this.paperGridBox) this.syncGridPaperBox();
+		if (this.pageGuideBox) this.syncPageGuideBox();
 		this.scheduleRepaint(moved ? "content-resize" : "scroll");
+		// Attached ink is read and painted in this frame, where its words now stand.
+		if (widthChanged) this.followMeasureNow();
 	}
 
 	/**
@@ -804,6 +823,13 @@ declare module "./InkOverlay" {
 	 * back in the same task, its pan properties rewritten from the pan in force, so no frame shows neither or both.
 	 */
 	function endPreviewPaper(this: InkOverlayPlugin, reason: PreviewPaperEnd): void {
+		// An end that leaves the layer at the scale its gesture started from, the one it was painted at (a run back to its start zoom, a
+		// cancel) schedules a scroll repaint, never the whole paint whose landHeldRaster would take the sibling down: it comes down
+		// here (paper or none), the pane's canvases shown in the same call. A zoomed landing keeps it until that paint.
+		// The guides paint again on every end, paper or none, whether or not a preview paper element was up.
+		this.markPageGuidesPreview(false);
+		const h = this.heldRaster;
+		if (h && !this.pinchPreview && Math.abs(this.pinchScaleNow - h.rasterScale) <= h.rasterScale * 1e-9) this.takeDownHeldRaster();
 		const el = this.previewPaperEl;
 		if (!el) return;
 		this.previewPaperEl = null;

@@ -6,6 +6,8 @@
 import { isolateHistory } from "@codemirror/commands";
 import { BBox, InkStroke } from "../ink/Stroke";
 import { inkApplied, inkEffect, InkOp } from "./InkHistory";
+import { applyAttachOp } from "./AttachFollow";
+import type { AttachmentData, AttachStep } from "./InkAttachments";
 import { notifyInkChanged } from "./InkEvents";
 import { StrokeIndex } from "../ink/StrokeIndex";
 import { scrollProbeSchedule } from "./ScrollProbe";
@@ -18,6 +20,7 @@ declare module "./InkOverlay" {
 		dispatchInk(op: InkOp): void;
 		opPath(op: InkOp): string | null;
 		applyInkOp(op: InkOp, docChanged?: boolean): void;
+		inkOpStands(op: InkOp, docChanged?: boolean): boolean;
 		repaintPath(path: string, damage?: readonly BBox[]): void;
 		currentIndexes(path: string): StrokeIndex[];
 		moveLive(path: string, ids: readonly string[], dx: number, dy: number): void;
@@ -32,6 +35,28 @@ declare module "./InkOverlay" {
  * through a sync adoption, removed or erased it first) does not come back over what is there.
  */
 const removedByHistory = new WeakMap<readonly InkStroke[], ReadonlySet<string>>();
+
+/**
+ * Whether a history op would apply now, op by op: the checks each case of applyInkOp makes before it writes, and nothing
+ * else. Pure: no store write, no anchor taken, no save. An add or a remove always applies (each takes what is there).
+ */
+const moveStands = (path: string, op: Extract<InkOp, { type: "move" }>): boolean =>
+	inlineInk.holdsAll(path, op.strokeIds) && (!op.from || inlineInk.standsAt(path, op.strokeIds, op.from));
+const replaceStands = (path: string, op: Extract<InkOp, { type: "replace" }>): boolean =>
+	inlineInk.holdsAll(path, op.removed.map((st) => st.id));
+const transformStands = (path: string, op: Extract<InkOp, { type: "transform" }>): boolean =>
+	inlineInk.holdsAll(path, op.strokeIds) && inlineInk.standsAt(path, op.strokeIds, op.before.map((s) => s.points[0]!));
+
+/**
+ * An attach step's checks, as applyAttachSettle makes them before its first write: the list the step makes where the step
+ * left the record (Q9), and, when it settles, the note holding every member; null when either fails.
+ */
+export function attachStands(op: AttachStep & { path: string }, docChanged = false): AttachmentData[] | null {
+	const list = applyAttachOp(inlineInk.attachments(op.path), op, docChanged);
+	if (!list) return null;
+	if (op.settle && !inlineInk.holdsAll(op.path, op.settle.strokeIds)) return null;
+	return list;
+}
 
 	/** Bind every live publication to its record before asynchronous claims settle. */
 	function stampInkIdentity(this: InkOverlayPlugin, op: InkOp): InkOp {
@@ -135,8 +160,7 @@ const removedByHistory = new WeakMap<readonly InkStroke[], ReadonlySet<string>>(
 				// already moved these strokes (its redo of a split puts back the
 				// same, already moved, pieces): applying anyway moves a part, or
 				// moves the same ink twice. The step is spent either way.
-				if (!inlineInk.holdsAll(op.path, op.strokeIds)) return;
-				if (op.from && !inlineInk.standsAt(op.path, op.strokeIds, op.from)) return;
+				if (!moveStands(op.path, op)) return;
 				inlineInk.moveStrokes(op.path, op.strokeIds, op.dx, op.dy);
 				// A lasso move's strokes ride the lines they land on. An insert space's ride their own lines, which the step's
 				// document change moves, as at the gesture: a re-take here would put them on the moved lines, and the change
@@ -149,7 +173,7 @@ const removedByHistory = new WeakMap<readonly InkStroke[], ReadonlySet<string>>(
 				// gone (another device erased or split it, and the sync poll
 				// adopted that): taking only the rest loses them, and putting
 				// the inserted strokes back lays them over what is there now.
-				if (!inlineInk.holdsAll(op.path, op.removed.map((st) => st.id))) return;
+				if (!replaceStands(op.path, op)) return;
 				// Order matters: take the old ones out before putting the new
 				// ones back at their recorded positions, or the indices the op
 				// carries describe a list that no longer exists.
@@ -159,6 +183,23 @@ const removedByHistory = new WeakMap<readonly InkStroke[], ReadonlySet<string>>(
 				inlineInk.save(op.path);
 				break;
 			}
+			case "attach": {
+				// Only where the step left the group and its members (applyAttachSettle); else the step is spent. Nothing
+				// shown moves: the points settle and each own anchor is taken again at the place shown before the step.
+				if (!this.applyAttachSettle(op, docChanged)) return;
+				break;
+			}
+			case "transform":
+				// Whole or not at all, as a move: a stroke another pane or device took out since leaves the step spent. Each
+				// stroke takes its shape from this direction's copies in place (rewriteStrokes copies them again, so the step's
+				// copies never become a live stroke's), then rides the line it now sits on, as a moved stroke does. And only
+				// where the strokes still stand at the shape this step leaves them in (op.before, the inverse's after):
+				// another pane moved them since, and rewriting would write over that move. The step is spent.
+				if (!transformStands(op.path, op)) return;
+				inlineInk.rewriteStrokes(op.path, op.strokeIds.map((id, i) => ({ id, shape: op.after[i]! })));
+				if (!docChanged) this.retakeLineAnchors(op.path, op.strokeIds);
+				inlineInk.save(op.path);
+				break;
 		}
 		const current = this.filePath();
 		if (current === op.path) {
@@ -287,12 +328,32 @@ const removedByHistory = new WeakMap<readonly InkStroke[], ReadonlySet<string>>(
 		});
 	}
 
+	/** Whether `op` would apply now (the predicates above); an op whose note is gone (no path) is refused. */
+	function inkOpStands(this: InkOverlayPlugin, op: InkOp, docChanged = false): boolean {
+		const path = this.opPath(op);
+		if (path === null) return false;
+		switch (op.type) {
+			case "add":
+			case "remove":
+				return true;
+			case "move":
+				return moveStands(path, op);
+			case "replace":
+				return replaceStands(path, op);
+			case "attach":
+				return attachStands({ ...op, path }, docChanged) !== null;
+			case "transform":
+				return transformStands(path, op);
+		}
+	}
+
 export function installInkOps(proto: InkOverlayPlugin): void {
 	installMethods(proto, {
 		stampInkIdentity,
 		dispatchInk,
 		opPath,
 		applyInkOp,
+		inkOpStands,
 		repaintPath,
 		currentIndexes,
 		moveLive,

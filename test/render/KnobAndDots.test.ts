@@ -549,7 +549,8 @@ describe("the strip's grip is visible", () => {
 					);
 					if (!el) throw new Error("no grip dots");
 					const root = getComputedStyle(document.documentElement);
-					const strip = el.closest<HTMLElement>(".handwriting-mobile-tools");
+					// The strip's fill is on its face, the box the grip sits in.
+					const strip = el.closest<HTMLElement>(".handwriting-mobile-tools-face");
 					if (!strip) throw new Error("the grip is not inside a strip");
 					return {
 						backgroundImage: getComputedStyle(el).backgroundImage,

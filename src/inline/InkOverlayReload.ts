@@ -3,6 +3,7 @@
  * the external reload and its bindings. They are methods of InkOverlayPlugin, installed on its prototype when
  * InkOverlay.ts loads.
  */
+import type { Transaction } from "@codemirror/state";
 import { ViewUpdate } from "@codemirror/view";
 import { editorInfoField } from "obsidian";
 import type { Editor, TFile } from "obsidian";
@@ -24,7 +25,7 @@ declare module "./InkOverlay" {
 		ownsMarkdownEditorRoot(): boolean;
 		update(u: ViewUpdate): void;
 		updateInner(u: ViewUpdate): void;
-		noteExternallyReloaded(path: string): void;
+		noteExternallyReloaded(path: string, strokesChanged?: boolean): void;
 		renamedFrom(lastPath: string | null, path: string | null, file: unknown): boolean;
 		invalidateReloadBindings(...paths: (string | null)[]): void;
 		reloadBinding(): InlineReloadBinding | null;
@@ -80,6 +81,11 @@ declare module "./InkOverlay" {
 			&& !dom.closest(".markdown-embed, .hover-popover");
 	}
 
+	/** Whether a transaction is a typed text edit: it changes the text with user event input.type, input.paste or delete. */
+	function typedTextEdit(tr: Transaction): boolean {
+		return tr.docChanged && (tr.isUserEvent("input.type") || tr.isUserEvent("input.paste") || tr.isUserEvent("delete"));
+	}
+
 	function update(this: InkOverlayPlugin, u: ViewUpdate): void {
 		// EVERY ROUTE OUT OF HERE IS INSIDE CODEMIRROR'S UPDATE. The routes
 		// that can release the measure hold are handled by name (the file
@@ -102,10 +108,22 @@ declare module "./InkOverlay" {
 		// undo took something else (item 6b). The ops touch only the store.
 		for (const tr of u.transactions) {
 			if (tr.annotation(inkApplied)) continue;
-			for (const effect of tr.effects) {
-				if (effect.is(inkEffect)) this.applyInkOp(effect.value, tr.docChanged);
+			const ops = tr.effects.filter((effect) => effect.is(inkEffect)).map((effect) => effect.value);
+			// One step of several ink ops (a resize, rotate or drop with its groups' attach steps, an Insert Space with its
+			// held groups') is one undo: every op is read against the store before any applies, and when one is spent (another
+			// pane or device changed what it acts on) none applies and the step is spent. A live gesture ends first, as each
+			// op's own apply would end it.
+			if (ops.length > 1) {
+				this.endLiveGestureForHistory();
+				if (!ops.every((op) => this.inkOpStands(op, tr.docChanged))) continue;
 			}
+			for (const op of ops) this.applyInkOp(op, tr.docChanged);
 		}
+		// A typed text edit (a letter, a paste, a delete; their sub-events too, such as input.type.compose or delete.backward)
+		// lets go of the ink selection. A finger tap that selected attached ink leaves the cursor where it was, so the next
+		// letter lands there; a Backspace to take it back must be the text's, not a delete of the ink. A text change with no
+		// such user event (another pane, a sync, a command) and a cursor move keep the selection.
+		if (u.docChanged && u.transactions.some(typedTextEdit) && !this.selection.isEmpty) this.dissolveSelection();
 		// Attachment/reparenting can change ownership without changing the file.
 		// Retire a surface that lost its root; a later valid update can remount it.
 		if (!this.ownsMarkdownEditorRoot()) {
@@ -255,12 +273,15 @@ declare module "./InkOverlay" {
 	}
 
 	/** See inkExternallyReloaded. */
-	function noteExternallyReloaded(this: InkOverlayPlugin, path: string): void {
+	function noteExternallyReloaded(this: InkOverlayPlugin, path: string, strokesChanged = true): void {
 		if (this.filePath() !== path) return;
 		// The adopted file may name another font reference than the one latched
 		// here; its ink is in that frame, and so is what is drawn from now on.
 		this.adoptStoredFontRef(path);
-		if (this.selection.clear()) this.redrawSelectionUI();
+		// Its attached groups came with it, found again in this note's text.
+		this.resolveAttachedText(path);
+		// A selection holds stroke ids only; with the same strokes every one is still there.
+		if (strokesChanged && this.selection.clear()) this.redrawSelectionUI();
 		this.scheduleRepaint("external-reload");
 	}
 

@@ -99,7 +99,7 @@ export interface MobileToolsHost {
 	 * the eight pen inks and the highlighter's its own five, and a single
 	 * active-tool read cannot answer for the pop that is not showing.
 	 */
-	paletteFor(tool: string): ReadonlyArray<{ name: string; hex: string }>;
+	paletteFor(tool: string): ReadonlyArray<{ name: string; hex: string; title?: string }>;
 	/**
 	 * A swatch was tapped: apply the color, pick up its nib, toast it.
 	 *

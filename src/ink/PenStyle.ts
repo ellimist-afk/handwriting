@@ -90,13 +90,31 @@ export const NO_PRESSURE = 0.5;
  * Pressure sensitivity, off for anyone who wants an even line.
  *
  * Each style carries its OFF width. Speed thinning and geometric endpoint
- * taper stay active in both states. Every stroke is styled at render time,
- * so flipping this restyles ink that was written years ago.
+ * taper stay active in both states. The switch sets new strokes: each one
+ * is saved with the value it was drawn under and draws under that value for
+ * good, so flipping the switch restyles no ink already on the page.
  */
 let pressureSensitive = true;
 
 export function setPressureSensitivity(on: boolean): void {
 	pressureSensitive = on;
+}
+
+/**
+ * What a stroke saved without its own pressure setting draws under: the
+ * legacy key, taken once from the switch at the first launch of the build
+ * that started marking strokes. Undefined until then, and such a stroke
+ * follows the switch, as it did in every earlier build.
+ */
+let legacyPressure: boolean | undefined;
+
+export function setLegacyInkPressure(on: boolean | null): void {
+	legacyPressure = on ?? undefined;
+}
+
+/** What a stroke without a mark draws under now: the legacy key, else the switch. */
+export function unmarkedInkPressure(): boolean {
+	return legacyPressure ?? pressureSensitive;
 }
 
 /**
@@ -109,12 +127,14 @@ let strokePressure: boolean | undefined;
 
 /**
  * Enters one stroke's own pressure setting, if it carries one; returns what to
- * hand back to leaveStrokePressure. A stroke with no mark changes nothing.
+ * hand back to leaveStrokePressure. A stroke with no mark takes the legacy key
+ * when one is set and nothing is entered already; else it changes nothing.
  */
 export function enterStrokePressure(mark: "on" | "off" | undefined): boolean | undefined {
 	const previous = strokePressure;
 	if (mark === "on") strokePressure = true;
 	else if (mark === "off") strokePressure = false;
+	else strokePressure ??= legacyPressure;
 	return previous;
 }
 

@@ -6,18 +6,69 @@ import { Platform } from "obsidian";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { paintPurgeSentinel, purgeDetected, purgeProbeArmed, purgeProbeDue, readPurgeSentinel } from "../ink/PurgeSentinel";
 import { BBox, InkStroke, InkTool } from "../ink/Stroke";
+import { strokesIn } from "../ink/StrokeIndex";
 import { drawCommitted, drawRegion } from "../ink/StrokeRenderer";
 import { scrollProbeRepaint } from "./ScrollProbe";
 import { installMethods } from "./InstallMethods";
+import { heldTagsStale, paintHeldTags, refreshHeldTags, staleTagsOnPaint } from "./AttachDecoration";
+import { inlineInk } from "./InkOverlayRegistry";
 import { committedFloorFor, committedRepaintPlan, type InkOverlayPlugin } from "./InkOverlay";
+import { EXTENT_SCROLL_QUIET_MS } from "./InkOverlayConstants";
 
 declare module "./InkOverlay" {
 	interface InkOverlayPlugin {
 		committedCtxFor(tool: InkTool): CanvasRenderingContext2D;
 		paintCommittedWork(cam: { x: number; y: number; zoom: number }, work: "all" | BBox[], strokes: readonly InkStroke[]): boolean;
+		/**
+		 * Arm the zoom-out overview when no extent raster holds at `cam` (`ext`) and no extent build is under way. A whole repaint
+		 * calls it, and so does a build that drops itself with no stand-in held (the repaint it skipped while the build was set).
+		 */
+		armOverviewWhenNoExtent(cam: { x: number; y: number; zoom: number }, strokes: readonly InkStroke[], ext: NonNullable<InkOverlayPlugin["extentRaster"]> | null): void;
 		repaint(): void;
+		/** Whole paints by path: every stroke drawn on the whole layer. */
+		wholePaints?: number;
+		/** Whole paints by path at the camera and backing of the whole paint before it: the layer already held that picture. */
+		wastedWholePaints?: number;
+		/** Whole copies of a zoom stand-in onto the layer. */
+		standInCopies?: number;
+		/** Who asked the whole paint now running: a camera commit's payment names its call site; anything else is unnamed. */
+		wholePaintSite?: string | null;
+		/** The camera and backing of the last whole paint by path. */
+		lastWholePaint?: { x: number; y: number; zoom: number; backing: number } | null;
+		/** The call sites that paid a wasted whole paint, oldest first, the last eight. */
+		wasteSites?: string[];
+		/** Rebuilds the stroke index from the note now; `why` is counted. */
+		rebuildIndex(strokes: readonly InkStroke[], why: "lazy" | "idle"): void;
+		/** Asks one idle callback that rebuilds the index if it is still dirty then. */
+		scheduleIndexIdle(): void;
+		/** The pending idle callback's handle, or null. */
+		indexIdle?: number | null;
+		/** Index rebuilds by who ran them: a paint that needed the index (lazy) or the idle callback. */
+		indexRebuilds?: { lazy: number; idle: number };
+		/** Whether the paint now running is at a camera other than the last paint's; set by `repaint`. */
+		paintMoving?: boolean;
+		/** When the last paint at a moved camera ran (performance.now()); the idle rebuild waits for the view to be still. */
+		lastMovingPaintAt?: number;
+		/** Partial paints that culled by walking the list: the index was dirty and the camera moved. */
+		cullWalks?: number;
 	}
 }
+
+	/**
+	 * Count one whole paint by path, and whether it was waste: the same camera and backing as the whole paint before it, so the
+	 * layer already held this picture. A paint after the camera moved (a line correction's scroll) is not waste.
+	 */
+	function countWholePaint(o: InkOverlayPlugin, cam: { x: number; y: number; zoom: number }): void {
+		const backing = o.committedBacking ?? 0, last = o.lastWholePaint;
+		o.wholePaints = (o.wholePaints ?? 0) + 1;
+		if (last && last.x === cam.x && last.y === cam.y && last.zoom === cam.zoom && last.backing === backing) {
+			o.wastedWholePaints = (o.wastedWholePaints ?? 0) + 1;
+			const sites = o.wasteSites ?? (o.wasteSites = []);
+			sites.push(o.wholePaintSite ?? "unnamed");
+			if (sites.length > 8) sites.shift();
+		}
+		o.lastWholePaint = { x: cam.x, y: cam.y, zoom: cam.zoom, backing };
+	}
 
 
 	// ---- committed repaint --------------------------------------------------
@@ -34,7 +85,20 @@ declare module "./InkOverlay" {
 	 * the RETAINED camera (see `repaint`). Returns whether the purge probe
 	 * is armed, for the heal check that follows an ordinary repaint.
 	 */
+	function armOverviewWhenNoExtent(this: InkOverlayPlugin, cam: { x: number; y: number; zoom: number }, strokes: readonly InkStroke[], ext: NonNullable<InkOverlayPlugin["extentRaster"]> | null): void {
+		if (!ext && !this.extentBuild) this.armOverviewBuild(cam, strokes);
+	}
+
 	function paintCommittedWork(this: InkOverlayPlugin, cam: { x: number; y: number; zoom: number }, work: "all" | BBox[], strokes: readonly InkStroke[]): boolean {
+		// A held tag a redraw left stale is worked out here, from the member lists the free list just read: its old and new
+		// rects join this paint, so it moves in the same frame as its ink.
+		// One flag read on every other paint.
+		// With nothing selected no redraw runs on open or on a key, so the marks go stale here when the note's groups, strokes,
+		// corrections or selection moved since the last check: identity and number compares on an unchanged paint.
+		const markPath = this.selection.isEmpty ? this.filePath() : null;
+		if (markPath) staleTagsOnPaint(this, inlineInk.attachments(markPath), inlineInk.strokes(markPath), inlineInk.generation(markPath));
+		const tagPath = heldTagsStale(this) ? this.filePath() : null;
+		if (tagPath) work = refreshHeldTags(this, inlineInk.attachments(tagPath), inlineInk.strokes(tagPath), inlineInk.generation(tagPath), cam.zoom, work);
 		const probeArmed = purgeProbeArmed(Platform.isMobileApp, diagnosticsEnabled());
 		// One source for both branches: a partial repaint must match a full
 		// one, or ink would visibly change width between a damage frame and
@@ -51,7 +115,8 @@ declare module "./InkOverlay" {
 		if (armAsked && work !== "all" && mayBuild && !this.usableExtent(cam, strokes)) this.armExtentBuild(cam, strokes, floor);
 		if (work === "all") {
 			// Read before the paint marks below clear it.
-			const mark = this.standIn?.mark ?? null;
+			const marked = this.standIn;
+			let mark = marked?.mark ?? null;
 			// A note holding a highlighter stroke needs the pair; one without it
 			// leaves the pair at 0x0 and skips its draw.
 			if (this.highlightPairDeferred && strokes.some(stroke => stroke.tool === "highlighter")) this.allocateHighlightPair();
@@ -60,6 +125,10 @@ declare module "./InkOverlay" {
 			const ext = this.usableExtent(cam, strokes);
 			// No raster at this scale: the frame shows the stand-in if one holds, else paints by path; the raster is built after it, in pieces.
 			if (!ext && mayBuild) this.armExtentBuild(cam, strokes, floor);
+			this.armOverviewWhenNoExtent(cam, strokes, ext);
+			// An arm may shrink the stand-in (shrinkStandIn), which replaces it: the layers still hold a copy of the old one, so its
+			// mark says nothing about the new one, and the shrunk stand-in is copied below instead of kept.
+			if (this.standIn !== marked) mark = null;
 			// A stand-in no build will replace is let go here (the build did not fit, or there is nothing to build).
 			if (this.standIn && (ext || (mayBuild && !this.extentBuild))) this.dropStandIn();
 			// A whole repaint that may not build (a stroke being built, a pan's own frame) keeps the stand-in and starts
@@ -67,6 +136,9 @@ declare module "./InkOverlay" {
 			if (this.standIn && !ext && !mayBuild && !this.extentBuild) this.retryStandInLater();
 			const stand = !ext && this.standIn ? this.usableStandIn(strokes, true, cam) : null;
 			if (ext && this.copyFromExtent(ext, cam, null)) {
+				// The raster's copy is the path draw's picture at this camera.
+				this.lastWholePaint = { x: cam.x, y: cam.y, zoom: cam.zoom, backing: this.committedBacking ?? 0 };
+				this.paintedShownMoves = ext.shownMoves;
 				if (probeArmed) paintPurgeSentinel(this.committedCtx);
 			} else if (stand && !this.inQueuedFrame) {
 				// A whole repaint outside the queued frame (a zoom commit runs two to four, each after a backing write, in its own task)
@@ -80,22 +152,34 @@ declare module "./InkOverlay" {
 				// a second whole repaint a frame after its copy, with nothing changed): paint nothing, keep the mark.
 				stand.mark = mark;
 			} else if (stand && this.copyFromStandIn(stand, cam, null, strokes, floor)) {
+				this.standInCopies = (this.standInCopies ?? 0) + 1;
+				this.paintedShownMoves = stand.shownMoves;
+				// A soft picture: the path draw after it at the same camera is the crisp one, not waste.
+				this.lastWholePaint = null;
 				if (probeArmed) paintPurgeSentinel(this.committedCtx);
 			} else {
+				countWholePaint(this, cam);
+				this.paintedShownMoves = this.shownMoves;
 				if (!this.highlightPairDeferred) drawCommitted(this.highlightCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "highlighter", undefined, floor);
 				drawCommitted(this.committedCtx, cam, strokes, this.cssWidth, this.cssHeight, true, "pen", probeArmed, floor);
 			}
 			this.highlightBlank = !strokes.some(stroke => stroke.tool === "highlighter");
 			this.committedBlank = !probeArmed && !strokes.some(stroke => stroke.tool !== "highlighter");
+			if (this.heldRaster) this.landHeldRaster(!!stand && !this.inQueuedFrame);
 		} else if (work.length > 0) {
+			// A partial paint at another camera moves the layer's picture: the next whole paint is compared with nothing.
+			const last = this.lastWholePaint;
+			if (last && (last.x !== cam.x || last.y !== cam.y || last.zoom !== cam.zoom)) this.lastWholePaint = null;
 			// A deferred highlight layer stays blank: marked painted, its 0x0
 			// canvas would count as an occupied layer in the pinch composite.
 			if (!this.highlightPairDeferred) this.markCommittedPaint("highlighter");
 			this.markCommittedPaint("pen");
-			if (this.indexDirty) {
-				this.strokeIndex.rebuild(strokes);
-				this.indexDirty = false;
-			}
+			// A dirty index in a moving paint is not rebuilt there (a fling started inside the idle window paid about 4.4 ms in one
+			// moving frame): the cull walks the list, one bbox test per stroke, and the index is built at the still paint or idle.
+			const walk = this.indexDirty && this.paintMoving === true;
+			if (walk) this.cullWalks = (this.cullWalks ?? 0) + 1;
+			else if (this.indexDirty) this.rebuildIndex(strokes, "lazy");
+			const follow = this.lineAnchors.follow, withGroups = follow.any;
 			const ext = this.usableExtent(cam, strokes);
 			const stand = !ext && this.standIn ? this.usableStandIn(strokes, false, cam) : null;
 			for (const rect of work) {
@@ -116,7 +200,8 @@ declare module "./InkOverlay" {
 				const sl = out(left, cam.x, Math.floor), st = out(top, cam.y, Math.floor);
 				const sr = out(right, cam.x, Math.ceil), sb = out(bottom, cam.y, Math.ceil);
 				const onCanvas = { x: sl, y: st, width: sr - sl, height: sb - st };
-				const hit = this.strokeIndex.query(onCanvas);
+				const found = walk ? strokesIn(strokes, onCanvas) : this.strokeIndex.query(onCanvas);
+				const hit = withGroups ? found.filter((s) => follow.groupOf(s.id) === undefined) : found;
 				// A highlighter stroke reaching a deferred layer (undo, paste, sync)
 				// gets a fresh blank backing: paint the whole highlight layer once.
 				if (this.highlightPairDeferred && hit.some(stroke => stroke.tool === "highlighter")) {
@@ -131,9 +216,15 @@ declare module "./InkOverlay" {
 			// `drawRegion` has no reason to know about it. Repainting is
 			// idempotent, so this needs no test for whether it was hit.
 			if (probeArmed) paintPurgeSentinel(this.committedCtx);
+			// A store change in a rect (an erase, an undo, a point edit) may touch a member: the attached layer repaints the rects too.
+			if (withGroups) this.attachedLayer?.moved(work);
 		}
 		// Only a whole-world paint puts every stroke of the store on the raster; a partial one draws the strokes in its rects.
 		if (work === "all") this.paintedStrokeCount = strokes.length;
+		// Attached ink, on its own layer above: copies of its groups' sprites. Nothing with no group.
+		this.paintAttached(cam, work === "all");
+		// A held group's tag, on the committed layer after its rect paints, so nothing selected keeps the tail compact.
+		paintHeldTags(this, this.committedCtx, cam, work, this.cssWidth, this.cssHeight);
 		return probeArmed;
 	}
 
@@ -176,7 +267,8 @@ declare module "./InkOverlay" {
 			const work = this.damage.take();
 			if (work === "all" || work.length > 0) {
 				const path = this.filePath();
-				this.paintCommittedWork(this.lastPaintCam, work, path ? this.committedStrokes(this.noteStrokes(path)) : []);
+				this.paintMoving = false;
+				this.paintCommittedWork(this.lastPaintCam, work, path ? this.committedStrokes(this.freeStrokes(path)) : []);
 			}
 			return;
 		}
@@ -224,7 +316,8 @@ declare module "./InkOverlay" {
 		this.syncCamera();
 		const syncCameraMs = diag ? performance.now() - syncAt : 0;
 		const path = this.filePath();
-		const strokes = path ? this.committedStrokes(this.noteStrokes(path)) : [];
+		// Free ink only: attached groups paint on their own layer.
+		const strokes = path ? this.committedStrokes(this.freeStrokes(path)) : [];
 		const cam = this.camera.snapshot;
 		if (panBaked && this.cssScale < 1) this.carryBakedPan(cam, strokes.length);
 		const last = this.lastPaintCam;
@@ -258,6 +351,8 @@ declare module "./InkOverlay" {
 		// says why it is not on for everyone yet). Desktop pays one boolean.
 		const paintAt = diag ? performance.now() : 0;
 		this.extentMayBuild = this.extentBuildAllowed();
+		this.paintMoving = last !== null && (last.x !== cam.x || last.y !== cam.y || last.zoom !== cam.zoom);
+		if (this.paintMoving) this.lastMovingPaintAt = performance.now();
 		const probeArmed = this.paintCommittedWork(cam, work, strokes);
 		const paintMs = diag ? performance.now() - paintAt : 0;
 		// ---- the purge heal (1.4.12-design.md §14, cause B) -----------------
@@ -327,12 +422,50 @@ declare module "./InkOverlay" {
 			});
 		}
 		this.updateExtent();
+		// A paint that left the index dirty: it is rebuilt at idle, not in the next gesture's first frame.
+		if (this.indexDirty) this.scheduleIndexIdle();
+	}
+
+	function rebuildIndex(this: InkOverlayPlugin, strokes: readonly InkStroke[], why: "lazy" | "idle"): void {
+		// The index holds every stroke as shown, attached members too (lasso and eraser hits); the paint skips them.
+		const path = this.filePath();
+		// In store order: a group read for the first time goes in at the depth this rebuild would give it.
+		const list = path && this.lineAnchors.follow.any ? this.committedStrokes(this.noteStrokes(path)) : strokes, order = this.lineAnchors.storeOrder(list);
+		this.strokeIndex.rebuild(list, order?.depths, order?.pending);
+		this.indexDirty = false;
+		this.firstsWaiting = null;
+		const n = (this.indexRebuilds ??= { lazy: 0, idle: 0 });
+		n[why]++;
+	}
+
+	function scheduleIndexIdle(this: InkOverlayPlugin): void {
+		if (this.indexIdle != null) return;
+		const w = this.winRef as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number };
+		const run = () => {
+			this.indexIdle = null;
+			// Torn down, or a paint already rebuilt it.
+			if (!this.container || !this.indexDirty) return;
+			// A view still moving (a scroll step asked for, or a paint at a moved camera, within EXTENT_SCROLL_QUIET_MS) waits until
+			// it is still: a fling over a dirty index paid the whole rebuild between two of its frames. Once still it runs as before.
+			const wait = EXTENT_SCROLL_QUIET_MS - (performance.now() - Math.max(this.lastScrollAskAt, this.lastMovingPaintAt ?? -Infinity));
+			if (wait > 0) {
+				this.indexIdle = w.setTimeout(() => { this.indexIdle = null; this.scheduleIndexIdle(); }, Math.ceil(wait));
+				return;
+			}
+			const path = this.filePath();
+			this.rebuildIndex(path ? this.committedStrokes(this.noteStrokes(path)) : [], "idle");
+		};
+		// No idle callback (iOS WebKit): a short timer, which still runs between frames.
+		this.indexIdle = w.requestIdleCallback ? w.requestIdleCallback(run, { timeout: 500 }) : w.setTimeout(run, 50);
 	}
 
 export function installInkOverlayRepaint(proto: InkOverlayPlugin): void {
 	installMethods(proto, {
 		committedCtxFor,
 		paintCommittedWork,
+		armOverviewWhenNoExtent,
 		repaint,
+		rebuildIndex,
+		scheduleIndexIdle,
 	});
 }

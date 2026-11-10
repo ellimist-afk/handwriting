@@ -16,6 +16,7 @@ import { DamageLedger } from "../ink/DamageLedger";
 import { StrokeIndex } from "../ink/StrokeIndex";
 import { FrontierCache } from "./FrontierCache";
 import type { InkStroke } from "../ink/Stroke";
+import { attachButtonPoint, handlePoints, type TransformHandle } from "./LassoTransform";
 
 const NOTE = "lasso-drag-picture.md";
 const proto = InkOverlayPlugin.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
@@ -59,11 +60,15 @@ const ALL = [
 
 function overlay() {
 	const o = Object.create(InkOverlayPlugin.prototype) as Record<string, any>;
+	// A shown frame after every sample: the frame runs at once and returns null, as a number would leave a stale frame id.
+	Object.defineProperty(o, "winRef", { value: { requestAnimationFrame: (cb: () => void) => { cb(); return null; }, cancelAnimationFrame: () => {} } }); o.container = {};
 	const noop = () => {};
 	const asks: string[] = [];
 	const tail = new Proxy({}, { get: () => noop });
 	Object.assign(o, {
 		filePath: () => NOTE,
+		// The Attach button's colours read the theme off view.dom; with none they fall back.
+		view: { dom: null },
 		scale: 1,
 		cssScale: 1,
 		cssWidth: 800,
@@ -247,5 +252,33 @@ describe("an abandoned lasso drag", () => {
 		let worst = 0;
 		end.forEach((st, i) => st.forEach((p, j) => { worst = Math.max(worst, Math.abs(p[0]! - start[i]![j]![0]!), Math.abs(p[1]! - start[i]![j]![1]!)); }));
 		expect(worst, "the abandoned drag left the ink away from its pen-down place").toBeLessThanOrEqual(1e-9);
+	});
+});
+
+describe("the Attach button during a resize or a turn", () => {
+	it.each<[string, TransformHandle, number, number]>([
+		["a resize from the se corner", "se", 20, 15],
+		["a turn from the knob", "rotate", 30, 0],
+	])("%s: the button is neither drawn nor hit mid-gesture, and is back after the lift", (_name, handle, dx, dy) => {
+		// Defect: the button's rule never hears of the transform, so it is drawn on the turning picture and a tap on it lands mid-resize.
+		const { o } = overlay();
+		const drawn: string[] = [];
+		o.tail = new Proxy({}, { get: (_t, k) => (k === "drawAttachButton" ? () => void drawn.push("button") : () => {}) });
+		const buttons = () => { drawn.length = 0; proto.redrawSelectionUI!.call(o); return [...drawn]; };
+		const box = proto.selectionBounds!.call(o) as { x: number; y: number; width: number; height: number };
+		const button = attachButtonPoint(box, 1);
+		expect(buttons(), "premise: the button shows before the grab").toEqual(["button"]);
+		expect(proto.attachButtonAt!.call(o, button, "pen"), "premise: and takes a pen").toBe(true);
+		const at = handlePoints(box, 1)[handle];
+		proto.lassoDown!.call(o, s(at.x, at.y), "pen");
+		proto.lassoMove!.call(o, [s(at.x + dx, at.y + dy)]);
+		expect(o.spaceSnapshot?.transform, "no transform began, so this cell proves nothing").toBeTruthy();
+		expect(buttons(), "no button drawn mid-gesture").toEqual([]);
+		expect(proto.attachButtonAt!.call(o, button, "pen"), "no button hit mid-gesture").toBe(false);
+		proto.lassoUp!.call(o);
+		expect(o.spaceSnapshot, "the lift ended the transform").toBeNull();
+		const after = attachButtonPoint(proto.selectionBounds!.call(o) as typeof box, 1);
+		expect(buttons(), "drawn again after the lift").toEqual(["button"]);
+		expect(proto.attachButtonAt!.call(o, after, "pen"), "hit again after the lift").toBe(true);
 	});
 });

@@ -6,14 +6,21 @@
  * as one argument, so this file imports only types from main.
  */
 import { Command, Notice, Platform } from "obsidian";
-import { clearGatedCommandActions, inkColorNames, setGatedCommandAction, setRetiredCommandAction } from "../CommandPaletteSplit";
+import {
+	clearGatedCommandActions,
+	gatedGeneratedCommands,
+	inkColorCommandLabel,
+	inkColorNames,
+	setGatedCommandAction,
+	setRetiredCommandAction,
+} from "../CommandPaletteSplit";
 import { activeSlidesActions, slidesInkEnabled } from "../slides/SlidesInkSurface";
 import { presentationCommands, requestSlidesAction } from "../slides/SlidesTools";
 import { getEraserRadiusPx, getInkSizeMult, getInlineEraserMode, getInlineLassoMode, getInlinePanMode, getInlineSpaceMode, getInlineTool, inkExternallyReloaded, inlineInk, refreshAllStrips, refreshPenToolsAll, setInlineEraserMode, setInlineLassoMode, setInlinePanMode, setInlineSpaceMode, setInlineTool } from "../inline/InkOverlay";
 import { INK_SIZE_STEPS, nextInkSize } from "../ink/InkSize";
 import { nextEraserSize } from "../ink/EraserSize";
 import { registerInkPresetCommands } from "../ink/InkPresetCommands";
-import { colorsFor, getInkColorHex, HIGHLIGHTER_COLORS, nextInkColor } from "../ink/InkColor";
+import { colorsFor, getInkColorHex, HIGHLIGHTER_COLORS, inkColorLabel, nextInkColor } from "../ink/InkColor";
 import { routineNoticesVisible } from "../diag/RoutineNotices";
 import { mouseInkEnabled, setMouseInk } from "../inline/MouseInk";
 import { nextPaperStyle } from "../inline/Paper";
@@ -30,6 +37,7 @@ import type { HandwritingPlugin } from "../main";
 declare module "../main" {
 	interface HandwritingPlugin {
 		registerCommands(deps: RegisterCommandsDeps): void;
+		refreshColourCommandNames(): void;
 	}
 }
 
@@ -434,7 +442,7 @@ interface RegisterCommandsDeps {
 				for (const name of names) {
 					addGatedCommand({
 						id: `ink-color-${name}`,
-						name: `Ink color: ${name}`,
+						name: `Ink color: ${inkColorCommandLabel(name)}`,
 						callback: () => {
 							const tool = getInlineTool();
 							const choice = colorsFor(tool).find((c) => c.name === name);
@@ -451,7 +459,7 @@ interface RegisterCommandsDeps {
 							// (glass, 2026-08-31). Choosing a color reaches
 							// for the nib that wears it, here like everywhere.
 							this.pickUpNib(tool);
-							runDetached(this.setInkColor(tool, choice.hex, choice.name), "save the ink color", () =>
+							runDetached(this.setInkColor(tool, choice.hex, choice.title ?? choice.name), "save the ink color", () =>
 								new Notice("Handwriting: the ink color changed, but the setting could not be saved.")
 							);
 						},
@@ -459,14 +467,17 @@ interface RegisterCommandsDeps {
 				}
 				// Highlighter by name: one hotkey takes you from anything to
 				// highlighting in that color. Its own palette's names only,
-				// so there is no wrong-tool case to report.
-				for (const c of HIGHLIGHTER_COLORS) {
+				// so there is no wrong-tool case to report. The id is the slot's
+				// default name; the colour is the slot's live one, read at the
+				// keypress, so a hotkey keeps meaning its slot after an edit.
+				for (const [i, c] of HIGHLIGHTER_COLORS.entries()) {
 					addGatedCommand({
 						id: `highlighter-color-${c.name}`,
-						name: `Highlighter color: ${c.name}`,
+						name: `Highlighter color: ${inkColorLabel("highlighter", i)}`,
 						callback: () => {
+							const slot = colorsFor("highlighter")[i]!;
 							this.pickUpNib("highlighter");
-							runDetached(this.setInkColor("highlighter", c.hex, c.name), "save the ink color", () =>
+							runDetached(this.setInkColor("highlighter", slot.hex, slot.title ?? slot.name), "save the ink color", () =>
 								new Notice("Handwriting: the ink color changed, but the setting could not be saved.")
 							);
 						},
@@ -482,7 +493,7 @@ interface RegisterCommandsDeps {
 				const tool = getInlineTool();
 				const next = nextInkColor(tool, getInkColorHex(tool));
 				this.pickUpNib(tool);
-				runDetached(this.setInkColor(tool, next.hex, next.name), "save the ink color", () =>
+				runDetached(this.setInkColor(tool, next.hex, next.title ?? next.name), "save the ink color", () =>
 					new Notice("Handwriting: the ink color changed, but the setting could not be saved")
 				);
 			},
@@ -497,7 +508,7 @@ interface RegisterCommandsDeps {
 			callback: () => {
 				const next = nextInkColor("highlighter", getInkColorHex("highlighter"));
 				this.pickUpNib("highlighter");
-				runDetached(this.setInkColor("highlighter", next.hex, next.name), "save the ink color", () =>
+				runDetached(this.setInkColor("highlighter", next.hex, next.title ?? next.name), "save the ink color", () =>
 					new Notice("Handwriting: the ink color changed, but the setting could not be saved")
 				);
 			},
@@ -508,7 +519,7 @@ interface RegisterCommandsDeps {
 			callback: () => {
 				const next = nextInkColor("pen", getInkColorHex("pen"));
 				this.pickUpNib("pen");
-				runDetached(this.setInkColor("pen", next.hex, next.name), "save the ink color", () =>
+				runDetached(this.setInkColor("pen", next.hex, next.title ?? next.name), "save the ink color", () =>
 					new Notice("Handwriting: the ink color changed, but the setting could not be saved")
 				);
 			},
@@ -536,8 +547,29 @@ interface RegisterCommandsDeps {
 		this.registerDiagCommands({ TRACE_UPLOAD_URL, loadedBuild, platformOs });
 	}
 
+	/**
+	 * Rename the per-colour commands after a palette edit. Their names are
+	 * computed when they register, so without this the palette would show a
+	 * slot's old colour until the next reload. The stored definition takes the
+	 * live name; one already registered with the app is handed again under the
+	 * same id, which replaces the entry. A mirrored command (the hotkey switch
+	 * off) is not registered, so nothing is handed. Ids and callbacks stay.
+	 */
+	function refreshColourCommandNames(this: HandwritingPlugin): void {
+		const live = new Map(gatedGeneratedCommands().map((c) => [c.id, c.name]));
+		const registered = new Set(this.registeredGatedCommandIds());
+		for (const [id, def] of this.gatedCommandDefs) {
+			if (!id.startsWith("ink-color-") && !id.startsWith("highlighter-color-")) continue;
+			const name = live.get(id);
+			if (name === undefined || name === def.name) continue;
+			def.name = name;
+			if (registered.has(id)) this.addCommand({ ...def });
+		}
+	}
+
 export function installRegisterCommands(proto: HandwritingPlugin): void {
 	installMethods(proto, {
 		registerCommands,
+		refreshColourCommandNames,
 	});
 }

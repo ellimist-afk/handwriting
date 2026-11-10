@@ -135,9 +135,7 @@ describe("device-local Pen side button setting", () => {
 		const { row } = settingRow();
 		expect(row.name).toBe("Pen side button");
 		expect(row.desc).toBe(
-			"Click while hovering over the screen switches pen and eraser. Android takes a pen touch made with the button held for text " +
-			"selection, so the button only works while the pen hovers. Click it once in the air to switch pen and " +
-			"eraser; click again to switch back. Needs a pen that hovers (S Pen, Wacom EMR). Remembered on this device.",
+			"Switch pen and eraser with a side button click while the pen hovers. Remembered on this device.",
 		);
 		const rendered = await paintToggle(row);
 		expect(rendered.value).toBe(true);
@@ -189,7 +187,7 @@ describe("device-local Pen side button setting", () => {
 		const { row } = settingRow();
 		expect(row.desc).toBe(
 			"Choose what a held pen side button does on contact. The mouse right button follows this choice. " +
-			"Remembered on this device; lasso stays on the toolbar.",
+			"Remembered on this device.",
 		);
 	});
 });

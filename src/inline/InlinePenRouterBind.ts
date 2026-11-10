@@ -36,15 +36,25 @@ declare module "./InlinePenRouter" {
 
 		on("pointerdown", (e) => this.pointerDown(e));
 		on("pointermove", (e) => this.pointerMove(e));
-		on("pointerrawupdate", (e) => this.pointerRawUpdate(e));
+		// `pointerrawupdate` is NOT bound here: it lives from a stroke's claim
+		// to its end (InlinePenRouter.bindRawListener), so a hovering pen
+		// generates no raw events.
 		on("pointerup", (e) => this.pointerUpOrCancel(e));
 		on("pointercancel", (e) => this.pointerUpOrCancel(e));
 		on("gotpointercapture", (e) => {
 			if (e.pointerType === "pen") tr("gotpointercapture", e);
 		});
 		on("lostpointercapture", (e) => {
+			// A finger's stroke ends here only when the scroller itself lost the
+			// capture. A real touch is captured by the element it landed on (a
+			// text line, a checkbox); that element losing the capture as the
+			// contact is claimed reaches this listener with the element as the
+			// target, and the contact is still down. Pen and mouse: unchanged.
 			const ownedFinger =
-				e.pointerType === "touch" && this.activeIsFinger && e.pointerId === this.activePenId;
+				e.pointerType === "touch" &&
+				this.activeIsFinger &&
+				e.pointerId === this.activePenId &&
+				e.target === this.scrollEl;
 			const ownedMouse = this.ownedMouseStroke(e);
 			if (!ownedFinger && e.pointerType !== "pen" && !ownedMouse) return;
 			tr("lostpointercapture", e, this.activePenId !== null ? "DURING STROKE" : "");

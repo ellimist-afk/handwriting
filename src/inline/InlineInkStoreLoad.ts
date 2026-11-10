@@ -8,6 +8,7 @@ import { emptyPage, PageData, parsePage, serializePage } from "../model/PageData
 import { scaleStroke } from "../objects/Selection";
 import { notifyInkChanged } from "./InkEvents";
 import { installMethods } from "./InstallMethods";
+import { takeColumnRef } from "../ink/ColumnRef";
 import { choicesKeyOf, inkFingerprint, type InlineDeleteCapture, type InlineDeleteReadiness, type InlineDeleteTarget, type NoteRecord, PARSER_INVENTED_STROKE_FIELDS, type InlineInkStore } from "./InlineInkStore";
 
 declare module "./InlineInkStore" {
@@ -344,6 +345,7 @@ function withoutFields(entry: unknown, drop: Set<string> | undefined): unknown {
 		}
 		const choicesBefore = choicesKeyOf(rec);
 		rec.basePage = result.data;
+		takeColumnRef(rec, result.data);
 		if (choicesKeyOf(rec) !== choicesBefore) this.emitChoicesOf(rec);
 		// Ink drawn while this read was in flight is in the frame of the size the
 		// editor latched then (`rec.fontRefPx`, through setFontRefPx). From here

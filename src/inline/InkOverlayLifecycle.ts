@@ -8,6 +8,9 @@ import { Notice, Platform, editorInfoField } from "obsidian";
 import { runGatedCommand } from "../CommandPaletteSplit";
 import { unmountDocumentAnchor } from "./DocumentAnchor";
 import { noteCameras } from "./NoteCamera";
+
+/** How long the camera must be still before it is saved at rest. */
+const NOTE_CAMERA_REST_MS = 500;
 import { tipMode } from "./TipMode";
 import { MobileTools, ensureNoteZoomControls, destroyNoteZoomControls } from "./MobileTools";
 import { clipboardSize } from "./InkClipboard";
@@ -39,6 +42,7 @@ import { setHitProbeContext } from "./PenHitProbe";
 import { surfaceExtents, ZERO_EXTENT } from "./SurfaceExtent";
 import { scrollProbeScroll, scrollProbeWheel } from "./ScrollProbe";
 import { installMethods } from "./InstallMethods";
+import { AttachedLayer } from "./InkOverlayAttachedLayer";
 import { applyToolbarPlacement, armMouseInkQuietlyEverywhere, commitEraserRadius, copySelectionNotice, copySelectionNoticeIsRoutine, cutSelectionNotice, cutSelectionNoticeIsRoutine, enabled, getEraserRadiusPx, getEraserWholeStrokes, getInkSizeMult, getInlineEraserMode, getInlineLassoMode, getInlinePanMode, getInlineSpaceMode, getInlineTool, INLINE_DESYNCHRONIZED, inlineInk, inlineTool, instances, metrics, OVERSCROLL_GIVE_PX, persistEraserMode, persistInkSize, pickStripColor, PINCH_SCROLL_QUIET_MS, releaseMouseInkQuietlyEverywhere, scrollExpansionEnabled, setEraserRadiusPx, setEraserWholeStrokes, setInkSizeMult, type InkOverlayPlugin } from "./InkOverlay";
 
 declare module "./InkOverlay" {
@@ -55,6 +59,11 @@ declare module "./InkOverlay" {
 		unmount(): void;
 		destroy(): void;
 		saveNoteCamera(): void;
+		noteCameraMoved(): void;
+		/** The armed rest check for the note's camera, or null; see noteCameraMoved. */
+		noteCameraRestTimer?: number | null;
+		/** Date.now() at the camera's last move. */
+		noteCameraMovedAt?: number;
 		armNoteCameraRestore(path: string | null): void;
 		restoreNoteCamera(path: string): void;
 	}
@@ -163,7 +172,13 @@ declare module "./InkOverlay" {
 		this.highlightWetCanvas = canvas();
 		this.highlightCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
 		this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
+		// Attached ink's highlighter canvas sits over the committed highlight layer, its pen canvas over the committed pen
+		// layer. Both stay 0x0 until a group is painted.
+		const attachedHl = canvas();
+		attachedHl.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
 		this.committedCanvas = canvas();
+		const attachedPen = canvas();
+		this.attachedLayer = new AttachedLayer(attachedPen, attachedHl, () => createEl("canvas"));
 		this.wetCanvas = canvas();
 		this.wetTileCanvas = canvas();
 		this.tailCanvas = canvas();
@@ -255,7 +270,10 @@ declare module "./InkOverlay" {
 				// mouse move reach here whenever mouse ink is armed. That is
 				// one of the two writers that made nibIsLit's flag a constant
 				// for a mouse-only user (alan, 2026-09-02).
-				onPenHover: (s, pt) => this.showPenCursor(s, pt),
+				onPenHover: (s, pt) => {
+					this.showPenCursor(s, pt);
+					this.attachHover(s, pt);
+				},
 				onPenLeave: () => this.hidePenCursor(),
 				// A finger just landed with nothing else on the glass, so a
 				// mouse's hover ring is the only thing that can be lit - and
@@ -288,6 +306,8 @@ declare module "./InkOverlay" {
 				// reticle back where the hand actually is.
 				onPenUp: (ev) => this.penUp(ev),
 				onAllContactsLifted: () => this.resumeStrandedPan(),
+				onTapLift: (sample, ev) => this.tapReleasesSelection(sample, ev),
+				easePlaying: () => (this.bounceState?.raf ?? 0) !== 0,
 				// Ordinary-note iPhone only. The predicate is read at contact,
 				// after a toolbar command has explicitly picked the current nib.
 				// PDF supplies no callback, so its touch behavior cannot widen.
@@ -301,6 +321,9 @@ declare module "./InkOverlay" {
 						tool: inlineTool,
 					}),
 				onFingerInkCancelled: () => this.cancelFingerInkForPinch(),
+				// A lone finger on the selection, its handles, the Attach button or a pin: the router holds it to the tap
+				// limit, then hands it here as a selection contact. The same hit test as a pen-down's.
+				claimTouch: (s) => this.selectionContactAt(this.camera.screenToWorld(s.x, s.y), "touch") !== null,
 				// A two-finger gesture is only ours while the Infinite Canvas is on. With it off the
 				// overlay already ignores every pinch phase, and this is what stops the router
 				// claiming the contacts in the first place, so the host's own pinch is what the note gets.
@@ -400,6 +423,8 @@ declare module "./InkOverlay" {
 			const scroller = this.view.scrollDOM;
 			const scrollLeft = scroller.scrollLeft;
 			const scrollTop = scroller.scrollTop;
+			// The camera is saved once the page is at rest, so a quit keeps it.
+			this.noteCameraMoved();
 			// The preview paper is outside the scroller: a scroll while it is up moves the text, so it takes the scroll too.
 			if (this.previewPaperEl && (scrollLeft !== this.paperScrollLeft || scrollTop !== this.paperScrollTop)) {
 				this.paperScrollLeft = scrollLeft; this.paperScrollTop = scrollTop; this.writePaperPan();
@@ -510,6 +535,8 @@ declare module "./InkOverlay" {
 		this.offCanvasOverride = onCanvasOverrideChanged((p) => { if (p === this.filePath()) this.applyCanvasMode(); });
 		this.offInkChanged = onInkChanged((p) => {
 			this.frontierCache.invalidate(p);
+			// A new note's first anchored stroke gives it its column width.
+			if (p === this.filePath()) this.applyColumnHold();
 			// ...but ONLY when ink ARRIVED. The sentence above said "or the
 			// last of it leaving", and that half was wrong on a user's screen:
 			// an eraser scrub re-lands the nib every few hundred ms, each
@@ -544,12 +571,15 @@ declare module "./InkOverlay" {
 		// the file arrives.
 		const loaded = inlineInk.ensureLoaded(path);
 		this.adoptStoredFontRef(path);
+		this.applyColumnHold();
 		runDetached(
 			loaded.then((changed) => {
 				// A read that finishes after unmount must not revive the page-class
 				// observer on a torn-down editor (audit 110).
 				if (this.filePath() === path && !this.retiring && this.container) {
 					this.adoptStoredFontRef(path);
+					// Before the repaint below: the ink is first painted under its own column width.
+					this.applyColumnHold();
 					// A restore the measure could not commit gets one more try, with the font reference and ink in.
 					this.restoreNoteCamera(path);
 					this.mobileTools?.refresh();
@@ -626,15 +656,14 @@ declare module "./InkOverlay" {
 				this.metadataObserver = new MutationObserver((records) => {
 					// This root is the whole editor, and CodeMirror recycles
 					// line DOM, so most batches arriving here cannot have
-					// changed a Properties block: gate first, then coalesce
-					// the survivors into ONE frame's work. §5g/G2.
+					// changed a Properties block: gate first. A survivor is
+					// classed now, before the browser paints. Obsidian draws a
+					// new note's block from inside an animation frame, so a
+					// class put off to the next frame lets that frame paint the
+					// id-only block and drop the text and ink by its height.
 					if (!records.some(isMetadataMutation)) return;
-					if (this.metadataFrame !== null) return;
-					this.metadataFrame = this.winRef.requestAnimationFrame(() => {
-						this.metadataFrame = null;
-						if (this.pageClassHost)
-							updateMetadataVisibility(this.pageClassHost, this.headFrontmatterKeys);
-					});
+					if (this.pageClassHost)
+						updateMetadataVisibility(this.pageClassHost, this.headFrontmatterKeys);
 				});
 				// The Properties container moves to the reading view beside this
 				// editor; keep observing both without moving the page class.
@@ -870,6 +899,7 @@ declare module "./InkOverlay" {
 		// The extent raster and a build in progress are whole-note copies of the ink, as big as the layers; the next whole repaint
 		// after a re-show paints by path, and builds again only where extentBuildAllowed() holds.
 		this.dropExtentBuild();
+		this.dropOverview();
 		const ext = this.extentRaster;
 		this.extentRaster = null;
 		for (const c of [
@@ -886,6 +916,7 @@ declare module "./InkOverlay" {
 			c.width = 0;
 			c.height = 0;
 		}
+		this.attachedLayer?.release();
 	}
 
 	function unmount(this: InkOverlayPlugin): void {
@@ -913,6 +944,8 @@ declare module "./InkOverlay" {
 		this.originLineObserver?.disconnect();
 		this.originLineObserver = null;
 		this.originLine = null;
+		this.attachedLayer?.release();
+		this.attachedLayer?.clearSprites();
 		if (this.scrollFn) {
 			this.view.scrollDOM.removeEventListener("scroll", this.scrollFn);
 			this.scrollFn = null;
@@ -920,6 +953,10 @@ declare module "./InkOverlay" {
 		if (this.shrinkIdleTimer !== null) {
 			this.winRef.clearTimeout(this.shrinkIdleTimer);
 			this.shrinkIdleTimer = null;
+		}
+		if (this.noteCameraRestTimer != null) {
+			this.winRef.clearTimeout(this.noteCameraRestTimer);
+			this.noteCameraRestTimer = null;
 		}
 		if (this.lineAnchorPassTimer > 0) {
 			this.winRef.clearTimeout(this.lineAnchorPassTimer);
@@ -941,6 +978,7 @@ declare module "./InkOverlay" {
 			this.wheelZoomTimer = 0;
 		}
 		this.dropExtentBuild();
+		this.dropOverview();
 		this.dropStandIn();
 		// No end step on the way out: the overlay is going, and `pinch` refuses
 		// once `retiring` is set anyway.
@@ -959,14 +997,11 @@ declare module "./InkOverlay" {
 		this.spacerTop = Number.NaN;
 		this.dropLeftReserve();
 		this.removeGridPaperBox();
+		this.removePageGuideBox();
 		this.stopPaperKindWatch();
 		this.view.scrollDOM.classList.remove("handwriting-hscroll");
 		this.metadataObserver?.disconnect();
 		this.metadataObserver = null;
-		if (this.metadataFrame !== null) {
-			this.winRef.cancelAnimationFrame(this.metadataFrame);
-			this.metadataFrame = null;
-		}
 		if (this.pageClassHost) clearMetadataVisibility(this.pageClassHost);
 		this.pageClassHost?.classList.remove("handwriting-page");
 		this.pageClassHost = null;
@@ -982,6 +1017,9 @@ declare module "./InkOverlay" {
 		// ticker rAF would keep rescheduling itself against a dead overlay.
 		this.stopFrameTicker();
 		this.restorePinchLayers();
+		// The held raster's element comes down with the pane's canvases shown, and is let go with the note.
+		this.takeDownHeldRaster();
+		this.heldRasterClip = null;
 		// Zero the backings before the container goes. Detached canvases hold
 		// their full-size memory until collection, and a same-tab note switch
 		// rebuilds the overlay, so a quick run of switches on an iPad stacked
@@ -1018,6 +1056,10 @@ declare module "./InkOverlay" {
 			this.winRef.cancelAnimationFrame(this.spaceFeedbackRaf);
 			this.spaceFeedbackRaf = null;
 		}
+		if (this.selectionPreviewRaf != null) {
+			this.winRef.cancelAnimationFrame(this.selectionPreviewRaf);
+			this.selectionPreviewRaf = null;
+		}
 		this.pinchPending = null;
 		// Hand the editor back the way it was found. The transform, the
 		// counter-sized box and the origin all live on view.dom, which
@@ -1025,6 +1067,7 @@ declare module "./InkOverlay" {
 		// editor painted at scale in a fraction-width box, with the only
 		// code that could undo it now unloaded.
 		this.restoreViewportLayout();
+		this.releaseColumnHold();
 		// The line-number travel class is on view.dom too, written at mount; it comes off here and only here, so a note
 		// switch in the same editor keeps the numbers with the text.
 		this.writeGutterTravel(1,true);
@@ -1052,6 +1095,8 @@ declare module "./InkOverlay" {
 		this.mobileTools = null;
 		this.noteZoomControls = destroyNoteZoomControls(this.noteZoomControls);
 		this.resetGestureState();
+		// The Attach button's hover anchor sits on the document body, outside the overlay: it goes with the overlay.
+		this.attachHoverOff(true);
 		// A remount puts a genuinely fresh screen in front of the reader, so
 		// the refusal is allowed to speak once more on it.
 		this.emptyNotice.forgetAll();
@@ -1087,6 +1132,27 @@ declare module "./InkOverlay" {
 	}
 
 	/**
+	 * The camera moved: save it once it has been still for NOTE_CAMERA_REST_MS. A quit
+	 * does not reliably unmount the editor, so a camera saved only on leave is lost to a quit. One timer per rest, not
+	 * one per scroll event: a move inside the wait only stamps the time, and the timer re-arms for what is left. Never
+	 * on the pen path.
+	 */
+	function noteCameraMoved(this: InkOverlayPlugin): void {
+		this.noteCameraMovedAt = Date.now();
+		if (this.noteCameraRestTimer != null) return;
+		const check = () => {
+			const quiet = Date.now() - (this.noteCameraMovedAt ?? 0);
+			if (quiet < NOTE_CAMERA_REST_MS) {
+				this.noteCameraRestTimer = this.winRef.setTimeout(check, NOTE_CAMERA_REST_MS - quiet);
+				return;
+			}
+			this.noteCameraRestTimer = null;
+			this.saveNoteCamera();
+		};
+		this.noteCameraRestTimer = this.winRef.setTimeout(check, NOTE_CAMERA_REST_MS);
+	}
+
+	/**
 	 * A note opening in this editor: if it has a remembered camera, restore it in CodeMirror's next measure. Mount and
 	 * the note switch run inside CodeMirror's update, where a commit may not run; the measure runs after the update and
 	 * before that frame is painted, so no frame shows the note at the default camera first. A remembered note was read
@@ -1115,6 +1181,12 @@ declare module "./InkOverlay" {
 			this.noteCameraRestore = null;
 			return;
 		}
+		// Canvas off is stock Obsidian, with no zoom: a camera kept at 100 percent gives its scroll back; a zoomed one,
+		// kept while the canvas was on, gives nothing, since its scroll was taken at another zoom. Never left armed.
+		if (!this.canvasMode && camera.zoom !== 1) {
+			this.noteCameraRestore = null;
+			return;
+		}
 		if (this.commitCameraScale(camera.zoom, { left: camera.left, top: camera.top }, undefined, false, true, true)) this.noteCameraRestore = null;
 	}
 
@@ -1132,6 +1204,7 @@ export function installLifecycle(proto: InkOverlayPlugin): void {
 		unmount,
 		destroy,
 		saveNoteCamera,
+		noteCameraMoved,
 		armNoteCameraRestore,
 		restoreNoteCamera,
 	});

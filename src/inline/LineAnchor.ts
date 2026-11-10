@@ -49,8 +49,32 @@
  * font size) is not the current one, or whose correction is larger than MAX_LINE_CORRECTION, shows the stroke at its page
  * position.
  */
-import { holdLineAnchors, pieceAnchor, releaseLineAnchors, type InkStroke, type LineAnchor } from "../ink/Stroke";
-import { inkRevision, strokeRev } from "../ink/StrokeRev";
+import { holdLineAnchors, pieceAnchor, releaseLineAnchors, type InkPoint, type InkStroke, type LineAnchor } from "../ink/Stroke";
+import { bumpCopyRev, inkListRevision, inkRevision, strokeRev, markCopy } from "../ink/StrokeRev";
+import { AttachFollow, type FollowSnapshot } from "./AttachFollow";
+import type { AttachmentData } from "./InkAttachments";
+
+/**
+ * A store stroke by id: an id to place map, built once per store list object and kept on it. The store
+ * refills its list in place, so each answer is checked against the list at its place, and a miss builds the map again.
+ */
+const byIdOfList = new WeakMap<readonly InkStroke[], Map<string, number>>();
+export function strokeById(list: readonly InkStroke[], id: string, counts?: { hits: number; builds: number }): InkStroke | undefined {
+	let at = byIdOfList.get(list);
+	if (at) {
+		const i = at.get(id), s = i === undefined ? undefined : list[i];
+		if (s && s.id === id) {
+			if (counts) counts.hits++;
+			return s;
+		}
+	}
+	if (counts) counts.builds++;
+	at = new Map();
+	for (let i = 0; i < list.length; i++) at.set(list[i]!.id, i);
+	byIdOfList.set(list, at);
+	const i = at.get(id);
+	return i === undefined ? undefined : list[i];
+}
 
 /** CodeMirror's line geometry, as the anchors read it. Heights are the editor's own px, below the document top. */
 export interface LineLayout {
@@ -62,31 +86,61 @@ export interface LineLayout {
 	lineTop(n: number): number;
 	/** Editor px per world unit: the editor's measured scale times the font zoom. */
 	readonly pxPerWorld: number;
+	/**
+	 * The first line under the note's frontmatter (bodyFromOf); 1 when absent. No line above it is ever a stroke's anchor: the
+	 * editor shows those lines hidden, drawn apart or as text, and a change between the three is not a change to the body.
+	 */
+	readonly bodyFrom?: number;
+}
+
+/** Each document's first body line, read once per document object (a document is never changed in place). */
+const bodyFromOfDoc = new WeakMap<object, number>();
+
+/**
+ * The first line under a leading frontmatter block, 1-based: the line after its closing `---`. 1 when the document does not
+ * open with a closed block, and 1 when nothing follows the block (no body line to hold ink).
+ */
+export function bodyFromOf(doc: { readonly lines: number; line(n: number): { text: string } }): number {
+	const known = bodyFromOfDoc.get(doc);
+	if (known !== undefined) return known;
+	let from = 1;
+	if (doc.lines > 2 && doc.line(1).text === "---") {
+		for (let n = 2; n < doc.lines; n++) {
+			if (doc.line(n).text === "---") {
+				from = n + 1;
+				break;
+			}
+		}
+	}
+	bodyFromOfDoc.set(doc, from);
+	return from;
 }
 
 /**
  * Where a layout update came from (LineAnchors.layoutChanged): an editor transaction; the measure loop, whose measure read the
- * lines the update before it drew; or a new signature, read in a measure or at a content resize.
+ * lines the update before it drew; a new signature, read in a measure or at a content resize; or the drawn lines' boxes, read in
+ * a measure (LineAnchors.boxesRead).
  */
-export type LayoutUpdate = "transaction" | "measure" | "signature";
+export type LayoutUpdate = "transaction" | "measure" | "signature" | "box";
 
 /**
  * The 1-based line of `lines` whose block holds editor height `h`, found by halving over the line tops `top(n)`: line 1 above
  * the first top, the last line below the last. Never lineBlockAtHeight (see editorLineLayout). Lines that share one top (a
  * fold's hidden lines share the heading's block) are found at the first of them, the line the reader sees: one more top read,
- * and a second halving only inside such a run.
+ * and a second halving only inside such a run. No line above `from` is found: a height above its top is on `from`, so the
+ * frontmatter's hidden lines, which share the first body line's top, are never the line under a stroke.
  */
-export function lineUnder(h: number, lines: number, top: (n: number) => number): number {
-	let lo = 1, hi = lines;
+export function lineUnder(h: number, lines: number, top: (n: number) => number, from = 1): number {
+	let lo = from, hi = lines;
 	while (lo < hi) {
 		const mid = (lo + hi + 1) >> 1;
 		if (top(mid) <= h) lo = mid;
 		else hi = mid - 1;
 	}
-	if (lo === 1) return lo;
+	if (lo === from) return lo;
 	const t = top(lo);
 	if (top(lo - 1) < t) return lo;
-	let a = 1;
+	let a = from;
 	hi = lo - 1;
 	while (a < hi) {
 		const mid = (a + hi) >> 1;
@@ -115,6 +169,7 @@ export function editorLineLayout(view: LineView, pxPerWorld: number): LineLayout
 		lineText: (n) => doc.line(n).text,
 		lineTop: (n) => (n > doc.lines ? view.lineBlockAt(doc.length).bottom : view.lineBlockAt(doc.line(n).from).top),
 		pxPerWorld,
+		bodyFrom: bodyFromOf(doc),
 	};
 }
 
@@ -146,8 +201,20 @@ export interface LineRange {
 
 /** A stroke moved by an anchor further than this from the stroke's own bbox is not the stroke the anchor was taken on. */
 const Y_SLACK = 0.5;
+/** No attached groups: freeFor's member map. */
+const NO_MEMBERS: ReadonlyMap<string, readonly InkStroke[]> = new Map();
 /** Corrections closer than this, world units, are the same correction: float noise never repaints the note. */
 const SAME_DY = 1e-3;
+/**
+ * How far a drawn line's box top may sit from its height-map top, editor px, before the box answers the line's top (top()): the
+ * 1/64 px layout quantum. The box is read at the rendered scale, the quotient CodeMirror measures its scaleY by, so while
+ * CodeMirror's scale is that quotient both readers give the same top to float noise at every line. Under the bar the height map
+ * answers, so the first box read after a settle moves no ink and the stand-in holds; past it, as the 3 px a 60.4 percent rest
+ * leaves while CodeMirror keeps its old scale, the box answers.
+ */
+const BOX_AGREE_PX = 1 / 64;
+/** boxLater's value for an anchor held under the height map until its line's box reads agree; no layout epoch is negative. */
+const BOX_HELD = -1;
 /** Font sizes this close are one: a file holds the size to a thousandth of a px, a computed size may carry more places. */
 const FONT_SLACK = 1e-3;
 /**
@@ -234,7 +301,7 @@ export function aboveOf(run: AboveRun, n: number, key: (k: number) => number): n
 export function takeAnchor(stroke: InkStroke, layout: LineLayout, sig: LineSignature): LineAnchor | null {
 	const px = layout.pxPerWorld;
 	if (!(px > 0) || layout.lines < 1 || !Number.isFinite(stroke.bbox.y)) return null;
-	const line = lineUnder(stroke.bbox.y * px, layout.lines, (n) => layout.lineTop(n));
+	const line = lineUnder(stroke.bbox.y * px, layout.lines, (n) => layout.lineTop(n), layout.bodyFrom);
 	return {
 		line,
 		top: layout.lineTop(line) / px,
@@ -258,13 +325,76 @@ export function anchorHolds(a: LineAnchor, stroke: InkStroke, layout: LineLayout
 	);
 }
 
-/** The stroke as the note surface shows it: every point and the bbox moved down by `dy`. A new object; the store's is untouched. */
-export function shiftedStroke(s: InkStroke, dy: number): InkStroke {
-	return {
+/**
+ * Shown copies whose points were built on a first read, and those among them whose source had changed in place since the
+ * copy was made. Counted always; the rig reads them.
+ */
+export const shownPointCounts = { built: 0, recovered: 0 };
+
+/**
+ * The stroke as the note surface shows it: every point and the bbox moved down by `dy` and right by `dx`. A new object; the
+ * store's is untouched. The bbox is moved now; the points on their first read, and every later read gets the same array
+ *: most copies are only placed and culled by their box.
+ *
+ * A store stroke can change in place between the copy and that read (translateStroke, scaleStroke). The copy keeps the
+ * source's revision and its bbox object as they were: both writers put a new bbox object and bump the revision, and both
+ * map the points and the bbox by the same scale and offset per axis. On a first read with the revision moved, each point
+ * is taken back through that map before the shift, so the copy shows the points as they were when it was made.
+ */
+export function shiftedStroke(s: InkStroke, dy: number, dx = 0): InkStroke {
+	const st: CopyPlace = { rev: strokeRev(s), was: s.bbox, dx, dy, points: null };
+	const was = st.was;
+	const copy: InkStroke = {
 		...s,
-		points: s.points.map((p) => ({ ...p, y: p.y + dy })),
-		bbox: { x: s.bbox.x, y: s.bbox.y + dy, width: s.bbox.width, height: s.bbox.height },
+		get points(): InkPoint[] {
+			return (st.points ??= shownPoints(s, st.rev, st.was, st.dx, st.dy));
+		},
+		set points(v: InkPoint[]) {
+			st.points = v;
+		},
+		bbox: { x: was.x + dx, y: was.y + dy, width: was.width, height: was.height },
 	};
+	// The insert-space rows cache confirms a copy by its source's id and revision.
+	markCopy(copy, s);
+	shifts.set(copy, st);
+	return copy;
+}
+
+/** A shown copy's offset from its source and its points once read: kept so a told move moves the copy in place. */
+interface CopyPlace {
+	rev: number;
+	was: InkStroke["bbox"];
+	dx: number;
+	dy: number;
+	points: InkPoint[] | null;
+}
+const shifts = new WeakMap<InkStroke, CopyPlace>();
+
+/**
+ * A shown copy moved in place to a new offset (a group's told move): the bbox now, the points on their next
+ * read, and its own revision bumped without the ink revision, so a ribbon cache keyed on it draws it at the new place.
+ * The same object stays THE copy every list and the index hold. False, nothing changed, when `copy` is no shiftedStroke.
+ */
+export function reshift(copy: InkStroke, dy: number, dx = 0): boolean {
+	const st = shifts.get(copy);
+	if (!st) return false;
+	st.dx = dx;
+	st.dy = dy;
+	st.points = null;
+	const w = st.was;
+	copy.bbox = { x: w.x + dx, y: w.y + dy, width: w.width, height: w.height };
+	bumpCopyRev(copy);
+	return true;
+}
+
+/** A shown copy's points on first read: the source's moved by (dx, dy), taken back first to its bbox `was` if it changed since. */
+function shownPoints(s: InkStroke, rev: number, was: InkStroke["bbox"], dx: number, dy: number): InkPoint[] {
+	shownPointCounts.built++;
+	const now = s.bbox;
+	if (strokeRev(s) === rev || now === was) return s.points.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy }));
+	shownPointCounts.recovered++;
+	const kx = now.width > 0 ? was.width / now.width : 1, ky = now.height > 0 ? was.height / now.height : 1;
+	return s.points.map((p) => ({ ...p, x: was.x + (p.x - now.x) * kx + dx, y: was.y + (p.y - now.y) * ky + dy }));
 }
 
 /**
@@ -400,6 +530,15 @@ export class LineAnchors {
 	/** Moves whenever a shown correction changed: the copies, the index, the rasters and the frontier are stale. */
 	generation = 0;
 	/**
+	 * The open step, since the last takeStep: the summed bound of its moves (each read's largest change of a shown correction, world
+	 * units), whether a generation move came from no read (another note, a remount: its size is not known), and whether a read moved one.
+	 */
+	private stepBound = 0;
+	private stepUnknown = false;
+	private stepSeen = false;
+	/** Ink attached to text (AttachFollow.ts): a member is shown by its group's correction, never by its own anchor. */
+	readonly follow = new AttachFollow();
+	/**
 	 * Moves whenever a correction can change: a layout update, another note. A correction read in an older epoch is read again.
 	 * A document change leaves it: the anchors it re-takes keep the correction they show, and those it cannot are read again.
 	 */
@@ -413,6 +552,16 @@ export class LineAnchors {
 	private heldSrc: readonly InkStroke[] | null = null;
 	/** Each anchored stroke's correction, world units, as of an epoch. */
 	private readonly dys = new WeakMap<InkStroke, { epoch: number; dy: number }>();
+	/**
+	 * The strokes whose memo was last written at a nonzero correction, and the strokes whose memo was
+	 * dropped or that are new to the anchored list since. While `wholeAt` is the epoch, every anchored stroke of the list
+	 * read at it is in `corrected` exactly when its correction is nonzero, or is in `unsure`.
+	 */
+	private readonly corrected = new Set<InkStroke>();
+	private readonly unsure = new Set<InkStroke>();
+	private wholeAt = -1;
+	/** Each corrected stroke's index in the store list it was last found at, checked by identity before it is used. */
+	private readonly correctedAt = new Map<InkStroke, number>();
 	/** Each shown copy, at the correction and stroke revision it was made at. */
 	private readonly copies = new WeakMap<InkStroke, { dy: number; rev: number; copy: InkStroke }>();
 	/**
@@ -425,15 +574,91 @@ export class LineAnchors {
 		len: number;
 		ink: number;
 		list: InkStroke[];
+		/** Each anchored stroke's index in `src`. */
+		at: number[];
 		top: InkStroke | null;
 		bottom: InkStroke | null;
 		stale: boolean;
 	} | null = null;
+	/** The last free list `freeFor` answered, and what it was made from. */
+	private free: { path: string; src: readonly InkStroke[]; len: number; ink: number; gen: number; map: ReadonlyMap<string, string>; anchored: boolean; out: { free: readonly InkStroke[]; members: ReadonlyMap<string, readonly InkStroke[]> }; base: InkStroke[]; listRev: number; freeSrc: InkStroke[]; copies: Map<InkStroke, number>; memberRevs: Map<InkStroke, number> } | null = null;
+	/**
+	 * FreeFor's calls, answers held at the same ink, answers kept across a store move in place, and builds; of the builds,
+	 * the lists patched in one changed window, the strokes looked up and placed for them, and the whole builds a too wide
+	 * window or a member joining forced, and the changed ids outside the window a patch skipped as in no list.
+	 */
+	readonly freeCounts = { calls: 0, held: 0, kept: 0, builds: 0, patched: 0, patchVisited: 0, whole: 0, wholeCold: 0, wholeMapOutside: 0, wholeWindowHalf: 0, absentSkipped: 0, baseReads: 0 };
+	/**
+	 * strokesFor's calls: answered with the held list, and otherwise why it missed and what it answered (the
+	 * store's list, the held copies list refilled in place, a new copies list). Counted always; the rig reads them.
+	 */
+	readonly strokesForCounts = { calls: 0, held: 0, missPath: 0, missList: 0, missInk: 0, missGen: 0, missFollow: 0, store: 0, refilled: 0, built: 0, remade: 0, shownOf: 0, visited: 0, lookups: 0, fullReads: 0, byIdBuilds: 0 };
+	/** Each member's index in the store list it was last found at, checked by id before it is used. */
+	private readonly memberAt = new Map<string, number>();
 	/** The last list `strokesFor` answered, and what it was made from. */
-	private shown: { path: string; src: readonly InkStroke[]; len: number; ink: number; gen: number; out: readonly InkStroke[]; own: InkStroke[] | null } | null = null;
+	private shown: { path: string; src: readonly InkStroke[]; len: number; ink: number; gen: number; fgen: number; out: readonly InkStroke[]; own: InkStroke[] | null; depths: number[] | null; pending: Map<InkStroke, number> | null } | null = null;
 	/** Each line's top (editor px) as of a layout epoch: read once however many strokes sit on it or halvings pass through it. */
 	private readonly tops = new Map<number, number>();
 	private topsEpoch = -1;
+	/**
+	 * Each drawn anchored line's top as its line box was last read in a measure (boxesRead), world units: where the browser
+	 * painted the text, at the rendered scale. CodeMirror's height map holds each line at the scale it was last measured at, and
+	 * keeps its own scale until a zoom moves it more than 0.005: under that, the lines drawn are measured again at the painted
+	 * scale and divided by the old one, so their height-map tops read high and a correction would move ink the text did not.
+	 * A line read here answers its top from this when it sits more than BOX_AGREE_PX from the height map's, else from the height
+	 * map; a line never read, from the height map. A line no longer drawn keeps its last read top, and so its correction,
+	 * only while the height map still puts it where it did at that read (boxMaps): a zoom or a scroll can re-estimate the lines
+	 * above it, and a box kept past that answers a top the text is no longer at, which the scroll can bring into view while the
+	 * line is not drawn and so not read again. A text change drops the lines at and below it, another note or a new signature
+	 * drops them all.
+	 */
+	private readonly boxTops = new Map<number, number>();
+	/** The height map's top each line of boxTops was read against, world units: refreshed at every read of the line, goes with it. */
+	private readonly boxMaps = new Map<number, number>();
+	/**
+	 * The lines the last box read that read boxes found drawn (its tops): one of these answers its box as boxTops says; any
+	 * other answers it only while the height map agrees with boxMaps. A read that waited on the painted scale leaves it.
+	 */
+	private readonly boxDrawn = new Set<number>();
+	/**
+	 * The lines of boxTops whose box answered (sat more than BOX_AGREE_PX from the height map's top) when read, or when a top
+	 * was later taken from it: a correction shown since may have been read against it.
+	 */
+	private readonly boxAnswered = new Set<number>();
+	/**
+	 * An edit dropped a box that answered: a correction shown against it outlives the drop (an epoch keeps its corrections), so
+	 * no line with no top on record may be skipped at the next box read. Down when every correction is read again.
+	 */
+	private answeredDropped = false;
+	/**
+	 * Anchors taken under the height map on a line with no box read, after this surface read boxes: the text is painted off
+	 * the map then, and the stroke was drawn at the painted line. Its line's first box read takes it again under the box when
+	 * that read arrives in the layout epoch the anchor was taken in (the value here). A read after the layout moved (a zoom
+	 * step, an edit) can catch a frame the text has not settled in, and a move from it would stay: the anchor is held
+	 * (BOX_HELD), read against the height map where the stroke was drawn, until a read of its line agrees with the one before
+	 * it (boxSettled).
+	 */
+	private readonly boxLater = new WeakMap<LineAnchor, number>();
+	/** The layout epoch each line's first box read on record arrived in; goes with the line's box top. */
+	private readonly boxReadEpoch = new Map<number, number>();
+	/** Layout updates other than a box read's own (a transaction, the measure loop, a new signature), counted. */
+	private layoutUpdates = 0;
+	/** The layout update count at each line's first box read on record; goes with boxReadEpoch. */
+	private readonly boxReadLayout = new Map<number, number>();
+	/**
+	 * Lines whose box read agreed with the top on record, marked only while an anchor is held: a held anchor on one is taken
+	 * under its box at its next read. A replaced top, a dropped box or an empty record unmarks the line.
+	 */
+	private readonly boxSettled = new Set<number>();
+	/**
+	 * Strokes whose anchor was held at their last read: while any is, boxesRead marks the lines that settle. Emptied when a box
+	 * read reads every correction again, which fills it with those still held.
+	 */
+	private readonly boxHeld = new Set<InkStroke>();
+	/** An anchor top moved by its line's first box read (boxLater) since takeBoxTopMoved last asked: the page holds the old top. */
+	private boxTopMoved = false;
+	/** The line box reads: measures that read at least one box, and rect reads, for the hot-path checks. */
+	readonly boxCounts = { measures: 0, reads: 0 };
 	/**
 	 * Each anchored line's text key. A layout update never changes a line's text, so the keys outlive the epoch: a document
 	 * change drops them from its first changed line down, a signature change or another note drops them all.
@@ -551,9 +776,14 @@ export class LineAnchors {
 		this.dropLater();
 		this.unhold();
 		this.path = path;
+		this.boxTopMoved = false;
 		this.gone.clear();
 		this.window = null;
 		this.anchored = null;
+		this.wholeAt = -1;
+		this.corrected.clear();
+		this.unsure.clear();
+		this.correctedAt.clear();
 		this.shown = null;
 		this.keys.clear();
 		this.unvouch();
@@ -561,6 +791,7 @@ export class LineAnchors {
 		this.epoch++;
 		this.layoutEpoch++;
 		this.generation++;
+		this.stepUnknown = true;
 	}
 
 	/** List this surface under the store list `src`, last, and under no other. */
@@ -595,6 +826,20 @@ export class LineAnchors {
 		if (!list || list.length < 2) return this;
 		for (const h of list) if (h.focused()) return h;
 		return list[0]!;
+	}
+
+	/**
+	 * Whether this surface maps the note's attached targets through a document change and writes the list: the writer
+	 * above, so of two panes on one note the targets move once. Read once per document change.
+	 */
+	get writesAttachments(): boolean {
+		return this.writer() === this;
+	}
+
+	/** The list the writer mapped, taken by every other pane's follow on the note: each reads its groups again at its next measure. */
+	shareAttachments(list: readonly AttachmentData[]): void {
+		const peers = this.peers;
+		if (peers && peers.length > 1) for (const h of peers) if (h !== this) h.follow.setList(list);
 	}
 
 	/** Every other surface on the note applies what it logged, so the writer's entries are the only ones held. */
@@ -656,6 +901,7 @@ export class LineAnchors {
 		this.epoch++;
 		this.layoutEpoch++;
 		this.generation++;
+		this.stepUnknown = true;
 	}
 
 	/** Nothing read before is vouched for: the text may change unheard until the next read (see `vouched`). */
@@ -754,11 +1000,134 @@ export class LineAnchors {
 	 */
 	private edited(first: number, last = Infinity): void {
 		this.aboveFrom(first);
+		this.dropBoxes(first);
 		if (last - first < this.keys.size) for (let n = first; n <= last; n++) this.keys.delete(n);
 		else for (const n of this.keys.keys()) if (n >= first && n <= last) this.keys.delete(n);
 		this.dropHeights(first, last);
 		this.changedLines.from = first;
 		this.changedLines.to = last;
+	}
+
+	/** The line box tops at and below line `first` go: those lines may have moved, and the height map answers until read again. */
+	private dropBoxes(first: number): void {
+		if (this.boxTops.size > 0)
+			for (const n of this.boxTops.keys())
+				if (n >= first) {
+					this.boxTops.delete(n);
+					this.boxMaps.delete(n);
+					this.boxReadEpoch.delete(n);
+					this.boxReadLayout.delete(n);
+					this.boxSettled.delete(n);
+					if (this.boxAnswered.delete(n)) this.answeredDropped = true;
+				}
+	}
+
+	/**
+	 * The lines anchored ink of `src` names between `from` and `to` (the lines CodeMirror has drawn), each once: the lines whose
+	 * boxes a measure reads. Each anchor first takes the document changes logged since it was last read.
+	 */
+	boxLines(path: string, src: readonly InkStroke[], from: number, to: number): number[] {
+		this.own(path);
+		const out = new Set<number>();
+		for (const s of this.anchoredIn(src)) {
+			this.current(s);
+			const n = s.lineAnchor?.line;
+			if (n !== undefined && n >= from && n <= to) out.add(n);
+		}
+		return [...out];
+	}
+
+	/**
+	 * Line box tops read in a measure (world units, by line). A line read again within float noise keeps its old top, so the
+	 * corrections read nothing new and nothing repaints; when any top moved, every correction is read again in a new layout
+	 * epoch. A line with no top on record (an edit dropped it, or it was never read) has moved only when, with the top read,
+	 * it answers a top other than the one the epoch already gives it: a line that moved with an edit reads nothing again, so a
+	 * keystroke above anchored ink walks none of it. True when any shown correction changed.
+	 */
+	boxesRead(path: string, src: readonly InkStroke[], tops: ReadonlyMap<number, number>, reads: number): boolean {
+		this.own(path);
+		if (reads > 0) {
+			this.boxCounts.measures++;
+			this.boxCounts.reads += reads;
+		}
+		const layout = this.layout();
+		const arrived = this.layoutEpoch;
+		const held = this.boxHeld.size > 0;
+		let moved = false, settled = false;
+		for (const [n, top] of tops) {
+			const old = this.boxTops.get(n);
+			if (old === undefined) {
+				this.boxReadEpoch.set(n, arrived);
+				this.boxReadLayout.set(n, this.layoutUpdates);
+			}
+			const inLayout = layout !== null && n >= 1 && n <= layout.lines;
+			if (old !== undefined && Math.abs(top - old) < SAME_DY) {
+				if (inLayout) {
+					// A line drawn again whose box reads where it did: while it was not drawn the height map may have moved under the
+					// box and answered; drawn, the box answers as read, and the corrections are read again when that moves its top.
+					const px = layout.pxPerWorld, map = layout.lineTop(n);
+					if (!this.boxDrawn.has(n) && Math.abs(this.boxTop(n, old, map, px, true) - this.top(n, layout)) >= SAME_DY * px) moved = true;
+					this.boxMaps.set(n, map / px);
+				}
+				// Two reads of the line agree: an anchor held on it is taken under its box at the read of every correction below.
+				if (held && !this.boxSettled.has(n)) {
+					this.boxSettled.add(n);
+					settled = true;
+				}
+				continue;
+			}
+			const answers = inLayout && Math.abs(top * layout.pxPerWorld - layout.lineTop(n)) > BOX_AGREE_PX;
+			const mapAt = inLayout ? layout.lineTop(n) / layout.pxPerWorld : NaN;
+			if (old === undefined && !this.answeredDropped && inLayout) {
+				// The top line n answers with the box read (top's rule, fresh), against the one the epoch's corrections use, read
+				// before the box goes on record. Only while no dropped box answered: then the epoch's tops are what the shown
+				// corrections were read against.
+				const was = this.top(n, layout), map = layout.lineTop(n), px = layout.pxPerWorld, box = top * px;
+				const now = answers ? box : map;
+				this.recordBox(n, top, answers, mapAt);
+				if (Math.abs(now - was) < SAME_DY * px) continue;
+			} else this.recordBox(n, top, answers, mapAt);
+			moved = true;
+		}
+		// A read that read boxes names the anchored lines drawn now; one that read none while a rect was read (it waited on the
+		// painted scale) names nothing, and the lines drawn stay as the last read found them.
+		if (tops.size > 0 || reads === 0) {
+			if (layout)
+				for (const n of this.boxDrawn) {
+					const box = this.boxTops.get(n);
+					if (tops.has(n) || box === undefined || n < 1 || n > layout.lines) continue;
+					// A line no longer drawn answers its box only while the height map has not moved under it since its last read.
+					const px = layout.pxPerWorld;
+					if (Math.abs(this.boxTop(n, box, layout.lineTop(n), px, false) - this.top(n, layout)) >= SAME_DY * px) moved = true;
+				}
+			this.boxDrawn.clear();
+			for (const n of tops.keys()) this.boxDrawn.add(n);
+		}
+		if (!moved && !settled) return false;
+		this.answeredDropped = false;
+		// The held strokes are those still held once every correction is read again.
+		this.boxHeld.clear();
+		return this.layoutChanged(path, src, "box");
+	}
+
+	/**
+	 * Whether an anchor top moved at its line's first box read since the last ask, which takes the answer: the move is in memory
+	 * only, so the caller asks the store for a page write, or a reopen reads the top the stroke was committed with.
+	 */
+	takeBoxTopMoved(): boolean {
+		const moved = this.boxTopMoved;
+		this.boxTopMoved = false;
+		return moved;
+	}
+
+	/** Line n's box top on record, the height map's top it was read against (world units), and whether it answered (sat off the map). */
+	private recordBox(n: number, top: number, answers: boolean, map: number): void {
+		this.boxTops.set(n, top);
+		if (Number.isFinite(map)) this.boxMaps.set(n, map);
+		else this.boxMaps.delete(n);
+		if (this.boxSettled.size > 0) this.boxSettled.delete(n);
+		if (answers) this.boxAnswered.add(n);
+		else this.boxAnswered.delete(n);
 	}
 
 	/** Make room in the record for line `n` and the top of the line after it. */
@@ -778,6 +1147,15 @@ export class LineAnchors {
 
 	/** The record holds nothing: the mount, another note, a new signature. */
 	private forgetHeights(): void {
+		this.boxTops.clear();
+		this.boxMaps.clear();
+		this.boxDrawn.clear();
+		this.boxReadEpoch.clear();
+		this.boxReadLayout.clear();
+		this.boxSettled.clear();
+		this.boxHeld.clear();
+		this.boxAnswered.clear();
+		this.answeredDropped = false;
 		this.valid.fill(0);
 		this.marked.fill(0);
 		this.validCount = 0;
@@ -990,16 +1368,16 @@ export class LineAnchors {
 	 * Strokes a lasso drag (or its undo or redo) has just moved. A move keeps each anchor's line while it runs
 	 * (translatedAnchor); at its end every honoured anchor is re-taken from where its stroke is shown, as a document change
 	 * re-takes it, so the stroke keeps its place on screen and from then on rides the line it was dropped on, not the one it
-	 * left.
+	 * left. `dys` (an attach step): each is taken at the correction given, whatever its old anchor read.
 	 */
-	retake(path: string, strokes: readonly InkStroke[]): void {
+	retake(path: string, strokes: readonly InkStroke[], dys?: readonly number[]): void {
 		this.own(path);
 		const sig = this.sig, layout = this.layout();
 		if (!sig || !layout) return;
 		let took = false;
-		for (const s of strokes) {
+		for (const [i, s] of strokes.entries()) {
 			const old = s.lineAnchor;
-			const dy = old ? this.honoured(s, old, layout) : null;
+			const dy = dys ? dys[i]! : old ? this.honoured(s, old, layout) : null;
 			if (dy === null) continue;
 			const a = this.take(s, layout, sig, dy);
 			if (!a) continue;
@@ -1008,7 +1386,8 @@ export class LineAnchors {
 			s.lineAnchor = a;
 			this.vouch(s);
 			this.stamp(s);
-			this.dys.set(s, { epoch: this.epoch, dy });
+			this.setDy(s, this.epoch, dy);
+			if (dys) for (const h of this.peers ?? []) if (h !== this) h.dropDy(s);
 			took = true;
 		}
 		// The dropped strokes may now be the first or last anchored lines.
@@ -1039,10 +1418,10 @@ export class LineAnchors {
 		if (this.measured < 1) return 0;
 		// A reloaded list's anchors are read here first: the log folds over the old list before any of them is read.
 		this.anchoredIn(src);
-		const through = Math.min(this.measured, layout.lines);
+		const through = Math.min(this.measured, layout.lines), from = layout.bodyFrom ?? 1;
 		// A bbox top above the measured top of the first line past the prefix sits on a measured line.
 		const below = this.trueTop(through + 1);
-		let took = 0, moved = false;
+		let took = 0, moved = false, most = 0;
 		for (const s of src) {
 			const old = s.lineAnchor;
 			if (old && this.honoured(s, old, layout) !== null) {
@@ -1052,35 +1431,120 @@ export class LineAnchors {
 				if (old.above === undefined && !this.laterSet.has(s)) old.above = this.above(old.line, layout);
 				continue;
 			}
-			if (!(s.bbox.y < below)) continue;
-			const line = lineUnder(s.bbox.y, through, (n) => this.trueTop(n));
-			const a: LineAnchor = { line, top: this.trueTop(line), y: s.bbox.y, key: this.key(line, layout), width: sig.width, fontPx: sig.fontPx };
+			// A member is shown by its group: anchored at the place its group shows it (the line under its stored top plus the
+			// group's dy, that line's top less the dy), so a read-only view draws it on its words. A pending member waits for
+			// its group's read. Free ink anchors at its stored top.
+			const g = this.follow.offsetOf(s.id);
+			if (g === null) continue;
+			const gdy = g?.dy ?? 0, shownY = s.bbox.y + gdy;
+			// Old ink waits for the first body line's measure: no frontmatter line is an anchor.
+			if (!(shownY < below) || through < from) continue;
+			const line = lineUnder(shownY, through, (n) => this.trueTop(n), from);
+			const a: LineAnchor = { line, top: this.trueTop(line) - gdy, y: s.bbox.y, key: this.key(line, layout), width: sig.width, fontPx: sig.fontPx };
 			// Hashed now, off the pen's path: an anchor that waited on the page write would change the ink a save captures.
 			a.above = this.above(line, layout);
 			s.lineAnchor = a;
 			this.vouch(s);
 			this.stamp(s);
-			const dy = this.read(s, a, layout);
-			this.dys.set(s, { epoch: this.epoch, dy });
-			if (dy !== 0) moved = true;
 			took++;
+			// A member's correction is its group's: its anchor moves nothing in this surface.
+			if (g !== undefined) continue;
+			const dy = this.read(s, a, layout);
+			this.setDy(s, this.epoch, dy);
+			if (dy !== 0) moved = true;
+			most = Math.max(most, Math.abs(dy));
 		}
 		// The anchored list is read again: these strokes now carry anchors.
 		if (took > 0 && this.anchored) this.anchored.stale = true;
-		if (moved) this.generation++;
+		if (moved) {
+			this.generation++;
+			this.stepBound += most;
+			this.stepSeen = true;
+		}
 		return took;
+	}
+
+	/**
+	 * A read moved groups since `before`. Each member whose anchor no longer shows its group's dy (a word that wrapped to
+	 * another row of its own line: no line top moved with it) is anchored again at the group's dy now, as anchorMeasured
+	 * anchors a member, so a read-only view draws it on its words with the sideways move its record keeps. A member whose
+	 * shown top is past the measured prefix loses its anchor instead, and anchorMeasured takes it once the editor is quiet.
+	 * An anchor this surface does not honour is left as it is. Answers how many lost theirs.
+	 */
+	retakeMembers(path: string, src: readonly InkStroke[], before: FollowSnapshot): number {
+		const follow = this.follow, members = follow.memberMap;
+		if (members.size === 0) return 0;
+		let moved: Set<string> | null = null;
+		for (const [id, was] of before.offsets) {
+			const now = follow.groupOffset(id);
+			if (now && (!was || was.dy !== now.dy)) (moved ??= new Set()).add(id);
+		}
+		if (!moved) return 0;
+		this.own(path);
+		const sig = this.sig, layout = this.layout();
+		if (!sig || !layout) return 0;
+		// As anchorMeasured: no anchor under an estimate, nor while a rebase window holds a line no measure has read.
+		const through = this.window ? 0 : Math.min(this.measured, layout.lines), from = layout.bodyFrom ?? 1;
+		const below = through >= from ? this.trueTop(through + 1) : -Infinity;
+		let changed = false, cleared = 0;
+		for (const s of src) {
+			const old = s.lineAnchor, id = old ? members.get(s.id) : undefined;
+			if (!old || id === undefined || !moved.has(id)) continue;
+			const gdy = follow.groupOffset(id)!.dy, dy = this.honoured(s, old, layout);
+			if (dy === null || Math.abs(dy - gdy) < SAME_DY) continue;
+			changed = true;
+			const shownY = s.bbox.y + gdy;
+			if (!(shownY < below)) {
+				delete s.lineAnchor;
+				cleared++;
+				continue;
+			}
+			const line = lineUnder(shownY, through, (n) => this.trueTop(n), from);
+			const a: LineAnchor = { line, top: this.trueTop(line) - gdy, y: s.bbox.y, key: this.key(line, layout), width: sig.width, fontPx: sig.fontPx };
+			a.above = this.above(line, layout);
+			s.lineAnchor = a;
+			this.vouch(s);
+			this.stamp(s);
+		}
+		if (changed && this.anchored) this.anchored.stale = true;
+		// The strokes are every pane's on the note: another pane's list may hold one whose anchor went or changed here, so it
+		// is built again at its next read, before any of its anchors is read.
+		const peers = this.peers;
+		if (changed && peers && peers.length > 1) for (const h of peers) if (h !== this && h.anchored) h.anchored.stale = true;
+		// A pane may be listed under the store list handed in while this one is still under an older one: its list is built
+		// again too.
+		const held = holdersOf.get(src);
+		if (changed && held && held !== peers) for (const h of held) if (h !== this && h.anchored) h.anchored.stale = true;
+		return cleared;
 	}
 
 	/** The stroke's correction, world units: 0 without an anchor this surface honours. */
 	dyOf(s: InkStroke): number {
+		const g = this.follow.offsetOf(s.id);
+		if (g !== undefined) return g?.dy ?? 0;
 		const a = s.lineAnchor;
 		if (!a) return 0;
 		const memo = this.dys.get(s);
 		if (memo && memo.epoch === this.epoch) return memo.dy;
 		const layout = this.layout();
 		const dy = layout ? this.read(s, a, layout) : 0;
-		this.dys.set(s, { epoch: this.epoch, dy });
+		this.setDy(s, this.epoch, dy);
 		return dy;
+	}
+
+	/** The correction memo written, and the corrected set with it. */
+	private setDy(s: InkStroke, epoch: number, dy: number): void {
+		this.dys.set(s, { epoch, dy });
+		if (dy !== 0 && epoch === this.epoch) this.corrected.add(s);
+		else if (dy === 0 && epoch === this.epoch) this.corrected.delete(s);
+		else this.unsure.add(s);
+	}
+
+	/** The correction memo dropped: the stroke is read again at the next build. */
+	private dropDy(s: InkStroke): void {
+		this.dys.delete(s);
+		this.corrected.delete(s);
+		this.unsure.add(s);
 	}
 
 	/** The correction an anchor gives now, with the checks of anchorHolds; 0 when any fails or it is past the bound. */
@@ -1106,10 +1570,47 @@ export class LineAnchors {
 			if (a.above !== undefined && !this.peerVouched(s) && a.above !== this.above(a.line, layout)) return null;
 			this.vouch(s);
 		}
+		if (a.line < (layout.bodyFrom ?? 1)) this.ontoBody(s, a, layout);
+		// Taken under the map before its line's box was read: the box is where the stroke was drawn against, so the anchor
+		// moves to it and the stroke stays where it is shown (zero snap). At once for a first read in the epoch it was taken
+		// in, while no layout update but the read's own has run since the read (a box read in one layout is not applied against
+		// the height map of the next); a later one may be a frame the text has not settled in, so the anchor is held under the
+		// map, where the stroke was drawn, until two reads of its line agree.
+		const takenIn = this.boxLater.get(a);
+		if (takenIn !== undefined && this.boxTops.has(a.line)) {
+			const same = takenIn !== BOX_HELD && this.boxReadEpoch.get(a.line) === takenIn &&
+				this.boxReadLayout.get(a.line) === this.layoutUpdates;
+			if (!same && !this.boxSettled.has(a.line)) {
+				if (takenIn !== BOX_HELD) this.boxLater.set(a, BOX_HELD);
+				this.boxHeld.add(s);
+				const held = layout.lineTop(a.line) / layout.pxPerWorld - a.top;
+				if (!Number.isFinite(held) || Math.abs(held) > MAX_LINE_CORRECTION) return null;
+				return Math.abs(held) < SAME_DY ? 0 : held;
+			}
+			this.boxLater.delete(a);
+			const move = (this.top(a.line, layout) - layout.lineTop(a.line)) / layout.pxPerWorld;
+			a.top += move;
+			if (Math.abs(move) >= SAME_DY) this.boxTopMoved = true;
+		}
 		const dy = this.top(a.line, layout) / layout.pxPerWorld - a.top;
 		if (!Number.isFinite(dy) || Math.abs(dy) > MAX_LINE_CORRECTION) return null;
 		// Under float noise the stroke is where it was taken: an anchor read back from a file, its top to a thousandth, shows 0.
 		return Math.abs(dy) < SAME_DY ? 0 : dy;
+	}
+
+	/**
+	 * An older build's anchor on a frontmatter line, moved onto the first body line with the top it was saved with. Ink on
+	 * the first body line got that anchor where the frontmatter shared the body line's top (the first line of a run of lines on
+	 * one top is the one found), so its saved top is the body line's top in the view it was drawn in. Read from the body line,
+	 * the stroke sits on its line in every view, whichever opens first; read from the fence, a view that shows the frontmatter
+	 * would put the fence's top where the body line's was.
+	 */
+	private ontoBody(s: InkStroke, a: LineAnchor, layout: LineLayout): void {
+		const from = layout.bodyFrom ?? 1;
+		a.line = from;
+		a.key = this.key(from, layout);
+		this.hashLater(s);
+		if (this.anchored) this.anchored.stale = true;
 	}
 
 	/** Line `n`'s top, editor px, read once per layout epoch. */
@@ -1120,10 +1621,32 @@ export class LineAnchors {
 		}
 		let top = this.tops.get(n);
 		if (top === undefined) {
-			top = layout.lineTop(n);
+			const map = layout.lineTop(n), box = this.boxTops.get(n);
+			if (box === undefined) top = map;
+			else {
+				top = this.boxTop(n, box, map, layout.pxPerWorld, this.boxDrawn.has(n));
+				// The box answers now, whatever it did when read (the height map may have moved since): corrections read from here
+				// stand on it, so dropping it must raise answeredDropped.
+				if (top !== map) this.boxAnswered.add(n);
+			}
 			this.tops.set(n, top);
 		}
 		return top;
+	}
+
+	/**
+	 * Line `n`'s top, editor px, with `box` (world units) on record and the height map at `map`. A drawn line's box answers while
+	 * it sits more than BOX_AGREE_PX off the map. A line not drawn is not read again until it is drawn, so its box answers only
+	 * while the map still sits within BOX_AGREE_PX of the top it was read against (boxMaps); once the map moved under it (a zoom
+	 * or a scroll re-estimated the lines above), the map answers.
+	 */
+	private boxTop(n: number, box: number, map: number, px: number, drawn: boolean): number {
+		if (Math.abs(box * px - map) <= BOX_AGREE_PX) return map;
+		if (!drawn) {
+			const at = this.boxMaps.get(n);
+			if (at === undefined || !(Math.abs(at * px - map) <= BOX_AGREE_PX)) return map;
+		}
+		return box * px;
 	}
 
 	/** Line `n`'s text key, hashed once until the document changes there. */
@@ -1138,7 +1661,7 @@ export class LineAnchors {
 
 	/** The line under editor height `h`, by halving over the epoch's line tops. */
 	private lineAt(h: number, layout: LineLayout): number {
-		return lineUnder(h, layout.lines, (n) => this.top(n, layout));
+		return lineUnder(h, layout.lines, (n) => this.top(n, layout), layout.bodyFrom);
 	}
 
 	/**
@@ -1149,11 +1672,15 @@ export class LineAnchors {
 		const px = layout.pxPerWorld;
 		if (!(px > 0) || layout.lines < 1 || !Number.isFinite(s.bbox.y)) return null;
 		const line = this.lineAt((s.bbox.y + dy) * px, layout);
-		return { line, top: this.top(line, layout) / px - dy, y: s.bbox.y, key: this.key(line, layout), width: sig.width, fontPx: sig.fontPx };
+		const a: LineAnchor = { line, top: this.top(line, layout) / px - dy, y: s.bbox.y, key: this.key(line, layout), width: sig.width, fontPx: sig.fontPx };
+		if (this.boxTops.size > 0 && !this.boxTops.has(line)) this.boxLater.set(a, this.layoutEpoch);
+		return a;
 	}
 
 	/** The stroke as this surface shows it: the store's own object when its correction is 0, else a copy made once per move. */
 	shownOf(s: InkStroke): InkStroke {
+		const g = this.follow.shown(s);
+		if (g !== undefined) return g ?? s;
 		const dy = this.dyOf(s);
 		if (dy === 0) return s;
 		const rev = strokeRev(s), c = this.copies.get(s);
@@ -1170,23 +1697,368 @@ export class LineAnchors {
 	 */
 	strokesFor(path: string, src: readonly InkStroke[]): readonly InkStroke[] {
 		this.own(path);
-		const ink = inkRevision(), v = this.shown;
-		if (v && v.path === path && v.src === src && v.len === src.length && v.ink === ink && v.gen === this.generation) return v.out;
+		const ink = inkRevision(), v = this.shown, fgen = this.follow.generation, n = this.strokesForCounts;
+		n.calls++;
+		if (v && v.path === path && v.src === src && v.len === src.length && v.ink === ink && v.gen === this.generation && v.fgen === fgen) {
+			n.held++;
+			return v.out;
+		}
+		// Why the held list missed, first reason only.
+		if (!v || v.path !== path) n.missPath++;
+		else if (v.src !== src || v.len !== src.length) n.missList++;
+		else if (v.ink !== ink) n.missInk++;
+		else if (v.gen !== this.generation) n.missGen++;
+		else n.missFollow++;
 		// A repaint may be the first to read a changed list: the log folds over the old one before any stroke of it is read.
-		this.anchoredIn(src);
+		const anchored = this.anchoredIn(src), at = this.anchored!.at;
 		// The copies list is refilled in place only while it is the list being answered, as the store refills its own.
-		let own = v && v.path === path && v.src === src && v.gen === this.generation && v.out === v.own ? v.own : null;
-		let moved = false;
-		for (const s of src) if (s.lineAnchor && this.dyOf(s) !== 0) { moved = true; break; }
-		if (!moved) {
-			this.shown = { path, src, len: src.length, ink, gen: this.generation, out: src, own };
+		let own = v && v.path === path && v.src === src && v.gen === this.generation && v.fgen === fgen && v.out === v.own ? v.own : null;
+		// The shown list is the store list sliced and patched. Only the anchored strokes and the members are
+		// visited: an anchored stroke with a correction is patched with its copy; a member (found at its last index, checked
+		// by id, else by one lookup) with its group's copy, or left out while pending. Every other stroke is shown as itself.
+		const map = this.follow.memberMap, len = src.length, idx: number[] = [], obj: (InkStroke | null)[] = [];
+		let byId: Map<string, number> | null = null, pends = false;
+		if (this.wholeAt !== this.epoch) {
+			// The set is not whole for this epoch: every anchored stroke is read, which makes it whole.
+			n.fullReads++;
+			for (let k = 0; k < anchored.length; k++) {
+				const s = anchored[k]!;
+				n.visited++;
+				if (map.has(s.id) || this.dyOf(s) === 0) continue;
+				n.shownOf++;
+				idx.push(at[k]!);
+				obj.push(this.shownOf(s));
+			}
+			this.unsure.clear();
+			this.wholeAt = this.epoch;
+		} else {
+			// The unsure are read first (each lands in the set or not), then only the corrected are
+			// visited, each at its last index, checked by identity, else found in the anchored list.
+			for (const s of this.unsure) {
+				n.visited++;
+				if (s.lineAnchor && !map.has(s.id)) this.dyOf(s);
+			}
+			this.unsure.clear();
+			let atOf: Map<InkStroke, number> | null = null;
+			for (const s of this.corrected) {
+				n.visited++;
+				if (map.has(s.id)) continue;
+				let i = this.correctedAt.get(s);
+				if (i === undefined || src[i] !== s) {
+					n.lookups++;
+					if (!atOf) {
+						atOf = new Map();
+						for (let k = 0; k < anchored.length; k++) atOf.set(anchored[k]!, at[k]!);
+					}
+					i = atOf.get(s);
+					if (i === undefined) {
+						this.corrected.delete(s);
+						this.correctedAt.delete(s);
+						continue;
+					}
+					this.correctedAt.set(s, i);
+				}
+				if (this.dyOf(s) === 0) continue;
+				n.shownOf++;
+				idx.push(i);
+				obj.push(this.shownOf(s));
+			}
+			// The members' patches below take their indices in any order; the anchored ones are patched by index too.
+		}
+		for (const id of map.keys()) {
+			n.visited++;
+			let i = this.memberAt.get(id);
+			if (i === undefined || src[i]?.id !== id) {
+				n.lookups++;
+				if (!byId) {
+					n.byIdBuilds++;
+					byId = new Map();
+					for (let j = 0; j < len; j++) byId.set(src[j]!.id, j);
+				}
+				i = byId.get(id);
+				if (i === undefined) {
+					this.memberAt.delete(id);
+					continue;
+				}
+				this.memberAt.set(id, i);
+			}
+			const s = src[i]!, g = this.follow.shown(s);
+			if (g === undefined || g === s) continue;
+			if (g === null) pends = true;
+			idx.push(i);
+			obj.push(g);
+		}
+		if (idx.length === 0) {
+			this.shown = { path, src, len: src.length, ink, gen: this.generation, fgen, out: src, own, depths: null, pending: null };
+			n.store++;
 			return src;
 		}
+		if (own) n.refilled++;
+		else n.built++;
 		own ??= [];
-		own.length = 0;
-		for (const s of src) own.push(s.lineAnchor ? this.shownOf(s) : s);
-		this.shown = { path, src, len: src.length, ink, gen: this.generation, out: own, own };
+		n.remade += idx.length;
+		let depths: number[] | null = null, pending: Map<InkStroke, number> | null = null;
+		if (!pends) {
+			// Each shown stroke at its store index: the list's positions are the store's depths.
+			own.length = len;
+			for (let i = 0; i < len; i++) own[i] = src[i]!;
+			for (let k = 0; k < idx.length; k++) own[idx[k]!] = obj[k]!;
+		} else {
+			// A pending group's members are left out: one pass places each shown stroke with its store depth.
+			const put = new Map<number, InkStroke | null>();
+			for (let k = 0; k < idx.length; k++) put.set(idx[k]!, obj[k]!);
+			own.length = 0;
+			depths = [];
+			pending = new Map();
+			for (let i = 0; i < len; i++) {
+				const s = src[i]!, o = put.has(i) ? put.get(i)! : s;
+				if (o === null) {
+					pending.set(s, i);
+					continue;
+				}
+				own.push(o);
+				depths.push(i);
+			}
+		}
+		this.shown = { path, src, len: src.length, ink, gen: this.generation, fgen, out: own, own, depths, pending };
 		return own;
+	}
+
+	/**
+	 * Store order for a list strokesFor returned: each stroke's place in the store (null: the list is the
+	 * store's own, so its position), and each member left out as pending, by its store stroke. Null for any other list.
+	 */
+	storeOrder(list: readonly InkStroke[]): { depths: readonly number[] | null; pending: ReadonlyMap<InkStroke, number> | null } | null {
+		const v = this.shown;
+		return v && v.out === list ? { depths: v.depths, pending: v.pending } : null;
+	}
+
+	/**
+	 * One store stroke as this surface shows it, as strokesFor places it in its list: a member at its
+	 * group's correction, an anchored free stroke at its line's, else itself. Null for a member of a pending group, which
+	 * strokesFor leaves out.
+	 */
+	shownOne(s: InkStroke): InkStroke | null {
+		const g = this.follow.shown(s);
+		if (g === null) return null;
+		return g ?? (s.lineAnchor ? this.shownOf(s) : s);
+	}
+
+	/** Whether freeFor would answer its held lists for `src` now, without a walk (rig counters only). */
+	freeHeld(path: string, src: readonly InkStroke[]): boolean {
+		const v = this.free;
+		return this.follow.memberMap.size === 0 || (!!v && v.path === path && v.src === src && v.len === src.length && v.ink === inkRevision() && v.map === this.follow.memberMap);
+	}
+
+	/**
+	 * The note's shown strokes that are in no attached group, and each group's member strokes as stored: the committed
+	 * layers and the extent raster hold free ink only, the attached layer the groups.
+	 * The store's own list when no stroke is in a group. Otherwise one list, kept the same object while only the store's
+	 * contents change (as the store keeps its own) and across a follow move, which changes no free stroke; a new object
+	 * when a line correction or the membership changes.
+	 */
+	freeFor(path: string, src: readonly InkStroke[]): { free: readonly InkStroke[]; members: ReadonlyMap<string, readonly InkStroke[]> } {
+		const follow = this.follow, map = follow.memberMap;
+		if (map.size === 0) return { free: this.strokesFor(path, src), members: NO_MEMBERS };
+		this.own(path);
+		const ink = inkRevision(), v = this.free, fc = this.freeCounts;
+		fc.calls++;
+		if (v && v.path === path && v.src === src && v.len === src.length && v.ink === ink && v.map === map) {
+			// A line correction changes no free stroke unless one is anchored to a line: the list stays the same object, so
+			// the extent raster keyed on it survives a keystroke above attached groups.
+			if (v.gen === this.generation) {
+				fc.held++;
+				return v.out;
+			}
+			if (!v.anchored) {
+				v.gen = this.generation;
+				fc.held++;
+				return v.out;
+			}
+		}
+		// The ink changed, the list did not. A store move in place (Insert Space, a lasso drag) keeps every
+		// stroke the same object in the same place: the free list and the member lists hold the same objects, so the answer
+		// holds, unless a free stroke shown as a copy (its line correction) changed under it. One identity test per stroke.
+		if (v && v.path === path && v.src === src && v.len === src.length && v.map === map && (v.gen === this.generation || !v.anchored)) {
+			let same = true;
+			const base = v.base, listRev = inkListRevision();
+			// The store changed no list in place since the base was taken: the same objects stand in the same places.
+			if (v.listRev !== listRev) {
+				let i = 0;
+				for (; i < base.length; i++) if (src[i] !== base[i]) { same = false; break; }
+				fc.baseReads += i;
+				if (same) v.listRev = listRev;
+			}
+			if (same) for (const [s, rev] of v.copies) if (strokeRev(s) !== rev) { same = false; break; }
+			if (same) {
+				v.ink = ink;
+				v.gen = this.generation;
+				fc.kept++;
+				// A member moved in place: the same lists in a new map, so a box kept per map (shownBoxes) is taken again.
+				let movedMember = false;
+				for (const [s, rev] of v.memberRevs) if (strokeRev(s) !== rev) { movedMember = true; v.memberRevs.set(s, strokeRev(s)); }
+				if (movedMember) v.out = { free: v.out.free, members: new Map(v.out.members) };
+				return v.out;
+			}
+		}
+		fc.builds++;
+		// The list changed in one window (an erase takes strokes out and puts its pieces in, a cut member's pieces join its
+		// group): only the window is placed again, by the membership now.
+		const changed = follow.takeMembershipChanges();
+		if (v && v.path === path && v.gen === this.generation) {
+			const patched = this.patchFree(v, src, ink, map, changed);
+			if (patched) return patched;
+		} else {
+			fc.whole++;
+			fc.wholeCold++;
+		}
+		this.anchoredIn(src);
+		const keep = v && v.path === path && v.src === src && v.gen === this.generation && v.map === map ? v.out : null;
+		const free: InkStroke[] = keep ? (keep.free as InkStroke[]) : [];
+		free.length = 0;
+		const members = new Map<string, InkStroke[]>(), copies = new Map<InkStroke, number>(), memberRevs = new Map<InkStroke, number>();
+		const freeSrc: InkStroke[] = [];
+		let anchored = false;
+		for (const s of src) {
+			const g = map.get(s.id);
+			if (g === undefined) {
+				freeSrc.push(s);
+				if (s.lineAnchor) {
+					anchored = true;
+					const o = this.shownOf(s);
+					if (o !== s) copies.set(s, strokeRev(s));
+					free.push(o);
+				} else free.push(s);
+				continue;
+			}
+			memberRevs.set(s, strokeRev(s));
+			const list = members.get(g);
+			if (list) list.push(s);
+			else members.set(g, [s]);
+		}
+		const out = { free, members };
+		this.free = { path, src, len: src.length, ink, gen: this.generation, map, anchored, out, base: src.slice(), listRev: inkListRevision(), freeSrc, copies, memberRevs };
+		return out;
+	}
+
+	/**
+	 * The free list and the member lists patched for one changed window of the store list, or null for a whole build.
+	 * Identity compares against the last list find the window; only its strokes are looked up and placed. A leaver leaves the free list or its old group's list, a joiner joins the free list or its group's,
+	 * in store order. A window over half the list, or a membership change outside it (an Attach, a Detach, an undo), is a
+	 * whole build, counted by its reason.
+	 */
+	private patchFree(v: NonNullable<LineAnchors["free"]>, src: readonly InkStroke[], ink: number, map: ReadonlyMap<string, string>, changed: ReadonlySet<string>): { free: readonly InkStroke[]; members: ReadonlyMap<string, readonly InkStroke[]> } | null {
+		// The anchors fold their log over the changed list first, as a whole build does.
+		this.anchoredIn(src);
+		const base = v.base, fsrc = v.freeSrc, was = v.map, fc = this.freeCounts, bl = base.length, sl = src.length, m = Math.min(bl, sl);
+		const whole = (why: "wholeMapOutside" | "wholeWindowHalf"): null => {
+			fc.whole++;
+			fc[why]++;
+			return null;
+		};
+		let p = 0;
+		while (p < m && src[p] === base[p]) p++;
+		let q = 0;
+		while (q < m - p && src[sl - 1 - q] === base[bl - 1 - q]) q++;
+		const be = bl - q, se = sl - q;
+		if (2 * (be - p + se - p) > sl) return whole("wholeWindowHalf");
+		let visited = 0;
+		if (changed.size > 0) {
+			// Every changed id must be a stroke of the window: one that left it or one that came in.
+			const inWindow = new Set<string>();
+			for (let i = p; i < be; i++) inWindow.add(base[i]!.id);
+			for (let i = p; i < se; i++) inWindow.add(src[i]!.id);
+			// One outside it changes no list if it is in neither list now (an erased original stays in its
+			// record): proven by its old group's held list, which holds exactly the base strokes of that group; outside the
+			// window base and src agree, so it is absent from both. An id that was free before is not proven absent.
+			for (const id of changed) {
+				if (inWindow.has(id)) continue;
+				const g = was.get(id), held = g === undefined ? undefined : v.out.members.get(g);
+				if (g === undefined) return whole("wholeMapOutside");
+				if (held) for (const x of held) { visited++; if (x.id === id) return whole("wholeMapOutside"); }
+				fc.absentSkipped++;
+			}
+		}
+		// The free list holds base's non-members in order: its entries before the window, then those inside it.
+		let fs = 0;
+		for (let i = 0; i < p && fs < fsrc.length; i++) if (fsrc[fs] === base[i]) fs++;
+		let fe = fs;
+		const leftMembers: InkStroke[] = [];
+		for (let i = p; i < be; i++) {
+			const s = base[i]!;
+			if (fe < fsrc.length && fsrc[fe] === s) fe++;
+			else leftMembers.push(s);
+		}
+		const joinFree: InkStroke[] = [], joinSrc: InkStroke[] = [], joinCopies: [InkStroke, number][] = [];
+		const joinMembers = new Map<string, InkStroke[]>();
+		let anchored = v.anchored;
+		for (let i = p; i < se; i++) {
+			const s = src[i]!, g = map.get(s.id);
+			visited++;
+			if (g !== undefined) {
+				const js = joinMembers.get(g);
+				if (js) js.push(s);
+				else joinMembers.set(g, [s]);
+				continue;
+			}
+			joinSrc.push(s);
+			if (s.lineAnchor) {
+				anchored = true;
+				const o = this.shownOf(s);
+				if (o !== s) joinCopies.push([s, strokeRev(s)]);
+				joinFree.push(o);
+			} else joinFree.push(s);
+		}
+		let members = v.out.members;
+		if (leftMembers.length > 0 || joinMembers.size > 0) {
+			const next = new Map(members);
+			// The list position each group's first leaver held: that group's joiners go there.
+			const at = new Map<string, number>();
+			for (const s of leftMembers) {
+				visited++;
+				const g = was.get(s.id), list = g === undefined ? undefined : next.get(g);
+				if (g === undefined || !list) continue;
+				const k = list.indexOf(s);
+				if (k < 0) continue;
+				if (!at.has(g)) at.set(g, k);
+				next.set(g, list.filter((x) => x !== s));
+			}
+			for (const [g, js] of joinMembers) {
+				const list = next.get(g) ?? [];
+				let k = at.get(g);
+				if (k === undefined) {
+					// No leaver of this group in the window: the joiners go before its first member after the window,
+					// each member's place read from its kept index and checked by identity.
+					k = list.length;
+					for (let j = 0; j < list.length; j++) {
+						visited++;
+						const x = list[j]!, i = this.memberAt.get(x.id);
+						if (i === undefined) return whole("wholeMapOutside");
+						if (i < p && src[i] === x) continue;
+						if (i >= be && src[i - (bl - sl)] === x) {
+							k = j;
+							break;
+						}
+						return whole("wholeMapOutside");
+					}
+				}
+				next.set(g, [...list.slice(0, k), ...js, ...list.slice(k)]);
+			}
+			for (const [g, list] of next) if (list.length === 0) next.delete(g);
+			members = next;
+		}
+		for (let k = fs; k < fe; k++) v.copies.delete(fsrc[k]!);
+		for (const [s, rev] of joinCopies) v.copies.set(s, rev);
+		for (const s of leftMembers) v.memberRevs.delete(s);
+		for (const js of joinMembers.values()) for (const s of js) v.memberRevs.set(s, strokeRev(s));
+		const free = v.src === src && v.map === map ? (v.out.free as InkStroke[]) : v.out.free.slice();
+		free.splice(fs, fe - fs, ...joinFree);
+		fsrc.splice(fs, fe - fs, ...joinSrc);
+		const out = { free, members };
+		fc.patched++;
+		fc.patchVisited += visited;
+		Object.assign(v, { src, len: sl, ink, map, anchored, out, base: src.slice(), listRev: inkListRevision() });
+		return out;
 	}
 
 	/** Whether this surface currently shows any stroke away from its page position. */
@@ -1206,18 +2078,55 @@ export class LineAnchors {
 		this.foldLog();
 		if (this.heldSrc !== src) this.hold(src);
 		this.foldPeers();
-		const list: InkStroke[] = [];
+		const list: InkStroke[] = [], at: number[] = [];
 		let top: InkStroke | null = null, bottom: InkStroke | null = null;
-		for (const s of src) {
-			const l = s.lineAnchor;
+		// The same walk keeps each group member's index, so strokesFor finds every member without a second walk.
+		// Only while some member has no index yet: a full map is checked by id in strokesFor, so later walks skip the lookup.
+		const members = this.follow.memberMap, withMembers = members.size > 0 && this.memberAt.size < members.size;
+		for (let i = 0; i < src.length; i++) {
+			const s = src[i]!, l = s.lineAnchor;
+			if (withMembers && members.has(s.id)) this.memberAt.set(s.id, i);
 			if (!l) continue;
 			list.push(s);
+			at.push(i);
 			if (!top || l.line < top.lineAnchor!.line) top = s;
 			if (!bottom || l.line > bottom.lineAnchor!.line) bottom = s;
 		}
-		if (a) this.left(a.list, list);
-		this.anchored = { src, len: src.length, ink, list, top, bottom, stale: false };
+		if (a) {
+			if (!this.readFirst(a.list, list)) this.newIn(a.list, list);
+			this.left(a.list, list);
+		} else this.wholeAt = -1;
+		this.anchored = { src, len: src.length, ink, list, at, top, bottom, stale: false };
 		return list;
+	}
+
+	/**
+	 * A first list (the old one empty, or no stroke kept at either end) is read here, at the pass that marks it, not left
+	 * unsure for the next build: on a large note that build runs inside a pen release. The set is whole for this epoch
+	 * once every stroke of it is read; a later layout change starts a new epoch and reads again. False with no layout.
+	 */
+	private readFirst(was: readonly InkStroke[], now: readonly InkStroke[]): boolean {
+		if (now.length === 0 || (was.length > 0 && (was[0] === now[0] || was[was.length - 1] === now[now.length - 1]))) return false;
+		if (!this.layout()) return false;
+		for (const s of now) {
+			this.dyOf(s);
+			this.unsure.delete(s);
+		}
+		if (this.unsure.size === 0) this.wholeAt = this.epoch;
+		return true;
+	}
+
+	/** The strokes of `now` that `was` did not hold at their place (both in store order) are unsure. */
+	private newIn(was: readonly InkStroke[], now: readonly InkStroke[]): void {
+		const n = Math.min(was.length, now.length);
+		let i = 0;
+		while (i < n && was[i] === now[i]) i++;
+		let j = was.length - 1, k = now.length - 1;
+		while (j >= i && k >= i && was[j] === now[k]) {
+			j--;
+			k--;
+		}
+		for (let m = i; m <= k; m++) this.unsure.add(now[m]!);
 	}
 
 	/**
@@ -1266,6 +2175,7 @@ export class LineAnchors {
 		if (!layout) return false;
 		// Every line top is read again, once; the text keys stand, as no text changed.
 		this.layoutEpoch++;
+		if (from !== "box") this.layoutUpdates++;
 		const list = this.anchoredIn(src);
 		if (from === "signature") this.window = null;
 		else if (from === "measure" && this.window && this.closeRead(layout) !== null && !this.window) {
@@ -1291,19 +2201,41 @@ export class LineAnchors {
 	/** Every correction of `list` read again, in a new epoch. True when any shown correction changed. */
 	private readAgain(list: readonly InkStroke[], layout: LineLayout): boolean {
 		this.epoch++;
-		let changed = false;
+		let changed = false, most = 0;
 		for (const s of list) {
 			const old = this.lastDy(s);
 			const dy = this.read(s, s.lineAnchor!, layout);
 			// Within float noise the old value stays, so a correction never creeps.
-			if (Math.abs(dy - old) < SAME_DY) this.dys.set(s, { epoch: this.epoch, dy: old });
+			if (Math.abs(dy - old) < SAME_DY) this.setDy(s, this.epoch, old);
 			else {
-				this.dys.set(s, { epoch: this.epoch, dy });
+				this.setDy(s, this.epoch, dy);
 				changed = true;
+				most = Math.max(most, Math.abs(dy - old));
 			}
 		}
-		if (changed) this.generation++;
+		// Every anchored stroke of the list was read in this epoch, so the corrected set is whole for it.
+		if (list === this.anchored?.list) {
+			this.unsure.clear();
+			this.wholeAt = this.epoch;
+		}
+		if (changed) {
+			this.generation++;
+			this.stepBound += most;
+			this.stepSeen = true;
+		}
 		return changed;
+	}
+
+	/**
+	 * The open step's summed bound, world units: no shown correction moved further than it since the last take. Null when no read
+	 * moved one since then, or a generation move came from no read; either way the step closes.
+	 */
+	takeStep(): number | null {
+		const bound = this.stepSeen && !this.stepUnknown ? this.stepBound : null;
+		this.stepBound = 0;
+		this.stepUnknown = false;
+		this.stepSeen = false;
+		return bound;
 	}
 
 	/**
@@ -1464,14 +2396,14 @@ export class LineAnchors {
 			// On the changed lines: re-taken when it held before the change; otherwise left as it is, at its page position, and
 			// read again when next asked.
 			if (this.heldBefore(s, a, before)) at.push(s);
-			else this.dys.delete(s);
+			else this.dropDy(s);
 		}
 		// A stroke out of the list (erased) is re-taken as it would be in it, from where it last showed, and names no end.
 		for (const s of this.gone.values()) {
 			const a = s.lineAnchor;
 			if (!a || a.line < firstBefore || a.line > lastBefore) continue;
 			if (this.heldBefore(s, a, before)) at.push(s);
-			else this.dys.delete(s);
+			else this.dropDy(s);
 		}
 		const still = shift === 0 && (first === null ||
 			(this.heldBefore(first, first.lineAnchor!, before) && this.heldBefore(last!, last!.lineAnchor!, before) &&
@@ -1481,13 +2413,13 @@ export class LineAnchors {
 				const a = s.lineAnchor!;
 				if (a.line <= lastBefore) continue;
 				if (this.heldBefore(s, a, before)) under.push(s);
-				else this.dys.delete(s);
+				else this.dropDy(s);
 			}
 			for (const s of this.gone.values()) {
 				const a = s.lineAnchor;
 				if (!a || a.line <= lastBefore) continue;
 				if (this.heldBefore(s, a, before)) under.push(s);
-				else this.dys.delete(s);
+				else this.dropDy(s);
 			}
 		}
 		// The changed lines' keys before the change, while the cache holds them: what the change adds to the hashes below.
@@ -1571,6 +2503,7 @@ export class LineAnchors {
 	 */
 	private rekey(first: number, last: number, shift: number, move: boolean): void {
 		this.aboveFrom(first);
+		this.dropBoxes(first);
 		if (shift === 0) this.edited(first, last);
 		else if (!move) {
 			this.keys.clear();
@@ -1586,6 +2519,19 @@ export class LineAnchors {
 			for (let i = 0; i < moved.length; i += 2) this.keys.set(moved[i]!, moved[i + 1]!);
 			this.spliceHeights(first, last, shift);
 		}
+	}
+
+	/**
+	 * The correction a re-take reads a stroke at, world units. A member is shown by its group, so it is its group's dy (0 for
+	 * a pending group) and it keeps no memo of its own, as anchorMeasured anchors it; free ink's is its memo, kept for this
+	 * epoch, or 0 without one.
+	 */
+	private retakeDy(s: InkStroke): number {
+		const g = this.follow.offsetOf(s.id);
+		if (g !== undefined) return g?.dy ?? 0;
+		const memo = this.dys.get(s), dy = memo ? memo.dy : 0;
+		if (!memo || memo.epoch !== this.epoch) this.setDy(s, this.epoch, dy);
+		return dy;
 	}
 
 	/**
@@ -1606,9 +2552,8 @@ export class LineAnchors {
 			const line = strokes[i]!.lineAnchor!.line;
 			let j = i, lo = Infinity, hi = -Infinity;
 			for (; j < strokes.length && strokes[j]!.lineAnchor!.line === line; j++) {
-				const s = strokes[j]!, memo = this.dys.get(s), dy = memo ? memo.dy : 0, h = (s.bbox.y + dy) * px;
+				const s = strokes[j]!, dy = this.retakeDy(s), h = (s.bbox.y + dy) * px;
 				dys[j] = dy;
-				if (!memo || memo.epoch !== this.epoch) this.dys.set(s, { epoch: this.epoch, dy });
 				if (h < lo) lo = h;
 				if (h > hi) hi = h;
 			}
@@ -1636,10 +2581,13 @@ export class LineAnchors {
 
 	/**
 	 * Whether line `n` holds every height from `lo` to `hi`, as lineUnder finds it: three line tops. A line sharing its top with
-	 * the line before it (a fold's hidden line) holds none: lineUnder finds the first line of the run.
+	 * the line before it (a fold's hidden line) holds none: lineUnder finds the first line of the run. A frontmatter line holds
+	 * none; the first body line holds every height above it.
 	 */
 	private covers(n: number, lo: number, hi: number, layout: LineLayout): boolean {
-		if (n === 1) return n === layout.lines || hi < this.top(n + 1, layout);
+		const from = layout.bodyFrom ?? 1;
+		if (n < from) return false;
+		if (n === from) return n === layout.lines || hi < this.top(n + 1, layout);
 		const t = this.top(n, layout);
 		return t <= lo && this.top(n - 1, layout) < t && (n === layout.lines || hi < this.top(n + 1, layout));
 	}
@@ -1694,7 +2642,7 @@ export class LineAnchors {
 		else if (piece.lineAnchor && this.vouchedAnywhere(parent)) this.vouch(piece);
 		this.stamp(piece);
 		const memo = this.dys.get(parent);
-		if (memo && piece.lineAnchor) this.dys.set(piece, { epoch: memo.epoch, dy: memo.dy });
+		if (memo && piece.lineAnchor) this.setDy(piece, memo.epoch, memo.dy);
 	}
 
 	/**
@@ -1726,7 +2674,7 @@ export class LineAnchors {
 		s.lineAnchor = a;
 		this.hashLater(s);
 		this.stamp(s);
-		this.dys.set(s, { epoch: this.epoch, dy: 0 });
+		this.setDy(s, this.epoch, 0);
 	}
 
 	/** The generation of the newest entry on the shift log: an anchor at it has applied every change. */
@@ -1796,7 +2744,7 @@ export class LineAnchors {
 				continue;
 			}
 			if (!this.heldIn(s, a, e) || !Number.isFinite(s.bbox.y)) {
-				this.dys.delete(s);
+				this.dropDy(s);
 				return;
 			}
 			this.retakeIn(s, a, e);
@@ -1830,8 +2778,7 @@ export class LineAnchors {
 	 * top is outside them), that line's top less the correction, so the stroke keeps its place. As the eager path's re-take.
 	 */
 	private retakeIn(s: InkStroke, a: LineAnchor, e: EditShift): void {
-		const memo = this.dys.get(s), dy = memo ? memo.dy : 0;
-		if (!memo || memo.epoch !== this.epoch) this.dys.set(s, { epoch: this.epoch, dy });
+		const dy = this.retakeDy(s);
 		const t = e.tops, y = s.bbox.y + dy;
 		let lo = 0, hi = t.length - 2;
 		while (lo < hi) {

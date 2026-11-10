@@ -110,7 +110,9 @@ declare module "./InkOverlay" {
 				}
 			}
 		}
-		return this.selectionDeleteKeys.keydown(event);
+		// Delete and Backspace over a swept text range are the editor's, the same
+		// test the copy and cut keys above make.
+		return this.selectionDeleteKeys.keydown(event, () => this.view.state.selection.main.empty);
 	}
 
 	/**

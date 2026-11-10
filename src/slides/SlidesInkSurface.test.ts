@@ -28,6 +28,7 @@ import {
 	ScreenRect,
 	SlidesDeck,
 	SlidesInkHost,
+	type SlideNib,
 	PEN_CONTACT_GUARDED_EVENTS,
 	PEN_GUARDED_EVENTS,
 	PEN_GUARD_TAIL_MS,
@@ -88,8 +89,10 @@ import { setMouseInk } from "../inline/MouseInk";
 import { setPredictionEink } from "../inline/StrokePrediction";
 import { PageData, ParseResult, emptyPage, isSafePageId } from "../model/PageData";
 import { inkThemeOverride, setInkThemeOverride } from "../ink/InkTheme";
-import { InkStroke } from "../ink/Stroke";
+import { InkStroke, type InkPoint } from "../ink/Stroke";
 import { TailRenderer } from "../ink/TailRenderer";
+import { WetInkRenderer } from "../ink/WetInkRenderer";
+import { setInkShaping } from "../ink/InkShape";
 
 // startSlidesInk lives in PluginLifecycle.ts and the css-change handler in PluginOnload.ts, both read
 // here with main.ts.
@@ -1477,6 +1480,8 @@ interface RigOptions {
 	 * could not tell the adopted one from the proposed one.
 	 */
 	load?: (sidecarId: string) => Promise<ParseResult | null>;
+	/** The host's pen, read at each contact; a pen at width 2 when not given. */
+	nib?: () => SlideNib;
 	/** `devicePixelRatio` on the DECK's window, set before the deck is built. */
 	devicePixelRatio?: number;
 	/** What the canvases' `getContextAttributes()` GRANTS for `desynchronized`. */
@@ -1592,7 +1597,7 @@ function makeRig(opts: RigOptions = {}): Rig {
 			savedNow.push({ id, page });
 			await opts.saveNow?.(id, page);
 		},
-		nib: () => ({ tool: "pen", color: "#123456", width: 2 }),
+		nib: () => opts.nib?.() ?? { tool: "pen", color: "#123456", width: 2 },
 		eraserRadiusPx: () => 12,
 		eraseWholeStrokes: () => {
 			wholeReads++;
@@ -3617,6 +3622,39 @@ function wetLayerOf(rig: Rig): { shape: boolean } {
 	if (!l) throw new Error("no layers mounted; the shaping assertion would be vacuous");
 	return l.wet;
 }
+
+describe("a pen tap that rests keeps its contact dot until the lift", () => {
+	afterEach(() => setInkShaping(true));
+
+	// A hand resting on the glass sends moves under the builder's step, which
+	// it accepts none of. The dot drawn at contact must still be on the head
+	// canvas after such a move, at the same width, or it changes size (or
+	// vanishes) while the pen rests and changes again at the lift.
+	for (const shaping of [true, false]) {
+		it(`shaping ${shaping ? "on" : "off"}: a move the builder takes nothing from leaves the dot at its contact width`, () => {
+			setInkShaping(shaping);
+			const rig = makeRig();
+			const ops: Array<"clear" | number | undefined> = [];
+			const head = vi.spyOn(TailRenderer.prototype, "drawHead").mockImplementation((...args) => {
+				ops.push(args[5]);
+			});
+			vi.spyOn(TailRenderer.prototype, "clear").mockImplementation(() => {
+				ops.push("clear");
+			});
+
+			rig.down({ clientX: 200, clientY: 200, pressure: 0.6 });
+			expect(head, "the contact dot is drawn at pointerdown").toHaveBeenCalledTimes(1);
+			const contact = ops[ops.length - 1];
+			expect(typeof contact).toBe("number");
+
+			rig.move(200.05, 200, { pressure: 0.62 });
+
+			expect(ops.length, "the move reached the head canvas").toBeGreaterThan(2);
+			expect(ops[ops.length - 1], "the last head-canvas operation is the dot at its contact width").toBe(contact);
+			rig.deck.dispose();
+		});
+	}
+});
 
 describe("live shaping follows the device, per stroke (mouse ink draws flat)", () => {
 	afterEach(() => setMouseInk(false));
@@ -5665,6 +5703,55 @@ describe("live reload while sidecar I/O is pending", () => {
 		}
 		rig.deck.dispose();
 	});
+
+	// The read lands while an erase contact is live, the
+	// reload waits for the lift, and the eraser takes a stored stroke in that
+	// wait. The erased set was taken when the read landed, so before the fix the
+	// disk copy of that stroke came back at the lift, on screen and in the file.
+	it.each(["whole erase", "partial erase"] as const)("a %s made after the read lands, before the lift, stays erased", async (mode) => {
+		// One long stored line across slide 0 at logical y 100, x 100 to 700
+		// (screen y 75, x 70 to 370 at the rig's k 0.5, left 20, top 25).
+		const withLine = (ids: string[]): ParseResult => {
+			const page = storedPageWith("note-1.slides", ids);
+			const long = page.data.strokes[0]!;
+			long.points = Array.from({ length: 13 }, (_, i) => ({ x: 100 + i * 50, y: 100, pressure: 0.5, t: i * 10 }));
+			long.bbox = { x: 100, y: 100, width: 600, height: 0 };
+			return page;
+		};
+		let release!: (page: ParseResult | null) => void;
+		const pending = new Promise<ParseResult | null>((resolve) => { release = resolve; });
+		let cold = true;
+		const rig = makeRig({ eraseWhole: mode === "whole erase", load: () => cold
+			? Promise.resolve(withLine(["stored-1"]))
+			: pending });
+		await Promise.all(rig.deck.inFlightWork());
+		cold = false;
+		expect(strokesOn(rig, 0).map((s) => s.id)).toEqual(["stored-1"]);
+		const reload = rig.deck.reloadExternal("note-1.slides");
+		// The eraser lands away from the line, so nothing is erased yet.
+		rig.down({ buttons: 32, clientX: 260, clientY: 260 });
+		rig.move(270, 270, { buttons: 32 });
+		expect(strokesOn(rig, 0).map((s) => s.id)).toEqual(["stored-1"]);
+		release(withLine(["stored-1", "stored-2"]));
+		await tick();
+		// Precondition: the read has landed and the reload waits for this lift.
+		expect(rig.deck.status().pendingGesture).toBe(true);
+		expect((rig.deck as unknown as { reloadAfterStroke: unknown }).reloadAfterStroke).not.toBeNull();
+		// Now the eraser crosses the middle of the stored line.
+		rig.move(220, 75, { buttons: 32 });
+		const onScreen = strokesOn(rig, 0);
+		expect(onScreen.some((s) => s.id === "stored-1")).toBe(false);
+		if (mode === "partial erase") expect(onScreen.length).toBeGreaterThan(0);
+		rig.end("pointerup", { buttons: 0 });
+		await reload;
+		const ids = strokesOn(rig, 0).map((s) => s.id);
+		expect(ids).not.toContain("stored-1");
+		expect(ids).toContain("stored-2");
+		const saved = rig.scheduled.at(-1)!.page.strokes.map((s) => s.id);
+		expect(saved).not.toContain("stored-1");
+		expect(saved).toContain("stored-2");
+		rig.deck.dispose();
+	});
 });
 // Counts captured from the installed Obsidian 1.13.7 presenter parser, with
 // its own %% tokenizers (app.js SHA256 8efbf581e259cabef4f9c9a34814cfe3c02863757377e56b3603933c50e89898).
@@ -6498,6 +6585,305 @@ describe("a mouse release the deck never hears", () => {
 		expect(session.phase).toBe("drawing");
 		rig.end("pointerup", { pointerType: "mouse", buttons: 0 });
 		expect(strokesOn(rig, 0)).toHaveLength(1);
+		rig.deck.dispose();
+	});
+});
+
+/**
+ * A resize while the pen is down. Resizing a canvas's backing store erases
+ * it, and the wet and tail canvases hold the live stroke's only pixels until
+ * the lift: so after the resize, the part of the stroke already drawn has to
+ * be drawn again, or it is missing from the screen until the pen comes up.
+ *
+ * The log interleaves the wet canvas's backing reallocations with the wet
+ * layer's draw calls, so "drawn again" means drawn AFTER the store was
+ * thrown away. A cell that saw no reallocation proves nothing either way and
+ * says so first.
+ */
+describe("a resize mid-stroke keeps the drawn part on screen", () => {
+	type Entry = { kind: "realloc" | "tail-realloc" | "begin" | "append" | "head"; x?: number; y?: number };
+
+	async function liveRig(): Promise<{ rig: Rig; log: Entry[] }> {
+		const rig = makeRig();
+		await new Promise((r) => setTimeout(r, 0));
+		rig.win.runFrames();
+		rig.win.runFrames();
+		const l = layersOf(rig);
+		const log: Entry[] = [];
+		const watch = (el: FakeEl, kind: "realloc" | "tail-realloc") => {
+			let w = (el as unknown as { width: number }).width;
+			Object.defineProperty(el, "width", {
+				configurable: true,
+				get: () => w,
+				set: (v: number) => {
+					w = v;
+					el.backingWrites++;
+					log.push({ kind });
+				},
+			});
+		};
+		watch(l.wetCanvas, "realloc");
+		watch(l.tailCanvas, "tail-realloc");
+		const begin = WetInkRenderer.prototype.beginStroke;
+		vi.spyOn(WetInkRenderer.prototype, "beginStroke").mockImplementation(function (this: WetInkRenderer, ...args) {
+			log.push({ kind: "begin", x: args[0].x, y: args[0].y });
+			return begin.apply(this, args);
+		});
+		const append = WetInkRenderer.prototype.appendPoint;
+		vi.spyOn(WetInkRenderer.prototype, "appendPoint").mockImplementation(function (this: WetInkRenderer, ...args) {
+			log.push({ kind: "append", x: args[2].x, y: args[2].y });
+			return append.apply(this, args);
+		});
+		const head = TailRenderer.prototype.drawHead;
+		vi.spyOn(TailRenderer.prototype, "drawHead").mockImplementation(function (this: TailRenderer, ...args) {
+			log.push({ kind: "head" });
+			return head.apply(this, args);
+		});
+		return { rig, log };
+	}
+
+	const after = (log: Entry[], kind: Entry["kind"]): Entry[] => {
+		const i = log.map((e) => e.kind).lastIndexOf(kind);
+		return i < 0 ? [] : log.slice(i + 1);
+	};
+
+	it("draws the stroke's first samples again after a new pixel ratio resizes the wet canvas", async () => {
+		const { rig, log } = await liveRig();
+		rig.down();
+		for (let i = 1; i <= 9; i++) rig.move(200 + i * 10, 200 + i * 4);
+		const drawn = log.filter((e) => e.kind === "begin" || e.kind === "append");
+		// Ten samples, every one accepted: pen-down plus nine moves.
+		expect(drawn.map((e) => e.kind)).toEqual(["begin", ...Array(9).fill("append")]);
+		log.length = 0;
+		rig.win.changeResolution(2);
+		expect(log.filter((e) => e.kind === "realloc").length, "the resize reallocated the wet store").toBeGreaterThan(0);
+		const redrawn = after(log, "realloc").filter((e) => e.kind === "begin" || e.kind === "append");
+		expect(redrawn, "the drawn part is painted again after its pixels were thrown away").toEqual(drawn);
+		expect(after(log, "tail-realloc").some((e) => e.kind === "head"), "the head is painted again too").toBe(true);
+		// The stroke goes on and lands whole, the ten samples from before the resize first.
+		rig.move(320, 250);
+		rig.end("pointerup", { buttons: 0 });
+		const landed = rig.scheduled[rig.scheduled.length - 1]!.page.strokes[0]!.points;
+		expect(landed.length).toBeGreaterThan(10);
+		expect(landed.slice(0, 10).map((p) => ({ x: p.x, y: p.y }))).toEqual(drawn.map((e) => ({ x: e.x, y: e.y })));
+		rig.deck.dispose();
+	});
+
+	it("draws nothing on the wet layer when a resize finds no live stroke", async () => {
+		const { rig, log } = await liveRig();
+		rig.win.changeResolution(2);
+		expect(log.filter((e) => e.kind === "realloc").length, "the resize reallocated the wet store").toBeGreaterThan(0);
+		expect(log.filter((e) => e.kind !== "realloc" && e.kind !== "tail-realloc")).toEqual([]);
+		rig.deck.dispose();
+	});
+});
+
+/**
+ * The redraw after a resize or a remount, past the pixel-ratio path the cells
+ * above cover: a canvas the host replaced mid-stroke, a deck that moves
+ * without a new ratio, a stroke already lifted, a resting contact, the samples'
+ * own time and pressure, and a refresh that resized nothing.
+ */
+describe("the live stroke redraws the way it was drawn, after any refresh", () => {
+	type Cam = { x: number; y: number; zoom: number };
+	type Entry =
+		| { kind: "realloc" | "tail-realloc" | "wet-clear" | "tail-clear" }
+		| { kind: "begin"; point: InkPoint; flat: boolean; shape: boolean }
+		| { kind: "append"; point: InkPoint; cam: Cam }
+		| { kind: "head"; from: { x: number; y: number }; to: { x: number; y: number }; half: number | undefined };
+
+	afterEach(() => setMouseInk(false));
+
+	async function liveRig(opts: RigOptions = {}): Promise<{ rig: Rig; log: Entry[] }> {
+		const rig = makeRig(opts);
+		await new Promise((r) => setTimeout(r, 0));
+		rig.win.runFrames();
+		rig.win.runFrames();
+		const log: Entry[] = [];
+		const watch = (el: FakeEl, kind: "realloc" | "tail-realloc") => {
+			let w = (el as unknown as { width: number }).width;
+			Object.defineProperty(el, "width", {
+				configurable: true,
+				get: () => w,
+				set: (v: number) => {
+					w = v;
+					el.backingWrites++;
+					log.push({ kind });
+				},
+			});
+		};
+		watch(layersOf(rig).wetCanvas, "realloc");
+		watch(layersOf(rig).tailCanvas, "tail-realloc");
+		const begin = WetInkRenderer.prototype.beginStroke;
+		vi.spyOn(WetInkRenderer.prototype, "beginStroke").mockImplementation(function (this: WetInkRenderer, ...args) {
+			log.push({ kind: "begin", point: { ...args[0] }, flat: args[2] ?? false, shape: this.shape });
+			return begin.apply(this, args);
+		});
+		const append = WetInkRenderer.prototype.appendPoint;
+		vi.spyOn(WetInkRenderer.prototype, "appendPoint").mockImplementation(function (this: WetInkRenderer, ...args) {
+			log.push({ kind: "append", point: { ...args[2] }, cam: { ...(args[0] as Cam) } });
+			return append.apply(this, args);
+		});
+		const clear = WetInkRenderer.prototype.clear;
+		vi.spyOn(WetInkRenderer.prototype, "clear").mockImplementation(function (this: WetInkRenderer, ...args) {
+			log.push({ kind: "wet-clear" });
+			return clear.apply(this, args);
+		});
+		const clearAll = TailRenderer.prototype.clearAll;
+		vi.spyOn(TailRenderer.prototype, "clearAll").mockImplementation(function (this: TailRenderer, ...args) {
+			log.push({ kind: "tail-clear" });
+			return clearAll.apply(this, args);
+		});
+		const head = TailRenderer.prototype.drawHead;
+		vi.spyOn(TailRenderer.prototype, "drawHead").mockImplementation(function (this: TailRenderer, ...args) {
+			log.push({ kind: "head", from: { x: args[2].x, y: args[2].y }, to: { x: args[3].x, y: args[3].y }, half: args[5] });
+			return head.apply(this, args);
+		});
+		return { rig, log };
+	}
+
+	const drawnOf = (log: Entry[]) => log.filter((e) => e.kind === "begin" || e.kind === "append");
+	const pointsOf = (log: Entry[]) => drawnOf(log).map((e) => (e as { point: InkPoint }).point);
+	const after = (log: Entry[], kind: Entry["kind"]): Entry[] => {
+		const i = log.map((e) => e.kind).lastIndexOf(kind);
+		return i < 0 ? [] : log.slice(i + 1);
+	};
+	const cameraOf = (rig: Rig): Cam => ({ ...(rig.deck as unknown as { geometry(): { camera: Cam } }).geometry().camera });
+
+	/** The host replaces the canvases while the pen is down, then the deck refreshes. */
+	function replaceCanvases(rig: Rig): void {
+		const old = layersOf(rig);
+		old.committed.remove();
+		rig.reveal.dispatch({ type: "resize" });
+		expect(layersOf(rig).wetCanvas, "the refresh mounted new canvases").not.toBe(old.wetCanvas);
+	}
+
+	it("redraws a MOUSE stroke unshaped after the canvases are replaced mid-stroke", async () => {
+		setMouseInk(true);
+		const { rig, log } = await liveRig();
+		rig.down({ pointerType: "mouse" });
+		for (let i = 1; i <= 6; i++) rig.move(200 + i * 10, 200 + i * 4, { pointerType: "mouse" });
+		const drawn = pointsOf(log);
+		expect(drawn.length).toBe(7);
+		log.length = 0;
+		replaceCanvases(rig);
+		const begins = log.filter((e) => e.kind === "begin") as Array<{ shape: boolean }>;
+		expect(begins.length, "the drawn part went through the new wet layer once").toBe(1);
+		expect(begins[0]!.shape, "latched unshaped, the way a mouse stroke draws and commits").toBe(false);
+		expect(wetLayerOf(rig).shape).toBe(false);
+		expect(pointsOf(log)).toEqual(drawn);
+		rig.deck.dispose();
+	});
+
+	it("redraws a PEN stroke shaped after the canvases are replaced mid-stroke", async () => {
+		const { rig, log } = await liveRig();
+		rig.down({ pointerType: "pen" });
+		for (let i = 1; i <= 6; i++) rig.move(200 + i * 10, 200 + i * 4, { pointerType: "pen" });
+		const drawn = pointsOf(log);
+		expect(drawn.length).toBe(7);
+		log.length = 0;
+		replaceCanvases(rig);
+		const begins = log.filter((e) => e.kind === "begin") as Array<{ shape: boolean }>;
+		expect(begins.length, "the drawn part went through the new wet layer once").toBe(1);
+		expect(begins[0]!.shape, "latched shaped, the way a pen stroke draws and commits").toBe(true);
+		expect(wetLayerOf(rig).shape).toBe(true);
+		expect(pointsOf(log)).toEqual(drawn);
+		rig.deck.dispose();
+	});
+
+	it("redraws a HIGHLIGHTER stroke inside the highlight group after the canvases are replaced", async () => {
+		const { rig, log } = await liveRig({ nib: () => ({ tool: "highlighter", color: "#ffee00", width: 12 }) });
+		rig.down();
+		for (let i = 1; i <= 6; i++) rig.move(200 + i * 10, 200);
+		expect(layersOf(rig).wetCanvas.parentElement, "live under the highlight group at pen-down").toBe(layersOf(rig).highlightGroup);
+		const drawn = pointsOf(log);
+		log.length = 0;
+		replaceCanvases(rig);
+		const l = layersOf(rig);
+		expect(l.wetCanvas.parentElement, "the new wet canvas sits in the highlight group, under the slide").toBe(l.highlightGroup);
+		expect(l.tailCanvas.parentElement, "and the new head canvas with it").toBe(l.highlightGroup);
+		const begins = log.filter((e) => e.kind === "begin") as Array<{ flat: boolean }>;
+		expect(begins.map((b) => b.flat), "drawn flat again, as a highlighter is").toEqual([true]);
+		expect(pointsOf(log)).toEqual(drawn);
+		rig.deck.dispose();
+	});
+
+	it("redraws at the camera measured after a pane resize that moves the deck without a new ratio", async () => {
+		const { rig, log } = await liveRig();
+		rig.down();
+		for (let i = 1; i <= 6; i++) rig.move(200 + i * 10, 200 + i * 4);
+		const before = cameraOf(rig);
+		log.length = 0;
+		rig.slides.rect = { ...rig.slides.rect, left: rig.slides.rect.left + 120, top: rig.slides.rect.top + 30 };
+		rig.reveal.dispatch({ type: "resize" });
+		const now = cameraOf(rig);
+		expect(now, "the move changed the camera, so the cell can tell old from new").not.toEqual(before);
+		const appends = log.filter((e) => e.kind === "append") as Array<{ cam: Cam }>;
+		expect(appends.length, "the drawn part was redrawn").toBe(6);
+		for (const a of appends) expect(a.cam).toEqual(now);
+		rig.deck.dispose();
+	});
+
+	it("draws nothing after a resize that comes once the stroke has lifted", async () => {
+		const { rig, log } = await liveRig();
+		rig.down();
+		for (let i = 1; i <= 6; i++) rig.move(200 + i * 10, 200 + i * 4);
+		rig.end("pointerup", { buttons: 0 });
+		log.length = 0;
+		rig.win.changeResolution(2);
+		expect(log.filter((e) => e.kind === "realloc").length, "the resize reallocated the wet store").toBeGreaterThan(0);
+		expect(drawnOf(log), "a landed stroke is the committed layer's, not the wet layer's").toEqual([]);
+		expect(log.filter((e) => e.kind === "head")).toEqual([]);
+		rig.deck.dispose();
+	});
+
+	it("puts a resting contact's dot back on the head canvas after a resize", async () => {
+		const { rig, log } = await liveRig();
+		rig.down({ clientX: 200, clientY: 200, pressure: 0.6 });
+		const first = pointsOf(log)[0]!;
+		const dots = log.filter((e) => e.kind === "head");
+		expect(dots, "pen-down drew the contact dot once").toHaveLength(1);
+		const dot = dots[0] as { half: number | undefined };
+		expect(dot.half, "the dot carries its contact width").toBeGreaterThan(0);
+		expect(dot).toEqual({ kind: "head", from: { x: first.x, y: first.y }, to: { x: first.x, y: first.y }, half: dot.half });
+		log.length = 0;
+		rig.win.changeResolution(2);
+		const heads = after(log, "tail-realloc").filter((e) => e.kind === "head");
+		// The width too: the live head drawn at the same place is a different
+		// size, so a dot put back as the live head would pass on place alone.
+		expect(heads, "the contact dot, drawn again once, at the contact point and width").toEqual([dot]);
+		rig.deck.dispose();
+	});
+
+	it("feeds the redraw each sample's own time and pressure, not only its place", async () => {
+		const { rig, log } = await liveRig();
+		rig.down({ pressure: 0.31 });
+		for (let i = 1; i <= 8; i++) rig.move(200 + i * 10, 200 + i * 4, { pressure: 0.3 + i * 0.07 });
+		const drawn = pointsOf(log);
+		expect(new Set(drawn.map((p) => p.pressure)).size, "the samples carry different pressures").toBe(9);
+		log.length = 0;
+		rig.win.changeResolution(2);
+		const redrawn = pointsOf(after(log, "realloc"));
+		expect(redrawn.map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure }))).toEqual(
+			drawn.map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure }))
+		);
+		rig.deck.dispose();
+	});
+
+	it("clears before it redraws when a refresh resized nothing, so the stroke is painted once", async () => {
+		const { rig, log } = await liveRig();
+		rig.down();
+		for (let i = 1; i <= 6; i++) rig.move(200 + i * 10, 200 + i * 4);
+		const drawn = pointsOf(log);
+		log.length = 0;
+		rig.reveal.dispatch({ type: "resize" });
+		expect(log.filter((e) => e.kind === "realloc" || e.kind === "tail-realloc"), "nothing was resized").toEqual([]);
+		const kinds = log.map((e) => e.kind);
+		const begin = kinds.indexOf("begin");
+		expect(begin, "the stroke was redrawn").toBeGreaterThan(-1);
+		expect(kinds.slice(0, begin), "the wet layer is cleared before the redraw").toContain("wet-clear");
+		expect(kinds.slice(0, begin), "and the head canvas").toContain("tail-clear");
+		expect(pointsOf(after(log, "wet-clear")), "after the last clear the stroke goes down exactly once").toEqual(drawn);
 		rig.deck.dispose();
 	});
 });

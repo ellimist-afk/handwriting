@@ -18,7 +18,7 @@ const frames = async (count = 5) => { for (let i = 0; i < count; i++) await new 
 /** Past the quiet a held shrink waits for after a scroll, and a few frames for its pass. */
 const idle = async () => { await new Promise<void>(resolve => setTimeout(resolve, SHRINK_SCROLL_IDLE_MS + 150)); await frames(4); };
 
-type Scenario = "near-edge-100" | "near-edge-200" | "edge-off" | "edge-on" | "zoom-out-edge-ink" | "narrowed-pane-edge-ink" | "canvas-off-scrolled" | "far-held-scroll-left" | "canvas-off-far-ink" | "far-delete-all" | "far-band-plant" | "far-erase" | "far-lasso-delete" | "far-undo-delete" | "chunked-growth-on" | "chunked-growth-off";
+type Scenario = "near-edge-100" | "near-edge-200" | "ic-on-fresh" | "far-ic-on-delete-all" | "far-ic-on-erase" | "far-ic-on-undo-delete" | "far-ic-on-delete-all-then-off" | "edge-off" | "edge-on" | "zoom-out-edge-ink" | "narrowed-pane-edge-ink" | "canvas-off-scrolled" | "far-held-scroll-left" | "canvas-off-far-ink" | "far-delete-all" | "far-band-plant" | "far-erase" | "far-lasso-delete" | "far-undo-delete" | "chunked-growth-on" | "chunked-growth-off";
 
 /** One stroke per entry, `[x, y]` in note px, a short diagonal of pen width 2. */
 function seed(path: string, at: readonly (readonly [number, number])[]) {
@@ -32,7 +32,7 @@ function seed(path: string, at: readonly (readonly [number, number])[]) {
 async function run(scenario: Scenario) {
 	const path = `sideways/${scenario}.md`;
 	surfaceExtents.handleDelete(path);
-	const infinite = scenario === "edge-on" || scenario === "chunked-growth-on" || scenario.startsWith("canvas-off");
+	const infinite = scenario === "edge-on" || scenario === "chunked-growth-on" || scenario.startsWith("canvas-off") || scenario.includes("ic-on");
 	setScrollExpansionEnabled(infinite);
 	if (scenario.startsWith("far-") || scenario === "canvas-off-far-ink") seed(path, [[120, 120], [1500, 160]]);
 	const wrapper = document.body.appendChild(document.createElement("div"));
@@ -213,6 +213,20 @@ async function run(scenario: Scenario) {
 			scroller.scrollLeft = scroller.scrollWidth;
 			await frames(8);
 			out.push(snap("scrolled to the far ink"));
+		} else if (scenario === "ic-on-fresh") {
+			// A note Infinite Canvas has just started, no ink: the room a cleared note returns to while it is on.
+			await frames(12);
+			out.push(snap("fresh"));
+		} else if (scenario === "far-ic-on-delete-all-then-off") {
+			// At home: clear the page with Infinite Canvas on, then turn it off.
+			if (deleteAllInkOn(path) !== 2) throw Error("delete all did not remove both strokes");
+			await idle();
+			out.push(snap("cleared, infinite canvas on"));
+			setScrollExpansionEnabled(false);
+			await idle();
+			out.push(snap("infinite canvas off"));
+			await frames(12);
+			out.push(snap("off, still"));
 		} else if (scenario.startsWith("chunked-growth")) {
 			setPenInk(true);
 			for (let i = 0; i < 12; i++) {
@@ -228,7 +242,7 @@ async function run(scenario: Scenario) {
 			lefts.length = 0;
 			// PLANT: the band keeps its sideways margin after the shrink, as it did before the release existed.
 			if (scenario === "far-band-plant") (overlay as any).releaseBandMargin = () => {};
-			if (scenario === "far-delete-all" || scenario === "far-band-plant" || scenario === "far-undo-delete") {
+			if (scenario.endsWith("delete-all") || scenario === "far-band-plant" || scenario.endsWith("undo-delete")) {
 				const removed = deleteAllInkOn(path);
 				if (removed !== 2) throw Error(`delete all removed ${removed}`);
 			} else if (scenario === "far-lasso-delete") {
@@ -251,7 +265,7 @@ async function run(scenario: Scenario) {
 			}
 			await frames(8);
 			out.push({ ...snap("removed, still scrolled out"), lefts: [...lefts] } as any);
-			if (scenario === "far-undo-delete") {
+			if (scenario.endsWith("undo-delete")) {
 				undo(view);
 				await frames(8);
 				out.push(snap("undone"));
@@ -268,6 +282,12 @@ async function run(scenario: Scenario) {
 			out.push(snap("scrolled home"));
 			await frames(12);
 			out.push(snap("home, still"));
+			if (scenario === "far-ic-on-delete-all" || scenario === "far-ic-on-undo-delete") {
+				// Scroll right as far as it goes, a few times: Infinite Canvas still extends the page.
+				for (let i = 0; i < 3; i++) { scroller.scrollLeft = scroller.scrollWidth; await frames(8); }
+				await idle();
+				out.push(snap("scrolled right again"));
+			}
 		}
 	} finally {
 		scroller.removeEventListener("scroll", onScroll);

@@ -30,7 +30,7 @@ declare module "./SlidesInkSurface" {
 		startInitialLoad(): Promise<void>;
 		loadSidecar(): Promise<void>;
 		finishLoad(): void;
-		adoptSidecar(sidecarId: string, replaceAdopted?: boolean): Promise<{ remapped: number; hashesChanged: number } | null>;
+		adoptSidecar(sidecarId: string, replaceAdopted?: boolean, keepErased?: boolean): Promise<{ remapped: number; hashesChanged: number } | null>;
 		noteMemoryOnly(why: string, plain?: string): void;
 		persist(): void;
 		snapshot(): PageData | null;
@@ -43,7 +43,29 @@ declare module "./SlidesInkSurface" {
 		reloadCandidateSidecarId(): string | null;
 		reloadExternal(sidecarId: string): Promise<boolean>;
 		strokeFingerprint(): string;
+		noteIdChanged(path: string, wasLocked: boolean, known?: string, keepHeld?: boolean): void;
+		followPageId(pageId: string): void;
+		carryOwnStrokes(pageId?: string, dropAll?: boolean): void;
 	}
+}
+
+/** Where the live deck is found. SlidesController.ts, which holds it, sets this when it loads. */
+let liveDeck: () => SlidesDeck | null = () => null;
+
+export function setSlidesLiveDeck(source: () => SlidesDeck | null): void {
+	liveDeck = source;
+}
+
+/**
+ * The id code changed what the note at `path` carries, or lifted its duplicate lock: a copy was given a fresh id, its
+ * id line was deleted, or the other carrier went away. The live deck for that note follows at the same moment inline
+ * ink does. `wasLocked` is whether the note was duplicate-locked just before the change. `pageId`, when the caller
+ * has just written it, is the note's new id: the metadata cache may still answer with the old text for a moment.
+ * `keepHeld` false: the old id's Slides file did not become the new id's live file (it was set aside beside a file the
+ * new id already had, or it is another note's), so the strokes the deck holds from it leave the deck.
+ */
+export function slidesNoteIdChanged(path: string, wasLocked = false, pageId?: string, keepHeld = true): void {
+	liveDeck()?.noteIdChanged(path, wasLocked, pageId, keepHeld);
 }
 
 /** How long a deck held on a thrown first read stays silent while reads keep throwing (the note surface's bound). */
@@ -54,6 +76,9 @@ const TRANSIENT_HEALED =
 	"Handwriting: this presentation's ink file is readable again. The saved ink is restored and saving is back on.";
 const TRANSIENT_GONE =
 	"Handwriting: this presentation's ink file is gone. The presentation starts fresh, and saving is back on.";
+/** Word for word the notice inline ink gives the same two notes (InlineInkStorePersist.markDuplicateLocked). */
+const duplicateNotice = (otherPath: string): string =>
+	`Handwriting: this note and "${otherPath}" carry the same handwriting-page-id, so they point at the same ink file. Ink on both is read-only until that is resolved. Delete the handwriting-page-id line from the copy (its next stroke gets a fresh id), or delete one of the notes.`;
 
 	/** Track one initial-load attempt, retaining failures for a later public retry. */
 	function startInitialLoad(this: SlidesDeck): Promise<void> {
@@ -214,12 +239,16 @@ const TRANSIENT_GONE =
 	async function adoptSidecar(
 		this: SlidesDeck,
 		sidecarId: string,
-		replaceAdopted = false
+		replaceAdopted = false,
+		// An id follow keeps the deck's ink on screen (no replace), but ink erased during its read must not come back
+		// from the file it reads, which holds that ink: the same erased-id rule as a live reload.
+		keepErased = false
 	): Promise<{ remapped: number; hashesChanged: number } | null> {
+		const trackErased = replaceAdopted || keepErased;
 		const persistedIds = replaceAdopted && this.host.hasQueuedSidecar?.(sidecarId) === false
 			? new Set(this.queuedIds) : new Set<string>();
 		const beforeIds = new Set<string>();
-		if (replaceAdopted) {
+		if (trackErased) {
 			for (const id of this.adoptedIds) beforeIds.add(id);
 			for (const list of this.strokes.values()) for (const s of list) beforeIds.add(s.id);
 		}
@@ -237,7 +266,7 @@ const TRANSIENT_GONE =
 		} finally {
 			// Remember read-window erases even when the read fails, so a retry
 			// cannot bring an erased local stroke back from its saved copy.
-			if (replaceAdopted && !this.stale()) {
+			if (trackErased && !this.stale()) {
 				const remaining = new Set<string>();
 				for (const list of this.strokes.values()) for (const s of list) remaining.add(s.id);
 				for (const id of beforeIds) if (!remaining.has(id)) {
@@ -351,6 +380,15 @@ const TRANSIENT_GONE =
 		if (replaceAdopted && !this.futureLocked && this.session.phase === "drawing") {
 			await new Promise<void>(resolve => { this.reloadAfterStroke = resolve; });
 			if (this.stale()) return null;
+			// The eraser may have taken more stored ink while this read waited
+			// for the lift. Recount with the finally block's rule, or the disk
+			// copy of that ink comes back below.
+			const remaining = new Set<string>();
+			for (const list of this.strokes.values()) for (const s of list) remaining.add(s.id);
+			for (const id of beforeIds) if (!remaining.has(id)) {
+				erased.add(id);
+				this.adoptedIds.add(id);
+			}
 		}
 		if (replaceAdopted && !this.futureLocked) this.endStrokeForSlideChange();
 		// Only the store can distinguish a saved snapshot from a queued one.
@@ -536,6 +574,18 @@ const TRANSIENT_GONE =
 			);
 			return;
 		}
+		// The note shares its page id with another and no owner is decided:
+		// inline ink on both is read-only, and a slides write here would land in
+		// the other note's slides ink. The strokes stay in memory and the first
+		// save after the duplicate is resolved writes them; `snapshot` refuses
+		// meanwhile, so teardown's flush holds too.
+		const other = this.host.duplicateLockedWith?.(path) ?? null;
+		if (other !== null) {
+			this.dirty = true;
+			log(`save held: ${path} shares its page id with ${other}; ink stays in memory`);
+			this.noticeReadOnly(duplicateNotice(other));
+			return;
+		}
 		if (this.sidecarId) {
 			this.save(false);
 			return;
@@ -591,6 +641,7 @@ const TRANSIENT_GONE =
 	function snapshot(this: SlidesDeck): PageData | null {
 		const sidecarId = this.sidecarId;
 		if (!sidecarId || this.futureLocked || this.reloadDamaged) return null;
+		if (this.path && this.host.duplicateLockedWith?.(this.path) != null) return null;
 		const base = this.basePage ?? emptyPage(sidecarId);
 		const strokes: InkStroke[] = [];
 		for (const list of this.strokes.values()) strokes.push(...list);
@@ -757,6 +808,122 @@ const TRANSIENT_GONE =
 		return parts.sort().join(",");
 	}
 
+	/**
+	 * The note's id changed under the open deck, or its duplicate lock lifted (slidesNoteIdChanged). Inline ink acts on
+	 * the same route at the same moment; this does the same for the deck:
+	 *  - a fresh id: the deck writes under it from now on, merging that id's file first; when the old id's file did not
+	 *    become that id's live file (`keepHeld` false), the strokes held from the old id leave the deck first;
+	 *  - the id line gone from a locked note: only ink drawn here goes on, under a fresh id the next save claims;
+	 *  - a locked note's id edited: only ink drawn here goes on, merged into the new id's file;
+	 *  - the id unchanged and the lock lifted: held ink saves now, not at the next stroke or the close.
+	 */
+	function noteIdChanged(this: SlidesDeck, path: string, wasLocked: boolean, known?: string, keepHeld = true): void {
+		if (this.disposed || path !== this.path) return;
+		// A load, reload or claim still running answers from the id it read before the change: look again once it lands.
+		const busy = this.loadInFlight ?? this.claimInFlight;
+		if (busy) {
+			const again = (): void => this.noteIdChanged(path, wasLocked, known, keepHeld);
+			void busy.then(again, again);
+			return;
+		}
+		// A deck that has adopted nothing yet reads the id on its next load; a memory-only or read-only one writes nothing.
+		if (!this.loaded || this.noteMismatch || this.futureLocked || this.reloadDamaged) return;
+		// The id the caller just wrote wins over the cache, which can still hold the note's old text.
+		const pageId = known !== undefined ? known : this.host.readPageId(path);
+		if (pageId === this.pageId) {
+			if (pageId !== null && this.dirty && this.host.duplicateLockedWith?.(path) == null) this.persist();
+			return;
+		}
+		// No id yet: the first stroke's claim reads the note's id itself and merges its file.
+		if (this.pageId === null) return;
+		// A locked note's adopted ink is the other note's: only ink drawn here goes on, to the new id or a fresh one.
+		if (wasLocked) this.carryOwnStrokes(pageId ?? undefined);
+		// The old id's file is now the new id's live file: what the deck holds is that file, so it stays on screen.
+		else if (pageId !== null && keepHeld) this.followPageId(pageId);
+		// It was set aside, or it is another note's: its strokes leave the deck, or the next save writes them under the new id.
+		else if (pageId !== null) this.carryOwnStrokes(pageId, true);
+	}
+
+	/**
+	 * Move the deck to the note's new id. The load gate is held while that id's file is read, as a live reload holds it,
+	 * so a stroke drawn meanwhile waits and is written under the new id when the read lands. The id is published only
+	 * after the merge, the claim path's rule.
+	 */
+	function followPageId(this: SlidesDeck, pageId: string): void {
+		const sidecarId = slidesSidecarId(pageId);
+		const loading: Promise<void> = this.adoptSidecar(sidecarId, false, true)
+			.then(() => {
+				if (this.stale()) return;
+				this.pageId = pageId;
+				this.sidecarId = sidecarId;
+				log(`page id followed: ${this.path ?? "?"} now writes ${sidecarId}`);
+			})
+			.catch((err) => {
+				// Fail closed: the deck is no longer on the old shared id, and the new id's file was not merged, so
+				// it writes nothing from here, and says so once.
+				this.futureLocked = true;
+				log(`could not read ${sidecarId} after the note's id changed: ${String(err)}`);
+				this.noticeReadOnly(
+					"Handwriting: this presentation's ink file could not be read, so new ink is not being saved."
+				);
+			})
+			.finally(() => {
+				if (this.loadInFlight === loading) this.loadInFlight = null;
+				if (!this.stale()) {
+					const deferred = this.saveAfterLoad;
+					this.finishLoad();
+					// Ink not yet written goes to the new id now, as inline ink reschedules the copy's record.
+					if (!deferred && this.dirty && !this.disposed && this.sidecarId === sidecarId) this.persist();
+				}
+				this.actionsChanged();
+			});
+		this.loaded = false;
+		this.loadInFlight = loading;
+		this.actionsChanged();
+	}
+
+	/**
+	 * The id line was deleted from this note while it was locked. Ink adopted from the shared file is the other note's
+	 * and leaves the deck, as it leaves an inline note; ink drawn here stays, and the next save claims a fresh id for it
+	 * (persist's claim merges whatever that id already holds). When the locked note's id was edited instead, `pageId`
+	 * is that new id: the deck reads its file and writes the ink drawn here there, never under the old shared id.
+	 *
+	 * `dropAll`: an unlocked note's id was edited and the old id's file did not become the new id's live file. Every
+	 * stroke the deck holds is on disk or queued under the old id already, so none is carried and the deck is not
+	 * dirty: it shows the new id's file only.
+	 */
+	function carryOwnStrokes(this: SlidesDeck, pageId?: string, dropAll = false): void {
+		let carried = 0;
+		for (const [index, list] of [...this.strokes]) {
+			const page = pageOfSlide(index);
+			const own = dropAll
+				? []
+				: list.filter((s) => !this.adoptedIds.has(s.id)).map((s) => (s.page === page ? s : { ...s, page }));
+			if (own.length > 0) this.strokes.set(index, own);
+			else this.strokes.delete(index);
+			carried += own.length;
+		}
+		this.pageId = null;
+		this.sidecarId = null;
+		this.basePage = null;
+		this.adoptedIds = new Set();
+		this.queuedIds = new Set();
+		this.retainedSlides.clear();
+		this.visualSlots.clear();
+		this.history.clear();
+		if (dropAll) log(`page id edited on ${this.path ?? "?"}: held ink of the old id dropped from the deck, ${pageId ?? "?"} read next`);
+		else log(`shared id left by ${this.path ?? "?"}: ${carried} stroke(s) drawn here kept for ${pageId ?? "a fresh id"}, shared ink dropped`);
+		this.actionsChanged();
+		this.repaint();
+		if (pageId !== undefined) {
+			// followPageId saves a dirty deck once the new id's file is merged; only carried ink makes it dirty now.
+			this.dirty = carried > 0;
+			this.followPageId(pageId);
+			return;
+		}
+		if (carried > 0) this.persist();
+	}
+
 export function installSlidesPersistence(proto: SlidesDeck): void {
 	installMethods(proto, {
 		startInitialLoad,
@@ -775,5 +942,8 @@ export function installSlidesPersistence(proto: SlidesDeck): void {
 		reloadCandidateSidecarId,
 		reloadExternal,
 		strokeFingerprint,
+		noteIdChanged,
+		followPageId,
+		carryOwnStrokes,
 	});
 }

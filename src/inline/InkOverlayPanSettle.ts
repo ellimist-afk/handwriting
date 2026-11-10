@@ -215,7 +215,7 @@ declare module "./InkOverlay" {
 		if (!validCameraScale(next) || !validCameraScale(a.fromScale)) return;
 		// NO SIZER, NO PAN. The text half of the pan goes on `.cm-sizer`; a
 		// surface without one takes the ink half and nothing else, which is ink
-		// sliding off the words - the very defect this lane exists to fix.
+		// sliding off the words - the very defect this settle code exists to prevent.
 		//
 		// It is also unrecoverable rather than merely partial. Every term here
 		// is measured against a column that has had the LIVE pan subtracted from
@@ -497,6 +497,11 @@ declare module "./InkOverlay" {
 		// the frontier on both axes, so there is nothing there to spring back from. The ceiling side is the
 		// page's own origin edge, which the direction check measured as the POSITIVE side (a finger dragging
 		// right at scrollLeft 0 pulls +96).
+		// THAT EDGE IS AT THE LIVE SCROLL, not at pan 0. No preview frame writes the scroll, so with the note
+		// scrolled the page's origin edge sits nativeLeft * effective (x) and nativeTop * effective (y) of pan
+		// away - the same ceiling the settle reads above. Measured from pan 0, a scrolled note stopped one give
+		// out while the fingers went on (300 asked, 96 painted at scroll 600) and the lift then jumped to the
+		// fingers. At scroll 0 the term is 0 and the band is what it was.
 		// CANVAS OFF TAKES THE PLAIN BOUND ON A DRAG FRAME, floor and ceiling, no give. Leaving the
 		// preview unbounded there drifted the page 21.21 px past the fingers on a fitting page (measured, every
 		// travel, ScrollColumnAnchorPinch tiny arm), and stock scrolling is exactly "the page never moves where
@@ -512,10 +517,10 @@ declare module "./InkOverlay" {
 		// rest under one device px past the bound, which is not a visible overscroll. Settle only; preview and
 		// drag frames are untouched.
 		const cx = bounded ? onDeviceGrid(rawX, this.canvasMode ? Math.min(rawX, 0) : plainX, this.dpr)
-			: dragFrame ? (this.canvasMode ? Math.min(rawX, Math.max(restCeilX + give, lastX)) : plainX)
+			: dragFrame ? (this.canvasMode ? Math.min(rawX, Math.max(nativeLeft * effective + restCeilX + give, lastX)) : plainX)
 			: rawX;
 		const cy = bounded ? onDeviceGrid(rawY, this.canvasMode ? Math.min(rawY, 0) : plainY, this.dpr)
-			: dragFrame ? (this.canvasMode ? Math.min(rawY, Math.max(give, lastY)) : plainY)
+			: dragFrame ? (this.canvasMode ? Math.min(rawY, Math.max(nativeTop * effective + give, lastY)) : plainY)
 			: rawY;
 		if (!settling) { this.pinchBand.lastPan.x = cx; this.pinchBand.lastPan.y = cy; }
 		this.boundReadout.rawX = rawX; this.boundReadout.cx = cx; this.boundReadout.rawY = rawY; this.boundReadout.cy = cy;
@@ -829,10 +834,11 @@ declare module "./InkOverlay" {
 		this.panGuttersWritten = "";
 	}
 
- /** The column's margin in host-local px: its painted position less the left reserve's translate. */
+ /** The column's margin in host-local px: its painted position less the left reserve's translate and the scroller's left padding. */
  function columnMarginLocal(this: InkOverlayPlugin, layout:NonNullable<InkOverlayPlugin["viewportLayout"]>):number|null {
-  // `> 0`, not the field alone: a unit rig builds the layout by hand without it.
-  return layout.columnLocal===null?null:layout.columnLocal-(layout.columnReserve>0?layout.columnReserve:0);
+  // `> 0`, not the fields alone: a unit rig builds the layout by hand without them.
+  const pad=layout.columnPad!==undefined&&layout.columnPad>0?layout.columnPad:0;
+  return layout.columnLocal===null?null:layout.columnLocal-(layout.columnReserve>0?layout.columnReserve:0)-pad;
  }
 
 export function installPanSettle(proto: InkOverlayPlugin): void {

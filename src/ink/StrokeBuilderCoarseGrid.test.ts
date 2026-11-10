@@ -81,7 +81,8 @@ function penDownGrid(pointerType: string, zoom: number): CoarseGrid | undefined 
 		liveWidthPx: () => 1,
 	};
 	view.mode = "ink";
-	view.scale = 1;
+	// No host zoom (cssScale 1): the visual scale is the font zoom the camera carries.
+	view.scale = zoom;
 	view.penCursorEl = null;
 	view.router = null;
 	view.mobileTools = null;

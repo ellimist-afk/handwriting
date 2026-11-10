@@ -21,6 +21,8 @@ export type RectProvider = (id: string) => BBox | null;
 
 export class SelectionModel {
 	private strokes = new Set<string>();
+	/** Moves at every change of what is selected: a kept answer about the selection holds while it does. */
+	revision = 0;
 	private boxes = new Set<string>();
 	// A third parallel set, mirroring boxes. Kept explicit rather than
 	// generalised: when a fourth object type arrives, these three are the
@@ -61,6 +63,7 @@ export class SelectionModel {
 
 	clear(): boolean {
 		if (this.isEmpty) return false;
+		this.revision++;
 		this.strokes.clear();
 		this.boxes.clear();
 		this.images.clear();
@@ -79,6 +82,7 @@ export class SelectionModel {
 		allImages: readonly ImageData[] = [],
 		imageRectOf: RectProvider = () => null
 	): void {
+		this.revision++;
 		this.strokes.clear();
 		this.boxes.clear();
 		this.images.clear();
@@ -102,6 +106,7 @@ export class SelectionModel {
 	 * it pasted, so the user can see it and move it immediately).
 	 */
 	selectExactly(strokeIds: readonly string[]): void {
+		this.revision++;
 		this.strokes = new Set(strokeIds);
 		this.boxes.clear();
 		this.images.clear();
@@ -142,6 +147,7 @@ export class SelectionModel {
 		liveBoxIds: Set<string>,
 		liveImageIds: Set<string> = new Set()
 	): void {
+		this.revision++;
 		for (const id of [...this.strokes]) {
 			if (!liveStrokeIds.has(id)) this.strokes.delete(id);
 		}

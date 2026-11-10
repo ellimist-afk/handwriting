@@ -32,6 +32,7 @@ import {
 	ZERO_EXTENT,
 	grownAxis,
 	grownExtent,
+	infiniteCanvasStartX,
 	inkClaimX,
 	inkFrontier,
 	inkLeftReach,
@@ -403,6 +404,48 @@ describe("SurfaceExtents: a sideways shrink falls due", () => {
 		expect(extents.shrinkDue("new.md"), "the rename keeps the generation").toBe(due);
 		extents.handleDelete("new.md");
 		expect(extents.owesShrinkX("new.md")).toBe(false);
+	});
+});
+
+describe("infiniteCanvasStartX (the room Infinite Canvas starts a note with)", () => {
+	it("is the pane and one more pane past it, less the column's inset, in note px", () => {
+		expect(infiniteCanvasStartX({ clientWidth: 420, originLeft: 20, fontZoom: 1 })).toBe(820);
+		expect(infiniteCanvasStartX({ clientWidth: 420, originLeft: 20, fontZoom: 2 })).toBe(410);
+	});
+
+	it("is nothing without a usable pane or zoom", () => {
+		expect(infiniteCanvasStartX({ clientWidth: 0, originLeft: 0, fontZoom: 1 })).toBe(0);
+		expect(infiniteCanvasStartX({ clientWidth: 420, originLeft: 0, fontZoom: 0 })).toBe(0);
+		expect(infiniteCanvasStartX({ clientWidth: 100, originLeft: 900, fontZoom: 1 })).toBe(0);
+	});
+});
+
+describe("SurfaceExtents: Delete all ink owes a shrink that holds with Infinite Canvas on", () => {
+	it("marks the note's due shrink as a clear, only where there is sideways room", () => {
+		const extents = new SurfaceExtents();
+		extents.grow("tall.md", { x: 0, y: 900 });
+		extents.oweShrinkXForClear("tall.md");
+		expect([extents.owesShrinkX("tall.md"), extents.shrinkIsClear("tall.md")]).toEqual([false, false]);
+		extents.grow("wide.md", { x: 1500, y: 0 });
+		extents.oweShrinkX("wide.md");
+		expect(extents.shrinkIsClear("wide.md"), "an ordinary removal is not a clear").toBe(false);
+		const before = extents.shrinkDue("wide.md");
+		extents.oweShrinkXForClear("wide.md");
+		expect(extents.shrinkIsClear("wide.md")).toBe(true);
+		expect(extents.shrinkDue("wide.md"), "a clear is a fresh shrink").not.toBe(before);
+	});
+
+	it("goes when the shrink settles, follows a rename and goes with a delete", () => {
+		const extents = new SurfaceExtents();
+		extents.grow("a.md", { x: 1500, y: 0 });
+		extents.oweShrinkXForClear("a.md");
+		extents.settleShrinkX("a.md");
+		expect(extents.shrinkIsClear("a.md")).toBe(false);
+		extents.oweShrinkXForClear("a.md");
+		extents.handleRename("a.md", "b.md");
+		expect([extents.shrinkIsClear("a.md"), extents.shrinkIsClear("b.md")]).toEqual([false, true]);
+		extents.handleDelete("b.md");
+		expect(extents.shrinkIsClear("b.md")).toBe(false);
 	});
 });
 

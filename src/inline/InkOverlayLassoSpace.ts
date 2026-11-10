@@ -8,7 +8,7 @@
 import { installMethods } from "./InstallMethods";
 import type { Text } from "@codemirror/state";
 import { isolateHistory } from "@codemirror/commands";
-import { Notice } from "obsidian";
+import { displayTooltip, Notice } from "obsidian";
 import { CameraState } from "../camera/coordinates";
 import { anchorTop } from "./DocumentTop";
 import { tipMode } from "./TipMode";
@@ -16,11 +16,37 @@ import { blankLinesAbove, boundsOf, lineSteps, sameRowSides, strokeIdsBelow, swe
 import { BBox, InkStroke } from "../ink/Stroke";
 import { drawStroke } from "../ink/StrokeRenderer";
 import { PenSample } from "../input/PointerRouter";
-import { padBBox, pointInBBox } from "../objects/Selection";
-import { inkApplied, inkEffect } from "./InkHistory";
-import { MAX_BACKING_AREA, visualToNote } from "./ZoomScale";
+import { padBBox, pointInBBox, unionBounds } from "../objects/Selection";
+import { inkRevision } from "../ink/StrokeRev";
+import { strokeById } from "./LineAnchor";
+import { inkApplied, inkEffect, type InkOp } from "./InkHistory";
+import { MAX_BACKING_AREA, noteToVisual, visualToNote } from "./ZoomScale";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
-import { committedFloorFor, inlineInk, SELECTION_GRAB_PAD, type InkOverlayPlugin } from "./InkOverlay";
+import { committedFloorFor, inlineInk, instances, SELECTION_GRAB_PAD, type InkOverlayPlugin } from "./InkOverlay";
+import { attachGroup, isOpaqueAttachment } from "./InkAttachments";
+import type { Point2 } from "../ink/Smoothing";
+import {
+	ATTACH_BUTTON_DRAW_PX,
+	attachButtonPoint,
+	attachButtonShown,
+	beginTransform,
+	handleInput,
+	handlesShown,
+	hitAttachButton,
+	hitTransformHandle,
+	pictureMatrix,
+	stepTransform,
+	transformedBox,
+	transformEdits,
+	transformStorePoint,
+	widthRange,
+	type HandleInput,
+	type TransformEdits,
+	type TransformGesture,
+	type TransformHandle,
+	type TransformParams,
+} from "./LassoTransform";
+import { ATTACH_STRINGS, NO_CHROME, attachChromeOf, attachPinsOf, hitPin, narrowedTo, overlayColours, paintAttachChrome, selectionChips, syncWithoutChrome, toggleAttach, PIN_LIFT_PX, type AttachPin } from "./AttachDecoration";
 
 /**
  * An insert space drag's moving ink, pen-down to release. The store does not move until the release; the committed layers
@@ -68,6 +94,17 @@ export type SpaceSnapshot = {
 	backing: number;
 	w: number;
 	h: number;
+	/**
+	 * A lasso resize or rotate (LassoTransform.ts), grab to lift: the gesture, the input that grabbed the handle, and the
+	 * scale the picture was rastered at (1, or less for a box past the backing budget). The picture then holds the whole box
+	 * at the grab, from `col`, `top` at the camera `at`, and is drawn through the gesture's matrix. Absent for a drag.
+	 */
+	transform?: { gesture: TransformGesture; input: HandleInput; r: number } | null;
+	/**
+	 * The step's scale a resize or rotate picture's width floor was taken at. Below 100 percent (backing under dpr) a scale
+	 * move rasters the picture again, so it shows the weight the lift lands; a turn alone, and 100 percent, never do.
+	 */
+	floorScale?: number;
 };
 
 declare module "./InkOverlay" {
@@ -75,13 +112,60 @@ declare module "./InkOverlay" {
 		pruneSelectionOnInkChange(path: string): void;
 		strokesHere(): readonly InkStroke[];
 		selectionBounds(): BBox | null;
-		lassoDown(sample: PenSample): void;
-		lassoMove(samples: PenSample[]): void;
+		/**
+		 * The selection frame to draw: during a resize or turn the grab's box and the step the preview shows, so the frame
+		 * turns with the ink; otherwise selectionBounds and no step. The walls, the handle hits and the Attach button keep
+		 * selectionBounds.
+		 */
+		selectionFrame(): { box: BBox; step?: TransformParams } | null;
+		lassoDown(sample: PenSample, input?: HandleInput): void;
+		lassoMove(samples: PenSample[], shift?: boolean): void;
+		/** The resize or rotate handle under world point `w` for this input, or null: handles show for strokes alone. */
+		transformHandleAt(w: Point2, input: HandleInput): TransformHandle | null;
+		/** Whether the Attach button shows under the selection now (attachButtonShown). */
+		attachButtonShownHere(): boolean;
+		/** Whether world point `w` is on the shown Attach button for this input. */
+		attachButtonAt(w: Point2, input: HandleInput): boolean;
+		/**
+		 * A contact that landed on the Attach button, down to lift: where it landed and was last, world units, and the input.
+		 * The lift attaches or detaches (toggleAttach) while the contact stayed within the grab pad and lifted on the button;
+		 * a move past the pad lets it go (`cancelled`), and the rest of the contact does nothing. Null or absent otherwise.
+		 */
+		attachPress?: { from: Point2; last: Point2; input: HandleInput; cancelled: boolean } | null;
+		/**
+		 * The pin under world point `w` for this input, or null. The selected group's pin takes any input; a held group's pin
+		 * that is not selected takes a mouse or a finger only, since a bare pen tip there inks (the nib always inks).
+		 */
+		attachPinAt(w: Point2, input: HandleInput): AttachPin | null;
+		selectionContactAt(w: Point2, input: HandleInput): "pin" | "button" | "handle" | "box" | null;
+		/**
+		 * A contact that landed on a pin, down to lift: the pin's group, where the contact landed and was last, world units,
+		 * and whether it moved past the grab pad. The lift of a moved press drops the pin there (dropAttachPin); an unmoved
+		 * press does nothing. Null or absent otherwise.
+		 */
+		pinPress?: { id: string; from: Point2; last: Point2; moved: boolean } | null;
+		/**
+		 * A pen or an armed mouse hovering: the Attach button's words ("Attach") show under the button while the hover is on
+		 * it, and hide off it. One element per overlay, made on first need, on the note's document body.
+		 */
+		attachHover(sample: PenSample, pointerType?: string): void;
+		/**
+		 * "Attach" hides if it shows. hidePenCursor calls it, so the pen leaving hover range, the hover watchdog and every
+		 * teardown hide the words; `drop` also takes the anchor off the body, when the overlay closes.
+		 */
+		attachHoverOff(drop?: boolean): void;
 		commitLiveDrag(): void;
-		lassoUp(): void;
+		/** `cancelled`: the contact ended with a pointercancel or a window blur, not a lift. A moved pin goes back; a press on the Attach button does nothing. */
+		lassoUp(cancelled?: boolean): void;
 		spaceTextBoundary(y: number, direction: -1 | 1): SpaceBoundary | null;
 		planSpace(y: number): SpaceBoundary | null;
 		previewSpace(plan: SpaceBoundary, known?: ReturnType<InsertSpaceRows["get"]>): NonNullable<InkOverlayPlugin["spacePreview"]>;
+		/** Rig only: told of each previewSpace part's ms, by arm ("reuse." or "build.") and part. Unset in the plugin. */
+		spaceTime?: ((part: string, ms: number) => void) | null;
+		/** selectionBounds kept: its answer, under the selection, ink and corrections it was read at. */
+		selBoundsKept?: { path: string; rev: number; ink: number; fgen: number; gen: number; box: BBox | null } | null;
+		/** selectionBounds calls, answers kept, selected ids visited and found shown. */
+		selBoundsCounts?: { calls: number; kept: number; visited: number; selected: number };
 		queueSpaceFeedback(y: number): void;
 		clearSpaceFeedback(redraw?: boolean): void;
 		spaceDown(sample: PenSample, _ev: PointerEvent): void;
@@ -127,14 +211,54 @@ function topWallRoom(box: BBox | null): number {
 	return box ? Math.min(0, -box.y) : -Infinity;
 }
 
+/** How far a lasso drag may move `box` left: to the column's left border at x 0, none for a box already past it. */
+function leftWallRoom(box: BBox | null): number {
+	return box ? Math.min(0, -box.x) : -Infinity;
+}
+
 /**
  * A lasso drag's offset as its picture shows it, in whole backing px at `k` (the camera's zoom times the backing): the nearest
- * whole px in each axis, or in y the next one down when the nearest would put the grab's box above the note's top (the wall).
+ * whole px in each axis, or the next one down or right when the nearest would put the grab's box above the note's top or left
+ * of the column's left border (the walls).
  * The lift moves the store by this over `k`, so the ink lands where the picture showed it: no jump at the lift, of any size.
  */
 function shownLassoOffset(total: { dx: number; dy: number }, box: BBox, k: number): { x: number; y: number } {
-	const y = Math.round(total.dy * k);
-	return { x: Math.round(total.dx * k), y: y / k < topWallRoom(box) ? Math.ceil(total.dy * k) : y };
+	const x = Math.round(total.dx * k), y = Math.round(total.dy * k);
+	return { x: x / k < leftWallRoom(box) ? Math.ceil(total.dx * k) : x, y: y / k < topWallRoom(box) ? Math.ceil(total.dy * k) : y };
+}
+
+/**
+ * ONE PREVIEW REDRAW PER SHOWN FRAME. While a lassoed selection is resized, rotated or dragged as its picture, each pen sample
+ * updates the gesture's state at once and asks for this frame; the frame draws the newest state once. A 240 Hz pen sends about
+ * four samples per 60 Hz frame, and drawing each one (clear, picture, box, handles, attach chrome) drew three that were never
+ * shown (TransformPreviewRedraws.test.ts). Any synchronous redraw draws the newest state as well, so it drops the pending frame
+ * (redrawSelectionUI); the lift draws the final sample before it commits (commitLiveDrag), so the last picture shown is the
+ * one the ink lands on. An overlay torn down before the frame draws nothing.
+ */
+function queueSelectionPreview(o: InkOverlayPlugin): void {
+	if (o.selectionPreviewRaf != null) return;
+	o.selectionPreviewRaf = o.winRef.requestAnimationFrame(() => {
+		o.selectionPreviewRaf = null;
+		if (!o.container) return;
+		o.redrawSelectionUI();
+	});
+}
+
+/** Drop a pending preview frame. True if one was pending, so the state it would have drawn is newer than the last drawn. */
+function dropSelectionPreview(o: InkOverlayPlugin): boolean {
+	const id = o.selectionPreviewRaf;
+	if (id == null) return false;
+	o.selectionPreviewRaf = null;
+	o.winRef.cancelAnimationFrame(id);
+	return true;
+}
+
+/** The rows cache, told the editor's letter size in note units: a floating group of half of it or more is never a mark. */
+function spaceRowsOf(o: InkOverlayPlugin): InsertSpaceRows {
+	const rows = (o.spaceRowsCache ??= new InsertSpaceRows());
+	const px = o.view.defaultLineHeight / o.scale;
+	rows.letterPx = px > 0 && Number.isFinite(px) ? px : undefined;
+	return rows;
 }
 
 /** Two insert-space seams that draw the same preview. */
@@ -165,7 +289,17 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		return path ? this.noteStrokes(path) : [];
 	}
 
+	function selectionFrame(this: InkOverlayPlugin): { box: BBox; step?: TransformParams } | null {
+		const held = this.spaceSnapshot, turning = held?.kind === "lasso" ? held.transform : null;
+		if (turning && !this.selection.isEmpty) return { box: turning.gesture.box, step: turning.gesture.accepted };
+		const box = this.selectionBounds();
+		return box ? { box } : null;
+	}
+
 	function selectionBounds(this: InkOverlayPlugin): BBox | null {
+		// A resize or rotate shows the grab's box under the step the preview shows, axis-aligned, as the lift will leave it.
+		const held = this.spaceSnapshot, turning = held?.kind === "lasso" ? held.transform : null;
+		if (turning && !this.selection.isEmpty) return transformedBox(turning.gesture.box, turning.gesture.accepted);
 		const frozen = this.dragBox;
 		// A lasso drag carried as a picture moves the ids frozen at the grab, whatever the selection holds now: a stroke pruned
 		// from it mid-drag still rides the picture, so the box drawn and the top wall follow the picture, not the store's bounds,
@@ -175,10 +309,147 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			const { box } = frozen;
 			return { x: box.x + this.dragTotal.dx, y: box.y + this.dragTotal.dy, width: box.width, height: box.height };
 		}
-		return this.selection.bounds(this.strokesHere(), () => null, () => null);
+		// The selected strokes by id, each where this surface shows it, never a walk of the note; the
+		// answer is kept while the selection, the ink and the corrections hold. Text boxes and images add no rect here.
+		const sel = this.selection, path = this.filePath(), c = (this.selBoundsCounts ??= { calls: 0, kept: 0, visited: 0, selected: 0 });
+		c.calls++;
+		if (!path || sel.isEmpty) return null;
+		const anchors = this.lineAnchors, ink = inkRevision(), kept = this.selBoundsKept;
+		if (kept && kept.path === path && kept.rev === sel.revision && kept.ink === ink && kept.fgen === anchors.follow.generation && kept.gen === anchors.generation) {
+			c.kept++;
+			return kept.box;
+		}
+		const list = inlineInk.strokes(path), boxes: BBox[] = [];
+		for (const id of sel.strokeIds) {
+			c.visited++;
+			const s = strokeById(list, id);
+			const shown = s ? anchors.shownOne(s) : null;
+			if (!shown) continue;
+			c.selected++;
+			boxes.push(shown.bbox);
+		}
+		const box = unionBounds(boxes);
+		this.selBoundsKept = { path, rev: sel.revision, ink, fgen: anchors.follow.generation, gen: anchors.generation, box };
+		return box;
 	}
 
-	function lassoDown(this: InkOverlayPlugin, sample: PenSample): void {
+	function transformHandleAt(this: InkOverlayPlugin, w: Point2, input: HandleInput): TransformHandle | null {
+		if (this.dragTotal || this.lassoActive || !handlesShown(selectedKinds(this))) return null;
+		const bounds = this.selectionBounds();
+		return bounds ? hitTransformHandle(bounds, this.camera.snapshot.zoom, w, input, this.cssScale) : null;
+	}
+
+	function attachButtonShownHere(this: InkOverlayPlugin): boolean {
+		const path = this.filePath();
+		if (!path || this.selection.isEmpty) return false;
+		const chips = selectionChips(this, inlineInk.attachments(path));
+		return attachButtonShown({
+			attach: chips.attach,
+			detach: chips.detach,
+			kinds: selectedKinds(this),
+			lassoActive: this.lassoActive,
+			moving: this.dragTotal !== null || this.spaceSnapshot?.kind === "lasso",
+		});
+	}
+
+	function attachButtonAt(this: InkOverlayPlugin, w: Point2, input: HandleInput): boolean {
+		if (!this.attachButtonShownHere()) return false;
+		const bounds = this.selectionBounds();
+		return bounds !== null && hitAttachButton(bounds, this.camera.snapshot.zoom, w, input, this.cssScale);
+	}
+
+	/** The Attach button's tap: attach or detach, no menu (toggleAttach), then the chrome redrawn for the new state. */
+	function toggleAttachHere(overlay: InkOverlayPlugin): void {
+		const path = overlay.filePath();
+		if (!path) return;
+		if (toggleAttach(overlay, inlineInk.attachments(path)) !== null) overlay.redrawSelectionUI();
+	}
+
+	function attachPinAt(this: InkOverlayPlugin, w: Point2, input: HandleInput): AttachPin | null {
+		// Asked on every mouse down with nothing selected, so an editor with no state yet has no file and no pin: nothing
+		// may throw at pen-down.
+		const path = this.view?.state ? this.filePath() : null;
+		if (!path) return null;
+		const list = inlineInk.attachments(path);
+		if (list.length === 0) return null;
+		const zoom = this.camera.snapshot.zoom, selected = selectionChips(this, list).groupIds;
+		for (const pin of attachPinsOf(this, list, inlineInk.strokes(path), inlineInk.generation(path))) {
+			if (input === "pen" && !selected.includes(pin.id)) continue;
+			if (hitPin(pin.at, zoom, w, input, this.cssScale)) return pin;
+		}
+		return null;
+	}
+
+	/**
+	 * What a contact at `w` takes of the selection, the one hit test for every input: a pin (a pen only the selected
+	 * group's), the Attach button, a resize or rotate handle, or the padded box. Null: it lets go of the selection and
+	 * inks, or for a finger, is the page's. lassoDown asks the same four in the same order.
+	 */
+	function selectionContactAt(this: InkOverlayPlugin, w: Point2, input: HandleInput): "pin" | "button" | "handle" | "box" | null {
+		if (this.attachPinAt(w, input)) return "pin";
+		const bounds = this.selection.isEmpty ? null : this.selectionBounds();
+		if (!bounds) return null;
+		if (this.attachButtonAt(w, input)) return "button";
+		if (this.transformHandleAt(w, input) !== null) return "handle";
+		return pointInBBox(w.x, w.y, padBBox(bounds, visualToNote(SELECTION_GRAB_PAD, this.scale))) ? "box" : null;
+	}
+
+	/** The element the button's hover words hang from: an empty box over the button, made on first need. */
+	type HoverAnchor = HTMLElement & { hwShownAt?: string };
+	const hoverAnchors = new WeakMap<InkOverlayPlugin, HoverAnchor>();
+
+	/**
+	 * A pen or armed mouse over the Attach button shows "Attach" through Obsidian's own tooltip (displayTooltip), hung
+	 * from an anchor at the button's rect; a finger gets none. The anchor takes no pointer events, so
+	 * the overlay still gets the hover and the tap. Obsidian drops pen pointerouts and gives no hide call, so moving off
+	 * sends its own leave event (a pointerout on an aria-label element) from the anchor; any lift hides it too.
+	 */
+	function attachHover(this: InkOverlayPlugin, sample: PenSample, pointerType?: string): void {
+		const w = this.camera.screenToWorld(sample.x, sample.y);
+		const input = handleInput(pointerType ?? "pen");
+		const on = input !== "touch" && this.attachButtonAt(w, input);
+		if (!on) {
+			this.attachHoverOff();
+			return;
+		}
+		let anchor = hoverAnchors.get(this);
+		const bounds = this.selectionBounds();
+		const body = (this.container as { ownerDocument?: { body?: HTMLElement } } | null)?.ownerDocument?.body;
+		if (!bounds || !body?.createDiv) return;
+		if (!anchor) {
+			// Placed by its left and top, and it takes no pointer events: styles.css, .hw-attach-tip-anchor.
+			anchor = body.createDiv({ cls: "hw-attach-tip-anchor", attr: { "aria-label": ATTACH_STRINGS.button } });
+			hoverAnchors.set(this, anchor);
+		}
+		const cam = this.camera.snapshot, p = attachButtonPoint(bounds, cam.zoom, this.cssScale);
+		const r = noteToVisual(ATTACH_BUTTON_DRAW_PX / 2 / this.cssScale, this.cssScale);
+		const cx = this.lastSyncRectLeft + noteToVisual((p.x - cam.x) * cam.zoom, this.cssScale);
+		const cy = this.lastSyncRectTop + noteToVisual((p.y - cam.y) * cam.zoom, this.cssScale);
+		const at = `${cx - r},${cy - r},${2 * r}`;
+		if (anchor.hwShownAt !== at) {
+			anchor.style.left = `${cx - r}px`;
+			anchor.style.top = `${cy - r}px`;
+			anchor.style.width = anchor.style.height = `${2 * r}px`;
+			anchor.hwShownAt = at;
+		}
+		// Asked on every hover move: Obsidian reuses its tooltip for the same anchor, and makes it again after a lift hid it.
+		displayTooltip(anchor, ATTACH_STRINGS.button, { placement: "bottom" });
+	}
+
+	function attachHoverOff(this: InkOverlayPlugin, drop = false): void {
+		const anchor = hoverAnchors.get(this);
+		if (!anchor) return;
+		if (anchor.hwShownAt) {
+			anchor.hwShownAt = undefined;
+			anchor.dispatchEvent(new Event("pointerout", { bubbles: true }));
+		}
+		if (drop) {
+			anchor.remove();
+			hoverAnchors.delete(this);
+		}
+	}
+
+	function lassoDown(this: InkOverlayPlugin, sample: PenSample, input: HandleInput = "pen"): void {
 		// One call site for both paths into a lasso gesture - a fresh loop
 		// and grabbing an existing selection to drag both reach here, from
 		// the two call sites in `penDown` - so the reticle persists through
@@ -188,11 +459,39 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		// `penCursorEl` for the length of the gesture without this.
 		this.showLassoCursor(sample);
 		const w = this.camera.screenToWorld(sample.x, sample.y);
+		// A press a lost contact never lifted is let go here, so it cannot swallow this contact's moves.
+		this.attachPress = null;
+		this.pinPress = null;
+		// A pin is asked first: the selected group's pin can sit inside its own padded box, and a held group's beside its tag.
+		// A contact on it moves no ink and draws no loop; a drag moves the hook, at the lift. A held group's pin selects its
+		// group, so the drag draws with the selection's chrome.
+		const pin = this.attachPinAt(w, input);
+		if (pin) {
+			const path = this.filePath(), a = path ? inlineInk.attachments(path).find((x) => x.id === pin.id) : undefined;
+			if (a && !isOpaqueAttachment(a) && !a.strokeIds.every((id) => this.selection.hasStroke(id))) {
+				this.selection.selectExactly([...a.strokeIds]);
+				this.refreshStrip();
+			}
+			this.pinPress = { id: pin.id, from: w, last: w, moved: false };
+			this.redrawSelectionUI();
+			return;
+		}
+		// The Attach button is asked before the handles: a finger's corner square can reach under a narrow box to it. A
+		// contact on it moves nothing and draws no loop; its lift decides.
+		if (this.attachButtonAt(w, input)) {
+			this.attachPress = { from: w, last: w, input, cancelled: false };
+			return;
+		}
+		const handle = this.transformHandleAt(w, input);
+		// Two attached groups selected: a contact inside one group's union, off the handles, narrows the selection to it.
+		const notePath = this.filePath(), narrow = !handle && notePath ? narrowedTo(this, inlineInk.attachments(notePath), inlineInk.strokes(notePath), w.x, w.y, visualToNote(SELECTION_GRAB_PAD, this.scale)) : null;
+		if (narrow) this.selection.selectExactly(narrow);
 		const bounds = this.selectionBounds();
-		// Landing inside an existing selection moves it; anywhere else lassos.
+		// Landing on a handle resizes or rotates the selection; inside it moves it; anywhere else lassos. The handle is asked
+		// first: its hit square reaches past the grab pad, and the rotate knob sits above the box.
 		if (
 			bounds &&
-			pointInBBox(w.x, w.y, padBBox(bounds, visualToNote(SELECTION_GRAB_PAD, this.scale)))
+			(handle !== null || pointInBBox(w.x, w.y, padBBox(bounds, visualToNote(SELECTION_GRAB_PAD, this.scale))))
 		) {
 			this.dragFrom = { x: w.x, y: w.y };
 			this.dragTotal = { dx: 0, dy: 0 };
@@ -200,7 +499,10 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			this.dragIds = [...this.selection.strokeIds];
 			const here = this.filePath();
 			this.dragHistoryIdentity = here ? inlineInk.captureHistoryIdentity(here) : null;
-			this.beginLassoSnapshot(this.strokesHere());
+			// The transform rides the drag's picture and its lift. With no picture (none of the selection is shown here) the
+			// grab is a plain drag.
+			if (this.beginLassoSnapshot(this.strokesHere()) && handle !== null)
+				this.spaceSnapshot!.transform = { gesture: beginTransform(bounds, handle, w, this.camera.snapshot.zoom, widthRange(this.spaceSnapshot!.moving)), input, r: 1 };
 			return;
 		}
 		this.selection.clear();
@@ -225,9 +527,27 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		this.redrawSelectionUI();
 	}
 
-	function lassoMove(this: InkOverlayPlugin, samples: PenSample[]): void {
+	function lassoMove(this: InkOverlayPlugin, samples: PenSample[], shift = false): void {
 		const last = samples[samples.length - 1];
 		if (!last) return;
+		const pinPress = this.pinPress;
+		if (pinPress) {
+			// A contact on a pin: past the grab pad it is a drag, and the pin follows it.
+			const w = this.camera.screenToWorld(last.x, last.y), pad = visualToNote(SELECTION_GRAB_PAD, this.scale);
+			pinPress.last = w;
+			if (!pinPress.moved && Math.hypot(w.x - pinPress.from.x, w.y - pinPress.from.y) > pad) pinPress.moved = true;
+			if (pinPress.moved) this.redrawSelectionUI();
+			return;
+		}
+		const press = this.attachPress;
+		if (press) {
+			// A contact on the Attach button: a move past the grab pad lets it go, and the contact does nothing more.
+			if (press.cancelled) return;
+			const w = this.camera.screenToWorld(last.x, last.y), pad = visualToNote(SELECTION_GRAB_PAD, this.scale);
+			press.last = w;
+			if (Math.hypot(w.x - press.from.x, w.y - press.from.y) > pad) press.cancelled = true;
+			return;
+		}
 
 		if (this.dragFrom && this.dragTotal) {
 			const path = this.filePath();
@@ -237,16 +557,24 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			// the contact, and the move the lift records stops growing with it.
 			if (this.selection.isEmpty) return;
 			const w = this.camera.screenToWorld(last.x, last.y);
-			const dx = w.x - this.dragFrom.x;
+			const held = this.spaceSnapshot, turning = held?.kind === "lasso" ? held.transform : null;
+			if (turning) {
+				// A resize or rotate: the step under the pen, slid onto a wall it would cross. The store and the committed layers do
+				// not change until the lift; the picture is drawn through the step.
+				stepTransform(turning.gesture, w, { shift, input: turning.input, k: this.camera.snapshot.zoom * (this.committedBacking ?? 0) });
+				if (!this.repaintQueued || this.pinchPreview) queueSelectionPreview(this);
+				return;
+			}
 			// Live drag only translates coordinates in the store; the history
 			// op is pushed once at release, naming the ids frozen at pen-down,
 			// which are also the ids moved here.
 			const before = this.selectionBounds();
-			// THE TOP IS A WALL. No scroll room exists above the note's top, so
-			// ink dragged past it could not be seen, lassoed or fitted again
-			// (Alan: no infinite space up and left; the left edge is not walled
-			// here). The selection stops with its box at the top; ink already
-			// above it may go down, never further up.
+			// THE TOP AND THE LEFT ARE WALLS. No scroll room exists above the
+			// note's top or left of the column's border, so ink dragged past
+			// either could not be seen, lassoed or fitted again (Alan: no
+			// infinite space up and left). The selection stops with its box at
+			// the wall; ink already past it may come back, never go further out.
+			const dx = Math.max(w.x - this.dragFrom.x, leftWallRoom(before));
 			const dy = Math.max(w.y - this.dragFrom.y, topWallRoom(before));
 			if (this.spaceSnapshot?.kind === "lasso") {
 				// The selected ink rides the tail as the grab's picture (drawSpacePicture): a sample moves nothing in the store and
@@ -254,9 +582,9 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 				// repainting its box per sample was the drag's lag on a heavy note. Other panes update at the lift.
 				this.dragTotal.dx += dx;
 				this.dragTotal.dy += dy;
-				this.dragFrom = { x: w.x, y: this.dragFrom.y + dy };
+				this.dragFrom = { x: this.dragFrom.x + dx, y: this.dragFrom.y + dy };
 				// A queued repaint draws the picture and the box in its frame; drawing them here too drew them twice.
-				if (!this.repaintQueued || this.pinchPreview) this.redrawSelectionUI();
+				if (!this.repaintQueued || this.pinchPreview) queueSelectionPreview(this);
 				return;
 			}
 			this.moveLive(path, this.dragIds, dx, dy);
@@ -265,7 +593,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			// The pen's return is not a jump: the grab point follows only the
 			// distance the ink moved, so the ink resumes once the pen is back
 			// at the point where it stopped.
-			this.dragFrom = { x: w.x, y: this.dragFrom.y + dy };
+			this.dragFrom = { x: this.dragFrom.x + dx, y: this.dragFrom.y + dy };
 			let moved: BBox[] | undefined;
 			if (before) {
 				moved = [before, { x: before.x + dx, y: before.y + dy, width: before.width, height: before.height }];
@@ -304,6 +632,9 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 	function commitLiveDrag(this: InkOverlayPlugin): void {
 		const total = this.dragTotal;
 		if (!total) return;
+		// The final sample has not been drawn yet: draw it while the picture still rides the tail, so the ink commits where it
+		// was last seen (zero snap).
+		if (dropSelectionPreview(this)) this.redrawSelectionUI();
 		let { dx, dy } = total;
 		// The op freezes WHICH strokes moved, as picked up at pen-down. An old
 		// move must never later act on whatever happens to be selected, and a
@@ -317,6 +648,10 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		this.dragIds = [];
 		this.dragHistoryIdentity = null;
 		const path = this.filePath();
+		if (snap?.transform) {
+			liftTransform(this, snap, snap.transform.gesture, path, strokeIds);
+			return;
+		}
 		if (snap) {
 			this.indexDirty = true;
 			this.paintedStrokeCount = snap.painted;
@@ -336,7 +671,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			// The dropped strokes ride the lines they were dropped on, not the ones they left.
 			this.retakeLineAnchors(path, strokeIds);
 			inlineInk.save(path);
-			this.dispatchInk({ type: "move", path, strokeIds, dx, dy });
+			this.dispatchDrop(path, strokeIds, dx, dy);
 			// A move changes no stroke COUNT, so the cache's cheap guard
 			// cannot see it. §5g/G1.
 			this.frontierCache.invalidate(path);
@@ -353,7 +688,22 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		}
 	}
 
-	function lassoUp(this: InkOverlayPlugin): void {
+	function lassoUp(this: InkOverlayPlugin, cancelled = false): void {
+		const pinPress = this.pinPress;
+		if (pinPress) {
+			this.pinPress = null;
+			// A cancelled pin drag puts the pin back, as Escape does: the hook stays on its words and nothing is written.
+			if (pinPress.moved && !cancelled) this.dropAttachPin(pinPress.id, pinPress.last);
+			this.redrawSelectionUI();
+			return;
+		}
+		const press = this.attachPress;
+		if (press) {
+			this.attachPress = null;
+			// A pointercancel or a window blur on the button does nothing, as a move past the pad does: nothing is written.
+			if (!cancelled && !press.cancelled && this.attachButtonAt(press.last, press.input)) toggleAttachHere(this);
+			return;
+		}
 		if (this.dragTotal) {
 			this.commitLiveDrag();
 			this.redrawSelectionUI();
@@ -367,6 +717,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		}
 		this.lassoActive = false;
 		this.selection.selectByLasso(this.lassoPts, this.strokesHere(), [], () => null);
+		this.expandToAttachedGroups();
 		this.lassoPts = [];
 		this.redrawSelectionUI();
 	}
@@ -449,17 +800,27 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 	}
 
 	function previewSpace(this: InkOverlayPlugin, plan:SpaceBoundary,known?:ReturnType<InsertSpaceRows["get"]>):NonNullable<InkOverlayPlugin["spacePreview"]> {
+		const on=this.spaceTime, t0=on?performance.now():0;
 		const strokes=this.strokesHere();
-		const rows=known??(this.spaceRowsCache??=new InsertSpaceRows()).get(strokes);
+		const t1=on?performance.now():0;
+		const rows=known??spaceRowsOf(this).get(strokes);
+		const t2=on?performance.now():0;
 		// Below the text every hover sample is a new plan. While the rows are the same (the cache keeps its array while the
 		// strokes and their revisions do) and none changes side of the seam, the lists are the last preview's; rebuilding them
 		// filters every stroke.
 		const prior=this.spacePreview;
-		if(prior&&prior.rows===rows&&sameRowSides(rows,prior.plan.y,plan.y))
+		if(prior&&prior.rows===rows&&sameRowSides(rows,prior.plan.y,plan.y)&&this.spaceGroupSides(prior.plan.y,plan.y,rows)){
+			if(on){on("reuse.strokes",t1-t0);on("reuse.get",t2-t1);on("reuse.groupSides",performance.now()-t2);}
 			return {plan,doc:this.view.state.doc,moving:prior.moving,staying:prior.staying,rows};
-		const moving=strokeIdsBelow(strokes,plan.y,rows),ids=new Set(moving);
+		}
+		const t3=on?performance.now():0;
+		const groups=this.spaceGroups(plan.y,rows);
+		const t4=on?performance.now():0;
+		const moving=strokeIdsBelow(strokes,plan.y,rows,groups),ids=new Set(moving);
+		const t5=on?performance.now():0;
 		const staying=rows.filter(row=>row.top<plan.y&&row.bottom>plan.y)
 			.flatMap(row=>row.ids).filter(id=>!ids.has(id));
+		if(on){on("build.strokes",t1-t0);on("build.get",t2-t1);on("build.sidesMiss",t3-t2);on("build.spaceGroups",t4-t3);on("build.strokeIdsBelow",t5-t4);on("build.staying",performance.now()-t5);}
 		return {plan,doc:this.view.state.doc,moving,staying,rows};
 	}
 
@@ -480,7 +841,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			// nothing to read, plan or draw: spaceMove draws once per sample.
 			if(this.spacePlan&&this.spaceLineY!==null)return;
 			// One ask of the rows cache per frame, handed to everything below.
-			const rows=(this.spaceRowsCache??=new InsertSpaceRows()).get(this.strokesHere());
+			const rows=spaceRowsOf(this).get(this.strokesHere());
 			// A frame that would draw what the last one drew is skipped: the
 			// pen sliding along a line re-planned the seam and re-stroked every
 			// previewed stroke at hover rate. Same hover y skips the plan too;
@@ -818,7 +1179,9 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 	function spaceUp(this: InkOverlayPlugin): void {
 		const path = this.filePath();
 		const applied = this.spaceTotalDy;
-		const strokeIds = this.spaceIds;
+		const strokeIds = this.spaceStoreIds(this.spaceIds);
+		// The moving set's members the text change carries (its groups), not moved in the store here.
+		const stored = new Set(strokeIds), textIds = this.spaceIds.filter((id) => !stored.has(id));
 		const plan = this.spacePlan;
 		const rows = this.spaceRows ?? null;
 		// From here the committed layers paint the store again. This pane's
@@ -880,6 +1243,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			return;
 		}
 		if (strokeIds.length) this.moveLive(path, strokeIds, 0, dy);
+		const attachedBefore = inlineInk.attachments(path), held = strokeIds.length ? this.spaceHeldShift(path, strokeIds, dy) : [];
 		if(strokeIds.length)inlineInk.save(path);
 		// Space opened: the moved rows shift in the cache by the same step,
 		// so the next hover does not regroup every point in the note. The
@@ -889,14 +1253,14 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		// dispatch below moves the ink back, and that move's revision makes
 		// the shift refuse and the next ask rebuild.
 		if (dy > 0 && rows) {
-			this.spaceRowsCache.queueShift(rows, strokeIds, [dy]);
+			this.spaceRowsCache.queueShift(rows, strokeIds, [dy], textIds);
 			this.winRef.requestAnimationFrame(() => this.winRef.setTimeout(() => this.spaceRowsCache.runQueued(this.strokesHere()), 0));
 		}
 		const op = strokeIds.length?this.stampInkIdentity({ type: "move", path, strokeIds, dx: 0, dy }):null;
 		try {
 			this.view.dispatch({
 				changes: change.changes ?? undefined,
-				effects: op?inkEffect.of(op):undefined,
+				effects: op?[op, ...held.map((h) => this.stampInkIdentity(h))].map((o) => inkEffect.of(o)):undefined,
 				annotations: op?[inkApplied.of(true), isolateHistory.of("full")]:isolateHistory.of("full"),
 			});
 		} catch (err) {
@@ -905,6 +1269,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			// and the restored state reaches the disk as rollbackSpaceMove does.
 			if (strokeIds.length) {
 				inlineInk.moveStrokes(path, strokeIds, 0, -dy);
+				if (held.length) inlineInk.setAttachments(path, attachedBefore, true);
 				inlineInk.save(path);
 				this.frontierCache.invalidate(path);
 			}
@@ -1012,6 +1377,9 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 	function shrinkTailNow(this: InkOverlayPlugin): void {
 		this.tailShrinkQueued = false;
 		if (!this.tail || !this.container || this.builder) return;
+		// A lasso drag or turn whose selection was let go mid-contact still carries its ink as the picture on the full tail until
+		// the lift; the shrink would wipe it.
+		if (this.spaceSnapshot?.kind === "lasso") return;
 		const preview = this.spacePreview;
 		if ((this.lassoActive && this.lassoPts.length > 1) || (preview !== null && preview.doc === this.view.state.doc) ||
 			this.selectionBounds() !== null || this.tail.inlineGrid?.mode !== "full") return;
@@ -1044,26 +1412,44 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 	}
 
 	function redrawSelectionUI(this: InkOverlayPlugin, rows?: ReturnType<InsertSpaceRows["get"]>): void {
+		// This draws the newest state, so a preview frame still pending would only draw it again (queueSelectionPreview).
+		dropSelectionPreview(this);
 		if (!this.tail) return;
 		// A repaint with no selection still needs a compact live head; an idle
 		// repaint releases the bitmap instead of restoring the whole band.
 		// The hover frame hands over the rows it just read; every other caller
 		// asks the cache itself, so a reload or erase under a hover still drops
 		// a preview of ink that is gone.
+		const on=this.spaceTime, t0=on?performance.now():0;
 		if(this.spacePreview&&!this.spacePlan&&(rows??this.spaceRowsCache.get(this.strokesHere()))!==this.spacePreview.rows)this.spacePreview=null;
+		const tr=on?performance.now():0;
+		if(on)on("sel.rows",tr-t0);
 		const preview=this.spacePreview;
 		const bounds = this.selectionBounds();
 		const head = this.builder ? this.activeWet.head() : undefined;
+		const path = this.filePath();
 		const fullUI = (this.lassoActive && this.lassoPts.length > 1) ||
 			(preview !== null && preview.doc === this.view.state.doc) || bounds !== null;
-		if (fullUI) this.tail.restoreFullSurface();
+		// Nothing selected, no lasso, no preview: no group boxes, only the chip and mark sync; a held tag that moved is
+		// worked out by the committed repaint that paints its ink.
+		let attach = NO_CHROME;
+		if (path && fullUI) attach = attachChromeOf(this, inlineInk.attachments(path), inlineInk.strokes(path), inlineInk.generation(path));
+		else if (path) syncWithoutChrome(this, inlineInk.attachments(path), inlineInk.strokes(path), inlineInk.generation(path));
+		// Escape or a tool change mid-drag or mid-turn empties the selection with the pen down: no chrome is drawn, but the tail
+		// keeps its full surface for the picture, which shows the ink where it was let go until the lift.
+		const keepFull = fullUI || this.spaceSnapshot?.kind === "lasso";
+		const tp=on?performance.now():0;
+		if (keepFull) this.tail.restoreFullSurface();
+		const tq=on?performance.now():0;
 		this.tail.clearAll(this.cssWidth, this.cssHeight);
 		this.dressTail(this.builder !== null && this.activeWet === this.highlightWet);
+		if(on){on("sel.bounds",tp-tr);on("sel.restore",tq-tp);on("sel.clear",performance.now()-tq);}
+		const tl=on?performance.now():0;
 		const cam = this.camera.snapshot;
 		// With no head and the tail at its full size (the chrome just went), the shrink to the empty backing reallocates the canvas;
 		// it runs in a task after this frame, and the cleared full tail stands in until then.
-		if (!fullUI && !head && this.tail.inlineGrid?.mode === "full") this.queueTailShrink();
-		else if (!fullUI) this.tail.prepareLive(head ? {
+		if (!keepFull && !head && this.tail.inlineGrid?.mode === "full") this.queueTailShrink();
+		else if (!keepFull) this.tail.prepareLive(head ? {
 			cam, style: this.activeStyle, from: head.from, to: head.to,
 			pressure: head.pressure,
 			hwWorld: this.activeWet.liveHalfWidth(this.activeStyle, head.pressure),
@@ -1071,6 +1457,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		if (this.lassoActive && this.lassoPts.length > 1) {
 			this.tail.drawLasso(cam, this.lassoPts, SELECTION_COLOR);
 		}
+		if(on)on("sel.live",performance.now()-tl);
 		// A reload/erase while hovering invalidates the affected-set promise.
 		// A live drag intentionally keeps its frozen set despite translations.
 		if (preview && preview.doc===this.view.state.doc) {
@@ -1078,12 +1465,20 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			// strokes from a list kept while the camera holds; the hover draws
 			// every previewed stroke.
 			const snap=this.spaceSnapshot;
+			// Rig only: the picture, the lists and the strokes drawn, timed apart.
+			const ta=on?performance.now():0;
 			if(snap){
 				this.drawSpacePicture(snap,cam);
-				for(const stroke of this.spaceAmber(snap,cam))
+				const tb=on?performance.now():0, amber=this.spaceAmber(snap,cam), tc=on?performance.now():0;
+				for(const stroke of amber)
 					this.tail.drawSpaceStroke(cam,stroke,STAYING_COLOR,this.cssWidth,this.cssHeight,this.cssScale);
-			}else for(const {stroke,color} of this.spaceDrawItems(preview,cam))
-				this.tail.drawSpaceStroke(cam,stroke,color,this.cssWidth,this.cssHeight,this.cssScale);
+				if(on){on("sel.picture",tb-ta);on("sel.lists",tc-tb);on("sel.drawn",performance.now()-tc);}
+			}else{
+				const items=this.spaceDrawItems(preview,cam), tc=on?performance.now():0;
+				for(const {stroke,color} of items)
+					this.tail.drawSpaceStroke(cam,stroke,color,this.cssWidth,this.cssHeight,this.cssScale);
+				if(on){on("sel.lists",tc-ta);on("sel.drawn",performance.now()-tc);}
+			}
 			this.tail.drawSpaceDivider(cam,preview.plan.y,SELECTION_COLOR,this.cssWidth);
 			// The labels start at the pane's left edge, not the band's: the band
 			// sits up to a margin left of the pane on a note that scrolls sideways.
@@ -1100,9 +1495,30 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 			}
 		}
 		// A lasso drag's selected ink, as the grab's picture at the drag's offset.
+		const th=on?performance.now():0;
 		const held = this.spaceSnapshot;
-		if (held && held.kind === "lasso") this.drawSpacePicture(held, cam);
-		if (bounds) this.tail.drawSelectionBox(cam, bounds, SELECTION_COLOR);
+		if (held && held.kind === "lasso") {
+			if (held.transform) drawTransformPicture(this, held, held.transform, cam);
+			else this.drawSpacePicture(held, cam);
+		}
+		// The handles ride the box whenever the selection holds strokes alone, a drag and a resize or rotate included.
+		// During a resize or turn the frame is the grab's box under the step, so it and the knob turn with the ink.
+		const frame = bounds ? this.selectionFrame() : null;
+		if (frame) this.tail.drawSelectionBox(cam, frame.box, SELECTION_COLOR, !this.lassoActive && handlesShown(selectedKinds(this)), frame.step);
+		// The Attach button under the box: the selection colour while the selection is one whole attached group, muted while loose.
+		if (bounds && path && this.attachButtonShownHere()) {
+			const c = overlayColours(this), detach = selectionChips(this, inlineInk.attachments(path)).detach;
+			this.tail.drawAttachButton(cam, bounds, detach, { attached: SELECTION_COLOR, loose: c.muted, background: c.background });
+		}
+		// The chrome rides the full tail only: with nothing selected a held group's tag is on the committed layer. A pin being
+		// dragged shows under the contact, its head where the contact is, in place of the selected group's pin on its words.
+		const dragged = this.pinPress?.moved ? this.pinPress : null;
+		if (fullUI) paintAttachChrome(this, this.tail, cam, dragged && attach.pins ? { ...attach, pins: undefined } : attach, SELECTION_COLOR, this.cssScale);
+		if (fullUI && dragged) {
+			const c = overlayColours(this), k = PIN_LIFT_PX / (cam.zoom * this.cssScale);
+			this.tail.drawAttachPin(cam, { x: dragged.last.x, y: dragged.last.y + k }, SELECTION_COLOR, c.background, this.cssScale);
+		}
+		if(on)on("sel.box",performance.now()-th);
 		// A repaint can land mid-stroke - a scroll, an external reload, damage
 		// from an erase elsewhere. clearAll above takes the live head with it,
 		// and the head is the lag-free tip: erasing it until the next pointer
@@ -1133,13 +1549,181 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		if(snap)this.scheduleRepaint();
 	}
 
+	/** What the selection holds, by kind, for handlesShown: strokes, text boxes and images. */
+	function selectedKinds(overlay: InkOverlayPlugin): { strokes: number; boxes: number; images: number } {
+		const sel = overlay.selection, boxes = sel.boxIds.length, images = sel.imageIds.length;
+		return { strokes: sel.size - boxes - images, boxes, images };
+	}
+
+	/**
+	 * A stroke's correction on this surface, world units: an attached member's group's in both axes, an anchored free stroke's
+	 * line's in y, none for a member of a pending group (it is not shown, so nothing the user saw is moved by it).
+	 */
+	function correctionOf(overlay: InkOverlayPlugin, s: InkStroke): { dx: number; dy: number } {
+		const anchors = overlay.lineAnchors, g = anchors.follow.offsetOf(s.id);
+		if (g === undefined) return { dx: 0, dy: anchors.dyOf(s) };
+		return g ? { dx: g.dx, dy: g.dy } : { dx: 0, dy: 0 };
+	}
+
+	/**
+	 * The lift of a resize or rotate, as the drop's lift: the store rewritten once in place by exactly the step the picture
+	 * showed (transformEdits, each stroke at its own correction), the line anchors taken again where the ink now sits, a save,
+	 * one history step, and the committed layers back on the store, with the grab's box and the new one repainted here and on
+	 * the other panes. A step that changed nothing records nothing.
+	 */
+	function liftTransform(overlay: InkOverlayPlugin, snap: SpaceSnapshot, g: TransformGesture, path: string | null, ids: readonly string[]): void {
+		const t = g.accepted, changed = t.scale !== 1 || t.angle !== 0;
+		const after = changed ? transformedBox(g.box, t) : g.box;
+		overlay.indexDirty = true;
+		overlay.paintedStrokeCount = snap.painted;
+		if (path && ids.length && changed) {
+			// Each stroke's correction, read once before the rewrite: the retake below changes the line anchors.
+			const corr = new Map<string, { dx: number; dy: number }>();
+			const at = (s: InkStroke) => corr.get(s.id) ?? corr.set(s.id, correctionOf(overlay, s)).get(s.id)!;
+			const edits = transformEdits(inlineInk.strokes(path), ids, t, (s) => at(s).dy, (s) => at(s).dx);
+			if (edits.strokeIds.length > 0) {
+				inlineInk.rewriteStrokes(path, edits.strokeIds.map((id, i) => ({ id, shape: edits.after[i]! })));
+				// The transformed strokes ride the lines they now sit on, as dropped strokes do.
+				overlay.retakeLineAnchors(path, edits.strokeIds);
+				inlineInk.save(path);
+				dispatchTransform(overlay, path, edits, t, corr);
+				// A rewrite changes no stroke COUNT, so the cache's cheap guard cannot see it.
+				overlay.frontierCache.invalidate(path);
+				for (const p of instances) if (p !== overlay && p.filePath() === path) p.indexDirty = true;
+			}
+		}
+		// The committed layers drew without the selected ink since the grab: paint where it was and where it is now.
+		overlay.extentArmAsked = true;
+		overlay.bandGrowthMayWait = true;
+		overlay.damage.addRect(g.box);
+		overlay.damage.addRect(after);
+		overlay.scheduleRepaint("partial");
+		if (path && changed) overlay.repaintPath(path, [g.box, after]);
+	}
+
+	/**
+	 * The lift's history: the transform, and for each attached group whose probe stroke it rewrote, the group's record with
+	 * the probe mapped as that stroke's points were (transformStorePoint, store space), in one step, as a drop records its
+	 * move. The group keeps its words: the ref and the layout stay. A group whose probe stroke was not transformed gets no step.
+	 */
+	function dispatchTransform(overlay: InkOverlayPlugin, path: string, edits: TransformEdits, t: TransformParams,
+		corr: ReadonlyMap<string, { dx: number; dy: number }>): void {
+		const op: InkOp = { type: "transform", path, strokeIds: [...edits.strokeIds], before: [...edits.before], after: [...edits.after] };
+		const moved = new Set(edits.strokeIds), list = inlineInk.attachments(path), steps: InkOp[] = [op];
+		let next = list;
+		for (const a of list) {
+			if (isOpaqueAttachment(a) || !moved.has(a.probe.id)) continue;
+			const c = corr.get(a.probe.id) ?? { dx: 0, dy: 0 }, p = transformStorePoint(a.probe, t, c.dy, c.dx);
+			const { list: l, step } = attachGroup(next, { ...a, probe: { ...a.probe, x: p.x, y: p.y } });
+			if (!step) continue;
+			next = l;
+			steps.push({ ...step, path });
+		}
+		if (next !== list) inlineInk.setAttachments(path, next, true);
+		if (steps.length === 1) {
+			overlay.dispatchInk(op);
+			return;
+		}
+		try {
+			overlay.view.dispatch({
+				effects: steps.map((o) => inkEffect.of(overlay.stampInkIdentity(o))),
+				annotations: [inkApplied.of(true), isolateHistory.of("full")],
+			});
+		} catch (err) {
+			console.error("[handwriting] ink history dispatch failed", err);
+		}
+	}
+
+	/**
+	 * A resize or rotate's selected ink on the tail: the grab's picture drawn through the step's matrix (pictureMatrix), soft
+	 * while the gesture lasts; the lift redraws it crisp from the store. The picture is made again only when the camera, the
+	 * backing or the tail's size changes, so the step's world numbers never depend on the camera.
+	 */
+	function drawTransformPicture(overlay: InkOverlayPlugin, snap: SpaceSnapshot, turning: NonNullable<SpaceSnapshot["transform"]>,
+		cam: CameraState): void {
+		const tail = overlay.tailCanvas, b = overlay.committedBacking ?? 0, k = cam.zoom * b;
+		if (!tail || !(k > 0) || !Number.isFinite(k) || tail.width === 0 || tail.height === 0) return;
+		const s = turning.gesture.accepted.scale;
+		if (!snap.canvas || snap.x !== cam.x || snap.y !== cam.y || snap.zoom !== cam.zoom || snap.backing !== b || snap.w !== tail.width ||
+			snap.h !== tail.height || (b < overlay.dpr && snap.floorScale !== s)) rasterTransformPicture(overlay, tail, snap, turning, cam, b);
+		const pic = snap.canvas;
+		if (!pic) return;
+		const ctx = snap.tailCtx ??= tail.getContext("2d");
+		if (!ctx) return;
+		const m = pictureMatrix(turning.gesture.accepted, snap.at, k), r = turning.r;
+		ctx.save();
+		ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+		ctx.globalAlpha = 1;
+		ctx.globalCompositeOperation = "source-over";
+		ctx.drawImage(pic, snap.col, snap.top, pic.width / r, pic.height / r);
+		ctx.restore();
+	}
+
+	/**
+	 * The transform's picture: the whole grab box (padded for the stroke floor) at camera `cam`, its pixel (0, 0) the tail's
+	 * backing px (`col`, `top`) there, the strokes painted as their committed layers paint them (rasterSpaceRows). A box over
+	 * the backing budget is rastered at a smaller scale `r` and drawn back up: softer, never larger than the budget. The width
+	 * floor is taken at the step's scale s: drawn at s, flooredHalfWidth(hw, b*s, dpr*s) is flooredHalfWidth(hw*s, b, dpr), the
+	 * weight the lift lands, where a floor at scale 1 drawn at s is not.
+	 */
+	function rasterTransformPicture(overlay: InkOverlayPlugin, tail: HTMLCanvasElement, snap: SpaceSnapshot,
+		turning: NonNullable<SpaceSnapshot["transform"]>, cam: CameraState, b: number): void {
+		const k = cam.zoom * b, box = snap.box;
+		const pad = Math.ceil(4 * b / overlay.cssScale) + 2;
+		const left = Math.floor((box.x - cam.x) * k) - pad, top = Math.floor((box.y - cam.y) * k) - pad;
+		const w = Math.ceil((box.x + box.width - cam.x) * k) + pad - left, h = Math.ceil((box.y + box.height - cam.y) * k) + pad - top;
+		const r = Math.min(1, Math.sqrt(MAX_BACKING_AREA / Math.max(1, w * h)));
+		const pic = snap.canvas ?? (tail.cloneNode(false) as HTMLCanvasElement);
+		const pw = Math.max(1, Math.ceil(w * r)), ph = Math.max(1, Math.ceil(h * r));
+		if (pic.width !== pw) pic.width = pw;
+		if (pic.height !== ph) pic.height = ph;
+		const ctx = pic.getContext("2d");
+		snap.canvas = ctx ? pic : null;
+		snap.col = left; snap.top = snap.lo = top; snap.done = snap.bottom = top + h;
+		snap.x = cam.x; snap.y = cam.y; snap.zoom = cam.zoom; snap.backing = b; snap.w = tail.width; snap.h = tail.height;
+		snap.at = { x: cam.x, y: cam.y, zoom: cam.zoom };
+		turning.r = r;
+		const s = turning.gesture.accepted.scale;
+		snap.floorScale = s;
+		if (!ctx) return;
+		const committed = committedFloorFor(overlay.committedBacking, overlay.dpr);
+		const floor = committed && s > 0 && Number.isFinite(s) ? { backing: committed.backing * s, dpr: committed.dpr * s } : committed;
+		ctx.save();
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.globalAlpha = 1;
+		ctx.globalCompositeOperation = "source-over";
+		ctx.clearRect(0, 0, pw, ph);
+		ctx.setTransform(b * r, 0, 0, b * r, -left * r, -top * r);
+		let wash = false;
+		for (const s of snap.moving) if (s.tool === "highlighter") { drawStroke(ctx, snap.at, s, undefined, true, undefined, floor); wash = true; }
+		if (wash) {
+			// The highlight layer paints its strokes opaque and carries one alpha, as rasterSpaceRows does.
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.globalCompositeOperation = "destination-in";
+			ctx.fillStyle = `rgba(0, 0, 0, ${HIGHLIGHTER_ALPHA})`;
+			ctx.fillRect(0, 0, pw, ph);
+			ctx.globalCompositeOperation = "source-over";
+			ctx.setTransform(b * r, 0, 0, b * r, -left * r, -top * r);
+		}
+		for (const s of snap.moving) if (s.tool === "pen") drawStroke(ctx, snap.at, s, undefined, true, undefined, floor);
+		ctx.restore();
+	}
+
 export function installLassoSpace(proto: InkOverlayPlugin): void {
 	installMethods(proto, {
 		pruneSelectionOnInkChange,
 		strokesHere,
 		selectionBounds,
+		selectionFrame,
 		lassoDown,
 		lassoMove,
+		transformHandleAt,
+		attachButtonShownHere,
+		attachButtonAt,
+		attachPinAt,
+		selectionContactAt,
+		attachHover,
+		attachHoverOff,
 		commitLiveDrag,
 		lassoUp,
 		spaceTextBoundary,

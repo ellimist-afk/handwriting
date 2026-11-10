@@ -15,6 +15,20 @@ import { DEFAULT_FOLD_ORDER } from "../inline/MobileTools";
 import { DEFAULT_INK_FOLDER } from "../persistence/InkFolder";
 import { DEFAULT_TOOLBAR_CORNER, ToolbarCorner } from "../inline/ToolbarCorner";
 
+/**
+ * One page id move left part done: the old id the note's ink still sits under
+ * (`held`), the id its text carries (`id`), the timer rounds it has had,
+ * whether a round made the old Slides file the new id's live file, and the
+ * content stamp of what a round made the new id's live inline file.
+ */
+export interface PartDoneFollow {
+	held: string;
+	id: string;
+	rounds: number;
+	keptLive: boolean;
+	wrote?: string;
+}
+
 export interface HandwritingSettings {
 	/** Named locations use their own schema; opaque records survive older builds. */
 	savedViews: unknown[];
@@ -30,8 +44,9 @@ export interface HandwritingSettings {
 	 * Shaped ink rendering (v0.13.10): velocity thinning, filtered pressure
 	 * Off pins pressure to its no-pressure value, so width stops following how
 	 * hard you press. Speed thinning and the endpoint taper stay in both
-	 * states. Applied at render time, so flipping this restyles every stroke
-	 * ever written.
+	 * states. Sets new strokes only: each stroke is saved with the value it
+	 * was drawn under, and ink saved before that draws under this device's
+	 * legacy pressure lock (LegacyPressureLock.ts), which is not a setting.
 	 */
 	pressureSensitivity: boolean;
 	/**
@@ -97,12 +112,27 @@ export interface HandwritingSettings {
 	/** Selected ink color per tool (v0.13.6), hex. */
 	inkColors: { pen: string; highlighter: string };
 	/**
+	 * The pen's eight colour slots and the highlighter's five (1.5.0), hex by
+	 * slot number ("0".."7", "0".."4"). Two keys rather than one map of two
+	 * tools: settings merge one level deep, so only a key per tool keeps two
+	 * devices' edits to different slots of the same tool.
+	 */
+	penPalette: Record<string, string>;
+	highlighterPalette: Record<string, string>;
+	/**
 	 * Which note owned each page id last session (v0.13.6). This is the
 	 * cross-session evidence that lets a duplicate discovered at startup
 	 * (a copy made while the app was closed) resolve safely: the remembered
 	 * path is the original, everything else carrying the id is a copy.
 	 */
 	pageOwners: Record<string, string>;
+	/**
+	 * Page id moves left part done, by note path: what the next launch's
+	 * census needs to finish one the app quit in the middle of
+	 * (PageIdentity.buildPageIdIndex). Set and removed with followEditedId's
+	 * own record of the move, and written with the page owners.
+	 */
+	partDoneFollows: Record<string, PartDoneFollow>;
 	/** Eraser radius in screen px (v0.13.13): 8 fine, 14 medium, 28 bold. */
 	eraserRadiusPx: number;
 	/** Mouse-ink mode (v0.13.16): left mouse button draws like a pen tip. */
@@ -123,6 +153,12 @@ export interface HandwritingSettings {
 	scribbleHintOffered: boolean;
 	/** Ruled paper background (v0.13.16): none, lines, grid or dots. Per device. */
 	paperStyle: PaperStyle;
+	/**
+	 * The faint page-end lines on Infinite Canvas notes. ON by default (Alan, 2026-11-09: "yeah give a setting,
+	 * default on"), so its load coercion reads `!== false`: a vault that never stored the key keeps its guides.
+	 * Off sets `handwriting-page-guides-off` on every window's body (applyPaperTo); styles.css hides the box under it.
+	 */
+	pageGuides: boolean;
 	extendCanvasWhileScrolling: boolean;
 	/**
 	 * Hide Obsidian's status bar while the ACTIVE note is a Handwriting page.
@@ -154,6 +190,8 @@ export interface HandwritingSettings {
 	penReticle: boolean;
 	/** Hold-at-end snaps the figure to a clean shape (1.0.14). Default on. */
 	shapeSnap: boolean;
+	/** A dense back-and-forth pen stroke over ink erases the ink under it (1.5.0). Default off. */
+	scribbleErase: boolean;
 	/** Shows the developer diagnostics commands in the palette. */
 	devDiagnostics: boolean;
 	/**
@@ -227,7 +265,10 @@ export const DEFAULT_SETTINGS: HandwritingSettings = {
 	 */
 	inkPdfColorMode: "darken",
 	inkColors: { pen: PEN_COLORS[0]!.hex, highlighter: HIGHLIGHTER_COLORS[0]!.hex },
+	penPalette: paletteSlots(PEN_COLORS.map((c) => c.hex)),
+	highlighterPalette: paletteSlots(HIGHLIGHTER_COLORS.map((c) => c.hex)),
 	pageOwners: {},
+	partDoneFollows: {},
 	eraserRadiusPx: DEFAULT_ERASER_RADIUS_PX,
 	mouseInk: false,
 	// On by default since 1.4.5. It was off for e-ink's sake (see
@@ -238,6 +279,7 @@ export const DEFAULT_SETTINGS: HandwritingSettings = {
 	einkHintOffered: false,
 	scribbleHintOffered: false,
 	paperStyle: "none",
+	pageGuides: true,
 	extendCanvasWhileScrolling: false,
 	/*
 	 * OFF, on Alan's ruling: status bar visible by default, with the toggle
@@ -253,6 +295,7 @@ export const DEFAULT_SETTINGS: HandwritingSettings = {
 	eraserMode: "stroke",
 	penReticle: true,
 	shapeSnap: true,
+	scribbleErase: false,
 	devDiagnostics: false,
 	slidesInk: true,
 	colorSizeCommands: false,
@@ -266,6 +309,11 @@ export const DEFAULT_SETTINGS: HandwritingSettings = {
 	stripFoldOrder: [...DEFAULT_FOLD_ORDER],
 	inkFolder: DEFAULT_INK_FOLDER,
 };
+
+/** A palette as its setting: hex by slot number, "0" first. */
+export function paletteSlots(hexes: readonly string[]): Record<string, string> {
+	return Object.fromEntries(hexes.map((hex, i) => [String(i), hex]));
+}
 
 /** A map-like setting value: an object that is not an array and not null. */
 export function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -1050,6 +1050,7 @@ describe("ink surfaces - the ledger's parts are held to the tree, not to memory"
 		"/src/inline/InkOverlayToolState.ts": "module tool and setting state the note surface imports and re-exports; nothing is installed on InkOverlayPlugin",
 		"/src/inline/InkOverlayRegistry.ts": "module registry the note surface imports and re-exports; nothing is installed on InkOverlayPlugin",
 		"/src/inline/InkOverlayConstants.ts": "module constants and small helpers the note surface imports and re-exports; nothing is installed on InkOverlayPlugin",
+		"/src/inline/InkOverlayAttachedLayer.ts": "attached ink layer class the note surface constructs; nothing is installed on InkOverlayPlugin",
 	};
 	const treeFiles = Object.keys(ALL_TS);
 

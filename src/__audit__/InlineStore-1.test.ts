@@ -132,7 +132,7 @@ function rig(): Rig {
 				},
 			},
 		},
-		pageIds: { register: () => ({ kind: "registered" }), snapshot: () => ({}) },
+		pageIds: { register: () => ({ kind: "registered" }), snapshot: () => ({}), owner: () => undefined },
 		settings: { cameras: {}, pageOwners: {} },
 		settingsDirty: false,
 		settingsTimer: null,

@@ -31,6 +31,11 @@
  * picture on one frame only is recorded (picsOneFrame) and not asserted.
  * The content box bottom edge is recorded and not asserted: it rides CodeMirror's height estimate for lines it has
  * not rendered. HW_Z1_OUT writes every sample as JSON.
+ *
+ * Counters per leg (recorded, not asserted; Z1-LEGS line and the record's legCounters): the stand-in copies and deferrals,
+ * the stand-in snapshots, the line anchor moves (the overlay's lineAnchorsMoved, counted in the page), and the whole paints by
+ * branch (path, extent, standIn, deferral, none), by frame (queued or direct) and by site. A leg runs from the rest before it
+ * to its own rest.
  */
 import { beforeAll, afterAll, it, expect } from "vitest";
 import { build } from "esbuild";
@@ -152,9 +157,31 @@ function sample(phase, ink = false) {
 		textLeft: textLeft === null ? null : r2(textLeft),
 		gutter: gr ? box(gr) : null, numRight: numRight === null ? null : r2(numRight),
 		overlapPx: gr && textLeft !== null ? r2((numRight ?? gr.right) - textLeft) : null,
-		picCount: pics.length, pics, renderedTextLines: textLines().length };
+		picCount: pics.length, pics, renderedTextLines: textLines().length,
+		ctr: { moved: ctr.moved, copies: overlay.standInCopies ?? 0, deferrals: overlay.standInDeferrals ?? 0, snapshots: overlay.standInSnapshots ?? 0, queuedPath: ctr.queuedPath, whole: { ...ctr.whole } } };
 	if (ink) { const i = backingInk(); s.ink = i && i.n ? { n: i.n, left: r2(i.left), right: r2(i.right), top: r2(i.top), bottom: r2(i.bottom) } : { n: i ? i.n : 0 }; }
 	frames.push(s); return s;
+}
+
+// Per leg counters: the overlay's own counts read at each sample, and two kept here by wrapping the instance's methods (a call
+// through this.<method> reaches the wrapper; each wrapper calls the original once, unchanged).
+const ctr = { moved: 0, extentCopies: 0, queuedPath: 0, whole: {} };
+function installLegCounters(o) {
+	const moved = o.lineAnchorsMoved, paint = o.paintCommittedWork, copyExt = o.copyFromExtent;
+	if (typeof moved !== "function" || typeof paint !== "function" || typeof copyExt !== "function") throw new Error("leg counters: a wrapped method is missing");
+	o.lineAnchorsMoved = function (...a) { ctr.moved++; return moved.apply(this, a); };
+	o.copyFromExtent = function (e, cam, rect) { const r = copyExt.call(this, e, cam, rect); if (r && !rect) ctr.extentCopies++; return r; };
+	o.paintCommittedWork = function (cam, work, strokes) {
+		if (work !== "all") return paint.call(this, cam, work, strokes);
+		const c0 = this.standInCopies ?? 0, d0 = this.standInDeferrals ?? 0, w0 = this.wholePaints ?? 0, e0 = ctr.extentCopies;
+		const queued = !!this.inQueuedFrame, site = this.wholePaintSite ?? "unnamed";
+		const r = paint.call(this, cam, work, strokes);
+		const branch = (this.standInCopies ?? 0) > c0 ? "standIn" : (this.standInDeferrals ?? 0) > d0 ? "deferral" : (this.wholePaints ?? 0) > w0 ? "path" : ctr.extentCopies > e0 ? "extent" : "none";
+		const key = branch + (queued ? "@queued:" : "@direct:") + site;
+		ctr.whole[key] = (ctr.whole[key] ?? 0) + 1;
+		if (branch === "path" && queued) ctr.queuedPath++;
+		return r;
+	};
 }
 
 window.z1 = {
@@ -165,7 +192,7 @@ window.z1 = {
 		const srcs = [await picture(1280, 400, "#406080"), await picture(1280, 400, "#608040")];
 		const para = "Two pictures, then lines to write on. " + Array.from({ length: 6 }, (_, i) => "This sentence is " + (i + 1) + " of a paragraph long enough to wrap at every zoom.").join(" ");
 		const doc = [para, "![[pic-0.png]]", "line 2 alpha beta gamma", "![[pic-1.png]]",
-			...Array.from({ length: 70 }, (_, i) => "line " + (i + 4) + " alpha beta gamma delta")].join("\\n");
+			...Array.from({ length: mode === "long" ? 600 : 70 }, (_, i) => "line " + (i + 4) + " alpha beta gamma delta")].join("\\n");
 		const pane = document.body.appendChild(document.createElement("div"));
 		pane.className = "markdown-source-view mod-cm6 is-readable-line-width";
 		pane.style.cssText = "position:relative;margin-left:" + HOST_LEFT + "px;width:" + PANE_W + "px;height:" + PANE_H + "px;overflow:hidden";
@@ -179,10 +206,12 @@ window.z1 = {
 		const overlay = overlayForPath(path);
 		if (!overlay) throw new Error("no overlay for " + path);
 		rig = { pane, view, overlay, sizer, path };
+		installLegCounters(overlay);
 		const sd = view.scrollDOM;
 		// "last": scroll to the end so the last line renders, then place the last line 36 px above the pane's bottom edge (the end of the
 		// scroller is the granted blank room below the text, not the last line).
-		if (mode === "last") {
+		// "long": the same, on a note of 600 lines, so the lines above the drawn range (the pictures among them) are not drawn.
+		if (mode === "last" || mode === "long") {
 			sd.scrollTop = sd.scrollHeight; await settle(12);
 			for (let i = 0; i < 4; i++) { const ls = lines(), last = ls[ls.length - 1], pb = pane.getBoundingClientRect().bottom; sd.scrollTop += last.getBoundingClientRect().bottom - (pb - 36); await settle(12); }
 		}
@@ -204,7 +233,7 @@ window.z1 = {
 		await settle(12);
 		wrapScrollWrites(sd, () => currentPhase);
 		const nat = sample("natural", true);
-		return { strokes: inlineInk.strokes(path).length, natural: nat, anchorLineNo, lastLineNo, docLines: view.state.doc.lines, anchorFromPaneBottom: r2(pr.bottom - t.bottom), scrollTopAtMount: r2(sd.scrollTop), maxScrollTop: sd.scrollHeight - sd.clientHeight };
+		return { strokes: inlineInk.strokes(path).length, natural: nat, drawnFrom: view.state.doc.lineAt(view.viewport.from).number, anchorLineNo, lastLineNo, docLines: view.state.doc.lines, anchorFromPaneBottom: r2(pr.bottom - t.bottom), scrollTopAtMount: r2(sd.scrollTop), maxScrollTop: sd.scrollHeight - sd.clientHeight };
 	},
 	/** Where the fingers go: the anchor line's text a little right of its start (the ink's centre when it is on the pane), else the pane's middle at the line's height kept on the pane. */
 	finger() {
@@ -237,6 +266,7 @@ window.z1 = {
 		await settle(4); return sample(phase, true);
 	},
 	frames: () => frames,
+	boxCounts: () => ({ ...rig.overlay.lineAnchors.boxCounts }),
 };
 `;
 
@@ -251,7 +281,9 @@ let script = "";
  * line signature re-read while zoomed (ink leaves its line at the rests). ease0: the commit-time ease alone, no re-aim on
  * the hold's attempts (the first settled frame steps off the last preview frame). band0: the residue band
  * dropped, so a scale gap reads as the line moving. k1sticky: the line-number travel class comes off at 100% again, as
- * before the line numbers rode the pan (the 100% lift's gutter steps by the pan, and its gap to the text with it).
+ * before the line numbers rode the pan (the 100% lift's gutter steps by the pan, and its gap to the text with it). shown0: the
+ * stand-in's shown places check taken out of usableStandIn (a stand-in painted before the line anchors moved the strokes is
+ * copied again in the queued frame, the k4 lift of mode below).
  */
 const PLANTS: Record<string, [string, string, string]> = {
 	correction0: ["InkOverlayZoomApi", "moved=this.view.lineBlockAt(fingerLine.pos).top/scaleY-fingerLine.top-(settleLineApplied.get(hold)??0);", "moved=0;"],
@@ -259,6 +291,7 @@ const PLANTS: Record<string, [string, string, string]> = {
 	band0: ["InkOverlayZoomApi", "if(Number.isFinite(moved)&&Math.abs(moved)>band){", "if(Number.isFinite(moved)&&moved!==0){"],
 	ease0: ["InkOverlayPanSettle", "const reaim = settling && !owesPreviewEase && settlePaintedBefore.has(a);", "const reaim = false;"],
 	k1sticky: ["InkOverlayViewportBox", "if(release){host.classList.remove(GUTTER_TRAVEL_CLASS);return;}", "if(release||Math.abs(next-1)<=SCALE_EPSILON){host.classList.remove(GUTTER_TRAVEL_CLASS);return;}"],
+	shown0: ["InkOverlayExtent", "((wholeFrame && !this.inQueuedFrame) || st.shownMoves === this.shownMoves)) return st;", "true) return st;"],
 };
 const PLANT = process.env.HW_Z1_PLANT ?? "";
 if (PLANT && !PLANTS[PLANT]) throw new Error(`unknown HW_Z1_PLANT ${PLANT}`);
@@ -356,7 +389,17 @@ for (const mode of ["below", "last"] as const) {
 				prevRest = ix.rest; prev = { k: r.k, frame: r };
 			}
 			const worstOverlap = frames.reduce((a, f) => (f.overlapPx !== null && f.overlapPx > a.overlapPx ? f : a), { overlapPx: -Infinity, phase: null } as any);
-			record.push({ mode, sizedPics: SIZED, mount: m, legs: legsRun, read, worstOverlap: { px: worstOverlap.overlapPx, phase: worstOverlap.phase }, frames });
+			// Counters per leg: each count at the leg's rest minus the count at the rest before it (the natural frame for the first leg).
+			const legCounters = read.map((r, i) => {
+				const c0 = frames[i === 0 ? at("natural") : read[i - 1].frames.rest].ctr, c1 = frames[r.frames.rest].ctr;
+				const whole: Record<string, number> = {};
+				for (const k of Object.keys(c1.whole)) { const d = c1.whole[k] - (c0.whole[k] ?? 0); if (d) whole[k] = d; }
+				return { step: r.step, moved: c1.moved - c0.moved, copies: c1.copies - c0.copies, deferrals: c1.deferrals - c0.deferrals, snapshots: c1.snapshots - c0.snapshots,
+					queuedPath: c1.queuedPath - c0.queuedPath, whole, liftInk: r.firstSettledVsLastPreview.ink };
+			});
+			// eslint-disable-next-line no-console
+			console.log("Z1-LEGS-" + mode + (SIZED ? "-sized " : "-unsized ") + JSON.stringify(legCounters));
+			record.push({ mode, sizedPics: SIZED, mount: m, legs: legsRun, read, legCounters, worstOverlap: { px: worstOverlap.overlapPx, phase: worstOverlap.phase }, frames });
 			// eslint-disable-next-line no-console
 			console.log("ROUNDTRIP-" + mode + (SIZED ? "-sized " : "-unsized ") + JSON.stringify({ mount: { anchorLineNo: m.anchorLineNo, lastLineNo: m.lastLineNo, anchorFromPaneBottom: m.anchorFromPaneBottom, maxScrollTop: m.maxScrollTop }, worstOverlap: [worstOverlap.overlapPx, worstOverlap.phase],
 				steps: read.map(r => ({ step: r.step, previewSeen: r.previewSeen, kRest: r.kRest, onFinger: r.onFinger, frames: r.frames, anchorPresent: r.rest.anchor.present, anchorOnPane: r.rest.anchor.onPane, anchorInside: r.rest.anchor.inside,
@@ -428,9 +471,12 @@ for (const mode of ["below", "last"] as const) {
 
 // A LIFT UNDER CODEMIRROR'S REFRESH THRESHOLD. CodeMirror rebuilds its height map only when its scale
 // moves by more than 0.005, so a lift from 60% to 60.4% leaves its scaleY at 0.6 against a painted 0.604: the line correction
-// would read that gap as the line moving and step the page at the lift. The residue band leaves it alone, so the first settled
-// frame stands where the last preview frame painted the anchor text and the ink.
-it("a lift under CodeMirror's 0.005 refresh threshold, 60% to 60.4%, steps nothing at the lift", async () => {
+// would read that gap as the line moving and step the page at the lift. The cell reads the arrived picture, not a frame in the
+// glide: at the 60.4% rest the ink stands against its text where it stood at the 60% rest, text minus ink within 1 px.
+// Red at base 4290a2e8 and at 75fa7017 by the same 3.1 px (-4.67 against -1.59): a base red, item ZOOM-SUB-01.
+// The long-note twin: the anchor line far down a 600-line note, the lines above the drawn range never drawn. At the rest no line
+// box is read again without a geometry change.
+for (const note of ["below", "long"] as const) it(`a lift under CodeMirror's 0.005 refresh threshold, 60% to 60.4%, note "${note}", keeps the ink on its text at the rest`, async () => {
 	const page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: 2, hasTouch: true });
 	const errors: string[] = [];
 	page.on("pageerror", e => errors.push(String(e.message).slice(0, 200)));
@@ -440,8 +486,9 @@ it("a lift under CodeMirror's 0.005 refresh threshold, 60% to 60.4%, steps nothi
 		await page.addStyleTag({ content: THEME_CSS });
 		await page.addScriptTag({ content: script });
 		await page.evaluate((f) => { (window as any).z1SizedPics = f; }, SIZED);
-		const m = await page.evaluate(() => (window as any).z1.mount("below")) as any;
+		const m = await page.evaluate((md) => (window as any).z1.mount(md), note) as any;
 		expect(m.strokes, "the stroke committed").toBe(1);
+		if (note === "long") expect(m.drawnFrom, "premise: the lines above the drawn range are not drawn").toBeGreaterThan(4);
 		// The second lift goes out to 80% and back, so the router takes the pinch, and lifts at 60.4%.
 		const legs = [{ tag: "k0.6", to: 0.6, steps: 20, via: null }, { tag: "k0.604", to: 0.604, steps: 20, via: 0.8 }];
 		const rests: number[] = [];
@@ -454,14 +501,24 @@ it("a lift under CodeMirror's 0.005 refresh threshold, 60% to 60.4%, steps nothi
 		const mv = frames.map((f, i) => (f.phase.startsWith("k0.604-move") ? i : -1)).filter(i => i >= 0), pv = mv.filter(i => frames[i].preview);
 		const a = frames[pv.length ? pv[pv.length - 1]! : mv[mv.length - 1]!], f = frames[at("k0.604-lift-1")];
 		const j = jumps(a, f);
+		// Text minus ink at each rest: the anchor text's top less the ink's top, screen px; null when either is missing.
+		const tmi = (fr: any) => (fr && fr.anchor?.present && fr.ink?.n > 0 ? rd(fr.anchor.top - fr.ink.top) : null);
+		const r6 = frames[at("rest-k0.6")], r604 = frames[at("rest-k0.604")];
+		const t6 = tmi(r6), t604 = tmi(r604), drift = t6 !== null && t604 !== null ? rd(Math.abs(t604 - t6)) : null;
+		const atRest = await page.evaluate(() => (window as any).z1.boxCounts());
+		await page.evaluate(() => (window as any).z1.later(700, "rest-again"));
+		const restAgain = await page.evaluate(() => (window as any).z1.boxCounts());
 		// eslint-disable-next-line no-console
-		console.log(`Z1-SUBTHRESHOLD rests ${JSON.stringify(rests)} previewSeen ${pv.length > 0} jump ${JSON.stringify(j)} scrollTop ${a.scrollTop} -> ${f.scrollTop}`);
+		console.log(`Z1-SUBTHRESHOLD-${note} drawnFrom ${m.drawnFrom} boxCounts ${JSON.stringify(atRest)} -> ${JSON.stringify(restAgain)}`);
+		// eslint-disable-next-line no-console
+		console.log(`Z1-SUBTHRESHOLD rests ${JSON.stringify(rests)} previewSeen ${pv.length > 0} jump ${JSON.stringify(j)} scrollTop ${a.scrollTop} -> ${f.scrollTop} textMinusInk rest-k0.6 ${t6} rest-k0.604 ${t604} drift ${drift}`);
 		expect(errors, "page errors").toEqual([]);
 		expect(rests[0], "premise: the first lift rests at 60%").toBeCloseTo(0.6, 3);
 		expect(rests[1], "premise: the second lift rests at 60.4%").toBeCloseTo(0.604, 3);
-		expect(j.anchorPresent, "the anchor text is on both frames").toEqual([true, true]);
-		expect.soft(j.anchor!, "the anchor text moves at most 1 px at the 60.4% lift").toBeLessThanOrEqual(1);
-		if (j.ink !== null) expect.soft(j.ink, "the ink moves at most 1 px at the 60.4% lift").toBeLessThanOrEqual(1);
+		expect(t6, "the anchor text and the ink are measured at the 60% rest").not.toBeNull();
+		expect(t604, "the anchor text and the ink are measured at the 60.4% rest").not.toBeNull();
+		expect(drift!, "at the 60.4% rest, text minus ink is within 1 px of the 60% rest's").toBeLessThanOrEqual(1);
+		expect(restAgain, "at rest, with no geometry change, no line box is read").toEqual(atRest);
 	} finally {
 		await page.close();
 	}

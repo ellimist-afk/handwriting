@@ -50,6 +50,8 @@ function makeRig(dpr: number) {
 		CSS: { supports: (property: string) => property === "translate" },
 		getComputedStyle: () => ({ fontSize: "16px", paddingTop: undefined, position: "relative" }),
 		cancelAnimationFrame: noop,
+		// Inert: the idle index rebuild never fires here, so a paint that leaves the index dirty has it rebuilt at the next read.
+		setTimeout: () => 0,
 		clearTimeout: noop,
 		requestAnimationFrame: (fn: () => void) => {
 			frames.push(fn);

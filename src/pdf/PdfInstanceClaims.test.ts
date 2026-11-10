@@ -394,7 +394,9 @@ it("the plugin's own writes - flatten, snip, export - leave an open pane's docum
 		await s.plugin.snipPdf(vaultFile("Paper.pdf"), controller);
 		let exportPdf: { checkCallback(checking: boolean): boolean } | undefined;
 		registerExportPdf.call(
-			Object.assign(Object.create(s.plugin), { addCommand: (spec: typeof exportPdf) => (exportPdf = spec) }),
+			// The command maps attached ink through the active overlay at the run; here no overlay
+			// shows the note, so it exports the store's strokes, as exportedStrokes answers then.
+			Object.assign(Object.create(s.plugin), { addCommand: (spec: typeof exportPdf) => (exportPdf = spec), exportedStrokes: () => [stroke(10, "note-ink")] }),
 			{ strokes: () => [stroke(10, "note-ink")] },
 			inkToPdf,
 			bytesOf,

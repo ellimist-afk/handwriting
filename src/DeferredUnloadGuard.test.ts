@@ -101,8 +101,9 @@ describe("deferred onLayoutReady callbacks check unloaded", () => {
 		// registration gone - which is what it is - rather than a registration
 		// this guard keeps counting.
 		expect(occurrences(mainCode, "onLayoutReady(")).toBe(occurrences(mainCode, DEFER));
-		// Existing popout Escape listeners are installed once layout is ready.
-		expect(occurrences(mainCode, DEFER)).toBe(4);
+		// Existing popout Escape listeners are installed once layout is ready; the
+		// fifth drops the kept zoom and scroll of notes the indexed vault no longer has.
+		expect(occurrences(mainCode, DEFER)).toBe(5);
 	});
 
 	it("every deferred callback opens with the unloaded guard", () => {

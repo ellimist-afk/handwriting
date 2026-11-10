@@ -12,15 +12,16 @@ import { penContactIntent, tipMode } from "./TipMode";
 import { stripPenDown, stripPenUp } from "./StripPenChrome";
 import { markPenHardwareSeen, markPenSeen } from "./PenToolsMode";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
+import { tr } from "./InlinePenRouterTrace";
 import { DEFAULT_PEN, HIGHLIGHTER_ALPHA, HIGHLIGHTER_PEN } from "../ink/PenStyle";
 import { getInkColorHex } from "../ink/InkColor";
 import { InkStroke } from "../ink/Stroke";
 import { coarseGridFor, StrokeBuilder } from "../ink/StrokeBuilder";
 import { type StrokeWidthMode, strokeWidthPolicy } from "../ink/StrokeWidth";
 import { drawStroke } from "../ink/StrokeRenderer";
-import { PenSample, silentLift } from "../input/PointerRouter";
+import { PenSample } from "../input/PointerRouter";
 import { SnapPreview, SnapPreviewCanvas } from "./SnapPreview";
-import { padBBox, pointInBBox, scaleStroke } from "../objects/Selection";
+import { scaleStroke } from "../objects/Selection";
 import { eraseRemovalIndices, snapHistoryOps } from "./InkHistory";
 import { adaptiveCaps, buildTail, correctionError, EINK_CAPS } from "../ink/Prediction";
 import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
@@ -34,14 +35,23 @@ import { noteToVisual, visualToNote } from "./ZoomScale";
 import { isPenProbeEnabled, noteProbeStroke } from "./PenProbe";
 import { scrollProbePenDown } from "./ScrollProbe";
 import { installMethods } from "./InstallMethods";
-import { eraserWholeStrokes, getInkSizeMult, inlineTool, shapeSnapOn } from "./InkOverlayToolState";
-import { committedFloorFor, inlineInk, metrics, PRED_HISTORY, SELECTION_GRAB_PAD, type InkOverlayPlugin } from "./InkOverlay";
+import { eraserWholeStrokes, getInkSizeMult, inlineTool, scribbleEraseOn, shapeSnapOn } from "./InkOverlayToolState";
+import { scribbleEraseTargets } from "../ink/ScribbleErase";
+import { removeSelectedInlineStrokes } from "./InlineSelectionDelete";
+import { committedFloorFor, inlineInk, metrics, PRED_HISTORY, type InkOverlayPlugin } from "./InkOverlay";
+import { handleInput } from "./LassoTransform";
 
 declare module "./InkOverlay" {
 	interface InkOverlayPlugin {
 		penDown(sample: PenSample, ev: PointerEvent): void;
 		beginSnapPreview(sample: Pick<PenSample, "x" | "y">, ev: PointerEvent): void;
 		clearSnapPreview(): void;
+		/**
+		 * A showing shape was cleared while this contact lives. Its samples stopped reaching the stroke when the shape
+		 * showed; handing them back would join the stroke's last point to the pen in a straight line, so the rest of the
+		 * contact inks nothing and the lift commits the stroke as it stood. Reset at every pen-down.
+		 */
+		snapSealed?: boolean;
 		penRaw(samples: PenSample[], ev: PointerEvent): void;
 		planPredictedTail(ev: PointerEvent, cam: CameraState): { fromX: number; fromY: number; points: readonly PenSample[]; lineWidthPx: number } | null;
 		schedulePresentProbe(newestTs: number): void;
@@ -59,6 +69,7 @@ declare module "./InkOverlay" {
 		// A new owned gesture invalidates any previous camera/reveal continuation.
 		this.viewportGeneration++;
 		this.clearSnapPreview();
+		this.snapSealed = false;
 		// The router cancels pointerdown so the pen cannot move CodeMirror's
 		// caret. That also cancels native focus. Give keyboard ownership back to
 		// this editor before freezing geometry, or Delete and undo go wherever
@@ -113,11 +124,17 @@ declare module "./InkOverlay" {
 		// read it whichever gesture this turns out to be - the pdf writes its
 		// own in the same place, ahead of its own `penContactIntent` call.
 		this.mouseStroke = ev.pointerType === "mouse";
+		this.fingerOnSelection = false;
 		const intent = penContactIntent(ev.buttons, ev.button, tipMode());
 		const eraser = intent === "erase";
+		// The lasso's resize and rotate handles size their hit squares by the input: a finger's is larger.
+		const input = handleInput(ev.pointerType);
 		if (intent === "lasso") {
 			this.mode = "lasso";
-			this.lassoDown(sample);
+			// With the toolbar lasso on, a finger reaches here on the selection too (the router's claim does not read the tip
+			// mode): its drag is the finger's, so a cancel or a pen landing puts it back, as on the branch below.
+			this.fingerOnSelection = this.selectionContactAt(this.camera.screenToWorld(sample.x, sample.y), input) !== null && ev.pointerType === "touch";
+			this.lassoDown(sample, input);
 			return;
 		}
 		// A bare tip landing INSIDE an active selection drags it - OneNote's
@@ -132,17 +149,15 @@ declare module "./InkOverlay" {
 		// contact, with no way out but dismissing the selection first. The
 		// rule was already written three lines down ("Tip and eraser return
 		// the pen to normal behavior"); only the code disagreed with it.
-		if (ev.pointerType !== "touch" && !eraser && !this.selection.isEmpty) {
-			const w = this.camera.screenToWorld(sample.x, sample.y);
-			const bounds = this.selectionBounds();
-			if (
-				bounds &&
-				pointInBBox(w.x, w.y, padBBox(bounds, visualToNote(SELECTION_GRAB_PAD, this.scale)))
-			) {
-				this.mode = "lasso";
-				this.lassoDown(sample);
-				return;
-			}
+		// One hit test (selectionContactAt): a pin, the Attach button, a handle (its square reaches past the grab pad, and
+		// the rotate knob sits above the box) or the padded box. A mouse works a held group's pin with nothing selected; a
+		// pen tip there inks. A finger reaches here on the selection only once it passed the tap limit (the router's
+		// claimTouch asks the same test), so it moves the selection; anywhere else a finger here is iPhone finger ink.
+		if (!eraser && this.selectionContactAt(this.camera.screenToWorld(sample.x, sample.y), input) !== null) {
+			this.mode = "lasso";
+			this.fingerOnSelection = ev.pointerType === "touch";
+			this.lassoDown(sample, input);
+			return;
 		}
 		// Tip and eraser return the pen to normal behavior: selection dissolves.
 		if (this.selection.clear()) this.redrawSelectionUI();
@@ -287,10 +302,11 @@ declare module "./InkOverlay" {
 			widthMode
 		);
 		// Device px per world unit: the screen's device px per CSS px times the
-		// camera's CSS px per world unit (font zoom rides on the camera). A mouse
-		// stroke passes no grid.
+		// visual CSS px per world unit, which is the host zoom (cssScale) times
+		// the font zoom. The camera carries the font zoom only, and the sample
+		// was already divided by cssScale. A mouse stroke passes no grid.
 		const dpr = this.view?.dom?.ownerDocument?.defaultView?.devicePixelRatio || 1;
-		this.builder.start(sample.timestamp, fromMouse ? undefined : coarseGridFor("note", ev.pointerType, dpr, dpr * this.camera.zoom));
+		this.builder.start(sample.timestamp, fromMouse ? undefined : coarseGridFor("note", ev.pointerType, dpr, dpr * this.scale));
 		const w = this.camera.screenToWorld(sample.x, sample.y);
 		const point = this.builder.add(
 			w.x,
@@ -345,17 +361,34 @@ declare module "./InkOverlay" {
 		const tool = inlineTool;
 		const color = getInkColorHex(tool);
 		const size = getInkSizeMult(tool);
-		this.snapContactId = ev.pointerId;
 		this.snapCanvas ??= new SnapPreviewCanvas();
+		// The backing reads the container's size, a layout read after the last frame's style writes. It changes only with
+		// the camera or the pane, so a drag's frames reuse it until one of those moves.
+		let backing: { key: string; value: number } | null = null;
+		const backingFor = (cam: CameraState): number => {
+			const key = `${cam.x},${cam.y},${cam.zoom},${this.cssWidth},${this.cssHeight},${this.cssScale},${this.pinchScaleNow},${this.dpr}`;
+			if (backing?.key !== key) backing = { key, value: this.backingNow() };
+			return backing.value;
+		};
+		const win = this.winRef;
 		this.snapPreview = new SnapPreview({
 			clock: this.winRef,
 			valid: () => shapeSnapOn && this.builder === builder && this.strokePenGesture && this.mode === "ink" &&
 				this.filePath() === path && !!this.container && inlineTool === tool &&
 				getInkColorHex(tool) === color && getInkSizeMult(tool) === size,
 			snapshot: () => builder.snapshotReleaseFiltered(),
-			show: stroke => !!this.container && this.snapCanvas!.show(this.container, this.camera.snapshot,
-				stroke, this.cssWidth, this.cssHeight, this.backingNow()),
+			show: stroke => {
+				if (!this.container) return false;
+				const cam = this.camera.snapshot;
+				return this.snapCanvas!.show(this.inkLayer ?? this.container, cam, stroke, this.cssWidth, this.cssHeight,
+					backingFor(cam), committedFloorFor(this.committedBacking, this.dpr));
+			},
 			hide: () => this.snapCanvas?.clear(),
+			world: (x, y) => this.camera.screenToWorld(x, y),
+			ended: () => { if (this.builder === builder) this.snapSealed = true; },
+			frame: typeof win.requestAnimationFrame === "function"
+				? { request: draw => win.requestAnimationFrame(() => draw()), cancel: id => win.cancelAnimationFrame(id) }
+				: undefined,
 		});
 		this.snapPreview.start(sample.x, sample.y);
 	}
@@ -363,13 +396,12 @@ declare module "./InkOverlay" {
 	function clearSnapPreview(this: InkOverlayPlugin): void {
 		this.snapPreview?.clear();
 		this.snapPreview = null;
-		this.snapContactId = null;
 		this.snapCanvas?.clear();
 	}
 
 	function penRaw(this: InkOverlayPlugin, samples: PenSample[], ev: PointerEvent): void {
 		if (this.mode === "lasso") {
-			this.lassoMove(samples);
+			this.lassoMove(samples, ev.shiftKey);
 			// Last sample only, matching the erase branch below: one DOM
 			// write per batch, and every call re-arms the watchdog for the
 			// length of the drag.
@@ -404,6 +436,19 @@ declare module "./InkOverlay" {
 		if (!this.builder || samples.length === 0) return;
 		const t0 = performance.now();
 		metrics.recordEvent("raw", samples.length, t0 - ev.timeStamp, true);
+		// A shape is showing: the pen resizes and turns it, and the stroke under it stops here. Only the
+		// newest sample of the batch can be seen, so the shape follows that one alone, one redraw per shown frame.
+		// The reticle pen-down concealed comes back on that sample too, one write per batch as the lasso drag.
+		const newest = samples[samples.length - 1]!;
+		if (this.snapPreview?.holding && this.snapPreview.move(newest.x, newest.y)) {
+			this.showSnapCursor(newest);
+			this.tail.clear();
+			return;
+		}
+		// The shape was cleared with the pen still down (a colour, size, tool or mode change, a resize): the stroke
+		// stays as it was when the shape showed, and nothing of the rest of this contact is ink. The reticle the shape
+		// brought back keeps following the pen to the lift, as it did while the shape showed.
+		if (this.snapSealed) { this.showSnapCursor(newest); this.tail.clear(); return; }
 		const cam = this.camera.snapshot;
 		const drawStart = performance.now();
 		let accepted = 0;
@@ -448,21 +493,33 @@ declare module "./InkOverlay" {
 			}
 			prediction = this.planPredictedTail(ev, cam);
 		}
-		const liveHead = head ? {
+		// A tap that rests: the batch moved less than the builder's step, so
+		// nothing was accepted and the contact point is still the whole stroke.
+		// The clear below erases the dot drawn at pen-down, so draw that dot
+		// again, at the contact width. Without this it is redrawn at the live
+		// width, or not at all with smoothing off, until the lift turns it back
+		// into the nib dot.
+		const contact = accepted === 0 && this.builder.pointCount === 1 ? this.builder.lastPoint : undefined;
+		const liveHead = contact ? {
+			cam, style: this.activeStyle,
+			from: { x: contact.x, y: contact.y }, to: { x: contact.x, y: contact.y },
+			pressure: contact.pressure,
+			hwWorld: this.activeWet.contactHalfWidth(this.activeStyle, contact.pressure),
+		} : head ? {
 			cam, style: this.activeStyle, from: head.from, to: head.to,
 			pressure: head.pressure,
 			hwWorld: this.activeWet.liveHalfWidth(this.activeStyle, head.pressure),
 		} : null;
 		this.tail.clear();
 		this.tail.prepareLive(liveHead, prediction);
-		if (head) {
+		if (liveHead) {
 			this.tail.drawHead(
 				cam,
 				this.activeStyle,
-				head.from,
-				head.to,
-				head.pressure,
-				liveHead!.hwWorld
+				liveHead.from,
+				liveHead.to,
+				liveHead.pressure,
+				liveHead.hwWorld
 			);
 		}
 		// The predicted tail goes on the same canvas, after the head, so the
@@ -665,6 +722,20 @@ declare module "./InkOverlay" {
 	 * length for the pdf's final stroke point).
 	 */
 	function penUp(this: InkOverlayPlugin, ev?: PointerEvent): void {
+		// A finger's box or handle drag taken, not lifted (a pointercancel, or no event: a blur, or a pen landing): the
+		// selection goes back where it started and nothing is committed, the teardown a second finger gets
+		// (cancelFingerInkForPinch). A pin or Attach button press goes on to lassoUp(cancelled), as a pen's does; a pen's
+		// box drag still commits.
+		if (
+			this.mode === "lasso" &&
+			this.fingerOnSelection &&
+			(!ev || ev.type === "pointercancel") &&
+			!this.pinPress &&
+			!this.attachPress
+		) {
+			this.cancelFingerInkForPinch();
+			return;
+		}
 		// `> 0`, not the field alone: a unit rig built with Object.create never runs the initialiser.
 		const reserveBefore = this.leftReserveHeld > 0 ? this.leftReserveHeld : 0;
 		this.endPenGesture(ev);
@@ -712,8 +783,9 @@ declare module "./InkOverlay" {
 			this.bandSyncDeferred = false;
 			this.scheduleRepaint("scroll");
 		}
-		// And a pane resize the zoomed layout skipped for the same reason.
-		this.replayDeferredResize();
+		// And a pane resize the zoomed layout skipped for the same reason. Not while a shape shows: the resize clears
+		// it, and the lift below takes it first, then replays.
+		if (!this.snapPreview?.holding) this.replayDeferredResize();
 		if(this.viewportStyleDirty)this.scheduleViewportStyleRefresh();
 		// The stroke is over: the strip returns (a beat later, so an eraser
 		// scrub's rapid lift-and-reland does not strobe it) and its buttons
@@ -759,7 +831,8 @@ declare module "./InkOverlay" {
 			this.mode = "ink";
 			// Same reasoning as pan and space above.
 			this.hideLassoCursor();
-			this.lassoUp();
+			// No event (a window blur) or a pointercancel: the contact was taken, not lifted.
+			this.lassoUp(!ev || ev.type === "pointercancel");
 			this.updateExtent(true);
 			return;
 		}
@@ -836,7 +909,7 @@ declare module "./InkOverlay" {
 			const at = this.router?.sampleAt(ev);
 			if (at) {
 				const w = this.camera.screenToWorld(at.x, at.y);
-				// Builder only: the wet layer clears once the commit below has
+				// The wet layer clears once the commit below has
 				// drawn the stroke, release point included, underneath it.
 				builder.add(w.x, w.y, this.gainedPressure(at.pressure), at.timestamp, at.tiltX, at.tiltY);
 			}
@@ -844,16 +917,28 @@ declare module "./InkOverlay" {
 		// On a proven coarse grid each stored point is the mean of its raw sample
 		// and the one before, so the stroke ended half its last step short of the
 		// lift. The last raw sample is the stroke's last point.
-		if (builder && !this.mouseStroke) {
-			// Builder only: the wet layer clears once the commit below has
+		if (builder && !this.mouseStroke && !this.snapPreview?.holding && !this.snapSealed) {
+			// The wet layer clears once the commit below has
 			// drawn the stroke, lift point included, underneath it.
 			builder.flushRaw();
 		}
 		let strokes = builder?.finishReleaseFiltered() ?? [];
-		const lift = !!ev && ev.pointerType === "pen" && ev.pointerId === this.snapContactId &&
-			(ev.type === "pointerup" || ((ev.type === "pointermove" || ev.type === "pointerrawupdate") && silentLift(ev)));
-		const visibleSnap = this.snapPreview?.take(strokes, lift) ?? null;
+		// Issue 37: one row per stroke end, recording only. What ended it (pointerup, pointercancel, a
+		// silent-lift move, or none for a blur), the pen state on that event, and how many strokes the
+		// release filter made of this contact. A line cut short reads here as its end event.
+		if (diagnosticsEnabled()) {
+			tr(
+				"stroke-end",
+				ev ?? null,
+				`stroke end: ev=${ev?.type ?? "(none)"} pointerType=${ev?.pointerType ?? "-"} pointerId=${ev?.pointerId ?? "-"} ` +
+					`pressure=${ev ? ev.pressure : "-"} buttons=${ev ? ev.buttons : "-"} strokes this contact=${strokes.length}`
+			);
+		}
+		// Whatever ends the gesture commits the shape as it shows; what would change it cleared it first.
+		const visibleSnap = this.snapPreview?.take(strokes) ?? null;
 		this.clearSnapPreview();
+		// The pane resize held back for the shape above, now that it is taken.
+		this.replayDeferredResize();
 		this.builder = null;
 		this.strokePenGesture = false;
 		// Hold the pen still at the end and the figure snaps to the clean
@@ -868,8 +953,9 @@ declare module "./InkOverlay" {
 			snapReplaced = strokes[0]!;
 			strokes = [{ ...visibleSnap, createdAt: strokes[0]!.createdAt }];
 		}
-		// Mouse offers and finger input retain the existing release behavior.
-		if (!wasPen && shapeSnapOn && strokes.length === 1) {
+		// A mouse's held stroke gets the offer. A finger never snaps: it has no preview to show the shape, so it lands the
+		// freehand it drew.
+		if (!wasPen && this.mouseStroke && shapeSnapOn && strokes.length === 1) {
 			// One clock: the last move is stamped from the samples, in the clock of
 			// the note's own window, so the hold is read there too. The global
 			// clock is the main window's, and in a popout its origin differs, so
@@ -890,15 +976,8 @@ declare module "./InkOverlay" {
 					// 2026-09-05). The same two facts - the hold and a fit the
 					// recognizer will stand behind - become an OFFER instead.
 					// SnapChip.ts carries the reasoning and the ruling; the
-					// pen and the finger below are untouched by it.
-					if (this.mouseStroke) {
-						snapOffered = snapped;
-					} else {
-						// Kept for history: undo UN-SNAPS back to the freehand
-						// (replace inverts to replace), a second undo removes.
-						snapReplaced = strokes[0]!;
-						strokes = [snapped];
-					}
+					// pen is untouched by it.
+					snapOffered = snapped;
 				}
 			}
 		}
@@ -916,6 +995,28 @@ declare module "./InkOverlay" {
 			strokes = strokes.map(moved);
 			if (snapReplaced) snapReplaced = moved(snapReplaced);
 			if (snapOffered) snapOffered = moved(snapOffered);
+		}
+		// Scribble to erase: a dense back-and-forth pen stroke over ink takes the ink under it, as one undo step, and is
+		// not kept itself. It is matched against the strokes as this pane shows them, so ink that follows a line of text
+		// is taken where the user sees it. Anything else, a scribble over empty page included, lands as plain ink.
+		const scribblePath =
+			scribbleEraseOn && !snapReplaced && !snapOffered && strokes.length === 1 && strokes[0]!.tool === "pen" ? this.filePath() : null;
+		const scribbled = scribblePath ? scribbleEraseTargets(strokes[0]!, this.noteStrokes(scribblePath)) : null;
+		if (scribblePath && scribbled) {
+			this.activeWet.clearStroke(this.cssWidth, this.cssHeight);
+			this.tail.clear(this.cssWidth, this.cssHeight);
+			this.tail.prepareLive(null, null);
+			const op = removeSelectedInlineStrokes(inlineInk, scribblePath, scribbled);
+			if (op) {
+				this.dispatchInk(op);
+				this.indexDirty = true;
+				this.frontierCache.invalidate(scribblePath);
+				this.updateHandwritingPageClass();
+			}
+			this.scheduleRepaint();
+			this.repaintPath(scribblePath);
+			if (op && inlineInk.inkPresence(scribblePath) === "none") this.emptyNotice.claim(scribblePath, "erase");
+			return;
 		}
 		const stroke = strokes.at(-1);
 		const path = stroke ? this.filePath() : null;
@@ -948,10 +1049,14 @@ declare module "./InkOverlay" {
 		handoffFinishedStroke({
 			store: () => {
 				const extentHeld = this.extentHoldsStore(path);
+				const ov = this.overviewBuild ?? this.overview, overviewHeld = !!ov && this.overviewHolds(ov, this.freeStrokes(path));
 				// Each new stroke remembers the line under it, as laid out now.
 				for (const s of strokes) this.lineAnchors.anchorNew(path, s);
+				// The freehand a snap replaced sits on the shape's line, so an undo puts it back there.
+				if (snapReplaced && strokes[0]?.lineAnchor) this.lineAnchors.inherit(snapReplaced, strokes[0]);
 				inlineInk.commitGesture(path, strokes);
 				if (extentHeld) this.drawIntoExtent(path, strokes);
+				if (overviewHeld) this.drawIntoOverview(path, strokes);
 				// The index has to hear about the stroke, and the commit is
 				// the one mutation that reaches this view's store without
 				// passing through scheduleRepaint's full-repaint branch: it

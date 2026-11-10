@@ -163,6 +163,17 @@ export function inkClaimX(g: {
 }
 
 /**
+ * The sideways room Infinite Canvas gives a note it first sees at the left
+ * edge, in note px: the pane, and one more pane past it (ScrollExpansionDemand
+ * `reserve`'s first grant, at scrollLeft 0). What a note cleared of its ink
+ * returns to while Infinite Canvas is on.
+ */
+export function infiniteCanvasStartX(g: { clientWidth: number; originLeft: number; fontZoom: number }): number {
+	if (!Number.isFinite(g.clientWidth) || g.clientWidth <= 0 || !Number.isFinite(g.fontZoom) || g.fontZoom <= 0) return 0;
+	return Math.max(0, (2 * g.clientWidth - g.originLeft) / g.fontZoom);
+}
+
+/**
  * The smallest x grant that keeps what is on screen scrollable, in note px:
  * the spacer must still reach the right edge of the view, or the browser pulls
  * scrollLeft back and the page jumps. Rounded up to whole chunks, so a shrink
@@ -441,6 +452,8 @@ export class SurfaceExtents {
 	private owedGeneration = 0;
 	/** How many times each note's x grant has shrunk, so every pane showing it can tell. */
 	private shrinks = new Map<string, number>();
+	/** Notes whose due shrink comes from Delete all ink, which takes the room back with Infinite Canvas on too. */
+	private cleared = new Set<string>();
 
 	get(path: string): Extent {
 		return this.byPath.get(path) ?? ZERO_EXTENT;
@@ -463,6 +476,23 @@ export class SurfaceExtents {
 		if (this.get(path).x > 0) this.owedX.set(path, ++this.owedGeneration);
 	}
 
+	/**
+	 * Delete all ink cleared this note: its shrink is due, and it takes the room
+	 * back even while Infinite Canvas is on, to the room Infinite Canvas starts a
+	 * note with (infiniteCanvasStartX). An erase or a lasso delete with Infinite
+	 * Canvas on leaves the room, as before.
+	 */
+	oweShrinkXForClear(path: string): void {
+		if (this.get(path).x <= 0) return;
+		this.owedX.set(path, ++this.owedGeneration);
+		this.cleared.add(path);
+	}
+
+	/** Whether this note's due shrink came from Delete all ink. */
+	shrinkIsClear(path: string): boolean {
+		return this.cleared.has(path);
+	}
+
 	/** Every note holding sideways room is due: Infinite Canvas was turned off. */
 	oweShrinkXEverywhere(): void {
 		for (const [path, extent] of this.byPath) if (extent.x > 0) this.owedX.set(path, ++this.owedGeneration);
@@ -483,6 +513,7 @@ export class SurfaceExtents {
 
 	settleShrinkX(path: string): void {
 		this.owedX.delete(path);
+		this.cleared.delete(path);
 	}
 
 	/** Changes exactly when this note's x grant shrinks. */
@@ -509,6 +540,7 @@ export class SurfaceExtents {
 		if (owed !== undefined) { this.owedX.delete(oldPath); this.owedX.set(newPath, Math.max(owed, this.owedX.get(newPath) ?? owed)); }
 		const shrinks = this.shrinks.get(oldPath);
 		if (shrinks !== undefined) { this.shrinks.delete(oldPath); this.shrinks.set(newPath, Math.max(shrinks, this.shrinkCount(newPath))); }
+		if (this.cleared.delete(oldPath)) this.cleared.add(newPath);
 		const existing = this.byPath.get(newPath);
 		this.byPath.set(
 			newPath,
@@ -522,6 +554,7 @@ export class SurfaceExtents {
 		this.byPath.delete(path);
 		this.owedX.delete(path);
 		this.shrinks.delete(path);
+		this.cleared.delete(path);
 	}
 }
 

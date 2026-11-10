@@ -39,7 +39,7 @@
  */
 
 import { InkTool } from "./Stroke";
-import { colorsFor, normalizeInkColor } from "./InkColor";
+import { defaultColorsFor, normalizeInkColor } from "./InkColor";
 import { INK_SIZE_STEPS, clampInkSize } from "./InkSize";
 
 export interface InkPreset {
@@ -77,7 +77,7 @@ function isTool(value: unknown): value is InkTool {
  * a preset must be able to name one without inventing a word for it.
  */
 export function colorNameFor(tool: InkTool, hex: string): string {
-	const hit = colorsFor(tool).find((c) => c.hex.toLowerCase() === hex.toLowerCase());
+	const hit = defaultColorsFor(tool).find((c) => c.hex.toLowerCase() === hex.toLowerCase());
 	return hit ? hit.name : hex;
 }
 

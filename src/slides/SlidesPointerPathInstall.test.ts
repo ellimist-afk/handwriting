@@ -52,6 +52,7 @@ const MOVED = [
 	"logStrokeEndFocus",
 	"commitStroke",
 	"totalStrokes",
+	"redrawLiveStroke",
 ] as const;
 
 /** Every name the pointer path file takes from the surface, and nothing else. */

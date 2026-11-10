@@ -17,6 +17,7 @@ declare module "./PdfInkController" {
 		sync(): void;
 		pageWidthPt(pageNumber: number, wPx: number, hPx: number, scale: number): number;
 		isRotated(pageNumber: number): boolean;
+		viewTurn(): ViewTurn | null;
 		frameBox(pageNumber: number): PageBox | null;
 		owns(pageNumber: number): boolean;
 		ensureOverlay(pageNumber: number): void;
@@ -40,6 +41,70 @@ declare module "./PdfInkController" {
 
 export const OVERLAY_CLASS = "handwriting-pdf-ink";
 
+/** A turn the viewer applies to every page, clockwise, in degrees. */
+export type ViewTurn = 0 | 90 | 180 | 270;
+
+/**
+ * Where each controller reads the viewer's page turn from. Registered by the
+ * code that builds the controller; a controller with no source, or a source
+ * that answers null, behaves exactly as it did before turns were handled:
+ * an aspect flip refuses ink and the page paints upright.
+ */
+const turnSources = new WeakMap<PdfInkController, () => number | null>();
+
+export function setViewTurnSource(controller: PdfInkController, source: () => number | null): void {
+	turnSources.set(controller, source);
+}
+
+/** Any multiple of 90 to one of the four turns; anything else is unknown. */
+export function normalTurn(deg: number | null): ViewTurn | null {
+	if (deg === null || !Number.isFinite(deg) || deg % 90 !== 0) return null;
+	return (((deg % 360) + 360) % 360) as ViewTurn;
+}
+
+/**
+ * The turn the viewer reported when each committed canvas was last painted,
+ * so a turn that leaves the box the same size (180 degrees), or that arrives
+ * before the box has turned, still defeats the repaint skip - and the repaint
+ * is what marks the page refused. Absent means upright, which keeps the
+ * upright skip test exactly as it was.
+ */
+const paintedTurns = new WeakMap<object, ViewTurn>();
+
+/**
+ * The matrix that carries the upright page's css px onto the page as the
+ * viewer shows it turned clockwise by `turn`. `pageW` and `pageH` are the
+ * TURNED box (the element being filled).
+ */
+function turnMatrix(turn: ViewTurn, pageW: number, pageH: number): [number, number, number, number, number, number] {
+	switch (turn) {
+		case 90:
+			return [0, 1, -1, 0, pageW, 0];
+		case 180:
+			return [-1, 0, 0, -1, pageW, pageH];
+		case 270:
+			return [0, -1, 1, 0, 0, pageH];
+		default:
+			return [1, 0, 0, 1, 0, 0];
+	}
+}
+
+/**
+ * The turn a page is painted at. A quarter turn is painted only once the box
+ * has turned with it: the viewer can report the new turn a moment before the
+ * page div is resized, and until the box agrees it is still the upright box,
+ * so the page paints upright on it. Same test as the aspect check in
+ * `pageWidthPt`, against the upright size cached there; a page with no size
+ * yet, or too square to tell, is taken as turned.
+ */
+function turnToPaint(turn: ViewTurn | null, known: { wPt: number; hPt: number } | undefined, wPx: number, hPx: number): ViewTurn {
+	if (turn === null) return 0;
+	if ((turn !== 90 && turn !== 270) || !known) return turn;
+	const expected = (known.hPt - known.wPt) * (wPx + hPx) / (known.wPt + known.hPt);
+	const observed = wPx - hPx;
+	const disagrees = expected * observed < 0 && Math.abs(expected) > 1.5 && Math.abs(observed) > 1.5;
+	return disagrees ? 0 : turn;
+}
 
 /**
  * Device pixels one page overlay may hold - a backstop, not a policy.
@@ -172,6 +237,13 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 	 * report's `stride` line is what would show otherwise.
 	 */
 	function pageWidthPt(this: PdfInkController, pageNumber: number, wPx: number, hPx: number, scale: number): number {
+		// A known quarter turn shows the page on its side: its box is the
+		// upright box with the sides swapped. Swapped back here, every reading
+		// below - the cached size, the aspect check - is of the upright page,
+		// which is the frame the stored ink is in. An unknown turn leaves the
+		// box as measured, as before.
+		const turn = this.viewTurn();
+		if (turn === 90 || turn === 270) [wPx, hPx] = [hPx, wPx];
 		const known = this.pageSize.get(pageNumber);
 		if (known) {
 			if (!Number.isFinite(wPx) || !Number.isFinite(hPx) || wPx <= 0 || hPx <= 0) return known.wPt;
@@ -180,8 +252,10 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 			// differences must each clear rounding noise before we refuse ink.
 			const expected = (known.wPt - known.hPt) * (wPx + hPx) / (known.wPt + known.hPt);
 			const observed = wPx - hPx;
-			const turned = expected * observed < 0 && Math.abs(expected) > 1.5 && Math.abs(observed) > 1.5;
-			if (turned) this.rotated.add(pageNumber);
+			const flipped = expected * observed < 0 && Math.abs(expected) > 1.5 && Math.abs(observed) > 1.5;
+			// Turned pages still refuse new ink: the pen and the snip map
+			// through the upright frame only.
+			if (flipped || (turn !== null && turn !== 0)) this.rotated.add(pageNumber);
 			else {
 				this.rotated.delete(pageNumber);
 				this.warnedRotated.delete(pageNumber);
@@ -191,12 +265,26 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		if (!Number.isFinite(scale) || scale <= 0 || wPx <= 0 || hPx <= 0) return 0;
 		const size = { wPt: wPx / scale, hPt: hPx / scale };
 		this.pageSize.set(pageNumber, size);
+		// A page can be first seen already turned: the viewer reopens a
+		// document at the turn it was left at.
+		if (turn !== null && turn !== 0) this.rotated.add(pageNumber);
 		return size.wPt;
 	}
 
 	/** Is this page one we refuse to ink? See `rotated`. */
 	function isRotated(this: PdfInkController, pageNumber: number): boolean {
 		return this.rotated.has(pageNumber);
+	}
+
+	/** The viewer's page turn right now, or null when it cannot be read. */
+	function viewTurn(this: PdfInkController): ViewTurn | null {
+		const source = turnSources.get(this);
+		if (!source) return null;
+		try {
+			return normalTurn(source());
+		} catch {
+			return null;
+		}
 	}
 
 	/** A live page's measured box, for clearing the wet layer at its size. */
@@ -780,11 +868,14 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 				pageEl.appendChild(this.pair.headCanvas);
 			}
 		}
+		const reported = this.viewTurn() ?? 0;
+		const turn = turnToPaint(reported, this.pageSize.get(box.pageNumber), size.pageW, size.pageH);
 		if (
 			!zoomed &&
 			attached.paintedScale === scale &&
 			attached.paintedCount === strokes.length &&
-			sameBand(attached.paintedBand, size.band)
+			sameBand(attached.paintedBand, size.band) &&
+			(paintedTurns.get(attached) ?? 0) === reported
 		) {
 			return; // already correct; the commonest case while scrolling
 		}
@@ -819,7 +910,14 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		// fills the same fraction of the page it is drawn on, settled or not.
 		const pageWidthPt = this.pageWidthPt(box.pageNumber, pageW, pageH, scale);
 		if (pageWidthPt <= 0) return;
-		this.drawCommitted(ctx, { x: 0, y: 0, zoom: pageW / pageWidthPt }, strokes);
+		// On a page the viewer turned a quarter, the upright width is the box's
+		// HEIGHT, so the scale comes from that side; then the frame is turned
+		// with the page. Upright pages take neither branch.
+		const uprightW = turn === 90 || turn === 270 ? pageH : pageW;
+		if (turn !== 0) ctx.transform(...turnMatrix(turn, pageW, pageH));
+		this.drawCommitted(ctx, { x: 0, y: 0, zoom: uprightW / pageWidthPt }, strokes);
+		if (reported !== 0) paintedTurns.set(attached, reported);
+		else paintedTurns.delete(attached);
 		attached.paintedScale = scale;
 		attached.paintedCount = strokes.length;
 		attached.paintedBand = band;
@@ -844,6 +942,7 @@ export function installPdfBand(proto: PdfInkController): void {
 		sync,
 		pageWidthPt,
 		isRotated,
+		viewTurn,
 		frameBox,
 		owns,
 		ensureOverlay,

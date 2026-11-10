@@ -60,6 +60,7 @@ const MOVED = [
 	"setPersistToolbarCorner",
 	"applyToolbarPlacement",
 	"setShapeSnap",
+	"setScribbleErase",
 	"setPenReticle",
 	"penReticleEnabled",
 	"setEraserWholeStrokes",
@@ -84,6 +85,7 @@ const SHARED = [
 	"penReticleOn",
 	"eraserWholeStrokes",
 	"shapeSnapOn",
+	"scribbleEraseOn",
 ] as const;
 
 /** Declared in the new file and used by nothing outside it. */

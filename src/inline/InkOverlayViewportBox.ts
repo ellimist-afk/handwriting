@@ -9,7 +9,7 @@ import { installMethods } from "./InstallMethods";
 import { Platform } from "obsidian";
 import { contentOrigin } from "./ContentOrigin";
 import { rasterScale, canvasLayerBox } from "./ZoomScale";
-import { PAN_FIT_SLACK_PX, SCALE_EPSILON, PAPER_PROPERTIES, type InkOverlayPlugin } from "./InkOverlay";
+import { inlineInk, PAN_FIT_SLACK_PX, SCALE_EPSILON, PAPER_PROPERTIES, type InkOverlayPlugin } from "./InkOverlay";
 
 declare module "./InkOverlay" {
 	interface InkOverlayPlugin {
@@ -17,7 +17,7 @@ declare module "./InkOverlay" {
 		prepareViewportLayout(): boolean;
 		scheduleViewportStyleRefresh(): void;
 		refreshViewportColumn(): boolean;
-		measureNaturalColumn(box: { width: number; height: number } | null): { column: number; columnBox: number; lineContent: number; gutterX: number; sizerColumn: boolean; columnInset: boolean; ownLines: boolean; left: string; right: string; columnLocal: number | null; columnReserve: number; columnAuto: { lineWidth: number; fixed: number; scrollbar: number } | null };
+		measureNaturalColumn(box: { width: number; height: number } | null): { column: number; columnBox: number; lineContent: number; gutterX: number; sizerColumn: boolean; columnInset: boolean; ownLines: boolean; left: string; right: string; columnLocal: number | null; columnReserve: number; columnPad: number; columnAuto: { lineWidth: number; fixed: number; scrollbar: number } | null };
 		measureColumnAuto(hostWidth: number, ownLineBox?: number | null): { lineWidth: number; fixed: number; scrollbar: number } | null;
 		setViewportScroll(left: number, top: number): void;
 		setScrollResidual(x: number, y: number, left: number, top: number): void;
@@ -29,6 +29,20 @@ declare module "./InkOverlay" {
 		writeGutterTravel(next: number, release?: boolean): void;
 		/** Host-local px the line-number gutter reaches past the content's left edge, read in an unowned layout (measureNaturalColumn). */
 		columnGutterReserve?: number;
+		applyColumnHold(): void;
+		releaseColumnHold(): void;
+		/** The column width written on the pane (applyColumnHold); null or absent when none is held. */
+		columnHeld?: number | null;
+		/** True when that width is written as a cap (canvas off, the pane has room for it) rather than a hold (canvas on). */
+		columnCapped?: boolean;
+		/** The sizer width written with a cap (the width plus the sizer's own inner chrome); null when none. */
+		columnCapSizer?: number | null;
+		/**
+		 * Canvas off with a width: the sizes the cap decision reads, from this observer's entries only, never a layout read.
+		 * room: the scroller's content box; sizer and content: their border boxes; chrome: their difference, taken while
+		 * the content fills the sizer but for it (nothing capped, or capped with the sizer at the width written for it).
+		 */
+		columnFit?: { ro: ResizeObserver; room: number | null; sizer: number | null; content: number | null; chrome: number } | null;
 	}
 }
 
@@ -61,6 +75,8 @@ declare module "./InkOverlay" {
    if(saved.value) host.style.setProperty(name,saved.value,saved.priority); else host.style.removeProperty(name);
   }
   this.viewportLayout=null;
+  // No column without the layout: the guides go with it.
+  this.removePageGuideBox();
  }
 
  function prepareViewportLayout(this: InkOverlayPlugin):boolean {
@@ -100,7 +116,7 @@ declare module "./InkOverlay" {
    // value they compare against was read in the same basis. The saved styles
    // above are captured first: the measurement writes the host's box.
    const natural=this.measureNaturalColumn(null);
-   layout.column=natural.column;layout.columnBox=natural.columnBox;layout.lineContent=natural.lineContent;layout.gutterX=natural.gutterX;layout.sizerColumn=natural.sizerColumn;layout.columnInset=natural.columnInset;layout.ownLines=natural.ownLines;layout.left=natural.left;layout.right=natural.right;layout.columnLocal=natural.columnLocal;layout.columnReserve=natural.columnReserve;layout.columnAuto=natural.columnAuto;
+   layout.column=natural.column;layout.columnBox=natural.columnBox;layout.lineContent=natural.lineContent;layout.gutterX=natural.gutterX;layout.sizerColumn=natural.sizerColumn;layout.columnInset=natural.columnInset;layout.ownLines=natural.ownLines;layout.left=natural.left;layout.right=natural.right;layout.columnLocal=natural.columnLocal;layout.columnReserve=natural.columnReserve;layout.columnPad=natural.columnPad;layout.columnAuto=natural.columnAuto;
   }
   this.observeAboveContent();
   if(!this.viewportPaneObserver) {
@@ -146,13 +162,13 @@ declare module "./InkOverlay" {
   if(!layout||this.frame.locked||!this.container)return false;
   const scroller=this.view.scrollDOM;
   const savedLeft=scroller.scrollLeft,savedTop=scroller.scrollTop;
-  const {column,columnBox,lineContent,gutterX,sizerColumn,columnInset,ownLines,left,right,columnLocal,columnReserve,columnAuto}=this.measureNaturalColumn({width:layout.width,height:layout.height});
+  const {column,columnBox,lineContent,gutterX,sizerColumn,columnInset,ownLines,left,right,columnLocal,columnReserve,columnPad,columnAuto}=this.measureNaturalColumn({width:layout.width,height:layout.height});
   // columnBox and sizerColumn are in the compare because a theme change can move the column without moving `.cm-content`
   // - that is exactly what Minimal does, and it is why neither the ResizeObserver nor the content-origin compare fired.
   // lineContent counts only under a theme that sizes its own lines, the one place the stylesheet reads it: elsewhere a
   // line's own padding change would re-commit for a variable nothing uses.
-  const changed=column!==layout.column||columnBox!==layout.columnBox||(ownLines&&lineContent!==layout.lineContent)||sizerColumn!==layout.sizerColumn||columnInset!==layout.columnInset||ownLines!==layout.ownLines||left!==layout.left||right!==layout.right||(columnLocal===null?null:columnLocal-columnReserve)!==this.columnMarginLocal(layout);
-  if(column>0&&changed){layout.column=column;layout.columnBox=columnBox;layout.lineContent=lineContent;layout.gutterX=gutterX;layout.sizerColumn=sizerColumn;layout.columnInset=columnInset;layout.ownLines=ownLines;layout.left=left;layout.right=right;layout.columnLocal=columnLocal;layout.columnReserve=columnReserve;}
+  const changed=column!==layout.column||columnBox!==layout.columnBox||(ownLines&&lineContent!==layout.lineContent)||sizerColumn!==layout.sizerColumn||columnInset!==layout.columnInset||ownLines!==layout.ownLines||left!==layout.left||right!==layout.right||(columnLocal===null?null:columnLocal-columnReserve-columnPad)!==this.columnMarginLocal(layout);
+  if(column>0&&changed){layout.column=column;layout.columnBox=columnBox;layout.lineContent=lineContent;layout.gutterX=gutterX;layout.sizerColumn=sizerColumn;layout.columnInset=columnInset;layout.ownLines=ownLines;layout.left=left;layout.right=right;layout.columnLocal=columnLocal;layout.columnReserve=columnReserve;layout.columnPad=columnPad;}
   // A theme change is the one way `--file-line-width` moves at a constant pane
   // size, so the auto term's inputs are re-read in the same unowned layout.
   if(column>0)layout.columnAuto=columnAuto;
@@ -198,7 +214,7 @@ declare module "./InkOverlay" {
   * freezing the sizer's margin restates where the column already was. Measured unowned: Obsidian's own theme puts the
   * sizer at 341 with the column at 341.25 - the same place. Minimal puts it at 0, full width.
   */
- function measureNaturalColumn(this: InkOverlayPlugin, box:{width:number;height:number}|null):{column:number;columnBox:number;lineContent:number;gutterX:number;sizerColumn:boolean;columnInset:boolean;ownLines:boolean;left:string;right:string;columnLocal:number|null;columnReserve:number;columnAuto:{lineWidth:number;fixed:number;scrollbar:number}|null} {
+ function measureNaturalColumn(this: InkOverlayPlugin, box:{width:number;height:number}|null):{column:number;columnBox:number;lineContent:number;gutterX:number;sizerColumn:boolean;columnInset:boolean;ownLines:boolean;left:string;right:string;columnLocal:number|null;columnReserve:number;columnPad:number;columnAuto:{lineWidth:number;fixed:number;scrollbar:number}|null} {
   const layout=this.viewportLayout!,host=this.view.dom,scroller=this.view.scrollDOM;
   if(box) {
    host.classList.remove("handwriting-note-viewport");
@@ -233,6 +249,12 @@ declare module "./InkOverlay" {
   const gutterLocal=Math.max(0,scroller.offsetWidth-scroller.clientWidth-border);
   const gutterX=scroller.offsetWidth>0&&sr.width>0?gutterLocal*sr.width/scroller.offsetWidth:0;
   const sizerLeft=sizer?sizer.offsetLeft:null;
+  // THE SCROLLER'S OWN LEFT PADDING, host-local. Obsidian pads the scroller by its file margins (32 px), so `columnLocal`
+  // and the sizer's offset both carry it, while the margin written from `columnLocal` goes on the sizer, or the line,
+  // inside that padding. Counted there again, a column with Readable line length off and no margin of its own got a
+  // 32 px margin: measured after a 100 to 200 to 100 percent round trip, the sizer 64 px in for 32, the scroll width 32
+  // px wider, and the 32 booked as margin debt and paid as scroll.
+  const columnPad=Math.max(0,Number.parseFloat(ss.paddingLeft)||0);
   // THE LEFT RESERVE IS PAINTED, NOT LAID OUT. Its `translate` on the sizer is in the rect read above, so
   // `columnLocal` is where the column is painted (the pinch anchor and the pan bounds want that), while
   // `offsetLeft` and every margin written from `columnLocal` do not carry it: those subtract `columnReserve`.
@@ -260,7 +282,7 @@ declare module "./InkOverlay" {
   // left; the own-lines margin never goes below it (applyViewportBox, appliedColumnMargin). A gutter in the flow - CodeMirror's
   // sticky, Obsidian's default theme - ends where the content starts, and its reserve is 0.
   {const g=this.view.dom.querySelector?.<HTMLElement>(".cm-gutters"),gr=g?.getBoundingClientRect?.(),cr=this.view.contentDOM.getBoundingClientRect?.();const reach=gr&&cr&&gr.width>0&&rectScale>0?(gr.right-cr.left)/rectScale:0;this.columnGutterReserve=Number.isFinite(reach)&&reach>0?reach:0;}
-  return {column,columnBox:columnBoxLocal,lineContent,gutterX:Number.isFinite(gutterX)?gutterX:0,sizerColumn,columnInset,ownLines,left:style.marginLeft,right:style.marginRight,columnLocal,columnReserve,columnAuto:this.measureColumnAuto(box?box.width:layout.width,ownLines?columnBoxLocal:null)};
+  return {column,columnBox:columnBoxLocal,lineContent,gutterX:Number.isFinite(gutterX)?gutterX:0,sizerColumn,columnInset,ownLines,left:style.marginLeft,right:style.marginRight,columnLocal,columnReserve,columnPad,columnAuto:this.measureColumnAuto(box?box.width:layout.width,ownLines?columnBoxLocal:null)};
  }
 
  /**
@@ -370,7 +392,7 @@ declare module "./InkOverlay" {
   if(!(this.cssWidth>0)||!(this.cssHeight>0))return;
   const raster=rasterScale(this.cssScale,this.pinchScaleNow,SCALE_EPSILON);
   const box=canvasLayerBox(this.cssWidth,this.cssHeight,raster,this.zoomFormAt(this.pinchScaleNow));
-  for(const c of [this.committedCanvas,this.wetCanvas,this.highlightCanvas,this.highlightWetCanvas]) {
+  for(const c of [this.committedCanvas,this.wetCanvas,this.highlightCanvas,this.highlightWetCanvas,this.attachedLayer?.pen,this.attachedLayer?.hl]) {
    c?.setCssStyles({width:`${box.width}px`,height:`${box.height}px`,transform:box.transform,transformOrigin:box.transform?"0 0":""});
   }
 		this.tail?.placeInline(raster, this.zoomFormAt(this.pinchScaleNow));
@@ -595,8 +617,182 @@ declare module "./InkOverlay" {
   if(!host.classList.contains(GUTTER_TRAVEL_CLASS))host.classList.add(GUTTER_TRAVEL_CLASS);
  }
 
+/** The pane's tokens and width for a held column and a capped one (styles.css, "THE HELD COLUMN", "THE CAPPED COLUMN"). */
+const COLUMN_HELD_CLASS = "handwriting-note-column-held";
+const COLUMN_CAPPED_CLASS = "handwriting-note-column-capped";
+const COLUMN_HOLD_VAR = "--handwriting-note-column-hold";
+const COLUMN_CAP_SIZER_VAR = "--handwriting-note-column-cap-sizer";
+
+/**
+ * CodeMirror reads its lines' heights again only when the editor's width or the content's height changed
+ * (@codemirror/view ViewState.measure, `measureContent`). A column changed by a class keeps the editor's width, and the
+ * ink room below the text keeps the content's height, so its height map would keep the old wrap and every anchor read
+ * from it would put the ink a row or more off its words on the page. The flag set here is the one its own redraw sets.
+ * It is not public API: an editor without it as a boolean is warned about once per session, by name, and left unwritten,
+ * and the zoom report carries the same line (ColumnHoldMeasureFlag.test.ts pins the npm build).
+ */
+const MEASURE_FLAG = "viewState.mustMeasureContent";
+let measureFlagSet = false;
+let measureFlagWarning: string | null = null;
+
+export function markContentForMeasure(view: unknown): void {
+ const viewState = (view as { viewState?: { mustMeasureContent?: unknown } } | null | undefined)?.viewState;
+ if (viewState && typeof viewState.mustMeasureContent === "boolean") {
+  viewState.mustMeasureContent = true;
+  measureFlagSet = true;
+  return;
+ }
+ if (!view || measureFlagWarning !== null) return;
+ measureFlagWarning = viewState
+  ? `${MEASURE_FLAG} is ${typeof viewState.mustMeasureContent}, not a boolean`
+  : `viewState is missing, so ${MEASURE_FLAG} was not set`;
+ console.warn(`Handwriting: the editor's ${MEASURE_FLAG} was not found (${measureFlagWarning}); a held text column may show its ink off its words until the editor measures again`);
+}
+
+/** For the zoom report: the warning if one was given this session, else whether the flag was ever set. */
+export function contentMeasureFlagState(): string {
+ return measureFlagWarning ?? (measureFlagSet ? "set" : "not asked yet");
+}
+
+ /**
+  * HOLD THE TEXT COLUMN AT THE WIDTH THE NOTE'S INK WAS DRAWN AGAINST (ColumnRef.ts). A line anchor is honoured only at
+  * the content width it was taken at; any other width re-wraps the text under ink that stays at its page position. With
+  * Infinite Canvas on, the column is held at the note's own width instead, so a zoom, a window or a sidebar changes the
+  * room around the column and not its wrap. With the canvas off, a pane with room for the note's width shows the column at
+  * that width, readable line length on or off, and a narrower pane is laid out exactly as it always was: nothing written,
+  * the readable cap included. Which of the two holds follows the pane live (a resize, a sidebar, the app zoom) through a
+  * ResizeObserver whose entries carry the sizes; no room is added and nothing is zoomed. A note with no width: nothing is
+  * written and the column is the editor's own.
+  *
+  * Asked when a note opens and when its ink arrives, when the canvas answer changes and when the note's ink changes (its
+  * first anchored stroke gives a new note its width). It reads no layout: a store lookup, and writes only when the width
+  * to hold changes. A change asks the next measure for the line signature, which runs before the next repaint, so the
+  * anchors are read under the held width before the ink is painted under it.
+  */
+ function applyColumnHold(this: InkOverlayPlugin): void {
+  // A unit rig may carry no editor DOM.
+  const pane = this.view?.dom?.parentElement;
+  if (!pane) return;
+  const path = this.filePath();
+  const width = path ? inlineInk.columnRefPx(path) : null;
+  const off = width !== null && !this.canvasMode;
+  watchColumnFit(this, off);
+  const fit = off ? this.columnFit : null;
+  // The chrome inside the sizer (a line-number gutter, a padded container) sits beside the content at every width.
+  const chrome = fit ? fit.chrome : 0;
+  const capped = !!fit && fit.room !== null && fit.room - chrome >= width!;
+  // Canvas off without the room: today's layout, so nothing at all is written.
+  const want = off && !capped ? null : width;
+  const sizer = capped ? width! + chrome : null;
+  if (want === (this.columnHeld ?? null) && capped === (this.columnCapped ?? false) && sizer === (this.columnCapSizer ?? null)) return;
+  this.columnHeld = want;
+  this.columnCapped = capped;
+  this.columnCapSizer = sizer;
+  if (want === null) {
+   pane.classList.remove(COLUMN_HELD_CLASS, COLUMN_CAPPED_CLASS);
+   pane.style.removeProperty(COLUMN_HOLD_VAR);
+  } else {
+   pane.style.setProperty(COLUMN_HOLD_VAR, `${want}px`);
+   pane.classList.toggle(COLUMN_HELD_CLASS, !capped);
+   pane.classList.toggle(COLUMN_CAPPED_CLASS, capped);
+  }
+  if (sizer === null) pane.style.removeProperty(COLUMN_CAP_SIZER_VAR);
+  else pane.style.setProperty(COLUMN_CAP_SIZER_VAR, `${sizer}px`);
+  // The editor keeps its old wrap's line heights unless told to measure them again (markContentForMeasure).
+  markContentForMeasure(this.view);
+  this.view.requestMeasure?.();
+  this.requestLineSignature();
+  // A taken-over viewport froze the natural column it measured; it is measured again under the new width.
+  if (this.viewportLayout) this.scheduleViewportStyleRefresh();
+ }
+
+ /** The pane OUTLIVES the overlay: an unmount takes the held width off with it. */
+ function releaseColumnHold(this: InkOverlayPlugin): void {
+  watchColumnFit(this, false);
+  if ((this.columnHeld ?? null) === null) return;
+  this.columnHeld = null;
+  this.columnCapped = false;
+  this.columnCapSizer = null;
+  const pane = this.view?.dom?.parentElement;
+  pane?.classList.remove(COLUMN_HELD_CLASS, COLUMN_CAPPED_CLASS);
+  pane?.style.removeProperty(COLUMN_HOLD_VAR);
+  pane?.style.removeProperty(COLUMN_CAP_SIZER_VAR);
+ }
+
+ /**
+  * Canvas off with a width: watch the scroller, the sizer and the content, and ask again whenever one changes size. The
+  * observer's entries carry the sizes, so the decision reads no layout, and it is delivered after layout and before paint,
+  * so a crossing shows the arrived layout in the frame it happens. The watch's start (a note opening with its ink, the
+  * canvas turned off) seeds the same sizes with one read, so the ink's first paint already has the column it belongs to;
+  * that read is never in a draw or scroll frame. Off: the watch ends.
+  */
+ function watchColumnFit(o: InkOverlayPlugin, on: boolean): void {
+  if (!on) {
+   o.columnFit?.ro.disconnect();
+   o.columnFit = null;
+   return;
+  }
+  if (o.columnFit) return;
+  const RO = o.view?.dom?.ownerDocument?.defaultView?.ResizeObserver;
+  const scroller = o.view?.scrollDOM, content = o.view?.contentDOM;
+  if (!RO || !scroller || !content) return;
+  const sizer = content.closest(".cm-sizer");
+  const fit: NonNullable<InkOverlayPlugin["columnFit"]> = { ro: new RO((entries) => {
+   let roomSeen = false;
+   for (const e of entries) {
+    const box = e.borderBoxSize?.[0]?.inlineSize ?? e.contentRect.width;
+    if (e.target === scroller) { fit.room = e.contentRect.width; roomSeen = true; }
+    else if (e.target === sizer) fit.sizer = box;
+    else if (e.target === content) fit.content = box;
+   }
+   // The chrome is the sizer less the content wherever the content fills its sizer beside the chrome: with nothing
+   // capped, and while capped with the sizer at the width it was given (readable line length on pins it there), so a
+   // gutter that widens or appears while capped is taken at once and the text keeps the held width. A capped column
+   // whose sizer is not at that width (readable line length off leaves it full width) does not fill it: the chrome is
+   // kept from the last layout that did.
+   const pinned = !!o.columnCapped && o.columnCapSizer != null && fit.sizer !== null && Math.abs(fit.sizer - o.columnCapSizer) < 1;
+   if ((!o.columnCapped || pinned) && fit.sizer !== null && fit.content !== null) fit.chrome = Math.max(0, fit.sizer - fit.content);
+   if (o.columnFit !== fit) return;
+   const before = [o.columnHeld ?? null, o.columnCapped ?? false, o.columnCapSizer ?? null];
+   o.applyColumnHold();
+   // A write asked by the sizer or the content alone (a gutter that changed beside the content) resizes both in the frame
+   // it is made, at or above the depth this round reported, which the browser holds to the next frame and reports as a
+   // ResizeObserver loop. The write still lands in this frame; the two are watched again from the next one, which reports
+   // their sizes then. The overlay's own content observer saw the content in this round too and is watched again the same
+   // way. A write asked by the scroller resizes only boxes below it, reported in this frame as before.
+   if (!roomSeen && o.columnFit === fit && (before[0] !== (o.columnHeld ?? null) || before[1] !== (o.columnCapped ?? false) || before[2] !== (o.columnCapSizer ?? null))) {
+    if (sizer) fit.ro.unobserve(sizer);
+    fit.ro.unobserve(content);
+    const own = o.contentResizeObserver;
+    own?.unobserve(content);
+    const again = (): void => {
+     if (own && o.contentResizeObserver === own) own.observe(content);
+     if (o.columnFit !== fit) return;
+     if (sizer) fit.ro.observe(sizer);
+     fit.ro.observe(content);
+    };
+    const win = o.view?.dom?.ownerDocument?.defaultView;
+    if (win?.requestAnimationFrame) win.requestAnimationFrame(again);
+    else again();
+   }
+  }), room: null, sizer: null, content: null, chrome: 0 };
+  // The seed, as the entries would give it: the scroller's content box (its client box less padding), border boxes for
+  // the other two. Nothing is capped yet, so the chrome is read too.
+  const ss = o.view.dom.ownerDocument.defaultView?.getComputedStyle(scroller);
+  if (ss) fit.room = scroller.clientWidth - (Number.parseFloat(ss.paddingLeft) || 0) - (Number.parseFloat(ss.paddingRight) || 0);
+  if (sizer instanceof HTMLElement) fit.sizer = sizer.offsetWidth;
+  fit.content = content.offsetWidth;
+  if (fit.sizer !== null) fit.chrome = Math.max(0, fit.sizer - fit.content);
+  o.columnFit = fit;
+  fit.ro.observe(scroller);
+  if (sizer) fit.ro.observe(sizer);
+  fit.ro.observe(content);
+ }
+
 export function installInkOverlayViewportBox(proto: InkOverlayPlugin): void {
 	installMethods(proto, {
+		applyColumnHold,
+		releaseColumnHold,
 		restoreViewportLayout,
 		prepareViewportLayout,
 		scheduleViewportStyleRefresh,

@@ -27,9 +27,9 @@ declare module "./MobileTools" {
 			// yet; it is written this way because the next one might.
 			if (!(spec.shownOn?.(host) ?? true)) continue;
 			if (spec.startsGroup) {
-				this.rowOrder.push(this.el.createDiv({ cls: "handwriting-mobile-tools-divider" }));
+				this.rowOrder.push(this.face.createDiv({ cls: "handwriting-mobile-tools-divider" }));
 			}
-			const b = this.el.createEl("button", {
+			const b = this.face.createEl("button", {
 				cls: "handwriting-mobile-tool",
 				attr: { "aria-label": spec.label, type: "button" },
 			});

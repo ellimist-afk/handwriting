@@ -337,6 +337,10 @@ export class FoldOrderControl {
 		// arrive without being restated. What the stylesheet undoes for this one
 		// copy is only what makes a strip a strip: the absolute positioning, the
 		// shadow and the 0.92 opacity.
+		//
+		// The buttons go inside the strip's inner face, as on the toolbar. The
+		// row, the fill, the border and the rounding live on the face, not on
+		// the root; buttons put straight in the root stack in one column.
 		const bar = fixedRow.createDiv({
 			cls: "handwriting-mobile-tools handwriting-fold-fixed-bar",
 			attr: {
@@ -345,8 +349,9 @@ export class FoldOrderControl {
 				"aria-label": `Always shown: ${NEVER_FOLDING_FACES.map((f) => f.label).join(", ")}`,
 			},
 		});
+		const barFace = bar.createDiv({ cls: "handwriting-mobile-tools-face" });
 		for (const face of NEVER_FOLDING_FACES) {
-			const btn = bar.createDiv({ cls: "handwriting-mobile-tool handwriting-fold-fixed-btn" });
+			const btn = barFace.createDiv({ cls: "handwriting-mobile-tool handwriting-fold-fixed-btn" });
 			this.paintIcon(btn, face);
 			// The two nibs wear their real ink here exactly as they do on the
 			// strip. This is the whole of "the first row of icons is not colored

@@ -12,7 +12,7 @@
  * install it still type-checks, because the module augmentation declares it, and onload would only fail when it
  * reached the call.
  *
- * THE PHASE. Run on a bare plugin, it registers its eleven commands, none of them behind a setting. The place of
+ * THE PHASE. Run on a bare plugin, it registers its thirteen commands, none of them behind a setting. The place of
  * the call in the whole list is pinned in RegisterCommandsCensus.test.ts.
  */
 import { describe, expect, it, vi } from "vitest";
@@ -58,6 +58,8 @@ describe("export and selection command registrations on the plugin prototype", (
 			"copy-selected-ink",
 			"cut-selected-ink",
 			"paste-ink",
+			"attach-ink-to-text",
+			"detach-ink",
 			"delete-all-ink",
 			"check-split-ink",
 		]);

@@ -43,6 +43,10 @@ const PHRASES_B64 = "XC5jbGF1ZGUvfGxlYWQtZW5naW5lZXJ8bWFpbGJveHxxdWV1ZVwubWR8Y28
 const POSITIVE_B64 =
 	"Ly8gYXBwcm92ZWQgYnkgQXN0cmEgYXQgMTc6MjIKc2VlIH4vLmNsYXVkZS9tYWlsYm94L3F1ZXVlLm1kCkNvLUF1dGhvcmVkLUJ5OiBzb21lb25l";
 
+/** Binary-rule controls, encoded for the same reason: a phrase and a bare name. */
+const CO_AUTHORED_B64 = "Q28tQXV0aG9yZWQtQnk=";
+const GPT_B64 = "R1BU";
+
 /**
  * Decoded without `Buffer`: this project's tsconfig does not pull in node
  * types, and a test that needs a new dependency to express a hygiene rule is a
@@ -52,6 +56,15 @@ declare const atob: (data: string) => string;
 const decode = (b64: string): string => atob(b64);
 
 const PATTERN = new RegExp(`\\b(${decode(NAMES_B64)})\\b|${decode(PHRASES_B64)}`, "i");
+const PHRASE_PATTERN = new RegExp(decode(PHRASES_B64), "i");
+
+/** git's rule: a NUL in the first 8000 bytes makes a file binary. */
+const isBinary = (text: string): boolean => text.slice(0, 8000).includes(String.fromCharCode(0));
+/**
+ * Binary files hold short random runs that read as names, so they are checked
+ * for the phrases only. Text files get both patterns.
+ */
+const patternFor = (text: string): RegExp => (isBinary(text) ? PHRASE_PATTERN : PATTERN);
 
 /**
  * Two carve-outs, named one at a time with a reason each. Everything else that
@@ -102,8 +115,9 @@ describe("nothing shipped names how it was built", () => {
 			} catch {
 				continue;
 			}
+			const pattern = patternFor(text);
 			text.split(/\r?\n/).forEach((line, i) => {
-				if (PATTERN.test(line)) hits.push(`${rel}:${i + 1}  ${line.trim().slice(0, 110)}`);
+				if (pattern.test(line)) hits.push(`${rel}:${i + 1}  ${line.trim().slice(0, 110)}`);
 			});
 		}
 		expect(
@@ -121,5 +135,14 @@ describe("nothing shipped names how it was built", () => {
 		// substring of `contrastRatio`, which is real code in InkTheme.ts.
 		expect(PATTERN.test("const contrastRatio = fg / bg;")).toBe(false);
 		expect(PATTERN.test("computeContrastRatio(a, b)")).toBe(false);
+	});
+
+	it("a binary file is checked for the phrases only: a phrase inside one is caught, a bare name is not", () => {
+		const NUL = String.fromCharCode(0);
+		const phraseInBinary = `${NUL}${NUL}${decode(CO_AUTHORED_B64)}${NUL}`;
+		const nameInBinary = `${NUL}${NUL}${decode(GPT_B64)}${NUL}`;
+		expect(isBinary(phraseInBinary)).toBe(true);
+		expect(patternFor(phraseInBinary).test(phraseInBinary), "a phrase inside a binary was missed").toBe(true);
+		expect(patternFor(nameInBinary).test(nameInBinary), "a bare name inside a binary was checked").toBe(false);
 	});
 });

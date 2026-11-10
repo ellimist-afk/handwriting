@@ -15,7 +15,9 @@ const timingResults:unknown[]=[];
 declare const process: { env: Record<string, string | undefined> };
 // Z1 PLANTS, one per run (HW_Z1_PLANT), each anchor matched exactly once. correction0: the zoom lift's line correction
 // forced to 0. measure0: a contact inside a zoom lift's first measure no longer runs it, so the pen retires the lift's line correction. pandrop: the router maps the pen's y without the pan. pendrift: the pen's client point read without the raster camera's pan, so a held stroke lands off its line.
+// putupoff: the first preview frame no longer puts up the held raster.
 const Z1_PLANTS:Record<string,[string,string,string]>={
+ putupoff:["InkOverlayPinch","if (firstFrame) this.putUpHeldRaster();",""],
  correction0:["InkOverlayZoomApi","moved=this.view.lineBlockAt(fingerLine.pos).top/scaleY-fingerLine.top-(settleLineApplied.get(hold)??0);","moved=0;"],
  measure0:["InkOverlayLifecycle","(this.view as unknown as { measure(): void }).measure(); this.router?.refreshRect();",""],
  pandrop:["InlinePenRouter","y: visualToNote(e.clientY - this.rect.top - panY, scale),","y: visualToNote(e.clientY - this.rect.top, scale),"],
@@ -58,9 +60,12 @@ for(const foreign of ['foreign-transform','foreign-origin','foreign-translate','
  try{
   await mount(page,250,false,false,'overlap');
   const state=(action:string)=>page.evaluate(a=>(window as any).zoomDrift.layerVisual(a.action,a.zoom),{action,zoom:.1});
+  // The knob: the held raster retired by the product's own path before each preview, so the guard under test is the placement
+  // check, not the held-raster refusal (premise: heldRasterSource null).
+  const previewNow=async()=>{const p=await state('retired-preview');expect(p.heldSource,`${foreign}: premise: no held raster for the gesture after the retire`).toBe(false);return p;};
   const before=await state('setup');expect(before.pixels[0]).toBeGreaterThan(0);expect(before.pixels[2]).toBeGreaterThan(0);
   await state(foreign);
-  const preview=await state('preview');
+  const preview=await previewNow();
   expect(preview.composite,`${foreign}: composite refused`).toBe(false);
   // The preview still hides BLANK layers on its own (a separate step from the
   // composite); what refusal guarantees is that every canvas holding ink stays
@@ -68,7 +73,7 @@ for(const foreign of ['foreign-transform','foreign-origin','foreign-translate','
   for(let i=0;i<5;i++)if(preview.pixels[i]>0)expect(preview.visible[i],`${foreign}: inked canvas ${i} stays visible`).toBe('visible');
   await state('foreign-restore');await state('restore');
   // Liveness: with the foreign placement gone the same preview composites.
-  const again=await state('preview');expect(again.composite,`${foreign}: composite accepted once placement agrees`).toBe(true);
+  const again=await previewNow();expect(again.composite,`${foreign}: composite accepted once placement agrees`).toBe(true);
   await state('restore');
  }finally{await page.close();}
 });
@@ -77,14 +82,31 @@ for(const [zoom,scaled] of [[.1,false],[.4,false],[1,false],[.1,true],[.4,true]]
  try{
   await mount(page,250,false,false,'overlap');
   const state=(action:string)=>page.evaluate(a=>(window as any).zoomDrift.layerVisual(a.action,a.zoom),{action,zoom});
+  // The knob, below 1.0 at fixed scale: the held raster retired by the product's own path before each preview (premise:
+  // heldRasterSource null), so these cells read the composite. The scaled cells keep the raster and read the held-raster contract.
+  const knob=!scaled&&zoom<1;
+  const previewNow=async()=>{const p=await state(knob?'retired-preview':'preview');if(knob)expect(p.heldSource,'premise: no held raster for the gesture after the retire').toBe(false);return p;};
   const before=await state('setup');expect(before.pixels[0]).toBeGreaterThan(0);expect(before.pixels[2]).toBeGreaterThan(0);
   expect(before.standInHeld,'setup: the zoom stand-in was still held 4 s after the zoom, so the baseline would be its pixels, not the sharp layer').toBe(false);
-  let original=await page.screenshot();const preview=await state(scaled?'scaled-preview':'preview');expect(preview.composite).toBe(true);expect(preview.blank[3]).toBe(false);
+  let original=await page.screenshot();const preview=scaled?await state('scaled-preview'):await previewNow();
+  if(scaled){
+   // THE HELD RASTER: the touch pinch holds up the raster painted at the start zoom on its first preview frame and takes
+   // the composite down. Plant HW_Z1_PLANT=putupoff: the sibling never goes up.
+   expect(preview.composite,'held raster: the pinch composite stays off').toBe(false);
+   expect(preview.heldFirst?.up,'held raster: the sibling is up on the first preview frame').toBe(true);
+   expect(preview.heldFirst.canvases,'held raster: the sibling holds the pen and highlighter canvases').toBe(2);
+   expect(preview.heldFirst.paneHidden,'held raster: the pane committed and highlight canvases hidden').toEqual(['hidden','hidden']);
+  }else{expect(preview.composite).toBe(true);expect(preview.blank[3]).toBe(false);}
   if(process.env.HW_COMPOSITE_THIN_PLANT)await state('thin-gap-plant');
   if(process.env.HW_COMPOSITE_SHIFT_PLANT)await state(`shift-plant:${process.env.HW_COMPOSITE_SHIFT_PLANT}`);
   const combined=await page.screenshot();
-  if(scaled){const restored=await state('restore');expect(restored.originalHashes).toEqual(before.originalHashes);expect(restored.pixels[3]).toBe(0);original=await page.screenshot();}
+  // THE SAME TRANSFORM: the scaled cells take the raster down mid-gesture by the product's own path, read in that call as
+  // the drop cell reads it, so the original, background and restore shots read the pane's own layers under the preview's transform,
+  // the same transform as the combined shot. The landing, the restore and the hashes come after.
+  if(scaled){const down=await state('held-down');expect(down.heldUp,'held raster: down in the take-down call').toBe(false);expect(down.visible[2],'held raster: the pane committed canvas shown in the take-down call').toBe('visible');original=await page.screenshot();}
   await state('background');const background=await page.screenshot();const captured=await state('background-restore');
+  if(scaled){const landed=await state('land');expect(landed.heldUp,'held raster: down within 4 s of the landing').toBe(false);expect(landed.visible[2],'held raster: the pane committed canvas shown after the landing').toBe('visible');
+   const restored=await state('restore');expect(restored.originalHashes).toEqual(before.originalHashes);expect(restored.pixels[3]).toBe(0);}
   if(process.env.HW_LAYER_SHOTS){writeFileSync(`${process.env.HW_LAYER_SHOTS}-${zoom}-${scaled}-original.png`,original);writeFileSync(`${process.env.HW_LAYER_SHOTS}-${zoom}-${scaled}-combined.png`,combined);}
   const diff=await page.evaluate(async ({images,arms})=>{
    const pixels=async(src:string)=>{const image=new Image();image.src='data:image/png;base64,'+src;await image.decode();const c=document.createElement('canvas');c.width=image.width;c.height=image.height;const ctx=c.getContext('2d')!;ctx.drawImage(image,0,0);return ctx.getImageData(0,0,c.width,c.height).data;};
@@ -122,12 +144,12 @@ for(const [zoom,scaled] of [[.1,false],[.4,false],[1,false],[.1,true],[.4,true]]
   for(const action of ['restore','tail','tail-clear','repaint','resize','wet-clear','wet','pen']){
    // The tail-clear arm paints its tail on the full surface: the composite takes a
    // full-size occupied tail only (a compact one is refused; see the cell below).
-   await state('restore');if(action==='tail-clear'){await state('tail-full');await state('tail');}const active=await state('preview');if(action==='tail-clear'){expect(active.composite).toBe(true);expect(active.pixels[4]).toBeGreaterThan(0);}
+   await state('restore');if(action==='tail-clear'){await state('tail-full');await state('tail');}const active=await previewNow();if(action==='tail-clear'){expect(active.composite).toBe(true);expect(active.pixels[4]).toBeGreaterThan(0);}
    const after=await state(action);expect.soft(after.composite,action).toBe(false);expect.soft(after.visible.every((v:string)=>v==='visible'),action).toBe(true);
    if(action==='tail-clear'||action==='wet-clear'){expect.soft(after.pixels[3],action).toBe(0);expect.soft(after.blank[3],action).toBe(true);}
    if(action==='tail-clear')expect(after.pixels[4]).toBe(0);
    if(action!=='pen')expect(withoutLineAnchor(after.strokes),action).toBe(withoutLineAnchor(before.strokes));
-   if(action==='wet'){expect(after.pixels[3]).toBeGreaterThan(0);expect(after.blank[3]).toBe(false);const fallback=await state('preview');expect(fallback.composite).toBe(false);expect(fallback.visible[3]).toBe('visible');await state('restore');const cleared=await state('wet-clear');expect(cleared.blank[3]).toBe(true);expect(cleared.pixels[3]).toBe(0);}
+   if(action==='wet'){expect(after.pixels[3]).toBeGreaterThan(0);expect(after.blank[3]).toBe(false);const fallback=await previewNow();expect(fallback.composite).toBe(false);expect(fallback.visible[3]).toBe('visible');await state('restore');const cleared=await state('wet-clear');expect(cleared.blank[3]).toBe(true);expect(cleared.pixels[3]).toBe(0);}
   }
  }finally{await page.close();}
 });
@@ -155,13 +177,27 @@ for(const mixed of [false,true])it(`uses one visible raster during repeated low-
  try{await mount(page,90,false,false,mixed);
   for(const [startScale,ratio] of [[.1,4],[.4,.25]]){
    const r=await page.evaluate(a=>(window as any).zoomDrift.continuousPinch(a.ratio,false,true,false,{startScale:a.startScale,hover:true,moving:true}),{startScale,ratio});
-   expect(r.liveDimensions.canvases.filter((c:any)=>c.visibility!=='hidden').length).toBe(1);
-   expect(r.finalDimensions.canvases.every((c:any)=>c.visibility!=='hidden')).toBe(true);
+   // THE HELD RASTER: the raster painted at the start zoom goes up on the first preview frame, one sibling holding the pen
+   // canvas and, on a mixed note, the highlighter canvas, with the pane's committed and highlight canvases hidden; the pinch
+   // composite stays off. The one visible raster is that sibling. Plant HW_Z1_PLANT=putupoff: the sibling never goes up.
+   const heldCanvases=mixed?2:1;
+   expect(r.liveComposite,`${startScale}: held raster: the pinch composite stays off`).toBe(false);
+   expect(r.heldFirst?.up,`${startScale}: held raster: the sibling is up on the first preview frame`).toBe(true);
+   expect(r.heldFirst.canvases,`${startScale}: held raster: canvases in the sibling`).toBe(heldCanvases);
+   expect(r.heldFirst.paneHidden,`${startScale}: held raster: the pane committed and highlight canvases hidden`).toEqual(['hidden','hidden']);
+   expect(r.liveDimensions.canvases.filter((c:any)=>c.visibility!=='hidden').length,`${startScale}: visible canvases in the live pinch`).toBe(heldCanvases);
+   // The landing: the pane's canvases are shown once the raster lands (waited for at most 4 s).
+   expect(r.heldUp,`${startScale}: held raster: down within 4 s of the landing`).toBe(false);
+   // The probe: on a hidden canvas the message lists every canvas by name, style visibility, blank flag and whether the
+   // pinch's restore map holds it. HW_Z1_HL_ARM (diagnostic): one highlighter stroke after the pen-only landing, read on the
+   // highlight canvas, logged as Z1-HLARM before the check.
+   const layers=JSON.stringify(r.finalDimensions.canvases.map((c:any)=>({name:c.name,visibility:c.visibility,blank:c.blank,pinchHidden:c.pinchHidden})));
+   if(process.env.HW_Z1_HL_ARM&&!mixed)console.log(`Z1-HLARM ${startScale} ${layers} ${JSON.stringify(await page.evaluate(()=>(window as any).zoomDrift.highlighterArm()))}`);
+   expect(r.finalDimensions.canvases.filter((c:any)=>c.visibility==='hidden').length,`${startScale}: canvases hidden after the landing: ${layers}`).toBe(0);
    expect(r.before.strokes).toEqual(r.after.strokes);expect(r.before.saved).toBe(r.after.saved);
-   // The pre-pinch scroll released the wet canvas. A pen-only pinch then writes no backing; a mixed note's composite
-   // sizes the wet canvas once, at its start (width and height), and nothing else.
+   // The pre-pinch scroll released the wet canvas. With the composite off the live pinch writes no backing, pen-only or mixed.
    expect(r.wetReleasedBefore,'premise: the scroll before the pinch released the wet canvas').toBe(true);
-   expect(r.wetBackingWrites,'wet canvas backing writes in the live pinch').toBe(mixed?2:0);
+   expect(r.wetBackingWrites,'wet canvas backing writes in the live pinch').toBe(0);
    expect(r.backingWrites-r.wetBackingWrites,'other backing writes in the live pinch').toBe(0);expect(r.liveClears).toBe(0);expect(r.liveTransactions).toBe(0);
   }
  }finally{await page.close();}

@@ -105,7 +105,7 @@ async function rig() {
 		spaceRowsCache: null, spaceLineY: null, spaceTotalDy: 0,
 		filePath: () => path,
 		camera: { screenToWorld: (x: number, y: number) => ({ x, y }), snapshot: { x: 0, y: 0, zoom: 1 } },
-		selection: { bounds: () => null },
+		selection: { bounds: () => null, isEmpty: true, strokeIds: [], revision: 0 },
 	});
 	// Ink: two strokes near the top, N_BELOW strokes spread down the visible page.
 	const strokes: InkStroke[] = [];

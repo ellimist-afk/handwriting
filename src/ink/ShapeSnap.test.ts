@@ -266,3 +266,25 @@ describe("snapStroke", () => {
 		expect(s.id).not.toBe(raw.id);
 	});
 });
+
+describe("snap carries the source stroke's pressure mark", () => {
+	function held(): InkPoint[] {
+		const pts: InkPoint[] = [];
+		for (let i = 0; i <= 40; i++) pts.push({ x: i * 5, y: 50 + jitter(i, 2), pressure: 0.4, t: i * 10 });
+		return withDwell(pts);
+	}
+
+	for (const value of ["off", "on"] as const) {
+		it(`a stroke marked "${value}" snaps to a figure marked "${value}"`, () => {
+			const s = snapStroke({ ...strokeOf(held()), pressureProfile: "exp7", pressureSensitivity: value });
+			expect(s, "premise: the stroke snapped").not.toBe(null);
+			expect(s!.pressureSensitivity).toBe(value);
+		});
+	}
+
+	it("an unmarked stroke snaps unmarked", () => {
+		const s = snapStroke({ ...strokeOf(held()), pressureProfile: "exp7" });
+		expect(s, "premise: the stroke snapped").not.toBe(null);
+		expect(s).not.toHaveProperty("pressureSensitivity");
+	});
+});

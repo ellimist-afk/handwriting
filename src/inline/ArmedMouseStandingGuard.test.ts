@@ -189,6 +189,10 @@ describe("negative control: a real pen still re-arms the guard, and the palm is 
 
 	it("the raw stream's half: a pen pointerrawupdate re-arms the guard", () => {
 		panAndLift(2);
+		// The raw listener is bound only during a stroke now, so no hover raw
+		// reaches the router in use; the raw hover path still exists for a raw
+		// that lands between a claim and the take, and this binds it by hand.
+		h.router.bindRawListener();
 		h.fire(ptr("pointerrawupdate", "pen", 7, 300, 300, 0));
 
 		expect(guard(), "COLD-CONTACT GUARD BROKEN: a pen seen on the raw stream did not re-arm the guard").toEqual({

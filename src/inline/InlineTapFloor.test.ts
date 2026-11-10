@@ -49,6 +49,8 @@ import { DEFAULT_PEN, PenStyle } from "../ink/PenStyle";
 import { PenSample } from "../input/PointerRouter";
 import { resetTipModeForTest } from "./TipMode";
 import { setPrediction } from "./StrokePrediction";
+import { WetInkRenderer } from "../ink/WetInkRenderer";
+import { setInkShaping } from "../ink/InkShape";
 
 /**
  * Distinguishable answers, so every assertion below is about which question
@@ -75,6 +77,8 @@ interface Rig {
 	widths: number[];
 	/** How many times the head canvas was cleared, for the tap case. */
 	clears(): number;
+	/** Every clear and head draw on the head canvas, in order: "clear", or the draw's half-width. */
+	ops: Array<"clear" | number>;
 }
 
 /**
@@ -83,10 +87,11 @@ interface Rig {
  * ruling can be asserted THROUGH the surface instead of only in the
  * renderer's own file.
  */
-function makeRig(realFloor = false): Rig {
+function makeRig(realFloor = false, realWet?: WetInkRenderer): Rig {
 	const view = Object.create(InkOverlayPlugin.prototype) as Record<string, unknown>;
 	const asked: string[] = [];
 	const widths: number[] = [];
+	const ops: Array<"clear" | number> = [];
 	let clears = 0;
 
 	const wet = {
@@ -114,8 +119,8 @@ function makeRig(realFloor = false): Rig {
 	view.mobileTools = null;
 	view.penStyle = { ...DEFAULT_PEN };
 	view.highlighterStyle = { ...DEFAULT_PEN };
-	view.wet = wet;
-	view.highlightWet = wet;
+	view.wet = realWet ?? wet;
+	view.highlightWet = realWet ?? wet;
 	view.predReal = [];
 	view.predLastTail = [];
 	// focusClaimedPenEditor's whole contract: already focused, nothing to do.
@@ -140,6 +145,7 @@ function makeRig(realFloor = false): Rig {
 		prepareLive: () => undefined,
 		clear: () => {
 			clears++;
+			ops.push("clear");
 		},
 		drawHead: (
 			_cam: unknown,
@@ -150,6 +156,7 @@ function makeRig(realFloor = false): Rig {
 			hw: number
 		) => {
 			widths.push(hw);
+			ops.push(hw);
 		},
 		draw: () => undefined,
 	};
@@ -176,6 +183,7 @@ function makeRig(realFloor = false): Rig {
 		asked,
 		widths,
 		clears: () => clears,
+		ops,
 	};
 }
 
@@ -236,4 +244,47 @@ describe("the note surface's contact draw is floored and its moving draw is not"
 			expect(rig.widths, `pressure ${pressure}`).toEqual([nib]);
 		}
 	});
+});
+
+/**
+ * A wet layer on a canvas whose context accepts every call and draws nothing,
+ * smoothed as the overlay's mount leaves it.
+ */
+function realWetLayer(): WetInkRenderer {
+	const ctx = new Proxy({}, { get: () => () => undefined, set: () => true });
+	const wet = new WetInkRenderer({ getContext: () => ctx } as unknown as HTMLCanvasElement, false);
+	wet.smooth = true;
+	return wet;
+}
+
+describe("a pen tap that rests keeps its contact dot until the lift", () => {
+	beforeEach(() => {
+		resetTipModeForTest();
+		setPrediction(false);
+	});
+	afterEach(() => {
+		resetTipModeForTest();
+		setInkShaping(true);
+	});
+
+	// The real wet layer and the real stroke builder: a hand resting on the
+	// glass sends samples under the builder's step, which it accepts none of.
+	// The dot drawn at contact must still be on the head canvas after that
+	// batch, at the same width, or it changes size (or vanishes) while the pen
+	// rests and changes again at the lift.
+	for (const shaping of [true, false]) {
+		it(`shaping ${shaping ? "on" : "off"}: a batch the builder takes nothing from leaves the dot at its contact width`, () => {
+			setInkShaping(shaping);
+			const rig = makeRig(false, realWetLayer());
+
+			rig.penDown(sample(100, 100, 0.6));
+			const contact = rig.ops[rig.ops.length - 1];
+			expect(typeof contact, "the contact dot is drawn at pen-down").toBe("number");
+
+			rig.penRaw([sample(100.05, 100, 0.62)]);
+
+			expect(rig.ops.length, "the batch reached the head canvas").toBeGreaterThan(2);
+			expect(rig.ops[rig.ops.length - 1], "the last head-canvas operation is the dot at its contact width").toBe(contact);
+		});
+	}
 });

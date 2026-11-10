@@ -332,7 +332,7 @@ export function mountOverlay(path: string, opts: { app?: unknown } = {}): Mounte
 		contentDOM,
 		hasFocus: true,
 		focus: () => {},
-		state: { field: () => info },
+		state: { field: () => info, selection: { main: { empty: true, from: 0, to: 0, anchor: 0, head: 0 } } },
 		dispatch: (spec: unknown) => void dispatched.push(spec),
 	};
 

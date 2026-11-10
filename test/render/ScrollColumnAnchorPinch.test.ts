@@ -59,13 +59,15 @@ const READABLE_LINE_WIDTH_CSS = REAL_OBSIDIAN_CSS;
  * exactly as production multiplies it (InkOverlay.ts, the drag band). A mirror, not an import: this file
  * runs the built bundle, not the module.
  *
- * THE GIVE IS MEASURED FROM WHERE THE GESTURE BEGAN, not from zero exposure, so it is
- * `begin + min(travel, give)` and not `min(begin + travel, give)`. The two agree only on an arm whose
- * begin row sits at exposure 0, which is most of them and is why the difference is easy to miss. The
- * `reachable` arm settles it: its begin row is at -250.00 because commitCameraScale({ left: 500 }) put
- * the committed scroll there, and 450 of travel measures -154.00, which is -250 + 96 exactly. The
- * zero-based form predicts 96.00 there and is wrong by 250. A negative travel is never capped - moving
- * back inside the edge is not overscroll - which `Math.min` gives for free.
+ * THE GIVE IS MEASURED FROM THE PAGE'S OWN ORIGIN EDGE, exposure 0, at the live scroll: the page
+ * follows the fingers to that edge and one give past it, then stops, so the figure is
+ * `min(begin + travel, max(give, begin))`. The `reachable` arm is the case that tells the two forms apart:
+ * its begin row is at -250.00 because commitCameraScale({ left: 500 }) put the committed scroll there, and
+ * 450 of travel measures 96.00, the edge plus the give. A form measured from where the gesture began
+ * (`begin + min(travel, give)`) predicts -154.00 there: the page stopping 154 px short of its own edge
+ * while the fingers go on, which was the defect, not the contract. A begin already past the give stays
+ * where it is (the band never moves a resting page), and a negative travel is never capped - moving back
+ * inside the edge is not overscroll - which `Math.min` gives for free.
  */
 const OVERSCROLL_GIVE_PX = 96;
 // THE BAND IS THE CANVAS'S NOW, and only on the ceiling side. With the canvas ON a preview follows
@@ -85,7 +87,7 @@ const OVERSCROLL_GIVE_PX = 96;
 // -250 (pan 0 on every row, fitting or not); `mixed-coalesced` 0 + -25 reaches -25; the tiny arm's -0.01 + 150
 // stays put. Canvas on is the give: 1:1 to the allowance on the ceiling side, then it stops.
 const previewExposure = (from: number, travel: number, external: number, infiniteCanvas: boolean): number =>
-	infiniteCanvas ? from + Math.min(travel, OVERSCROLL_GIVE_PX * external) : from + Math.min(travel, 0);
+	infiniteCanvas ? Math.min(from + travel, Math.max(OVERSCROLL_GIVE_PX * external, from)) : from + Math.min(travel, 0);
 const zoomedWrites = (writes: { styleZoom: string; base: string }[]) => writes.filter(w => w.styleZoom !== w.base);
 
 declare const process: { env: Record<string, string | undefined> };
@@ -1625,8 +1627,15 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 				if (c.from[0] < 0) expect.soft(c.ink[2] - c.pane[2], `${c.phase}: the ink raster reaches the pane's right edge on the ease's first frame (start offset ${c.from[0].toFixed(2)}, offset now ${c.offset[0].toFixed(2)})`).toBeGreaterThanOrEqual(-.5);
 				if (c.from[1] < 0) expect.soft(c.ink[3] - c.pane[3], `${c.phase}: the ink raster reaches the pane's bottom edge on the ease's first frame (start offset ${c.from[1].toFixed(2)}, offset now ${c.offset[1].toFixed(2)})`).toBeGreaterThanOrEqual(-.5);
 			}
-			if (external === 1.25 && readable && infiniteCanvas && !tiny)
-				expect((r.easeCovers ?? []).some((c: any) => c.phase === 'reachable' && c.from && c.from[0] < 0), `premise: the reachable arm eases from left of its rest (${JSON.stringify((r.easeCovers ?? []).filter((c: any) => c.phase === 'reachable'))})`).toBe(true);
+			// The reachable arm is dragged past its own origin edge, so the preview holds it one give past its rest on each
+			// driven axis and the lift's ease starts from exactly there.
+			if (external === 1.25 && readable && infiniteCanvas && !tiny) {
+				const reach = (r.easeCovers ?? []).filter((c: any) => c.phase === 'reachable' && c.from);
+				const seen = JSON.stringify(reach);
+				expect(reach.length, `the reachable arm's ease is read (${seen})`).toBeGreaterThan(0);
+				for (const i of axis === 'corner' ? [0, 1] : [0])
+					expect(Math.abs(reach[0].from[i] - OVERSCROLL_GIVE_PX * external), `the reachable arm's ease starts one give past its rest ${i ? 'below' : 'right of'} it (${seen})`).toBeLessThanOrEqual(.5);
+			}
 			expect(r.naturalLeft).toBeGreaterThanOrEqual((tiny ? 12 : readable ? 300 : 0) * external - .1);
 			expect(r.naturalInset).toBeGreaterThanOrEqual(68 * external - .1);
 			expect(r.inkUnchanged).toBe(true);
@@ -2147,33 +2156,6 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 				// law is min(375, 0) = 0. That law is now asserted on BOTH axes at `pending-arrived`,
 				// which the rig waits for, so nothing is lost by dropping the constant.
 				if (axis === 'corner') expect(r.reachableDelta).toBeCloseTo(infiniteCanvas ? 40 : 0, 1);
-			}
-		} finally { await page.close(); }
-	}, 120000);
-}
-
-// THE LONG SLIDE BACK. A settle whose ease starts further left of or above its rest than the band's margin past the
-// pane: the band's ordinary spare cannot cover that ease, so only the widening for the ease keeps ink under the pane's
-// right or bottom edge while it plays. The drag preview holds at its bound plus the give, so the start offset cannot be
-// made larger by dragging further; the margin is a quarter of the pane's height, so a short pane puts the offset, in
-// band px, past the margin by 10 or more. 560 css px keeps the corner arm's fingers inside the pane at outer 1.25.
-const SHORT_PANE = { w: 1397.5, h: 560 };
-for (const axis of ['left', 'corner'] as const) {
-	it(`long slide back: ${axis} RLL=true IC=true outer 1.25, pane ${SHORT_PANE.h} css px tall`, async () => {
-		const page = await browser.newPage({ viewport: { width: 1800, height: 1100 }, deviceScaleFactor: 2 });
-		try {
-			await page.setContent('<!doctype html><body style="margin:0"></body>');
-			await page.addStyleTag({ content: css + READABLE_LINE_WIDTH_CSS }); await page.addScriptTag({ content: script });
-			const r = await page.evaluate(a => (window as any).scrollColumnAnchor.runTopBoundary(true, true, false, 1.25, a.axis, false, a.pane), { axis, pane: SHORT_PANE });
-			const c = (r.easeCovers ?? []).find((x: any) => x.phase === 'reachable');
-			const seen = JSON.stringify(c ?? null);
-			expect(c && c.from && c.ink, `premise: the reachable arm's ease is read (${seen})`).toBeTruthy();
-			for (const [i, side] of (axis === 'corner' ? [[0, 'right'], [1, 'bottom']] : [[0, 'right']]) as Array<[number, string]>) {
-				const startPx = Math.ceil(Math.abs(c.from[i]) / c.cssScale);
-				expect(c.from[i], `premise: the reachable arm eases from ${i ? 'above' : 'left of'} its rest (${seen})`).toBeLessThan(0);
-				expect(startPx - c.margin, `premise: the start offset, ${startPx} band px, passes the band margin ${c.margin} by 10 or more (${seen})`).toBeGreaterThanOrEqual(10);
-				expect(startPx, `premise: the start offset, ${startPx} band px, is inside the scroll room ${side} of the scroll, ${c.room[i].toFixed(2)} (${seen})`).toBeLessThanOrEqual(c.room[i]);
-				expect.soft(c.ink[2 + i] - c.pane[2 + i], `reachable: the ink raster reaches the pane's ${side} edge on the ease's first frame (start offset ${c.from[i].toFixed(2)}, offset now ${c.offset[i].toFixed(2)})`).toBeGreaterThanOrEqual(-.5);
 			}
 		} finally { await page.close(); }
 	}, 120000);

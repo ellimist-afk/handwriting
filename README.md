@@ -1,6 +1,6 @@
 # Handwriting
 
-Handwrite, highlight, erase and lasso directly on your notes and PDFs. Your notes stay Markdown.
+Pen ink on ordinary Markdown notes and PDFs in Obsidian.
 
 ![picking a pen color, writing, highlighting, then underlining on a note in Obsidian](docs/assets/write.gif)
 
@@ -12,7 +12,7 @@ your ink is not stored "in" the markdown. it lives in a folder at your vault roo
 
 disable the plugin and your notes STAY EXACTLY THE SAME - the ink just stops rendering. re-enable and it comes back.
 
-![turning the plugin off and back on: the ink fades out, every word stays where it was, then the ink comes back](docs/assets/plugin-off.gif)
+![turning the plugin off: the ink goes away and every word stays where it was](docs/assets/plugin-off.gif)
 
 one line is written to the invisible frontmatter of a note when you first write on it - `handwriting-page-id`.
 
@@ -24,30 +24,36 @@ Here's a demonstration of some of the features: https://youtu.be/uWcOWixkxEk
 
 ### right now you can
 
-* handwrite, highlight, color palette, size sliders
-* erase, two modes, size slider
-* lasso, compatible with side button; move the selection, delete it, copy/paste it across notes (resize and rotate coming soon)
-* insert space tool
+* handwrite, highlight; color palette, size sliders, choose your favorites
+* erase; two modes, size slider
+* lasso; compatible with side button; move the selection, delete it, resize and rotate it, copy/paste it across notes
+* insert space tool; moves ink + text
 * undo/redo ink + text
-* draw + pan with the mouse if you want
-* pdfs: annotate, export, snip
+* copy/paste ink
+
+### write on pdfs
+
+* pdfs: annotate anywhere, export the pdf with ink; snip with lasso
 
 ### features
 
 * data yours forever
    * your ink is all stored here: your vault's `.handwriting/` folder
-   * [what that folder looks like](#where-is-ink-stored)
-* pressure sensitivity
+   * [what that folder looks like](https://github.com/ellimist-afk/handwriting#where-is-ink-stored)
+* pressure sensitivity, ink prediction + smoothing
 * palm rejection
-* pen toolbar with auto-hide
-* pinch to zoom (pdfs always; notes with **Infinite canvas** on)
-* ink prediction + smoothing
-* lined, grid, and dotted paper background
-* export ink as svg or pdf
+* draw + pan with the mouse if you want
+* movable pen toolbar with auto-hide
+* custom colors + RGB swatch picker for every pen and highlighter
 * true infinite canvas
+* pinch to zoom (pdfs always; notes with Infinite canvas on)
+* lined, grid, and dotted paper background per note or global toggle
+* export/flatten ink as svg or pdf
+* snip selections out of pdfs as pngs
 * ink works in embeds
-* handwriting to shape snap
+* handwriting to shape snap; resize and rotate, ten shapes
 * works on slides
+* attach ink to text
 
 ### works on
 
@@ -135,7 +141,7 @@ you may also find the global option in the Handwriting settings menu. `Handwriti
 
 with infinite canvas on you can zoom out and keep writing past the edge of the note. `Fit` zooms so all of your ink fits on screen.
 
-![infinite canvas: zooming out, drawing off to the side, then Fit](docs/assets/canvas.gif)
+![infinite canvas: zooming out to 20%, then Fit](docs/assets/canvas.gif)
 
 ### mouse input
 
@@ -160,9 +166,11 @@ the commands are hidden by default because their sheer number makes other Handwr
 
 ### shape snap
 
-hold the pen still for about a third of a second at the end of a stroke to snap it into a line, triangle, rectangle, circle or ellipse.
+hold the pen still for about a third of a second at the end of a stroke to snap it into a line, arrow, triangle, rectangle, pentagon, hexagon, octagon, star, circle or ellipse.
 
-![drawing a ramp, holding still, and it snaps into a triangle](docs/assets/snap.gif)
+keep the pen down after it snaps and move it to resize and rotate the shape. lift to keep it. you can also lasso it later to resize or rotate it.
+
+![a rough star, arrow and hexagon each snapping clean on a hold, then the star lassoed, resized and rotated](docs/assets/snap.gif)
 
 with a mouse, pause at the end of a stroke and select Snap.
 
@@ -172,9 +180,19 @@ with a mouse, pause at the end of a stroke and select Snap.
 
 you can lasso ink to move or copy and paste it anywhere in the note, or across different notes. You can also use `Handwriting: Snip the selection to an image` to save what you lassoed as a png next to the file and copy a link to it to your clipboard, so you can paste it into a note.
 
+on a note you can also resize and rotate what you lassoed: drag a corner to resize it, or the knob above it to rotate it.
+
 ![lassoing two rings and dragging them somewhere else](docs/assets/lasso.gif)
 
-![a snip pasted into another note, with a link back to the pdf page](docs/assets/snip.png)
+### attach ink to text
+
+lasso some ink next to your text, tap the link button on the selection, then **Attach ink to text**. the ink now moves with that text when you type above it. when you hook it initially, the hooked text lights up (if your ink hooked the wrong text, tap the correct text with your pen or mouse within the 4 second grace period to fix the hook).
+
+tap attached ink with your finger to select it. attached ink shows a small grey link icon at its top-left.
+
+if attached text gets deleted or can't be found, orphaned ink shows "Needs reattachment". **detach ink from text** in the same menu will detach the ink.
+
+both are also commands: `Handwriting: Lasso: attach ink to text` and `Handwriting: Lasso: detach ink from text`.
 
 ### insert space
 
@@ -192,16 +210,16 @@ every redraw costs on e-ink, so it turns off smoothing, the pen reticle and anim
 
 you can annotate pdfs. same toolbar. same tools
 
-![a pdf page with a pink highlight and blue pen ink on it](docs/assets/pdf.png)
+![writing in the margin of a pdf page, then highlighting a phrase](docs/assets/pdf.gif)
 
 * `Handwriting: Export ink as SVG (drawing only)` and `Handwriting: Export ink as PDF (drawing only)` export the drawing by itself, cropped to the ink, with no background
 * `Handwriting: Flatten ink into a copy of this PDF` draws the ink into a copy of the pdf so anyone can open it
 
-![the flattened copy open in a different pdf app, ink and all](docs/assets/pdf-flattened.png)
+![flattening a pdf: the copy opens in a new tab with the ink drawn in](docs/assets/pdf-flattened.gif)
 
 you can also use the native Obsidian Export to PDF command. the page is shrunk to fit the paper export, so your ink should stay on its words. warning: text can come out a little smaller than a plain export.
 
-![a note exported with Export to PDF, ink on its words](docs/assets/export-pdf.png)
+![a note exported with Export to PDF: the typed text, then the ink below it](docs/assets/export-pdf.gif)
 
 ### ink works on slides too
 
@@ -274,6 +292,18 @@ this sounds pretty straightforward.
 
 however if you resize Obsidian, resize a window pane, change the font size, pinch the screen, zoom with ctrl+, ctrl-, or ctrl & scroll, use a theme that moves the text column, use a theme that moves the live editor, change the readable line length setting, or simply pan, the coordinates must transform to match
 
+### how attached ink works
+
+when you attach ink to text, the plugin saves that text (plus 32 characters on each side) and its position. i tried using line numbers first but Obsidian line numbers are so fragile instead i just used spatial position. when the note opens, the plugin searches for the text part, reads where it is now, and moves the ink by the difference. 
+
+this method is extremely cheap: each drawing costs the same, bc typing doesnt rewrite the strokes. it's O(n); type above twenty drawings and the plugin updates twenty numbers.
+
+this feature is intended to fix sync between devices. your desktop might wrap a paragraph into 3 lines and your phone into 7, so everything below shifts and ink ends up next to the wrong paragraph. attached ink just looks for its words and sits beside them, on any screen.
+
+if the paragraph gets deleted, or can’t be found after a sync, the ink stays where it was last shown and gets a “Needs reattachment” tag.
+
+the attachment info lives as JSON in your vault’s .handwriting folder with everything else
+
 ### undo/redo
 
 if you draw, type, then erase, ctrl+z should undo those things in the order you did them
@@ -306,15 +336,17 @@ and i guarantee nothing will leave your device unless you press `Upload` button.
 
 ## coming soon
 
-* audio alongside ink
-* ruler + compass on screen
+* handwriting to text (ocr)
+* handwriting to math / latex
+* search your handwriting
+* handwriting [ [ backlinks ] ] in the document
+* movable text boxes
+* true OneNote import -> edit imported ink
+* scribble/cross out to erase
+* image integration
+* ruler + compass
 * laser pointer
-* ocr / handwriting to text ( very soon )
-* searchable handwriting ( very soon )
-* handwriting to math/latex ( very soon )
-* text boxes (soon)
-* compatibility with Obsidian's canvas mode
-* more custom colors
+* drawing in native Obsidian canvas
 
 ## money
 

@@ -39,9 +39,10 @@ const MOVED = [
 	"lineHeightOf",
 	"ROW_HOST",
 	"rowsOf",
+	"NOT_LINES",
+	"lineStarts",
 	"textNodes",
 	"charTop",
-	"firstCharTop",
 	"NOT_SECTION",
 	"notSection",
 	"topBlocks",
@@ -100,7 +101,7 @@ describe("line measure lives in EmbedInkMeasure.ts", () => {
 
 describe("no declaration is left behind in EmbedInk.ts", () => {
 	it("declares each moved name once in the new file and never in EmbedInk.ts", () => {
-		expect(MOVED).toHaveLength(17);
+		expect(MOVED).toHaveLength(18);
 		for (const name of MOVED) {
 			expect(declarations(measureSrc, name), `${name} in EmbedInkMeasure.ts`).toBe(1);
 			expect(declarations(embedSrc, name), `${name} in EmbedInk.ts`).toBe(0);

@@ -121,7 +121,7 @@ it("mounted sync waits through the production camera control's owned settlement"
   await page.addStyleTag({content:css+readFileSync(fileURLToPath(new URL("./noteViewportCamera.css",import.meta.url)),"utf8")});
   await page.addScriptTag({content:script});
   const r=await page.evaluate(()=>(window as any).mountedSyncCameraSettlement());evidence.push(r);
-  expect(errors).toEqual([]);expect(r).toEqual({before:true,textSelection:true,textRange:{anchor:1,head:8},chosenTool:true,hover:true,pending:false,after:true,zoom:.5});
+  expect(errors).toEqual([]);expect(r).toEqual({before:true,textSelection:true,textRange:{anchor:1,head:8},chosenTool:true,hover:true,pending:false,after:true,zoom:.8});
  }finally{await page.close();}
 });
 
@@ -275,8 +275,10 @@ it("production controls preserve wrapping, caret, selection, eraser and pane own
   const pointFit=await page.evaluate(()=>(window as any).viewportFixture.fit("point"));expect(pointFit.result).toBe("fit");expect(pointFit.state.zoom).toBe(1);
   await page.evaluate(()=>(window as any).viewportFixture.setup("other","empty"));
   await page.locator('[data-rig="point"]').getByRole("button",{name:"Zoom out",exact:true}).click();await page.evaluate(()=>(window as any).viewportFixture.settle());
-  const half=await page.evaluate(()=>(window as any).viewportFixture.snap("point"));const other=await page.evaluate(()=>(window as any).viewportFixture.snap("other"));
-  expect(half.state.zoom).toBe(.5);expect(other.state.zoom).toBe(1);
+  const tapped=await page.evaluate(()=>(window as any).viewportFixture.snap("point"));const other=await page.evaluate(()=>(window as any).viewportFixture.snap("other"));
+  expect(tapped.state.zoom,"one Zoom out tap is a quarter step, 100% to 80%").toBe(.8);expect(other.state.zoom).toBe(1);
+  // The layout checks below were written at 50%, where every glyph lands on the same row px; 80% puts text on sub-px rows.
+  const half=await page.evaluate(()=>(window as any).viewportFixture.zoomTo("point",.5));expect(half.state.zoom).toBe(.5);
   expect(half.engineZoom,"the harness engine supports css zoom").toBe(true);
   expect(half.hostZoom,"the overlay's host-form gate agrees with the engine").toBe(half.engineZoom);
   sameLayout(half.layout,before.layout);
@@ -288,6 +290,20 @@ it("production controls preserve wrapping, caret, selection, eraser and pane own
   const erased=await page.evaluate(()=>(window as any).viewportFixture.gesture("point","erase"));expect(erased.strokes).toHaveLength(0);
   const resized=await page.evaluate(()=>(window as any).viewportFixture.resize("point"));expect(resized.viewport.width).toBeCloseTo(580,0);expect(resized.viewport.height).toBeCloseTo(430,0);
   const empty=await page.evaluate(()=>(window as any).viewportFixture.fit("point"));expect(empty.result).toBe("empty");expect(empty.state.zoom).toBe(1);expect(empty.scroll.left).toBe(0);expect(empty.scroll.top).toBe(0);
+ }finally{await page.close();}
+});
+
+it("one tap on the zoom bar's + button shows 125% in the readout from 100%",async()=>{
+ const page=await browser.newPage({viewport:{width:1400,height:1100}});
+ try {
+  await page.setContent("<!doctype html><body></body>");await page.addStyleTag({content:css+readFileSync(fileURLToPath(new URL("./noteViewportCamera.css",import.meta.url)),"utf8")});await page.addScriptTag({content:script});
+  const before=await page.evaluate(()=>(window as any).viewportFixture.setup("point","point"));expect(before.state.zoom).toBe(1);
+  const readout=page.locator('[data-rig="point"]').getByRole("button",{name:"Reset note zoom to 100%",exact:true});
+  expect(await readout.textContent(),"the readout starts at 100%").toBe("100%");
+  await page.locator('[data-rig="point"]').getByRole("button",{name:"Zoom in",exact:true}).click();await page.evaluate(()=>(window as any).viewportFixture.settle());
+  const tapped=await page.evaluate(()=>(window as any).viewportFixture.snap("point"));
+  expect(tapped.state.zoom,"one + tap is a quarter step, 100% to 125%, never a double").toBeCloseTo(1.25,10);
+  expect(await readout.textContent(),"the readout shows the new zoom").toBe("125%");
  }finally{await page.close();}
 });
 
@@ -319,8 +335,7 @@ it("centered padded text stays registered through zoom",async()=>{
  try {
   await page.setContent("<!doctype html><body></body>");await page.addStyleTag({content:css+readFileSync(fileURLToPath(new URL("./noteViewportCamera.css",import.meta.url)),"utf8")});await page.addScriptTag({content:script});
   const before=await page.evaluate(()=>(window as any).viewportFixture.setup("theme","theme"));
-  await page.getByRole("button",{name:"Zoom out",exact:true}).click();await page.evaluate(()=>(window as any).viewportFixture.settle());
-  const half=await page.evaluate(()=>(window as any).viewportFixture.snap("theme"));
+  const half=await page.evaluate(()=>(window as any).viewportFixture.zoomTo("theme",.5));expect(half.state.zoom).toBe(.5);
   expect(half.engineZoom,"the harness engine supports css zoom").toBe(true);
   expect(half.hostZoom,"the overlay's host-form gate agrees with the engine").toBe(half.engineZoom);
   sameLayout(half.layout,before.layout);

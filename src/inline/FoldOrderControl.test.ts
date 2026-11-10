@@ -21,6 +21,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { Platform } from "obsidian";
 import controlSrc from "./FoldOrderControl.ts?raw";
 import css from "../../styles.css?raw";
+import postcss from "postcss";
 import { codeOnly } from "../CodeOnly";
 import {
 	FoldOrderControl,
@@ -659,6 +660,52 @@ describe("fold order: the control against a fake tree", () => {
 		const listed = h.rows().map((r) => r.dataset.commandId);
 		for (const face of NEVER_FOLDING_FACES) expect(listed).not.toContain(face.commandId);
 		h.control.destroy();
+	});
+
+	// The toolbar's row, fill, border and shadow live on an inner face, not on the
+	// strip's root. A bar that wears the root class but puts its buttons straight in
+	// it gets none of that: the six stack in one column on a bare background.
+	it("puts the six always-shown buttons inside the toolbar's own face, as one row", () => {
+		const h = build();
+		const bar = h.pane.all("handwriting-fold-fixed-bar")[0];
+		expect(bar, "premise: the always-shown bar is drawn").toBeDefined();
+		expect(bar!.children.map((c) => [...c.classes].join(" ")), "the bar holds one face and nothing else").toEqual([
+			"handwriting-mobile-tools-face",
+		]);
+		const face = bar!.children[0]!;
+		expect(face.children).toHaveLength(6);
+		expect(face.children.every((b) => b.classes.has("handwriting-fold-fixed-btn"))).toBe(true);
+		h.control.destroy();
+	});
+
+	// The face is translucent, raised and faded in on the real toolbar. The copy in
+	// settings is not floating over a note, so it takes none of that, and it stays
+	// one row as it did in 1.4.24.
+	it("undoes the floating look on the always-shown bar's face, in the stylesheet", () => {
+		const root = postcss.parse(css);
+		const scoped: Record<string, string> = {};
+		const base: Record<string, string> = {};
+		root.walkRules((rule) => {
+			if (rule.parent?.type !== "root") return;
+			for (const sel of rule.selectors.map((s) => s.replace(/\s+/g, " ").trim())) {
+				const into =
+					sel === ".handwriting-mobile-tools-face"
+						? base
+						: /^\.handwriting-fold-fixed-bar ?> ?\.handwriting-mobile-tools-face$/.test(sel)
+							? scoped
+							: null;
+				if (!into) continue;
+				rule.walkDecls((d) => {
+					into[d.prop] = d.value;
+				});
+			}
+		});
+		expect(base.display, "premise: the row comes from the face").toBe("flex");
+		expect(base.opacity, "premise: the toolbar's face is translucent").toBe("0.92");
+		expect(scoped["box-shadow"], "no shadow on the settings copy").toBe("none");
+		expect(scoped.opacity, "fully opaque on the settings copy").toBe("1");
+		expect(scoped.transition, "no fade on the settings copy").toBe("none");
+		expect(scoped["flex-wrap"], "one row on the settings copy").toBe("nowrap");
 	});
 
 	// The live toolbar blends a nib's colour toward the theme's text colour so a black pen in a dark theme (or a white one in a light

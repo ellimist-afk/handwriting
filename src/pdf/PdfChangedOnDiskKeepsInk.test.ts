@@ -94,12 +94,62 @@ function session(v: ReturnType<typeof vault>) {
 		await plugin.resolvePdfId(leaf, root, controller);
 		const id = plugin.pdfIds.get(root) as string;
 		expect(id, "production resolution must bind a PDF identity").toMatch(/^pdf-[0-9a-f]+(?:-\d+)?$/);
-		return { root, id };
+		return { root, id, controller };
 	}
-	return { store, pdfStore, plugin, notices, open };
+	/** Close a pane the way syncPdfControllers does: drop its maps, then release its id. */
+	function close(root: HTMLElement) {
+		leaves.splice(leaves.findIndex((l) => l.view.containerEl === root), 1);
+		const was = plugin.pdfIds.get(root);
+		plugin.pdfInk.delete(root);
+		plugin.pdfIds.delete(root);
+		plugin.pdfFiles.delete(root);
+		if (was) plugin.releasePdfId(was);
+	}
+	return { store, pdfStore, plugin, notices, open, close };
 }
 
 const ids = (strokes: readonly InkStroke[]) => strokes.map((s) => s.id);
+
+/**
+ * Every identification pass the plugin starts, the retry its timer starts included, so a cell can wait for the retry
+ * itself to finish rather than for a number of timer steps: the retry reads the file and hashes it, which is real async
+ * work the fake clock does not drive.
+ */
+function recordPasses(plugin: { onPdfModified: unknown }): Promise<void>[] {
+	const passes: Promise<void>[] = [];
+	const onPdfModified = plugin.onPdfModified as (...args: unknown[]) => Promise<void>;
+	plugin.onPdfModified = function (this: unknown, ...args: unknown[]) {
+		const pass = onPdfModified.apply(this, args);
+		passes.push(pass);
+		return pass;
+	};
+	return passes;
+}
+
+/** A held pane's retry is due within the plugin's settle time (1 s, PdfClaims.ts): it runs once, and this waits for it to end. */
+async function heldRetry(passes: Promise<void>[]): Promise<void> {
+	const before = passes.length;
+	await vi.advanceTimersByTimeAsync(1000);
+	expect(passes.length, "the held pane's retry ran once").toBe(before + 1);
+	await passes[passes.length - 1];
+}
+
+// Taken before any cell fakes the clock: the late digest below waits on the real one.
+const realTimeout = globalThis.setTimeout;
+
+/**
+ * Make the platform digest land `ms` of real time late, as a loaded machine's thread pool can. A PDF's
+ * identity is a SHA-256 the platform computes off the main thread, so it resolves in real time, which the
+ * fake clock does not move.
+ */
+function lateDigest(ms: number) {
+	const subtle = globalThis.crypto.subtle;
+	const digest = subtle.digest.bind(subtle);
+	vi.spyOn(subtle, "digest").mockImplementation(async (algorithm, data) => {
+		await new Promise((resolve) => realTimeout(resolve, ms));
+		return digest(algorithm, data);
+	});
+}
 function disk(v: ReturnType<typeof vault>, path: string) {
 	const raw = v.adapter.files.get(path);
 	expect(raw, `sidecar exists: ${path}`).toBeDefined();
@@ -177,6 +227,150 @@ it("A-two-panes: two panes on the changed file get the ink once and one notice, 
 	expect(s.plugin.pdfIds.get(second.root)).not.toBe(first.id);
 	expect(changeNotices()).toEqual([CARRIED_NOTICE]);
 	expect(ids(s.pdfStore.strokesOnPage(s.plugin.pdfIds.get(first.root), 1))).toEqual(["before-change"]);
+});
+
+it("A-closed: a PDF changed while no pane shows it reopens with its ink, and the old file is left as it was", async () => {
+	const v = vault();
+	const s = session(v);
+	const opened = await s.open();
+	s.pdfStore.commit(opened.id, stroke("before-change"));
+	await s.store.flush();
+	const oldPath = s.store.path(opened.id);
+	const oldBytes = v.adapter.files.get(oldPath);
+	s.close(opened.root);
+	await vi.advanceTimersByTimeAsync(5000);
+	mutate(v, "head");
+	await s.plugin.onPdfModified("Paper.pdf");
+	const reopened = await s.open();
+	expect(reopened.id, "new bytes, new ink file").not.toBe(opened.id);
+	expect(ids(s.pdfStore.strokesOnPage(reopened.id, 1))).toEqual(["before-change"]);
+	expect(changeNotices()).toEqual([CARRIED_NOTICE]);
+	await s.store.flush();
+	expect(v.adapter.files.get(oldPath), "the old ink file is never written").toBe(oldBytes);
+	const restarted = session(v);
+	const again = await restarted.open();
+	expect(again.id).toBe(reopened.id);
+	expect(ids(restarted.pdfStore.strokesOnPage(again.id, 1))).toEqual(["before-change"]);
+});
+
+it("A-closed-restart: a PDF changed while Obsidian was closed reopens with its ink", async () => {
+	const v = vault();
+	const s = session(v);
+	const opened = await s.open();
+	s.pdfStore.commit(opened.id, stroke("before-change"));
+	await s.store.flush();
+	const oldPath = s.store.path(opened.id);
+	const oldBytes = v.adapter.files.get(oldPath);
+	mutate(v, "head");
+	const restarted = session(v);
+	const reopened = await restarted.open();
+	expect(reopened.id).not.toBe(opened.id);
+	expect(ids(restarted.pdfStore.strokesOnPage(reopened.id, 1))).toEqual(["before-change"]);
+	expect(changeNotices()).toEqual([CARRIED_NOTICE]);
+	await restarted.store.flush();
+	expect(v.adapter.files.get(oldPath), "the old ink file is never written").toBe(oldBytes);
+});
+
+for (const late of [0, 50]) {
+const digestNote = late ? ` (the digest lands ${late} ms late)` : "";
+it(`A-two-panes-held: a stroke drawn in the pane busy during the change reaches the new ink file${digestNote}`, async () => {
+	if (late) lateDigest(late);
+	const v = vault();
+	const s = session(v);
+	const first = await s.open();
+	const second = await s.open();
+	const passes = recordPasses(s.plugin);
+	s.pdfStore.commit(first.id, stroke("before-change"));
+	await s.store.flush();
+	second.controller.idle = false;
+	mutate(v, "head");
+	await s.plugin.onPdfModified("Paper.pdf");
+	const now = s.plugin.pdfIds.get(first.root) as string;
+	expect(now, "the idle pane moved to the new ink file").not.toBe(first.id);
+	expect(s.plugin.pdfIds.get(second.root), "the busy pane is left on the old one").toBe(first.id);
+	await vi.advanceTimersByTimeAsync(1000);
+	s.pdfStore.commit(first.id, stroke("during"));
+	second.controller.idle = true;
+	await heldRetry(passes);
+	expect(s.plugin.pdfIds.get(second.root), "the busy pane moved once it went idle").toBe(now);
+	expect(ids(s.pdfStore.strokesOnPage(now, 1))).toEqual(["before-change", "during"]);
+});
+}
+
+it("A-closed-twice: ink added between two changes made while closed carries from the second version, not the first", async () => {
+	const v = vault();
+	const s = session(v);
+	const first = await s.open();
+	s.pdfStore.commit(first.id, stroke("v1-ink"));
+	await s.store.flush();
+	s.close(first.root);
+	await vi.advanceTimersByTimeAsync(5000);
+	mutate(v, "head");
+	const second = await s.open();
+	expect(ids(s.pdfStore.strokesOnPage(second.id, 1))).toEqual(["v1-ink"]);
+	s.pdfStore.commit(second.id, stroke("v2-ink"));
+	await s.store.flush();
+	s.close(second.root);
+	await vi.advanceTimersByTimeAsync(5000);
+	mutate(v, "length-only");
+	const third = await s.open();
+	expect(third.id).not.toBe(second.id);
+	expect(third.id).not.toBe(first.id);
+	expect(ids(s.pdfStore.strokesOnPage(third.id, 1))).toEqual(["v1-ink", "v2-ink"]);
+});
+
+for (const late of [0, 50]) {
+const digestNote = late ? ` (the digest lands ${late} ms late)` : "";
+it(`A-two-panes-held-erase: a carried stroke erased in the new file stays erased when the busy pane catches up${digestNote}`, async () => {
+	if (late) lateDigest(late);
+	const v = vault();
+	const s = session(v);
+	const first = await s.open();
+	const second = await s.open();
+	const passes = recordPasses(s.plugin);
+	s.pdfStore.commit(first.id, stroke("before-change"));
+	await s.store.flush();
+	second.controller.idle = false;
+	mutate(v, "head");
+	await s.plugin.onPdfModified("Paper.pdf");
+	const now = s.plugin.pdfIds.get(first.root) as string;
+	expect(ids(s.pdfStore.strokesOnPage(now, 1)), "precondition: carried by the idle pane").toEqual(["before-change"]);
+	s.pdfStore.replaceAll(now, []);
+	await vi.advanceTimersByTimeAsync(1000);
+	s.pdfStore.commit(first.id, stroke("during"));
+	second.controller.idle = true;
+	await heldRetry(passes);
+	expect(s.plugin.pdfIds.get(second.root)).toBe(now);
+	expect(ids(s.pdfStore.strokesOnPage(now, 1))).toEqual(["during"]);
+});
+}
+
+it("A-revert-open: bytes back to a version with its own ink file keep that file's ink only, and say so", async () => {
+	const v = vault();
+	const s = session(v);
+	const opened = await s.open();
+	s.pdfStore.commit(opened.id, stroke("v1-ink"));
+	await s.store.flush();
+	const v1Path = s.store.path(opened.id);
+	const v1Bytes = v.adapter.files.get(v1Path);
+	const v1 = v.pdfs.get("Paper.pdf")!;
+	mutate(v, "head");
+	await s.plugin.onPdfModified("Paper.pdf");
+	const v2 = s.plugin.pdfIds.get(opened.root) as string;
+	expect(v2, "precondition: the change gave a new ink file").not.toBe(opened.id);
+	s.pdfStore.commit(v2, stroke("v2-ink"));
+	await s.store.flush();
+	shown.length = 0;
+	v.pdfs.set("Paper.pdf", v1);
+	await s.plugin.onPdfModified("Paper.pdf");
+	const back = s.plugin.pdfIds.get(opened.root) as string;
+	expect(back, "the old bytes find their own ink file").toBe(opened.id);
+	expect(ids(s.pdfStore.strokes(back))).toEqual(["v1-ink"]);
+	expect(changeNotices()).toEqual([KEPT_NOTICE]);
+	await s.store.flush();
+	await vi.advanceTimersByTimeAsync(5000);
+	await s.store.flush();
+	expect(v.adapter.files.get(v1Path), "the first version's ink file is never written").toBe(v1Bytes);
 });
 
 it("A-no-ink: a changed PDF that had no ink says nothing", async () => {

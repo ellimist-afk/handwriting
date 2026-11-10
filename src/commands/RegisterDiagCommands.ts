@@ -112,6 +112,7 @@ interface RegisterDiagCommandsDeps {
 						strokePrediction: this.settings.strokePrediction,
 						booxMode: this.settings.booxMode,
 						pressureSensitivity: this.settings.pressureSensitivity,
+						legacyInkPressure: this.legacyInkPressure ?? null,
 						mouseInk: this.settings.mouseInk,
 						// Both, because since the quiet arm stopped being written
 						// down these two disagree: a mouse click on a tool arms

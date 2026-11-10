@@ -17,6 +17,7 @@ import { bboxVisibleInViewport, scrollProbeCommit, scrollProbeLayers } from "./S
 import { ZERO_EXTENT, inkFrontier, isScrollableOverflow, surfaceExtents, type Extent } from "./SurfaceExtent";
 import { noteToVisual, rasterScale } from "./ZoomScale";
 import { SCALE_EPSILON, canvasReallocs, inlineInk, type InkOverlayPlugin } from "./InkOverlay";
+import { contentMeasureFlagState } from "./InkOverlayViewportBox";
 
 declare module "./InkOverlay" {
 	interface InkOverlayPlugin {
@@ -53,6 +54,7 @@ declare module "./InkOverlay" {
 			`content offsetWidth: ${this.view.contentDOM.offsetWidth}`,
 			`content font-size / line-height: ${cs.fontSize} / ${cs.lineHeight}`,
 			`documentTop: ${this.view.documentTop.toFixed(2)}  contentHeight: ${this.view.contentHeight.toFixed(2)}`,
+			`editor re-measure flag for a held column (viewState.mustMeasureContent): ${contentMeasureFlagState()}`,
 			`canvas backing: ${this.committedCanvas?.width} x ${this.committedCanvas?.height}` +
 				`  css: ${this.cssWidth.toFixed(2)} x ${this.cssHeight.toFixed(2)}`,
 			`camera origin (note space): ${this.camera.x.toFixed(2)}, ${this.camera.y.toFixed(2)}`,

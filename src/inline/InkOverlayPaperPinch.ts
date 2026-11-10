@@ -6,6 +6,8 @@
  * itself and the paper and layer members a plain ink stroke calls stay in the
  * class.
  */
+import type { BBox, InkStroke } from "../ink/Stroke";
+import type { HeldTile } from "./InkOverlayAttachedLayer";
 import { installMethods } from "./InstallMethods";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { MAX_VIEWPORT_LAYOUT } from "./PinchScale";
@@ -14,7 +16,44 @@ import { surfaceExtents } from "./SurfaceExtent";
 import { paperPlan, type PaperPlan } from "./PaperPlan";
 import { copyPreviewPaperBackground, foldIntoPitch, fractionOf, previewPaperCopyable, previewPaperPhase, previewPaperPitch, type PreviewPaperEnd, type PreviewPaperSource } from "./PaperPan";
 import { scrollProbeExtent } from "./ScrollProbe";
-import { PAN_MIN_VISIBLE_PX, PAN_FIT_SLACK_PX, OVERSCROLL_BOUNCE_MS, PAPER_PROPERTIES, type InkOverlayPlugin } from "./InkOverlay";
+import { pageGuidePitch } from "./PageGuides";
+
+/** The guides' box, and its own class while a preview lives (styles.css blanks it under that class). */
+const PAGE_GUIDES_CLASS = "handwriting-page-guides";
+const PAGE_GUIDES_PREVIEWING = "handwriting-page-guides-previewing";
+import { PAN_MIN_VISIBLE_PX, PAN_FIT_SLACK_PX, OVERSCROLL_BOUNCE_MS, PAPER_PROPERTIES, committedFloorFor, inkLookKey, inlineInk, type RasterCamera, standInFactorFits, type InkOverlayPlugin } from "./InkOverlay";
+import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
+
+/**
+ * The extent raster, or the stand-in, shown through a zoom preview: its own pen and highlighter canvases in one
+ * element right after the scroller. `scroll` is the scroller's scroll at put-up (a preview writes none); the inner box takes the
+ * band's place in the scroller's padding box less that scroll, plus the ink layer's own translate, each frame. `box` is the committed canvas's style the raster's canvases were
+ * sized from, so a change of host form (placeCanvasLayers) is followed by style writes alone. `src` is the picture's canvases; `f` is
+ * its CSS size against the committed canvas's per device px (1 for the extent raster, start zoom over the stand-in's zoom for it).
+ * `rasterScale` is the scale the gesture started from (pinchAnchor.fromScale), the one the committed layer was painted at: a preview
+ * that ends there paints no whole layer. NaN when no anchor was live. `shownMoves` is the picture's own (equal to the overlay's at
+ * put-up): a later shown move leaves its strokes at the old places, and writeHeldRaster takes it down. `penTiles` and `hlTiles` are the
+ * attached layer's sprite tiles put up beside the picture (heldTiles), the highlight ones in `hlWrap` at the highlighter's alpha.
+ */
+interface HeldRaster {
+	src: { pen: HTMLCanvasElement; hl: HTMLCanvasElement | null };
+	f: number;
+	path: string;
+	count: number;
+	generation: number;
+	shownMoves: number;
+	inner: HTMLElement;
+	scroll: { x: number; y: number };
+	offX: number;
+	offY: number;
+	rasterScale: number;
+	box: string;
+	transform: string;
+	hidden: [HTMLCanvasElement, string][];
+	penTiles: HeldTile[];
+	hlTiles: HeldTile[];
+	hlWrap: HTMLElement | null;
+}
 
 declare module "./InkOverlay" {
 	interface InkOverlayPlugin {
@@ -31,6 +70,9 @@ declare module "./InkOverlay" {
 		watchPaperKind(): void;
 		syncGridPaperBox(): void;
 		removeGridPaperBox(): void;
+		syncPageGuideBox(): void;
+		removePageGuideBox(): void;
+		markPageGuidesPreview(on: boolean): void;
 		stopPaperKindWatch(): void;
 		clearScrollerPan(scroller: HTMLElement): void;
 		gridBoxPaperStyle(pitch: number): PreviewPaperSource | null;
@@ -47,6 +89,15 @@ declare module "./InkOverlay" {
 		updatePaperSpacing(): void;
 		writePaperVars(plan: PaperPlan): boolean;
 		clearOwnPaperVars(): void;
+		heldRaster?: HeldRaster | null;
+		heldRasterClip?: HTMLElement | null;
+		heldRasterHlWrap?: HTMLElement | null;
+		putUpHeldRaster(clipOnly?: boolean): void;
+		heldRasterSource(path: string, cam: RasterCamera, strokes: readonly InkStroke[]): { src: HeldRaster["src"]; f: number; offX: number; offY: number; count: number; generation: number; shownMoves: number; world: BBox; clip: boolean } | null;
+		placeHeldRasterCanvases(h: HeldRaster): void;
+		writeHeldRaster(x: number, y: number): void;
+		landHeldRaster(deferred: boolean): void;
+		takeDownHeldRaster(): void;
 	}
 }
 
@@ -165,6 +216,7 @@ declare module "./InkOverlay" {
 		if (this.preparePinchComposite()) return;
 		const layers: [HTMLCanvasElement | undefined, boolean | undefined][] = [
 			[this.committedCanvas, this.committedBlank], [this.highlightCanvas, this.highlightBlank],
+			[this.attachedLayer?.pen, this.attachedLayer?.penBlank], [this.attachedLayer?.hl, this.attachedLayer?.hlBlank],
 			[this.wetCanvas, this.wet?.provenBlank], [this.highlightWetCanvas, this.highlightWet?.provenBlank],
 			[this.tailCanvas, this.tail?.provenBlank], [this.wetTileCanvas, this.wet?.provenBlank],
 		];
@@ -178,12 +230,21 @@ declare module "./InkOverlay" {
 	function preparePinchComposite(this: InkOverlayPlugin): boolean {
 		const target = this.wetCanvas;
 		if (this.frame.locked || this.builder !== null || !this.wet?.provenBlank || !target?.style || !this.winRef?.getComputedStyle) return false;
+		// Attached ink in its stacking place: its highlight over the committed highlight, its pen over the committed pen.
+		const att = this.attachedLayer;
 		const layers: [HTMLCanvasElement, boolean][] = [
 			[this.highlightCanvas, this.highlightBlank], [this.highlightWetCanvas, this.highlightWet.provenBlank],
-			[this.committedCanvas, this.committedBlank], [this.tailCanvas, this.tail.provenBlank],
+			...(att ? [[att.hl, att.hlBlank] as [HTMLCanvasElement, boolean]] : []),
+			[this.committedCanvas, this.committedBlank],
+			...(att ? [[att.pen, att.penBlank] as [HTMLCanvasElement, boolean]] : []),
+			[this.tailCanvas, this.tail.provenBlank],
 		];
 		const occupied = layers.filter(([,blank]) => !blank);
 		if (occupied.length < 2) return false;
+		// A raster the first preview frame holds up takes the composite down again (putUpHeldRaster): engaged here it would only give a
+		// released wet canvas its backing inside the gesture and draw a picture nobody sees.
+		const cam = this.lastPaintCam, path = cam ? this.filePath() : null;
+		if (cam && path && this.heldRasterSource(path, cam, this.committedStrokes(this.freeStrokes(path)))) return false;
 		// The composite engages: a released wet canvas gets its backing now, before the first preview frame.
 		this.allocateWet();
 		if (!(target.width > 0)) return false;
@@ -226,9 +287,12 @@ declare module "./InkOverlay" {
 			ctx.restore();this.restorePinchLayers();return false;
 		}
 		ctx.restore();this.wet.notePixelsChanged();
-		for (const [canvas] of layers) { this.pinchHiddenCanvases.set(canvas,canvas.style.visibility);canvas.setCssStyles({ visibility: "hidden" }); }
+		// A canvas already hidden (a landing's held raster hides the committed pair until its whole paint) is left alone, as in
+		// hideBlankPinchLayers: recording its 'hidden' let the pinch end write it back after the first preview frame's take-down had
+		// shown it, and the free ink stayed hidden until the note was reopened.
+		for (const [canvas] of layers) if (canvas.style.visibility !== "hidden") { this.pinchHiddenCanvases.set(canvas,canvas.style.visibility);canvas.setCssStyles({ visibility: "hidden" }); }
 		// The wet tile is blank here (the composite needs a blank wet layer); it hides with the rest.
-		if (this.wetTileCanvas?.style) { this.pinchHiddenCanvases.set(this.wetTileCanvas,this.wetTileCanvas.style.visibility);this.wetTileCanvas.setCssStyles({ visibility: "hidden" }); }
+		if (this.wetTileCanvas?.style && this.wetTileCanvas.style.visibility !== "hidden") { this.pinchHiddenCanvases.set(this.wetTileCanvas,this.wetTileCanvas.style.visibility);this.wetTileCanvas.setCssStyles({ visibility: "hidden" }); }
 		this.armPinchLayerRestore();
 		return true;
 	}
@@ -292,6 +356,9 @@ declare module "./InkOverlay" {
 		if (this.previewPaperEl || !host?.style || !scroller?.style || scroller.parentElement !== host || !this.winRef?.getComputedStyle) return;
 		// Live: every read below resolves the style as it stands at that read.
 		const cs = this.winRef.getComputedStyle(scroller);
+		// The guides go quiet on every paper, before any paper reason to stop here; after the one read, so the class
+		// write does not make that read resolve style again.
+		this.markPageGuidesPreview(true);
 		const pitch = previewPaperPitch(cs);
 		if (pitch === null || cs.direction !== "ltr" || !previewPaperCopyable(cs, pitch)) return;
 		// Under grid the vertical rules live on their own box inside the scroller, so the copy takes that
@@ -426,17 +493,89 @@ declare module "./InkOverlay" {
 			const pan = this.paperPanWritten;
 			if (pan?.x) this.writeGridBoxPan(pan.x);
 		}
-		const sizer = scroller.firstElementChild === this.paperGridBox ? this.paperGridBox.nextElementSibling : scroller.firstElementChild;
-		const contentW = sizer instanceof HTMLElement ? sizer.offsetLeft + sizer.offsetWidth : 0;
-		const contentH = sizer instanceof HTMLElement ? sizer.offsetTop + sizer.offsetHeight : 0;
-		const grantedW = Number.isFinite(this.spacerLeft) ? this.spacerLeft + 1 : 0;
-		const grantedH = Number.isFinite(this.spacerTop) ? this.spacerTop + 1 : 0;
-		const w = Math.max(scroller.clientWidth, contentW, grantedW);
-		const h = Math.max(scroller.clientHeight, contentH, grantedH);
+		const { w, h } = paperBoxArea(this, scroller);
 		const size = `${w},${h}`;
 		if (size === this.paperGridBoxSize) return;
 		this.paperGridBoxSize = size;
 		this.paperGridBox.setCssStyles({ width: `${w}px`, height: `${h}px` });
+	}
+
+	/**
+	 * The area a box behind the text covers, layout px: the content and the granted extent, never `scrollWidth` or
+	 * `scrollHeight` (see `syncGridPaperBox`). The sizer is the first child that is neither box.
+	 */
+	function paperBoxArea(o: InkOverlayPlugin, scroller: HTMLElement): { w: number; h: number } {
+		let sizer: Element | null = scroller.firstElementChild;
+		while (sizer && (sizer === o.paperGridBox || sizer === o.pageGuideBox)) sizer = sizer.nextElementSibling;
+		const contentW = sizer instanceof HTMLElement ? sizer.offsetLeft + sizer.offsetWidth : 0;
+		const contentH = sizer instanceof HTMLElement ? sizer.offsetTop + sizer.offsetHeight : 0;
+		const grantedW = Number.isFinite(o.spacerLeft) ? o.spacerLeft + 1 : 0;
+		const grantedH = Number.isFinite(o.spacerTop) ? o.spacerTop + 1 : 0;
+		return { w: Math.max(scroller.clientWidth, contentW, grantedW), h: Math.max(scroller.clientHeight, contentH, grantedH) };
+	}
+
+	/**
+	 * THE PAGE GUIDES' BOX, made, sized or taken away. Infinite Canvas on, with the text column measured: faint lines at
+	 * every page height (PageGuides.ts) from the note's top edge, on every paper, at every zoom.
+	 *
+	 * SCREEN ONLY AND INERT: absolutely placed behind the text (z-index -1, no pointer events), sized like the grid box
+	 * from the content and the grant, so it adds no scroll room; its top is the note origin the paper's phase is planned
+	 * from, so page 1 starts where the note does and no line sits at its top edge. It draws, clips and moves nothing,
+	 * and the print path never reads it.
+	 *
+	 * QUIET WHILE A PREVIEW LIVES: the stylesheet blanks it under its own previewing class (markPageGuidesPreview), set
+	 * and cleared where the preview paper begins and ends, so it goes quiet on paper `none` too, where the scroller's
+	 * class never comes on; it paints again at the settle. A box made while a preview lives takes the class at once.
+	 * Not called on a preview frame: like the grid box, it reads and writes nothing there.
+	 *
+	 * After the grid box in the scroller, before the content: both are behind the text, and the guides paint over the
+	 * grid's vertical rules rather than under them.
+	 */
+	function syncPageGuideBox(this: InkOverlayPlugin): void {
+		const scroller = this.view?.scrollDOM;
+		if (!scroller?.isConnected) { this.removePageGuideBox(); return; }
+		if (this.pinchPreview || !this.winRef?.getComputedStyle) return;
+		const column = this.viewportLayout?.columnBox ?? 0;
+		const pitch = this.canvasMode && column > 0 ? pageGuidePitch(column) : Number.NaN;
+		if (!(pitch > 0)) { this.removePageGuideBox(); return; }
+		if (!this.pageGuideBox) {
+			if (this.winRef.getComputedStyle(scroller).position === "static") {
+				scroller.setCssStyles({ position: "relative" });
+				this.scrollPositionPatched = true;
+			}
+			const box = scroller.createDiv({ cls: PAGE_GUIDES_CLASS });
+			if (this.pageGuidesPreviewing) box.classList.add(PAGE_GUIDES_PREVIEWING);
+			scroller.insertBefore(box, this.paperGridBox?.parentElement === scroller ? this.paperGridBox.nextElementSibling : scroller.firstElementChild);
+			this.pageGuideBox = box;
+			this.pageGuideBoxKey = null;
+		}
+		const { w, h } = paperBoxArea(this, scroller);
+		const origin = this.paperOriginLayout;
+		const top = origin !== null && Number.isFinite(origin) && origin > 0 ? origin : 0;
+		const px = Math.round(pitch * 1000) / 1000;
+		const key = `${w},${h},${top},${px}`;
+		if (key === this.pageGuideBoxKey) return;
+		this.pageGuideBoxKey = key;
+		this.pageGuideBox.setCssStyles({ width: `${w}px`, height: `${Math.max(0, h - top)}px`, top: `${top}px` });
+		this.pageGuideBox.style.setProperty("--handwriting-page-guide-pitch", `${px}px`);
+	}
+
+	/**
+	 * The guides' own previewing class, on or off: written only when it changes. Kept as state too, so a box made while a
+	 * preview lives starts quiet, and the box going and coming leaves the preview's word standing.
+	 */
+	function markPageGuidesPreview(this: InkOverlayPlugin, on: boolean): void {
+		if (this.pageGuidesPreviewing === on) return;
+		this.pageGuidesPreviewing = on;
+		this.pageGuideBox?.classList.toggle(PAGE_GUIDES_PREVIEWING, on);
+	}
+
+	/** The guides' box goes: the canvas off, the column gone, a note switch, a release. */
+	function removePageGuideBox(this: InkOverlayPlugin): void {
+		if (!this.pageGuideBox) return;
+		this.pageGuideBox.remove();
+		this.pageGuideBox = null;
+		this.pageGuideBoxKey = null;
 	}
 
 	/** The box goes: paper switched away from grid, a note switch, a release. Its own state goes with it. */
@@ -678,6 +817,7 @@ declare module "./InkOverlay" {
   // The paper kind can have changed with the plan (a note switch, the picker, the cycle command), and the
   // content can have grown since the last pass. Never on a preview frame: this method is not called on one.
   this.syncGridPaperBox();
+  this.syncPageGuideBox();
  }
 
  /**
@@ -719,6 +859,234 @@ declare module "./InkOverlay" {
   this.writeGridBoxPan("");
  }
 
+	/**
+	 * THE INK THE START VIEW DID NOT HOLD. A zoom out shows note the committed layer never painted; the extent raster holds all of it
+	 * at the start zoom. On the preview's first frame, when that raster still holds (extentHolds, no side effect) and the camera
+	 * moved by whole device px since it was built (copyFromExtent's own test), or else the stand-in a landing kept while the next
+	 * raster builds still pictures the layer's strokes (heldRasterSource, its CSS size scaled once here), its two canvases go up in one element right after
+	 * the scroller, at the scroller's own stacking and under the same host scale, and the pane's committed and highlight canvases are
+	 * hidden in the same call; the extent raster after a move off whole device px, and on a zoom out with neither held the overview
+	 * picture, go up the same way but cut off the start view, and the pane's canvases stay shown. Nothing is drawn and no canvas is made: the element is kept across gestures, every style is written while it
+	 * is off the page, and the reads are the ones measurePreviewPaperBox makes on a frame whose layout is already flushed. The pinch
+	 * composite, if it engaged at the gesture's start, is undone first: under the element it would paint the ink twice.
+	 * `clipOnly`: a later frame's try puts up a clipped pick only, never one that hides the pane's canvases mid-gesture.
+	 */
+	function putUpHeldRaster(this: InkOverlayPlugin, clipOnly = false): void {
+		if (this.heldRaster) this.takeDownHeldRaster();
+		const host = this.view?.dom, scroller = this.view?.scrollDOM, container = this.container, cam = this.lastPaintCam;
+		if (!cam || !host?.style || !scroller?.style || scroller.parentElement !== host || !container?.style) return;
+		const path = this.filePath();
+		if (!path) return;
+		const committed = this.committedCanvas, cw = committed?.width ?? 0, ch = committed?.height ?? 0;
+		if (!(cw > 0) || !(ch > 0) || !(this.cssWidth > 0) || !(this.cssHeight > 0)) return;
+		const pick = this.heldRasterSource(path, cam, this.committedStrokes(this.freeStrokes(path)));
+		if (!pick || (clipOnly && !pick.clip)) return;
+		if (!bandPlace(container)) return;
+		if (this.pinchComposite) this.restorePinchLayers();
+		const clip = this.heldRasterClip ?? makeHeldRasterClip();
+		this.heldRasterClip = clip;
+		const inner = clip.firstElementChild as HTMLElement;
+		const top = scroller.offsetTop + scroller.clientTop, left = scroller.offsetLeft + scroller.clientLeft;
+		const right = host.clientWidth - (left + scroller.clientWidth), bottom = host.clientHeight - (top + scroller.clientHeight);
+		clip.setCssStyles({ top: `${top}px`, left: `${left}px`, right: `${right}px`, bottom: `${bottom}px` });
+		const h: HeldRaster = {
+			src: pick.src, f: pick.f, path, count: pick.count, generation: pick.generation, shownMoves: pick.shownMoves, inner,
+			scroll: { x: scroller.scrollLeft, y: scroller.scrollTop },
+			offX: pick.offX, offY: pick.offY, rasterScale: this.pinchAnchor?.fromScale ?? Number.NaN, box: "", transform: "", hidden: [],
+			penTiles: [], hlTiles: [], hlWrap: null,
+		};
+		// Attached ink in its stacking place: the groups the picture's world rect meets, from their current sprites (heldTiles). The
+		// raster holds free ink only; without the tiles the wash paints over attached pen and a group off the start view pops in.
+		const att = this.attachedLayer, groups = att?.live ? this.attachedGroups(path) : [];
+		const tiles = att && groups.length > 0 ? att.heldTiles(cam, groups, pick.world, committedFloorFor(this.committedBacking, this.dpr), this.committedBacking ?? 0) : null;
+		if (tiles) {
+			h.penTiles = tiles.pen;
+			h.hlTiles = tiles.hl;
+			if (tiles.hl.length > 0) {
+				const wrap = this.heldRasterHlWrap ?? makeHeldRasterHlWrap();
+				this.heldRasterHlWrap = wrap;
+				for (const t of tiles.hl) wrap.appendChild(t.c);
+				h.hlWrap = wrap;
+			}
+		}
+		this.placeHeldRasterCanvases(h);
+		// A clipped pick (the overview, or the extent raster off whole device px) goes up beside the pane's canvases, so it is cut off
+		// the start view they paint (inner px 0 to the layer's CSS size, the committed canvas's own box): an even-odd ring, one write
+		// here and none per frame. Any other source clears it. The attached tiles sit in the same inner box, so the ring cuts them too.
+		const ring = pick.clip ? `polygon(evenodd, -1e7px -1e7px, 1e7px -1e7px, 1e7px 1e7px, -1e7px 1e7px, -1e7px -1e7px, 0px 0px, 0px ${this.cssHeight}px, ${this.cssWidth}px ${this.cssHeight}px, ${this.cssWidth}px 0px, 0px 0px)` : "";
+		if (inner.style.clipPath !== ring) inner.style.clipPath = ring;
+		// Inner order, as the pane stacks its layers: free highlight, attached highlight under one alpha, free pen, attached pen.
+		if (h.src.hl) inner.appendChild(h.src.hl);
+		if (h.hlWrap) inner.appendChild(h.hlWrap);
+		inner.appendChild(h.src.pen);
+		for (const t of h.penTiles) inner.appendChild(t.c);
+		this.heldRaster = h;
+		this.writeHeldRaster(0, 0);
+		// The first write takes the raster down when the store no longer counts what the layer paints (a drag snapshot lifts strokes
+		// out): nothing is put up then, and the pane's canvases stay shown.
+		if (this.heldRaster !== h) return;
+		host.insertBefore(clip, scroller.nextSibling);
+		if (pick.clip) return;
+		// The attached canvases hide with the committed pair when the tiles stand in for them; with none (a group the start view
+		// shows has no current sprite) they stay shown, under the picture, as before.
+		for (const c of [committed, this.highlightCanvas, ...(tiles && att ? [att.pen, att.hl] : [])]) {
+			if (!c?.style) continue;
+			// The resting visibility, not a pinch's own 'hidden': a pinch hides a blank canvas only for the pinch (pinchHiddenCanvases) and
+			// its end puts the resting value back. Recording 'hidden' here let the take-down write it again after that restore, and the
+			// highlight canvas stayed hidden after a touch pinch on a pen-only note (a later highlighter stroke painted into it unseen).
+			h.hidden.push([c, this.pinchHiddenCanvases.get(c) ?? c.style.visibility]);
+			c.setCssStyles({ visibility: "hidden" });
+		}
+	}
+
+	/**
+	 * What a zoom preview may hold up, with no side effect: the extent raster while it still holds (extentHolds), in place of the pane's
+	 * canvases when the camera moved by whole device px since it was built (copyFromExtent's own test), else beside them and clipped off
+	 * the start view, at its fractional offset; else the stand-in while it pictures exactly the strokes the
+	 * committed layer paints (none added since: those are drawn by path, and would be hidden under it) at the shown places it was
+	 * painted at (no shown move since, the extent branch's own test) and at a copy factor that fits; else, on a zoom out, the overview.
+	 * `off` is the picture's device px under committed device px 0, at the committed layer's scale; `f` the picture's size factor.
+	 */
+	function heldRasterSource(this: InkOverlayPlugin, path: string, cam: RasterCamera, strokes: readonly InkStroke[]):
+		{ src: HeldRaster["src"]; f: number; offX: number; offY: number; count: number; generation: number; shownMoves: number; world: BBox; clip: boolean } | null {
+		const ext = this.extentRaster;
+		if (ext && this.extentHolds(ext, cam, strokes)) {
+			const k = cam.zoom * ext.backing;
+			const whole = (v: number) => Number.isFinite(v) && Math.abs(v - Math.round(v)) < 1 / 16;
+			const mx = (cam.x - ext.cam0.x) * k, my = (cam.y - ext.cam0.y) * k;
+			const world = { x: ext.world.x0, y: ext.world.y0, width: ext.world.x1 - ext.world.x0, height: ext.world.y1 - ext.world.y0 };
+			if (whole(mx) && whole(my))
+				return { src: ext, f: 1, offX: Math.round(mx) - ext.kx, offY: Math.round(my) - ext.ky, count: ext.count, generation: ext.generation, shownMoves: ext.shownMoves, world, clip: false };
+			// Moved off whole device px (a pan of 150 CSS px at dsf 1.37 moves it 205.5): the layer's start view is not this raster's
+			// grid, so the raster goes up the overview's way, beside the pane's canvases and clipped off the start view they paint, at
+			// its fractional offset. Returning null here held nothing up: an extent build drops the overview, and the stand-in lives only
+			// after a landing.
+			if (!Number.isFinite(mx) || !Number.isFinite(my)) return null;
+			return { src: ext, f: 1, offX: mx - ext.kx, offY: my - ext.ky, count: ext.count, generation: ext.generation, shownMoves: ext.shownMoves, world, clip: true };
+		}
+		const backing = this.committedBacking ?? 0;
+		const scaled = (at: { x: number; y: number; zoom: number }, atBacking: number) => {
+			const kn = cam.zoom * backing, ko = at.zoom * atBacking, f = kn / ko;
+			if (!(kn > 0) || !(ko > 0) || !Number.isFinite(f) || !standInFactorFits(f)) return null;
+			const offX = (cam.x - at.x) * kn, offY = (cam.y - at.y) * kn;
+			return Number.isFinite(offX) && Number.isFinite(offY) ? { f, offX, offY, ko } : null;
+		};
+		const st = this.standIn;
+		if (st && st.path === path && st.dpr === this.dpr && st.look === inkLookKey() && st.strokes === strokes && strokes.length === st.count &&
+			st.generation === inlineInk.generation(path) && st.shownMoves === this.shownMoves && this.cssScale < 1 && !(st.hl && this.highlightPairDeferred) &&
+			st.pen.width !== 0 &&
+			// A stand-in with no highlighter picture would hide highlighter ink the pane's own layer shows.
+			(st.hl || this.highlightPairDeferred || !strokes.some(s => s.tool === "highlighter"))) {
+			const at = scaled(st.at, st.backing);
+			if (!at) return null;
+			const world = { x: st.at.x, y: st.at.y, width: st.pen.width / at.ko, height: st.pen.height / at.ko };
+			return { src: st, f: at.f, offX: at.offX, offY: at.offY, count: st.count, generation: st.generation, shownMoves: st.shownMoves, world, clip: false };
+		}
+		// Nothing else held: on a zoom out only (this frame's scale under the gesture's start), the overview picture, beside the pane's
+		// own canvases and clipped off the start view, so it needs no highlighter picture of its own to hide anything. It holds free
+		// ink only, as the extent raster does; the shown moves it is put up at are the overlay's own, so a later move takes it down.
+		const ov = this.overview, anchor = this.pinchAnchor;
+		if (!ov || !anchor || !(this.pinchScaleNow < anchor.fromScale) || ov.pen.width === 0 || !this.overviewHolds(ov, strokes)) return null;
+		const at = scaled(ov.at, ov.backing);
+		if (!at) return null;
+		const world = { x: ov.at.x, y: ov.at.y, width: ov.pen.width / at.ko, height: ov.pen.height / at.ko };
+		return { src: ov, f: at.f, offX: at.offX, offY: at.offY, count: ov.count, generation: ov.generation, shownMoves: this.shownMoves, world, clip: true };
+	}
+
+	/**
+	 * The raster's canvases at their world place in the inner box, whose origin is the committed canvas's: committed device px d shows
+	 * extent px d + off, as copyFromExtent copies it (a stand-in's px (d + off) / f, as copyFromStandIn copies it). Each takes the
+	 * committed canvas's own layer box scaled by the size ratio and by f, and its transform, so both rasterise alike under either host form.
+	 */
+	function placeHeldRasterCanvases(this: InkOverlayPlugin, h: HeldRaster): void {
+		const committed = this.committedCanvas, cw = committed.width, ch = committed.height;
+		const bw = Number.parseFloat(committed.style.width), bh = Number.parseFloat(committed.style.height);
+		const fx = this.cssWidth / cw, fy = this.cssHeight / ch;
+		h.box = `${committed.style.width} ${committed.style.height}`;
+		h.transform = committed.style.transform;
+		for (const c of [h.src.hl, h.src.pen]) {
+			if (!c) continue;
+			// The picture's canvases are clones of the committed canvas, and a stand-in shrunk at a landing is cloned while a preview
+			// hides it: the clone's own visibility is cleared here, or the sibling would hold an invisible picture.
+			c.setCssStyles({
+				position: "absolute", visibility: "", left: `${-h.offX * fx}px`, top: `${-h.offY * fy}px`, pointerEvents: "none",
+				width: `${(bw * c.width * h.f) / cw}px`, height: `${(bh * c.height * h.f) / ch}px`, transform: h.transform, transformOrigin: h.transform ? "0 0" : "",
+				opacity: c === h.src.hl ? String(HIGHLIGHTER_ALPHA) : "",
+			});
+		}
+		// A tile at the attached layer's device px, on the committed canvas's grid: placed as the picture is at f 1, its alpha the wrapper's.
+		for (const t of [...h.hlTiles, ...h.penTiles]) {
+			t.c.setCssStyles({
+				position: "absolute", visibility: "", left: `${t.x * fx}px`, top: `${t.y * fy}px`, pointerEvents: "none", opacity: "",
+				width: `${(bw * t.c.width) / cw}px`, height: `${(bh * t.c.height) / ch}px`, transform: h.transform, transformOrigin: h.transform ? "0 0" : "",
+			});
+		}
+	}
+
+	/**
+	 * The ink layer's translate (writeInkLayerTransform's own numbers) on the inner box, one style write when it moves. A raster no
+	 * longer held (let go and not the stand-in, freed, the note's ink changed, or a shown move since put-up) comes down here instead.
+	 */
+	function writeHeldRaster(this: InkOverlayPlugin, x: number, y: number): void {
+		const h = this.heldRaster;
+		if (!h) return;
+		// The raster holds free ink only: its count is the store's less the attached members it holds, which the free list's length
+		// is (an erased member stays in its group's ids until the next load, so the group's id count would overcount).
+		if ((h.src.pen !== this.extentRaster?.pen && h.src.pen !== this.standIn?.pen && h.src.pen !== this.overview?.pen) || h.src.pen.width === 0 ||
+			inlineInk.generation(h.path) !== h.generation || this.freeStrokes(h.path).length !== h.count ||
+			this.shownMoves !== h.shownMoves) { this.takeDownHeldRaster(); return; }
+		const committed = this.committedCanvas;
+		if (committed.style.transform !== h.transform || `${committed.style.width} ${committed.style.height}` !== h.box) this.placeHeldRasterCanvases(h);
+		const band = this.container ? bandPlace(this.container) : null;
+		if (!band) { this.takeDownHeldRaster(); return; }
+		const t = `translate(${band.x - h.scroll.x + x}px,${band.y - h.scroll.y + y}px)`;
+		if (h.inner.style.transform !== t) h.inner.style.transform = t;
+	}
+
+	/** A whole paint of the committed layer: once it really painted (not deferred to the queued frame) with no preview live, the pane's canvases show it. */
+	function landHeldRaster(this: InkOverlayPlugin, deferred: boolean): void {
+		if (deferred || this.pinchPreview) return;
+		this.takeDownHeldRaster();
+	}
+
+	/** Down: the pane's canvases shown and the raster's moved back out, in one call. The element is kept for the next gesture. */
+	function takeDownHeldRaster(this: InkOverlayPlugin): void {
+		const h = this.heldRaster;
+		if (!h) return;
+		this.heldRaster = null;
+		for (const [c, visibility] of h.hidden) c.style.visibility = visibility;
+		this.heldRasterClip?.remove();
+		h.src.pen.remove();
+		h.src.hl?.remove();
+		for (const t of [...h.penTiles, ...h.hlTiles]) t.c.remove();
+		h.hlWrap?.remove();
+	}
+
+/** The container's place in the scroller from its own style (bandPlacement: whole px in left and top, the fraction in a translate). No layout read. */
+function bandPlace(container: HTMLElement): { x: number; y: number } | null {
+	const l = Number.parseFloat(container.style.left), t = Number.parseFloat(container.style.top);
+	const m = /translate\((-?[\d.e+-]+)px, (-?[\d.e+-]+)px\)/.exec(container.style.transform);
+	const x = l + (m ? Number(m[1]) : 0), y = t + (m ? Number(m[2]) : 0);
+	return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
+/** The held raster's element, made off the page with every style set (styles.css untouched): a clip at the scroller's padding box, one inner box. */
+function makeHeldRasterClip(): HTMLElement {
+	const clip = createDiv({ cls: "handwriting-ink-held" });
+	// Stacked where the scroller's own ink paints (z-index 0, right after it), under the note's chrome: at the band's z-index the
+	// picture painted over the zoom controls.
+	clip.setCssStyles({ position: "absolute", overflow: "hidden", pointerEvents: "none", zIndex: "0" });
+	clip.createDiv().setCssStyles({ position: "absolute", left: "0", top: "0" });
+	return clip;
+}
+
+/** The held raster's attached highlight wrapper, made once: the tiles in it paint opaque and it carries the one alpha, as the layer does. */
+function makeHeldRasterHlWrap(): HTMLElement {
+	const wrap = createDiv({ cls: "handwriting-ink-held-attached-hl" });
+	wrap.setCssStyles({ position: "absolute", left: "0", top: "0", pointerEvents: "none", opacity: String(HIGHLIGHTER_ALPHA) });
+	return wrap;
+}
+
 export function installPaperPinch(proto: InkOverlayPlugin): void {
 	installMethods(proto, {
 		refreshPinchConstraint,
@@ -734,6 +1102,9 @@ export function installPaperPinch(proto: InkOverlayPlugin): void {
 		watchPaperKind,
 		syncGridPaperBox,
 		removeGridPaperBox,
+		syncPageGuideBox,
+		removePageGuideBox,
+		markPageGuidesPreview,
 		stopPaperKindWatch,
 		clearScrollerPan,
 		gridBoxPaperStyle,
@@ -750,5 +1121,11 @@ export function installPaperPinch(proto: InkOverlayPlugin): void {
 		updatePaperSpacing,
 		writePaperVars,
 		clearOwnPaperVars,
+		putUpHeldRaster,
+		heldRasterSource,
+		placeHeldRasterCanvases,
+		writeHeldRaster,
+		landHeldRaster,
+		takeDownHeldRaster,
 	});
 }

@@ -171,13 +171,15 @@ describe("raw-fed ink through the real router (Chromium stream)", () => {
 		expect(prevented).toBe(0);
 	});
 
-	it("a raw during a later stroke keeps the move handler out for the session", () => {
+	it("a raw in one stroke does not keep the next stroke's moves out: each stroke is move-fed until its own first raw", () => {
 		h.fire(penEvent("pointerdown", 100));
 		h.fire(penEvent("pointerrawupdate", 104, { coalesced: [104] }));
 		h.fire(penEvent("pointerup", 108, { pressure: 0, buttons: 0 }));
 		h.fire(penEvent("pointerdown", 200));
 		h.fire(penEvent("pointermove", 208, { coalesced: [204, 208] }));
-		expect(fedTimestamps(h.rec.rawCalls)).toEqual([104]);
+		h.fire(penEvent("pointerrawupdate", 212, { coalesced: [204, 208, 212] }));
+		h.fire(penEvent("pointermove", 216, { coalesced: [212, 216] }));
+		expect(fedTimestamps(h.rec.rawCalls)).toEqual([104, 204, 208, 212]);
 	});
 });
 

@@ -1,8 +1,9 @@
-import { EditorView, ViewPlugin } from "@codemirror/view";
+import { EditorView, ViewPlugin, type DOMEventHandlers } from "@codemirror/view";
 import { EditorState, StateEffect, Prec, type Text, type SelectionRange } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
 import { Platform, editorInfoField } from "obsidian";
 import { Camera } from "../camera/Camera";
+import type { AttachedLayer } from "./InkOverlayAttachedLayer";
 import type { CameraOriginY } from "./CameraOriginY";
 import {
 	InsertSpaceRows,
@@ -37,6 +38,7 @@ import {
 import {
 	committedFloorFor,
 	enabled,
+	inlineInk,
 	instances,
 	scrollExpansionEnabled,
 	type GutterPanMode,
@@ -64,11 +66,14 @@ import { installKeys } from "./InkOverlayKeys";
 import { installZoomApi } from "./InkOverlayZoomApi";
 import { installPinch } from "./InkOverlayPinch";
 import { installLineAnchors } from "./InkOverlayLineAnchors";
+import { attachTargetExtension, attachedStrokeAtTap, narrowedTo, selectionChips, toggleAttach } from "./AttachDecoration";
+import { isOpaqueAttachment } from "./InkAttachments";
 import { installReload } from "./InkOverlayReload";
 import { installGestureEnd } from "./InkOverlayGestureEnd";
 import { installInkOps } from "./InkOverlayOps";
 import { installErase } from "./InkOverlayErase";
 import { installExtent } from "./InkOverlayExtent";
+import { installOverview } from "./InkOverlayOverview";
 import { installBand } from "./InkOverlayBand";
 import { installPenSupport } from "./InkOverlayPenSupport";
 import { installPenPath } from "./InkOverlayPenPath";
@@ -79,7 +84,11 @@ import { installInkOverlayRepaint } from "./InkOverlayRepaint";
 import {
 	backingScale,
 	rasterScale,
+	visualToNote,
 } from "./ZoomScale";
+import { mouseInkEnabled } from "./MouseInk";
+import { padBBox, pointInBBox } from "../objects/Selection";
+import { handleInput } from "./LassoTransform";
 import { InlinePenRouter } from "./InlinePenRouter";
 import {
 	ScrollAxisGuard,
@@ -88,9 +97,19 @@ import {
 import { type PreviewPaperEnd } from "./PaperPan";
 
 /** The module constants and helpers live in InkOverlayConstants.ts; the other overlay files keep importing them from here. */
-import { bumpCanvasReallocs, SCALE_EPSILON, type MeasureHold, type PinchConstraintGeometry, type PinchConstraint, type PenMode } from "./InkOverlayConstants";
-export { PINCH_SCROLL_QUIET_MS, PAN_MIN_VISIBLE_PX, PAN_DRAG_SCALE_EPS, PAN_DRAG_FRAME_EPS, PAN_DRAG_WINDOW, PAN_FIT_SLACK_PX, PAN_SETTLE_ZOOM_BAND, EXTENT_RASTER_MAX_PX_DESKTOP, EXTENT_RASTER_MAX_PX_MOBILE, inkLookKey, EXTENT_PIECE_MS, EXTENT_PIECE_RETRY_MS, EXTENT_SCROLL_QUIET_MS, extentRasterFits, EXTENT_PAIR_FACTOR, STAND_IN_MIN_FACTOR, ZOOM_STAND_IN_ENABLED, standInFactorFits, extentPairFits, OVERSCROLL_BOUNCE_MS, OVERSCROLL_BOUNCE_MIN_PX, OVERSCROLL_GIVE_PX, travelledEaseRoom, canvasReallocs, inkCanvasReallocs, bumpCanvasReallocs, SCALE_EPSILON, CONTENT_ORIGIN_EPSILON, PAPER_PROPERTIES, SELECTION_GRAB_PAD, INLINE_DESYNCHRONIZED, PRED_HISTORY } from "./InkOverlayConstants";
+import { bumpCanvasReallocs, SCALE_EPSILON, SELECTION_GRAB_PAD, type MeasureHold, type PinchConstraintGeometry, type PinchConstraint, type PenMode } from "./InkOverlayConstants";
+export { PINCH_SCROLL_QUIET_MS, PAN_MIN_VISIBLE_PX, PAN_DRAG_SCALE_EPS, PAN_DRAG_FRAME_EPS, PAN_DRAG_WINDOW, PAN_FIT_SLACK_PX, PAN_SETTLE_ZOOM_BAND, EXTENT_RASTER_MAX_PX_DESKTOP, EXTENT_RASTER_MAX_PX_MOBILE, inkLookKey, EXTENT_PIECE_MS, EXTENT_PIECE_RETRY_MS, EXTENT_SCROLL_QUIET_MS, extentRasterFits, EXTENT_PAIR_FACTOR, STAND_IN_MIN_FACTOR, ZOOM_STAND_IN_ENABLED, standInFactorFits, extentPairFits, extentPairCapPx, OVERSCROLL_BOUNCE_MS, OVERSCROLL_BOUNCE_MIN_PX, OVERSCROLL_GIVE_PX, travelledEaseRoom, canvasReallocs, inkCanvasReallocs, bumpCanvasReallocs, SCALE_EPSILON, CONTENT_ORIGIN_EPSILON, PAPER_PROPERTIES, SELECTION_GRAB_PAD, INLINE_DESYNCHRONIZED, PRED_HISTORY } from "./InkOverlayConstants";
 export type { CmMeasureRequest, MeasureHoldEntry, MeasureHold } from "./InkOverlayConstants";
+
+/** The parts of a Live Preview note a finger tap works (see tapReleasesSelection): checkbox, link, tag, embed. */
+const TAP_WORKS_SELECTOR = 'input[type="checkbox"], .task-list-item-checkbox, a, .cm-hmd-internal-link, .cm-link, .cm-url, .cm-hashtag, .internal-embed';
+
+/** Whether a tap's lift landed on, or inside, a part of the note a tap works. A target with no closest() (a text node) is plain text. */
+function tapWorksText(ev: PointerEvent | undefined): boolean {
+	const target = ev?.target as { closest?: unknown } | null | undefined;
+	if (!target || typeof target.closest !== "function") return false;
+	return (target as Element).closest(TAP_WORKS_SELECTOR) !== null;
+}
 
 
 // ---- the committed raster's camera test -------------------------------------
@@ -181,6 +200,7 @@ export {
 	setPersistToolbarCorner,
 	applyToolbarPlacement,
 	setShapeSnap,
+	setScribbleErase,
 	setPenReticle,
 	penReticleEnabled,
 	setEraserWholeStrokes,
@@ -196,10 +216,10 @@ export {
 } from "./InkOverlayToolState";
 
 /** What the committed layers hold after a zoom stand-in's last whole copy: camera, backing, device ratio, canvas size, highlight pair
- * state and stroke set (array, count, generation). A whole repaint that finds all of them unchanged paints nothing. */
+ * state, stroke set (array, count, generation) and shown places (shownMoves). A whole repaint that finds all of them unchanged paints nothing. */
 export type StandInMark = {
 	x: number; y: number; zoom: number; backing: number; dpr: number; w: number; h: number; hlDeferred: boolean;
-	strokes: readonly InkStroke[]; count: number; generation: number;
+	strokes: readonly InkStroke[]; count: number; generation: number; shownMoves: number;
 };
 
 /**
@@ -257,6 +277,8 @@ export class InkOverlayPlugin {
 	view: EditorView;
 	container: HTMLElement | null = null;
 	committedCanvas!: HTMLCanvasElement;
+	/** Ink attached to text, above the committed layers; null until mounted. */
+	attachedLayer: AttachedLayer | null = null;
 	wetCanvas!: HTMLCanvasElement;
 	/** The pen wet layer's small tile, over the full wet canvas (WetInkRenderer.configureWetTile). */
 	wetTileCanvas!: HTMLCanvasElement;
@@ -344,6 +366,8 @@ export class InkOverlayPlugin {
 	 * site: the field only speaks where nothing else does.
 	 */
 	mouseStroke = false;
+	/** This lasso contact is a finger on the selection (penDown's selection branch); cleared at every pen-down. */
+	fingerOnSelection = false;
 	// Raw-layer dwell tracking: the last time the pen actually MOVED. The
 	// builder filters stationary samples out of the stroke, so the hold
 	// that requests a shape snap is only visible here.
@@ -359,7 +383,6 @@ export class InkOverlayPlugin {
 	readonly snapChip = new SnapChip();
 	snapPreview: SnapPreview | null = null;
 	snapCanvas: SnapPreviewCanvas | null = null;
-	snapContactId: number | null = null;
 
 	// gesture state (one pen contact at a time; mode decided at pen-down)
 	mode: PenMode = "ink";
@@ -383,6 +406,19 @@ export class InkOverlayPlugin {
 	/** How many strokes the store held at the last committed paint, full or partial. A band carry trusts the raster only while the store still holds that many. */
 	paintedStrokeCount = -1;
 	/**
+	 * Moves of the shown strokes (lineAnchorsMoved) so far. The store's array, count and generation stay the same when the line
+	 * anchors move the shown copies, so every kept picture of the ink (the extent raster, its build, the stand-in, the stand-in mark)
+	 * records this count when painted and holds only while it is unchanged.
+	 */
+	shownMoves = 0;
+	/**
+	 * The sizes of the last 16 moves, at index move & 15: the move it was written for and its bound (world units, no shown stroke
+	 * moved further), or null where the size is not known. An entry written for another move is older than the ring: not known.
+	 */
+	shownSteps: { step: number; bound: number | null }[] = Array.from({ length: 16 }, () => ({ step: 0, bound: null }));
+	/** shownMoves at the last whole committed paint that drew (by path, extent copy or stand-in copy); a layer copy taken as the stand-in carries it. */
+	paintedShownMoves = -1;
+	/**
 	 * The note's whole ink drawn once below 100 percent (within extentRasterFits), on the committed raster's device grid: origin
 	 * `kx, ky` device px from the camera `cam0` it was built at, drawn at the camera `at`, covering the world rect `world`. Valid
 	 * while its content holds - the note, the zoom, the backing, the device ratio, the settings that shape ink (inkLookKey) and the
@@ -393,7 +429,7 @@ export class InkOverlayPlugin {
 		path: string; pen: HTMLCanvasElement; hl: HTMLCanvasElement | null; kx: number; ky: number;
 		cam0: { x: number; y: number; zoom: number }; at: { x: number; y: number; zoom: number };
 		world: { x0: number; y0: number; x1: number; y1: number }; backing: number; dpr: number; look: number;
-		strokes: readonly InkStroke[]; generation: number; count: number;
+		strokes: readonly InkStroke[]; generation: number; count: number; shownMoves: number;
 	} | null = null;
 	/** Whether this repaint's one paint may start building the extent raster; set by `repaint`, false otherwise. */
 	extentMayBuild = false;
@@ -411,7 +447,7 @@ export class InkOverlayPlugin {
 		path: string; cam0: { x: number; y: number; zoom: number }; at: { x: number; y: number; zoom: number }; kx: number; ky: number;
 		w: number; h: number; world: { x0: number; y0: number; x1: number; y1: number }; backing: number; dpr: number; look: number;
 		floor: ReturnType<typeof committedFloorFor>; strokes: readonly InkStroke[]; count: number; generation: number; hasHl: boolean;
-		pen: HTMLCanvasElement | null; hl: HTMLCanvasElement | null; next: number; timer: number;
+		pen: HTMLCanvasElement | null; hl: HTMLCanvasElement | null; next: number; timer: number; shownMoves: number;
 	} | null = null;
 	/**
 	 * A picture of the ink shown at a new scale while the sharp extent raster is built (zoom settle design, 2026-10-04): the old whole
@@ -423,7 +459,8 @@ export class InkOverlayPlugin {
 	 */
 	standIn: {
 		path: string; pen: HTMLCanvasElement; hl: HTMLCanvasElement | null; at: { x: number; y: number; zoom: number }; backing: number;
-		dpr: number; look: number; strokes: readonly InkStroke[]; count: number; generation: number; mark: StandInMark | null;
+		dpr: number; look: number; strokes: readonly InkStroke[]; count: number; generation: number; mark: StandInMark | null; shownMoves: number;
+		store: readonly InkStroke[];
 	} | null = null;
 	/** Stand-ins taken from the layer's own pixels, counted for the suites (one per settle); read nowhere else. */
 	standInSnapshots = 0;
@@ -447,6 +484,84 @@ export class InkOverlayPlugin {
 		() => !this.selection.isEmpty,
 		() => this.deleteSelectedInk()
 	);
+	/**
+	 * The device of the editor's last pointerdown. Chromium follows a pen's pointerdown with a compatibility
+	 * mousedown, so the mousedown alone cannot say a mouse pressed; this can. Taken by the next mousedown.
+	 */
+	editorPointerType: string | null = null;
+
+	/** Notes which device pressed, for the mousedown that follows. Never consumes the event. */
+	handleEditorPointerDown(event: PointerEvent): boolean {
+		this.editorPointerType = event.pointerType;
+		return false;
+	}
+
+	/**
+	 * A mouse click into the text lets go of the ink selection, as OneNote does, and the event is left to the
+	 * editor so the caret lands as today. A pen's compatibility mousedown never does: the pen's own paths decide.
+	 * Nor does a mouse while mouse ink is armed, which is a pen here and reaches penDown instead.
+	 */
+	handleEditorMouseDown(_event: MouseEvent): boolean {
+		const pointerType = this.editorPointerType;
+		this.editorPointerType = null;
+		if (pointerType === "mouse" && !mouseInkEnabled()) this.dissolveSelection();
+		return false;
+	}
+
+	/**
+	 * A finger tap (the router's onTapLift). On attached ink, an attached stroke's line or a group's link icon, it selects
+	 * that whole group, the set a lasso of the stroke gives, and answers true: the router keeps the tap from the text, so
+	 * the cursor does not move and the keyboard does not rise. With two or more groups selected, a tap inside one of them
+	 * narrows the selection to it, as a lasso contact does, and is kept from the text too. While the selection holds
+	 * attached ink, a tap anywhere inside its padded box, a gap between the strokes included, keeps the selection as it
+	 * is and is kept from the text, so the cursor does not move. That gap tap is not kept when the lift's target (`ev`,
+	 * the element under the finger: the overlay canvases take no pointer events and a plain finger tap has no capture)
+	 * is, or sits inside, a part of the note a tap works: a task checkbox (input[type="checkbox"],
+	 * .task-list-item-checkbox), a link (a, .cm-hmd-internal-link, .cm-link, .cm-url), a tag (.cm-hashtag) or an embed
+	 * (.internal-embed), as Live Preview draws them. Then the selection stays and the tap goes on to it. Anywhere else as
+	 * before, the answer false: a tap off the selection (outside its padded box, its handles and its Attach button, the
+	 * places a pen tip takes for it) lets go of it, a tap inside a free-ink selection's box keeps it, and the tap goes on
+	 * to the text.
+	 */
+	tapReleasesSelection(sample: PenSample, ev: PointerEvent): boolean {
+		const w = this.camera.screenToWorld(sample.x, sample.y);
+		const bounds = this.selection.isEmpty ? null : this.selectionBounds();
+		const input = handleInput("touch");
+		// The Attach button: one tap attaches or detaches (toggleAttach), and the tap is the overlay's.
+		if (bounds && this.attachButtonAt(w, input)) {
+			const path = this.filePath();
+			if (path && toggleAttach(this, inlineInk.attachments(path)) !== null) this.redrawSelectionUI();
+			return true;
+		}
+		// A pin: the tap selects its group and is the overlay's.
+		const pin = this.attachPinAt(w, input);
+		if (pin) {
+			const path = this.filePath(), a = path ? inlineInk.attachments(path).find((x) => x.id === pin.id) : undefined;
+			if (a && !isOpaqueAttachment(a)) this.selection.selectExactly([...a.strokeIds]);
+			this.redrawSelectionUI();
+			this.refreshStrip();
+			return true;
+		}
+		if (bounds && this.transformHandleAt(w, input) !== null) return false;
+		const pad = visualToNote(SELECTION_GRAB_PAD, this.scale);
+		const path = this.filePath(), list = path ? inlineInk.attachments(path) : [];
+		if (path && list.length > 0) {
+			const strokes = inlineInk.strokes(path);
+			const narrow = bounds ? narrowedTo(this, list, strokes, w.x, w.y, pad) : null;
+			const hit = narrow ? null : attachedStrokeAtTap(this, list, strokes, w.x, w.y, pad);
+			if (narrow || hit !== null) {
+				this.selection.selectExactly(narrow ?? [hit!]);
+				if (!narrow) this.expandToAttachedGroups();
+				this.redrawSelectionUI();
+				this.refreshStrip();
+				return true;
+			}
+		}
+		if (bounds && pointInBBox(w.x, w.y, padBBox(bounds, pad))) return list.length > 0 && selectionChips(this, list).groupIds.length > 0 && !tapWorksText(ev);
+		if (this.selection.isEmpty) return false;
+		this.dissolveSelection();
+		return false;
+	}
 	lassoPts: Point2[] = [];
 	lassoActive = false;
 	dragFrom: { x: number; y: number } | null = null;
@@ -484,6 +599,7 @@ export class InkOverlayPlugin {
 		w:number;h:number;scale:number;items:{stroke:InkStroke;color:string}[]} | null = null;
 	spaceHoverY: number | null = null;
 	spaceFeedbackRaf: number | null = null;
+	selectionPreviewRaf: number | null = null; // a lasso transform or drag preview frame not drawn yet (queueSelectionPreview)
 	/** What the last hover feedback frame drew, so an identical frame is skipped. */
 	spaceFeedbackKey: {hoverY:number;doc:Text;mode:string;rows:unknown;x:number;y:number;zoom:number;w:number;h:number;preview:unknown} | null = null;
 	/** Last viewport point of a pan drag; client space, so scrolling cannot
@@ -638,11 +754,15 @@ export class InkOverlayPlugin {
 	}
 	/** The measure after a document change: the anchors' rebase window closes there when that measure read every line of it. */
 	readonly lineWindowMeasure = { key: {}, read: (): null => null, write: (): void => this.lineWindowMeasured() };
-	/** Reads the layout the anchors are honoured under in a measure, for the mount and a font change. */
+	/**
+	 * Reads the layout the anchors are honoured under in a measure, for the mount and a font change. The read keeps the
+	 * zoom it was taken at: CodeMirror runs every read before any write, and a reopened note's camera restore, asked for
+	 * first, commits its saved zoom in a write between this read and this write.
+	 */
 	readonly lineSignatureMeasure = {
 		key: {},
-		read: (view: EditorView): LineSignature => this.readLineSignature(view),
-		write: (sig: LineSignature): void => this.lineSignatureMeasured(sig),
+		read: (view: EditorView): { sig: LineSignature; zoom: number } => ({ sig: this.readLineSignature(view), zoom: this.pinchScaleNow }),
+		write: (read: { sig: LineSignature; zoom: number }): void => this.lineSignatureMeasured(read.sig, read.zoom),
 	};
 	/**
 	 * THE INK'S OWN REACH on x, note px, cached for the settle's width tests to read as a field.
@@ -677,8 +797,6 @@ export class InkOverlayPlugin {
 	pageClassHost: HTMLElement | null = null;
 	/** Keeps the page-id-only Properties block class in step with Obsidian's DOM. */
 	metadataObserver: MutationObserver | null = null;
-	/** The one frame that observer owes, or null when it owes none. §5g/G2. */
-	metadataFrame: number | null = null;
 	/** Live magnification of this editor. Session-local; never persisted. */
 	pinchScaleNow = 1;
 	/**
@@ -1003,7 +1121,7 @@ export class InkOverlayPlugin {
  /** Camera commits in progress, plus a settle measure's write while it re-anchors; commitCameraScale carries a pending settle only at depth 1. */
  commitDepth = 0;
  viewportStyleDirty: {path:string|null;container:HTMLElement|null} | null = null;
- viewportLayout: {parent:HTMLElement; paneWidth:number; paneHeight:number; externalScale:number; gutterScreen:number; baseTransform:string; baseZoom:number; zoomVerified?:boolean; width:number; height:number; column:number; columnBox:number; lineContent:number; gutterX:number; sizerColumn:boolean; columnInset:boolean; ownLines:boolean; left:string; right:string; columnLocal:number|null; columnReserve:number; columnAuto:{lineWidth:number;fixed:number;scrollbar:number}|null; styles:Map<string,{value:string;priority:string}>} | null = null;
+ viewportLayout: {parent:HTMLElement; paneWidth:number; paneHeight:number; externalScale:number; gutterScreen:number; baseTransform:string; baseZoom:number; zoomVerified?:boolean; width:number; height:number; column:number; columnBox:number; lineContent:number; gutterX:number; sizerColumn:boolean; columnInset:boolean; ownLines:boolean; left:string; right:string; columnLocal:number|null; columnReserve:number; columnPad?:number; columnAuto:{lineWidth:number;fixed:number;scrollbar:number}|null; styles:Map<string,{value:string;priority:string}>} | null = null;
  /** `CSS.supports("zoom", "0.5")`, asked once per overlay. See `hostZoomSupported`. */
  hostZoomSupport: boolean | null = null;
  /** The form `applyViewportBox` last wrote (true: zoom), so a crossing of k = 1 re-places the canvases. Null until one is. */
@@ -1487,6 +1605,18 @@ export class InkOverlayPlugin {
 	/** The box's written size, `w,h` in layout px, and its written pan: neither is written again unchanged. */
 	paperGridBoxSize: string | null = null;
 	paperGridBoxPanX = "";
+	/**
+	 * PAGE GUIDES' BOX (Infinite Canvas on only): faint lines at every page height from the note's top edge, one
+	 * repeating gradient behind the text, screen only. Null with the canvas off or no column measured. Its written
+	 * geometry, `w,h,top,pitch` in layout px, so nothing is written again unchanged.
+	 */
+	pageGuideBox: HTMLElement | null = null;
+	pageGuideBoxKey: string | null = null;
+	/**
+	 * A preview lives, as far as the guides go: set where the preview paper begins and cleared where it ends, on every
+	 * paper, `none` included, where the scroller's previewing class never comes on. The box carries it as its own class.
+	 */
+	pageGuidesPreviewing = false;
 
 	/** When the settle being traced began, performance.now() ms; NaN outside one. Diagnostics only. */
 	settlePaperT0 = Number.NaN;
@@ -1568,6 +1698,7 @@ installReload(InkOverlayPlugin.prototype);
 installGestureEnd(InkOverlayPlugin.prototype);
 installInkOps(InkOverlayPlugin.prototype);
 installErase(InkOverlayPlugin.prototype);
+installOverview(InkOverlayPlugin.prototype);
 installExtent(InkOverlayPlugin.prototype);
 installBand(InkOverlayPlugin.prototype);
 installPenSupport(InkOverlayPlugin.prototype);
@@ -1588,19 +1719,27 @@ const inkOverlayPlugin = ViewPlugin.fromClass(InkOverlayPlugin, {
 // Obsidian's ordinary editor keymap also handles Delete and Backspace. Put
 // the selected-ink handler first, but claim those keys only while ink is
 // selected. Every other key still falls through untouched.
-const inlineSelectionKeyHandlers = Prec.highest(
-	EditorView.domEventHandlers({
-		keydown(event, view) {
-			return view.plugin(inkOverlayPlugin)?.handleKeyDown(event) ?? false;
-		},
-		keyup(event, view) {
-			return view.plugin(inkOverlayPlugin)?.handleKeyUp(event) ?? false;
-		},
-		paste(event, view) {
-			return view.plugin(inkOverlayPlugin)?.handlePaste(event) ?? false;
-		},
-	})
-);
+/** The editor's dom event handlers this overlay owns; exported so the cells drive the very object the editor is given. */
+export const inlineEditorHandlers: DOMEventHandlers<unknown> = {
+	keydown(event, view) {
+		return view.plugin(inkOverlayPlugin)?.handleKeyDown(event) ?? false;
+	},
+	keyup(event, view) {
+		return view.plugin(inkOverlayPlugin)?.handleKeyUp(event) ?? false;
+	},
+	paste(event, view) {
+		return view.plugin(inkOverlayPlugin)?.handlePaste(event) ?? false;
+	},
+	// A mouse click into the text lets go of the ink selection, as OneNote does; the event is left to the editor so
+	// the caret lands as always. The pointerdown says which device pressed (see handleEditorMouseDown).
+	pointerdown(event, view) {
+		return view.plugin(inkOverlayPlugin)?.handleEditorPointerDown(event) ?? false;
+	},
+	mousedown(event, view) {
+		return view.plugin(inkOverlayPlugin)?.handleEditorMouseDown(event) ?? false;
+	},
+};
+const inlineSelectionKeyHandlers = Prec.highest(EditorView.domEventHandlers(inlineEditorHandlers));
 
 type ViewportScrollLifetime = {
 	owners: WeakMap<SelectionRange, object>;
@@ -1650,5 +1789,6 @@ export function inkOverlayExtension(): Extension {
 		inlineSelectionKeyHandlers,
 		inkOverlayPlugin,
 		inkHistorySupport(),
+		attachTargetExtension(),
 	];
 }

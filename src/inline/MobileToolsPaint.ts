@@ -14,6 +14,7 @@ declare module "./MobileTools" {
 	interface MobileTools {
 		refresh(): void;
 		refreshNow(): void;
+		rehangPops(): void;
 		paintPresets(slider: SliderParts): void;
 		paintSwatches(slider: SliderParts): void;
 	}
@@ -34,6 +35,53 @@ declare module "./MobileTools" {
 			this.refreshQueued = false;
 			this.refreshNow();
 		});
+	}
+
+	/**
+	 * Hang a SHOWING pop under its button, measured live.
+	 *
+	 * Measured rects, and CENTERED under the button: the offset arithmetic
+	 * drifted a full button's width in the bottom-left corner (glass,
+	 * 2026-08-31). The pop is visible by here, so its width is real.
+	 * The arithmetic is `popRightOffset` (PopPlacement.ts) so the nine
+	 * anchors can be pinned without a layout; this is the measuring.
+	 * The PANE is measured too now: the old `Math.max(0, right)` clamped the
+	 * pop to the strip's own right edge, which is nearly the pane's edge in a
+	 * right-hand corner and nowhere near it for a centred strip - so a
+	 * centre-column anchor could hang a wide pop off the side of the pane.
+	 */
+	function placePop(this: MobileTools, slider: SliderParts, commandId: string): void {
+		const btn = this.buttons.find((b) => b.spec.commandId === commandId)?.el;
+		if (!btn) return;
+		const right = popRightOffset({
+			strip: this.el.getBoundingClientRect(),
+			button: btn.getBoundingClientRect(),
+			popWidth: slider.pop.offsetWidth,
+			pane: this.pane.getBoundingClientRect(),
+		});
+		slider.pop.setCssStyles({ right: `${right}px` });
+	}
+
+	/**
+	 * Hang every pop that is showing again, from fresh rects, and touch
+	 * nothing else. A pane resize reaches the strip through `layoutOverflow`,
+	 * not `refresh`, so without this a pop open while the pane narrows kept
+	 * the place it was hung at: past the pane's edge, off screen, until it was
+	 * shut and opened again. Placement ONLY: the value, the readout and the
+	 * preset and swatch rows belong to `refreshNow`, and a resize changes none
+	 * of them - so a held slider keeps its value and a shut pop stays shut.
+	 * With every pop shut this is three class checks: the observer calls it
+	 * on every frame of a pane drag.
+	 */
+	function rehangPops(this: MobileTools): void {
+		const pops: [SliderParts, string][] = [
+			[this.slider, "handwriting:inline-tool-eraser"],
+			[this.penSlider, "handwriting:inline-tool-pen"],
+			[this.hlSlider, "handwriting:inline-tool-highlighter"],
+		];
+		for (const [slider, commandId] of pops) {
+			if (slider.pop.classList.contains("is-showing")) placePop.call(this, slider, commandId);
+		}
 	}
 
 	/** The synchronous body; the constructor uses it before first paint. */
@@ -88,9 +136,10 @@ declare module "./MobileTools" {
 				// keeping the dataset current is all it takes; the sr-only
 				// span is the same name for screen readers, which get the
 				// colour they cannot see.
-				const colour = this.host
+				const slot = this.host
 					.paletteFor(spec.inkTool)
-					.find((c) => c.hex.toLowerCase() === hex.toLowerCase())?.name;
+					.find((c) => c.hex.toLowerCase() === hex.toLowerCase());
+				const colour = slot ? (slot.title ?? slot.name) : undefined;
 				const label = colour ? `${spec.label}: ${colour}` : spec.label;
 				if (el.dataset.tipLabel !== label) {
 					el.dataset.tipLabel = label;
@@ -213,27 +262,7 @@ declare module "./MobileTools" {
 			// pop and the nib pop that is not up cost nothing.
 			this.paintPresets(slider);
 			this.paintSwatches(slider);
-			const btn = this.buttons.find((b) => b.spec.commandId === commandId)?.el;
-			if (btn) {
-				// Measured rects, and CENTERED under the button: the offset
-				// arithmetic drifted a full button's width in the bottom-left
-				// corner (glass, 2026-08-31). The pop is visible by here, so
-				// its width is real.
-				// The arithmetic is `popRightOffset` (PopPlacement.ts) so the nine
-				// anchors can be pinned without a layout; this is the measuring.
-				// The PANE is measured too now: the old `Math.max(0, right)`
-				// clamped the pop to the strip's own right edge, which is nearly
-				// the pane's edge in a right-hand corner and nowhere near it for
-				// a centred strip - so a centre-column anchor could hang a wide pop off
-				// the side of the pane.
-				const right = popRightOffset({
-					strip: this.el.getBoundingClientRect(),
-					button: btn.getBoundingClientRect(),
-					popWidth: slider.pop.offsetWidth,
-					pane: this.pane.getBoundingClientRect(),
-				});
-				slider.pop.setCssStyles({ right: `${right}px` });
-			}
+			placePop.call(this, slider, commandId);
 		};
 		const whole = this.host.eraserWholeStroke();
 		this.strokeChip.toggleClass("is-current", whole);
@@ -461,13 +490,16 @@ declare module "./MobileTools" {
 		if (!row || tool === null) return;
 		row.empty();
 		const current = this.host.toolColor(tool);
-		for (const c of this.host.paletteFor(tool)) {
+		const palette = this.host.paletteFor(tool);
+		// Two slots may hold the same colour; only the first of them is current.
+		const currentAt = palette.findIndex((c) => c.hex.toLowerCase() === current.toLowerCase());
+		for (const [i, c] of palette.entries()) {
 			const sw = row.createEl("button", {
 				cls: "handwriting-color-swatch",
-				attr: { "aria-label": c.name, type: "button" },
+				attr: { "aria-label": c.title ?? c.name, type: "button" },
 			});
 			sw.setCssStyles({ backgroundColor: c.hex });
-			sw.toggleClass("is-current", c.hex.toLowerCase() === current.toLowerCase());
+			sw.toggleClass("is-current", i === currentAt);
 			sw.addEventListener("pointerdown", (ev) => ev.preventDefault());
 			sw.addEventListener("click", (ev) => {
 				ev.preventDefault();
@@ -491,6 +523,7 @@ export function installMobileToolsPaint(proto: MobileTools): void {
 	installMethods(proto, {
 		refresh,
 		refreshNow,
+		rehangPops,
 		paintPresets,
 		paintSwatches,
 	});

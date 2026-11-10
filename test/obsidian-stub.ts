@@ -25,10 +25,36 @@ export class MarkdownRenderer {}
 export class MarkdownView {}
 export class SuggestModal {}
 export class Notice {}
+/**
+ * The one stand-in that records: a menu keeps the items added to it and where it was shown, so a test can read what a tap
+ * offered and click an item. Nothing is drawn.
+ */
+export class MenuItem {
+	title = "";
+	icon = "";
+	click: (() => void) | null = null;
+	setTitle(title: string): this { this.title = title; return this; }
+	setIcon(icon: string): this { this.icon = icon; return this; }
+	onClick(fn: () => void): this { this.click = fn; return this; }
+}
+export class Menu {
+	static last: Menu | null = null;
+	items: MenuItem[] = [];
+	shownAt: { x: number; y: number } | null = null;
+	constructor() { Menu.last = this; }
+	addItem(fn: (item: MenuItem) => void): this { const item = new MenuItem(); fn(item); this.items.push(item); return this; }
+	showAtPosition(at: { x: number; y: number }): this { this.shownAt = { x: at.x, y: at.y }; return this; }
+	hide(): this { return this; }
+}
 export class App {}
 export class TFile {}
 export class TAbstractFile {}
 export class WorkspaceLeaf {}
+
+// The settings tab imports these; empty classes let its module graph load.
+export class ButtonComponent {}
+export class ColorComponent {}
+export class ExtraButtonComponent {}
 
 // Flags shipped code reads (audit-fixes-design.md s3 A3, 2026-09-02): grep
 // for Platform.is\w+ under src/ gives isAndroidApp isDesktopApp isIosApp
@@ -55,4 +81,5 @@ export function normalizePath(path: string): string {
 	return path;
 }
 export function setIcon(): void {}
+export function displayTooltip(): void {}
 export function getIcon(): null { return null; }

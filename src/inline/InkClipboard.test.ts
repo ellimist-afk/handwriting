@@ -37,12 +37,45 @@ describe("ink clipboard", () => {
 		expect(out[0]!.id).not.toBe("a");
 		// Deep: mutating the paste never reaches the held copy.
 		out[0]!.points[0]!.x = 999;
-		expect(pasteInk("two.md")[0]!.points[0]!.x).toBe(100);
+		expect(pasteInk("three.md")[0]!.points[0]!.x).toBe(100);
 	});
 
 	it("cross-note pastes keep their coordinates (fixed grid)", () => {
 		copyInk([stroke("a", 100)], "one.md");
 		expect(pasteInk("two.md")[0]!.points[0]!.x).toBe(100);
+	});
+
+	it("a second paste into another note steps off the first", () => {
+		copyInk([stroke("a", 100)], "one.md");
+		const first = pasteInk("two.md")[0]!;
+		const second = pasteInk("two.md")[0]!;
+		const third = pasteInk("two.md")[0]!;
+		expect(first.points[0]!.x).toBe(100);
+		expect(first.points[0]!.y).toBe(10);
+		expect(second.points[0]!.x).toBe(116);
+		expect(second.points[0]!.y).toBe(26);
+		expect(second.bbox.x).toBe(first.bbox.x + 16);
+		expect(second.bbox.y).toBe(first.bbox.y + 16);
+		expect(third.points[0]!.x).toBe(132);
+	});
+
+	it("each other note counts its own pastes", () => {
+		copyInk([stroke("a", 100)], "one.md");
+		expect(pasteInk("two.md")[0]!.points[0]!.x).toBe(100);
+		expect(pasteInk("three.md")[0]!.points[0]!.x).toBe(100);
+		expect(pasteInk("two.md")[0]!.points[0]!.x).toBe(116);
+		expect(pasteInk("one.md")[0]!.points[0]!.x).toBe(116);
+		expect(pasteInk("three.md")[0]!.points[0]!.x).toBe(116);
+	});
+
+	it("a new copy starts every count again", () => {
+		copyInk([stroke("a", 100)], "one.md");
+		pasteInk("two.md");
+		pasteInk("two.md");
+		pasteInk("one.md");
+		copyInk([stroke("b", 100)], "one.md");
+		expect(pasteInk("two.md")[0]!.points[0]!.x).toBe(100);
+		expect(pasteInk("one.md")[0]!.points[0]!.x).toBe(116);
 	});
 
 	it("pastes into the source note stagger, and keep staggering", () => {

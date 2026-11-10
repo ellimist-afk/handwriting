@@ -415,6 +415,8 @@ function moreRowProbe(width: number): MoreRowProbe {
 
 	const el = pane.querySelector<HTMLElement>(".handwriting-mobile-tools");
 	if (!el) throw new Error("no strip was built");
+	const face = el.querySelector<HTMLElement>(":scope > .handwriting-mobile-tools-face");
+	if (!face) throw new Error("no strip face was built");
 	// The chevron is the only way in: `setMoreOpen` is private, and driving
 	// the control the user drives is the point of a render harness.
 	const chevron = el.querySelector<HTMLElement>(".handwriting-tools-more");
@@ -425,8 +427,8 @@ function moreRowProbe(width: number): MoreRowProbe {
 	if (!row) throw new Error("no second row was built");
 	const kids = [...row.children] as HTMLElement[];
 	const rects = kids.map((k) => k.getBoundingClientRect());
-	const stripRect = el.getBoundingClientRect();
-	const cs = getComputedStyle(el);
+	const stripRect = face.getBoundingClientRect();
+	const cs = getComputedStyle(face);
 	// The CONTENT box, not the border box: the row is centred inside the
 	// strip's padding, so comparing against the border box would report every
 	// symmetric layout as off by the padding.
@@ -441,7 +443,7 @@ function moreRowProbe(width: number): MoreRowProbe {
 	return {
 		needed: el.classList.contains("is-more-needed"),
 		open: el.classList.contains("is-more-open"),
-		firstRow: el.querySelectorAll(":scope > .handwriting-mobile-tool").length,
+		firstRow: face.querySelectorAll(":scope > .handwriting-mobile-tool").length,
 		secondRow: kids.length,
 		content,
 		buttons,
@@ -518,7 +520,10 @@ function gridProbe(opts: { width: number; open?: boolean }): StripGridProbe {
 		chevron.dispatchEvent(new PointerEvent("click", { bubbles: true, pointerType: "touch" }));
 	}
 
-	const inFlow = ([...el.children] as HTMLElement[]).filter((k) => {
+	// The row lives in the strip's face; the pops hang beside it.
+	const face = el.querySelector<HTMLElement>(":scope > .handwriting-mobile-tools-face");
+	if (!face) throw new Error("no strip face was built");
+	const inFlow = ([...face.children] as HTMLElement[]).filter((k) => {
 		const cs = getComputedStyle(k);
 		return cs.display !== "none" && cs.position === "static";
 	});
@@ -537,8 +542,8 @@ function gridProbe(opts: { width: number; open?: boolean }): StripGridProbe {
 		if (held) held.push(k);
 		else lines.set(mid, [k]);
 	}
-	const stripRect = el.getBoundingClientRect();
-	const cs = getComputedStyle(el);
+	const stripRect = face.getBoundingClientRect();
+	const cs = getComputedStyle(face);
 	const content = {
 		left: stripRect.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft),
 		right: stripRect.right - parseFloat(cs.borderRightWidth) - parseFloat(cs.paddingRight),
@@ -701,6 +706,8 @@ function dragProbe(opts: { from: number; to: number; step: number }): Promise<Dr
 	strip.refreshNow();
 	const el = pane.querySelector<HTMLElement>(".handwriting-mobile-tools");
 	if (!el) throw new Error("no strip was built");
+	const face = el.querySelector<HTMLElement>(":scope > .handwriting-mobile-tools-face");
+	if (!face) throw new Error("no strip face was built");
 
 	const settled: string[] = [];
 	let mutations = 0;
@@ -717,7 +724,7 @@ function dragProbe(opts: { from: number; to: number; step: number }): Promise<Dr
 		const tick = (): void => {
 			const r = el.getBoundingClientRect();
 			const mids = new Set<number>();
-			for (const k of [...el.children] as HTMLElement[]) {
+			for (const k of [...face.children] as HTMLElement[]) {
 				const cs = getComputedStyle(k);
 				if (cs.display === "none" || cs.position !== "static") continue;
 				const b = k.getBoundingClientRect();
@@ -1027,9 +1034,88 @@ function clearanceProbe(pane: HTMLElement, collapsed: boolean): ClearanceProbe {
 	};
 }
 
+/**
+ * The strip in the pane Obsidian really gives it: `chromeHost()` is the
+ * editor's `div.markdown-source-view`, which sits straight inside
+ * `div.view-content`. Every other builder here uses a bare div, so a theme
+ * rule keyed on that pair of classes (issue 54, the ITS theme's
+ * `.view-content > div:is(.markdown-source-view, ...) > div`) never matches
+ * in this harness without it. Built with a note viewport so the zoom bar is
+ * one of the pane's children too, as it is in a note.
+ */
+function buildSourceViewStrip(): HTMLElement {
+	installObsidianDom();
+	const content = document.createElement("div");
+	content.className = "view-content";
+	content.style.cssText = "position:relative;width:1200px;height:800px;";
+	document.body.appendChild(content);
+	const pane = document.createElement("div");
+	pane.className = "markdown-source-view";
+	pane.style.cssText = "position:relative;width:1200px;height:800px;";
+	content.appendChild(pane);
+	new MobileTools(pane, {
+		...fakeHost(),
+		noteViewport: {
+			getNoteViewportState: () => ({ zoom: 1, busy: false, fitAvailable: true }),
+			zoomNoteBy: () => true,
+			resetNoteZoom: () => true,
+			fitHandwriting: () => "ok",
+		},
+	});
+	return pane;
+}
+
+export interface SourceViewBox {
+	/** Found as a direct child of the pane. */
+	found: boolean;
+	width: number;
+	height: number;
+	containerType: string;
+}
+
+export interface SourceViewStripProbe {
+	strip: SourceViewBox;
+	/** Centre y of every shown control on the strip's face, in order. */
+	controlYs: number[];
+	pillTip: SourceViewBox;
+	zoomBar: SourceViewBox;
+}
+
+async function sourceViewStripProbe(pane: HTMLElement): Promise<SourceViewStripProbe> {
+	await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+	const read = (cls: string): SourceViewBox => {
+		const el = pane.querySelector<HTMLElement>(`:scope > .${cls}`);
+		if (!el) return { found: false, width: 0, height: 0, containerType: "" };
+		const r = el.getBoundingClientRect();
+		return {
+			found: true,
+			width: +r.width.toFixed(2),
+			height: +r.height.toFixed(2),
+			containerType: getComputedStyle(el).containerType,
+		};
+	};
+	const face = pane.querySelector<HTMLElement>(":scope > .handwriting-mobile-tools > .handwriting-mobile-tools-face");
+	const controlYs = face
+		? Array.from(face.children)
+				.filter((c): c is HTMLElement => c instanceof HTMLElement && c.getBoundingClientRect().width > 0)
+				.map((c) => {
+					const r = c.getBoundingClientRect();
+					return +(r.top + r.height / 2).toFixed(2);
+				})
+		: [];
+	return {
+		strip: read("handwriting-mobile-tools"),
+		controlYs,
+		pillTip: read("handwriting-pill-tip"),
+		zoomBar: read("handwriting-note-viewport-controls"),
+	};
+}
+
 declare global {
 	interface Window {
 		__hw: {
+			buildSourceViewStrip: typeof buildSourceViewStrip;
+			sourceViewStripProbe: typeof sourceViewStripProbe;
 			setWritingVisibility: typeof setWritingVisibility;
 			buildStrip: typeof buildStrip;
 			buildLeaf: typeof buildLeaf;
@@ -1050,6 +1136,8 @@ declare global {
 }
 
 window.__hw = {
+	buildSourceViewStrip,
+	sourceViewStripProbe,
 	setWritingVisibility,
 	buildStrip,
 	buildLeaf,

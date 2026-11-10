@@ -435,10 +435,13 @@ for (const zoom of [0.2, 1]) it(`IDENTITY at ${zoom * 100}% on the default pane:
 		expect(r.containerOffsetWidth, "the read carries the container's offset width").toBeGreaterThan(0);
 		expect(Math.abs(r.cssScale - zoom), `at ${zoom} within the measurement's own bound, 2 x ${zoom} / ${r.containerOffsetWidth}`).toBeLessThanOrEqual(2 * zoom / r.containerOffsetWidth);
 		expect(r.strokes, "the shape stored").toBeGreaterThan(0);
-		expect(r.canvases.length, "five layers and the wet tile").toBe(6);
+		expect(r.canvases.length, "five layers, the wet tile and the attached pair").toBe(8);
+		// The attached ink pair (pen and highlighter) stays 0x0 on a note with no group painted.
+		const attached = r.canvases.filter((c: any) => c.field === "attachedPen" || c.field === "attachedHl");
+		expect(attached.map((c: any) => [c.field, c.backing.w, c.backing.h]).sort(), "the attached pair, 0x0").toEqual([["attachedHl", 0, 0], ["attachedPen", 0, 0]]);
 		// The four band layers share one box; the live tail and the wet tile
 		// have their own compact backings and are read apart.
-		const bandLayers = r.canvases.filter((c: any) => c.field !== "tailCanvas" && c.field !== "wetTileCanvas");
+		const bandLayers = r.canvases.filter((c: any) => c.field !== "tailCanvas" && c.field !== "wetTileCanvas" && c.field !== "attachedPen" && c.field !== "attachedHl");
 		const wetTile = r.canvases.find((c: any) => c.field === "wetTileCanvas");
 		expect(wetTile, "the wet tile canvas is read").toBeTruthy();
 		expect(wetTile.backing.w * wetTile.backing.h, "the wet tile is smaller than the band").toBeLessThan(committed.backing.w * committed.backing.h);
@@ -513,7 +516,7 @@ it("IDENTITY at 20%: under a stubbed non-zoom engine, the pin catches it before 
 		// the pin not stopped the arm first (5 canvases: committedCanvas,
 		// wetCanvas, tailCanvas, highlightCanvas, highlightWetCanvas; the wet
 		// tile has its own box and is not one of them).
-		const five = r.canvases.filter((c: any) => c.field !== "wetTileCanvas");
+		const five = r.canvases.filter((c: any) => c.field !== "wetTileCanvas" && c.field !== "attachedPen" && c.field !== "attachedHl");
 		const transformMismatches = five.filter((c: any) => c.transform !== "").length;
 		expect(transformMismatches, "every canvas actually carries the fallback's own scale transform here").toBe(5);
 		const cssMismatches = five.filter((c: any) => Math.abs(c.css.w - r.containerCss.w) > 0.5).length;

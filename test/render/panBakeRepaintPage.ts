@@ -130,7 +130,8 @@ function rasterFrameDiff(overlay: any, ext: any, cam: Cam, rect: Rect | null): D
 (window as any).panBake = {
 	/** Every copy's layer against a whole redraw at the layer's size, since the last call. */
 	copyLog() { const l = rig.copyLog ?? []; rig.copyLog = []; return l; },
-	async mount(zoom: number, sidecar: string, pageId: string, paneW: number, paneH: number, wantStrokes: number) {
+	/** `lines`: the note's empty text lines, four unless a cell asks for a taller note. */
+	async mount(zoom: number, sidecar: string, pageId: string, paneW: number, paneH: number, wantStrokes: number, lines = 4) {
 		setDiagnosticsEnabled(false);
 		setPenInk(true); setScrollExpansionEnabled(true); setInlineTool("pen");
 		const path = "Untitled 1.md";
@@ -139,7 +140,7 @@ function rasterFrameDiff(overlay: any, ext: any, cam: Cam, rect: Rect | null): D
 		pane.className = "markdown-source-view mod-cm6";
 		pane.style.cssText = "position:relative;margin-left:300px;margin-top:20px;width:" + paneW + "px;height:" + paneH + "px;overflow:hidden";
 		document.body.classList.add("handwriting-paper-lines");
-		const view = new EditorView({ parent: pane, state: EditorState.create({ doc: "\n\n\n", extensions: [history(), EditorView.lineWrapping,
+		const view = new EditorView({ parent: pane, state: EditorState.create({ doc: "\n".repeat(lines - 1), extensions: [history(), EditorView.lineWrapping,
 			editorInfoField.init(() => ({ app: { commands: { executeCommandById: () => false } }, file: { path }, editor: {} })), inkOverlayExtension(),
 			EditorView.theme({ "&": { width: paneW + "px", height: paneH + "px" }, ".cm-scroller": { overflowY: "auto", overflowX: "hidden" } })] }) });
 		installSizer(view);
@@ -883,6 +884,66 @@ function rasterFrameDiff(overlay: any, ext: any, cam: Cam, rect: Rect | null): D
 		};
 		return { pen: cmp(e.pen, "pen"), hl: e.hl ? cmp(e.hl, "highlighter") : null, count: e.count, storeCount: strokes.length };
 	},
+	/** Run as desktop or as a phone (the stub is a phone): the canvas caps and the backing budget read these. Call before mount. */
+	platform(mobile: boolean) { const P = Platform as any; P.isMobile = mobile; P.isMobileApp = mobile; P.isPhone = mobile; P.isIosApp = mobile; P.isDesktop = !mobile; P.isDesktopApp = !mobile; return { isMobile: Platform.isMobile }; },
+	/**
+	 * The router's two-finger pinch about the pane's centre to scale `to` in `steps` moves, then the lift: the settle's commit. Returns
+	 * the whole-layer repaints from the lift on (path points, stand-in copies), whether a stand-in is held after the lift's frames, and
+	 * how many layer snapshots the lift took.
+	 */
+	async pinchLift(to: number, steps = 8) {
+		const o = rig.overlay, router = o.router, from = o.pinchScaleNow, r = rig.pane.getBoundingClientRect();
+		const cx = r.left + r.width / 2, cy = r.top + r.height / 2, s0 = 100, s1 = 100 * to / from;
+		const touch = (s: number) => { router.touchPos.set(911, { x: cx - s / 2, y: cy }); router.touchPos.set(912, { x: cx + s / 2, y: cy }); };
+		const ev = (type: string) => new PointerEvent(type, { pointerId: 912, pointerType: "touch" });
+		const snap0 = o.standInSnapshots ?? 0;
+		rig.phase = "pinch";
+		touch(s0); router.beginPinch(ev("pointerdown"));
+		for (let i = 1; i <= steps; i++) { touch(s0 + (s1 - s0) * i / steps); router.updatePinch(ev("pointermove")); await settle(1); }
+		const n0 = rig.rows.length;
+		rig.phase = "lift";
+		router.endPinch(ev("pointerup"), { x: cx, y: cy }); router.touchPos.clear();
+		await settle(16);
+		const rows = rig.rows.slice(n0).filter((x: any) => x.painted && x.work === "all").map((x: any) => ({ pts: x.pts, stand: x.standCopies ?? 0 }));
+		return { from, scale: o.pinchScaleNow, cssScale: o.cssScale, rows, held: !!o.standIn, snapshots: (o.standInSnapshots ?? 0) - snap0 };
+	},
+	/** The whole-paint counters: by-path whole paints, the wasted ones with the call sites that paid them, and stand-in copies. */
+	paintCounts() {
+		const o = rig.overlay;
+		return { whole: o.wholePaints ?? 0, wasted: o.wastedWholePaints ?? 0, copies: o.standInCopies ?? 0,
+			deferrals: (o.standInDeferrals ?? 0) - (rig.deferrals0 ?? 0), sites: [...(o.wasteSites ?? [])] };
+	},
+	/** Zero the counters and forget the last whole paint, so a cell counts one commit from the picture already on screen. */
+	resetPaintCounts() {
+		const o = rig.overlay;
+		o.wholePaints = 0; o.wastedWholePaints = 0; o.standInCopies = 0; o.wasteSites = []; rig.deferrals0 = o.standInDeferrals ?? 0;
+		const cam = o.lastPaintCam;
+		o.lastWholePaint = cam ? { x: cam.x, y: cam.y, zoom: cam.zoom, backing: o.committedBacking ?? 0 } : null;
+	},
+	/** Ctrl+wheel at the pane's centre, as a mouse does: `notches` real wheel events 16 ms apart, then the quiet time that ends the run. */
+	async ctrlWheel(notches: number, deltaY: number) {
+		const o = rig.overlay, sd = rig.view.scrollDOM, r = sd.getBoundingClientRect();
+		const x = r.left + r.width / 2, y = r.top + r.height / 2;
+		rig.phase = "wheel";
+		for (let i = 0; i < notches; i++) {
+			sd.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, ctrlKey: true, deltaY, deltaMode: 0, clientX: x, clientY: y }));
+			await new Promise(res => setTimeout(res, 16));
+		}
+		await new Promise(res => setTimeout(res, 600));
+		await settle(16);
+		return { cssScale: o.cssScale, live: !!o.wheelZoomRun?.isLive };
+	},
+	/** The control arm: no stand-in is taken, so every zoom commit paints by path as before the stand-in. */
+	standInOff() { rig.overlay.takeStandIn = () => {}; },
+	/** Start a long-task tape (each task over 50 ms: its start and duration), or read and stop it. */
+	longTasks(on: boolean) {
+		if (on) { const tape: Array<{ start: number; dur: number }> = rig.tape = []; rig.tapeObs = new PerformanceObserver(l => { for (const e of l.getEntries()) tape.push({ start: e.startTime, dur: e.duration }); }); rig.tapeObs.observe({ type: "longtask", buffered: false }); return []; }
+		rig.tapeObs?.disconnect(); const tape = rig.tape ?? []; rig.tape = null; return tape;
+	},
+	/** The committed layer's backing size in device px. */
+	layerSize() { const c = rig.overlay.committedCanvas; return { w: c.width, h: c.height }; },
+	/** The two scale sources: the overlay's cssScale and CodeMirror's scaleY, with the document height in px they differ over. */
+	scaleGap() { const { overlay, view } = rig; return { cssScale: overlay.cssScale, scaleY: view.scaleY, docPx: view.contentHeight }; },
 	state() {
 		const { overlay, view } = rig, sd = view.scrollDOM;
 		return { left: sd.scrollLeft, top: sd.scrollTop, pan: { ...overlay.viewportPan }, rasterPan: overlay.rasterPan ? { ...overlay.rasterPan } : null,

@@ -69,19 +69,19 @@ afterEach(() => {
 	vi.mocked(embedInkRepaintAll).mockClear();
 });
 
+// pressureSensitivity left this list with the 1.5.0 pressure lock: a synced flip sets new strokes only and redraws
+// nothing (SettingsSyncRepaint.test.ts holds that).
 for (const [key, from, to] of [
-	["pressureSensitivity", true, false],
 	["inkSmoothing", true, false],
 	["inkAdaptsToTheme", false, true],
 ] as const) {
 	it(`a synced ${key} change still redraws when a local save reads the file first`, async () => {
-		const h = plugin({ [key]: from, pressureChoice: key === "pressureSensitivity" ? from : undefined });
+		const h = plugin({ [key]: from });
 		await proto.loadSettings.call(h);
 		vi.mocked(repaintAllInkOverlays).mockClear();
 		vi.mocked(embedInkRepaintAll).mockClear();
 		// The other device's file lands.
 		const synced = { ...(h.disk as Record<string, unknown>), [key]: to };
-		if (key === "pressureSensitivity") synced.pressureChoice = to;
 		h.disk = synced;
 		// This device saves something unrelated before the change report arrives.
 		(h.settings as Record<string, unknown>).eraserRadiusPx = 28;

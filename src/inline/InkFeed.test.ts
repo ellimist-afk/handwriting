@@ -12,8 +12,8 @@ import { InkFeedArbiter } from "./InkFeed";
 describe("InkFeedArbiter", () => {
 	it("feeds every raw sample on a raw-only stream (Chromium)", () => {
 		const a = new InkFeedArbiter();
-		a.noteRawChannel();
 		a.strokeStart(100);
+		a.noteRawChannel(); // the stroke's first raw
 		expect(a.feed([104, 108, 112])).toEqual([0, 1, 2]);
 		expect(a.feed([116, 120])).toEqual([0, 1]);
 		expect(a.moveFeedsInk()).toBe(false);
@@ -28,11 +28,11 @@ describe("InkFeedArbiter", () => {
 		expect(a.moveFeedsInk()).toBe(true);
 	});
 
-	it("a hover raw before the stroke silences the move feed", () => {
+	it("a raw before the stroke does not silence its move feed: the latch is per stroke", () => {
 		const a = new InkFeedArbiter();
-		a.noteRawChannel(); // approach hover, before any contact
+		a.noteRawChannel(); // a raw before any contact
 		a.strokeStart(100);
-		expect(a.moveFeedsInk()).toBe(false);
+		expect(a.moveFeedsInk()).toBe(true);
 	});
 
 	it("a move flushed ahead of the first raw feeds once, raw duplicates drop", () => {
@@ -44,7 +44,7 @@ describe("InkFeedArbiter", () => {
 		// The withheld raw flushes the same samples plus one newer.
 		a.noteRawChannel();
 		expect(a.feed([104, 108, 112, 116])).toEqual([3]);
-		// From here the session is raw-fed.
+		// From here the stroke is raw-fed.
 		expect(a.moveFeedsInk()).toBe(false);
 	});
 

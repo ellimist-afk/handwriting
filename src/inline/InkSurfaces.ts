@@ -156,7 +156,7 @@ export const INK_SURFACES: readonly InkSurface[] = [
 	{
 		id: "note",
 		file: "/src/inline/InkOverlay.ts",
-		parts: ["/src/inline/InkOverlayCursors.ts", "/src/inline/InkOverlayLassoSpace.ts", "/src/inline/InkOverlayClipboard.ts", "/src/inline/InkOverlayPaperPinch.ts", "/src/inline/InkOverlayPanSettle.ts", "/src/inline/InkOverlayViewportBox.ts", "/src/inline/InkOverlayColumnMargin.ts", "/src/inline/InkOverlayDiagnostics.ts", "/src/inline/InkOverlayMeasureHold.ts", "/src/inline/InkOverlayLayout.ts", "/src/inline/InkOverlayLifecycle.ts", "/src/inline/InkOverlayKeys.ts", "/src/inline/InkOverlayZoomApi.ts", "/src/inline/InkOverlayPinch.ts", "/src/inline/InkOverlayLineAnchors.ts", "/src/inline/InkOverlayToolState.ts", "/src/inline/InkOverlayReload.ts", "/src/inline/InkOverlayGestureEnd.ts", "/src/inline/InkOverlayOps.ts", "/src/inline/InkOverlayErase.ts", "/src/inline/InkOverlayExtent.ts", "/src/inline/InkOverlayBand.ts", "/src/inline/InkOverlayPenSupport.ts", "/src/inline/InkOverlayPenPath.ts", "/src/inline/InkOverlayRegistry.ts", "/src/inline/InkOverlayCamera.ts", "/src/inline/InkOverlayRepaint.ts", "/src/inline/InkOverlayConstants.ts"],
+		parts: ["/src/inline/InkOverlayCursors.ts", "/src/inline/InkOverlayLassoSpace.ts", "/src/inline/InkOverlayClipboard.ts", "/src/inline/InkOverlayPaperPinch.ts", "/src/inline/InkOverlayPanSettle.ts", "/src/inline/InkOverlayViewportBox.ts", "/src/inline/InkOverlayColumnMargin.ts", "/src/inline/InkOverlayDiagnostics.ts", "/src/inline/InkOverlayMeasureHold.ts", "/src/inline/InkOverlayLayout.ts", "/src/inline/InkOverlayLifecycle.ts", "/src/inline/InkOverlayKeys.ts", "/src/inline/InkOverlayZoomApi.ts", "/src/inline/InkOverlayPinch.ts", "/src/inline/InkOverlayLineAnchors.ts", "/src/inline/InkOverlayAttachedLayer.ts", "/src/inline/InkOverlayToolState.ts", "/src/inline/InkOverlayReload.ts", "/src/inline/InkOverlayGestureEnd.ts", "/src/inline/InkOverlayOps.ts", "/src/inline/InkOverlayErase.ts", "/src/inline/InkOverlayExtent.ts", "/src/inline/InkOverlayOverview.ts", "/src/inline/InkOverlayBand.ts", "/src/inline/InkOverlayPenSupport.ts", "/src/inline/InkOverlayPenPath.ts", "/src/inline/InkOverlayRegistry.ts", "/src/inline/InkOverlayCamera.ts", "/src/inline/InkOverlayRepaint.ts", "/src/inline/InkOverlayConstants.ts"],
 		router: "InlinePenRouter",
 		userReachable: true,
 		mountsStrip: true,
@@ -250,7 +250,7 @@ export const INK_SURFACES: readonly InkSurface[] = [
 		// call site.
 		id: "slides",
 		file: "/src/slides/SlidesInkSurface.ts",
-		parts: ["/src/slides/SlidesSections.ts", "/src/slides/SlidesStrokeSession.ts", "/src/slides/SlidesPersistence.ts", "/src/slides/SlidesPenGuards.ts", "/src/slides/SlidesMount.ts", "/src/slides/SlidesPointerPath.ts", "/src/slides/SlidesContact.ts", "/src/slides/SlidesBind.ts", "/src/slides/SlidesController.ts"],
+		parts: ["/src/slides/SlidesSections.ts", "/src/slides/SlidesStrokeSession.ts", "/src/slides/SlidesPersistence.ts", "/src/slides/SlidesPenGuards.ts", "/src/slides/SlidesMount.ts", "/src/slides/SlidesPointerPath.ts", "/src/slides/SlidesContact.ts", "/src/slides/SlidesBind.ts", "/src/slides/SlidesController.ts", "/src/slides/SlidesTransition.ts"],
 		router: "none",
 		userReachable: true,
 		mountsStrip: true,

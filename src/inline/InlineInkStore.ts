@@ -1,9 +1,11 @@
 import { installInlineInkStorePersist } from "./InlineInkStorePersist";
 import { InkStroke } from "../ink/Stroke";
 import { PageData, type NotePaperKind } from "../model/PageData";
+import type { AttachmentData } from "./InkAttachments";
 import type { NoteChoiceKind, NoteChoices } from "./NoteChoiceHint";
 import type { ExternalAdoptionPrep, LoadResult, PreparedExternalAdoption } from "../persistence/PageStore";
 import { installInlineInkStoreLoad } from "./InlineInkStoreLoad";
+import { columnRefOf } from "../ink/ColumnRef";
 import { installInlineInkStoreCommit } from "./InlineInkStoreCommit";
 
 /**
@@ -265,6 +267,7 @@ export const PARSER_INVENTED_STROKE_FIELDS: Readonly<
 > = {};
 
 const EMPTY: readonly InkStroke[] = [];
+const NO_ATTACHMENTS: readonly AttachmentData[] = [];
 
 /** Cheap identity of a note's ink: which strokes, where they sit. */
 export function inkFingerprint(strokes: readonly InkStroke[]): string {
@@ -340,6 +343,11 @@ export interface NoteRecord {
 	 * too, since undo and redo reach disk through exactly those.
 	 */
 	mutationGeneration: number;
+	/**
+	 * Of those, the edits that changed attached groups only (a group moved, a target mapped and written): no stroke
+	 * changed, so a raster of the note's strokes drawn before one still holds after it. Undefined until the first.
+	 */
+	attachOnlyEdits?: number;
 	/** The external-adoption failure has been reported once for this record. */
 	adoptionNoticed: boolean;
 	/** When this run of adoption failures began, or null while it is succeeding. */
@@ -356,6 +364,13 @@ export interface NoteRecord {
 	lastAdoptFound: boolean;
 	/** A font reference set this session, before any sidecar carried one (audit 46). */
 	fontRefPx?: number;
+	/**
+	 * The column width this note's ink is held at, taken this session before any sidecar carried one: from the anchors of the
+	 * file as it was read, or of the first anchored ink drawn here (ColumnRef.ts). Rides the next ordinary save.
+	 */
+	columnRefPx?: number;
+	/** Ink attached to text as this session holds it; undefined until changed here, the file's list until then. */
+	attachments?: readonly AttachmentData[];
 	/**
 	 * This note's paper and canvas choices as set this session, over the
 	 * file's: undefined keeps the file's value, null clears it (the note
@@ -438,9 +453,40 @@ export class InlineInkStore {
 		return this.host !== null;
 	}
 
+	/**
+	 * Ink is waiting to be saved: a save parked behind a read or a claim, or a first write still in flight. A settle
+	 * that gave up with none of these left only a read open, and no ink rides on it; the unload notice asks this.
+	 */
+	parkedInk(): boolean {
+		return this.pendingPersists.size > 0 || this.firstWrites.size > 0;
+	}
+
 	/** How many times this note's strokes have changed in this session: a raster drawn at one count is stale at another. -1 with no record. */
 	generation(path: string): number {
-		return this.byPath.get(path)?.mutationGeneration ?? -1;
+		const rec = this.byPath.get(path);
+		return rec ? rec.mutationGeneration - (rec.attachOnlyEdits ?? 0) : -1;
+	}
+
+	/** The note's attached groups: this session's list, else the file's. The same object until it changes. */
+	attachments(path: string): readonly AttachmentData[] {
+		const rec = this.byPath.get(path);
+		return rec?.attachments ?? rec?.basePage?.attachments ?? NO_ATTACHMENTS;
+	}
+
+	/**
+	 * The note's attached groups changed. `edit`: a real edit (Attach, Detach, a group moved, a correction a document change
+	 * moved), which writes the page; a target only mapped through typing is held for the next write and writes nothing.
+	 */
+	setAttachments(path: string, list: readonly AttachmentData[], edit: boolean): void {
+		const rec = this.record(path);
+		if (rec.attachments === list) return;
+		rec.attachments = list;
+		if (!edit) return;
+		// A save would write the new list, so the mutation counts; no stroke changed, so the strokes' generation holds.
+		// An Attach or a Detach changes which strokes are free, and the free list says so itself.
+		rec.mutationGeneration++;
+		rec.attachOnlyEdits = (rec.attachOnlyEdits ?? 0) + 1;
+		this.persist(path, rec);
 	}
 
 	strokes(path: string): readonly InkStroke[] {
@@ -459,6 +505,21 @@ export class InlineInkStore {
 	fontRefPx(path: string): number | null {
 		const rec = this.byPath.get(path);
 		return rec?.basePage?.fontRefPx ?? rec?.fontRefPx ?? null;
+	}
+
+	/**
+	 * The column width this note's ink is held at, or null when it has none: the sidecar's, else the one taken this session.
+	 * A note without either takes it from its anchored strokes the first time it has one, and keeps it (ColumnRef.ts).
+	 */
+	columnRefPx(path: string): number | null {
+		const rec = this.byPath.get(path);
+		if (!rec) return null;
+		const stored = rec.basePage?.columnRefPx ?? rec.columnRefPx;
+		if (stored !== undefined) return stored;
+		const derived = columnRefOf(rec.strokes);
+		if (derived === undefined) return null;
+		rec.columnRefPx = derived;
+		return derived;
 	}
 
 	/**

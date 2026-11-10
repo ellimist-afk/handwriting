@@ -54,6 +54,7 @@ import {
 import { MAX_PINCH_SCALE } from "./PinchScale";
 import { setCanvasNoteOverrideForTest, type CanvasNoteOverride } from "./CanvasNoteOverride";
 import { refreshNoteZoomControlsAll } from "./MobileTools";
+import { foldOrder } from "./MobileTools";
 import {
 	armMouseInkQuietly,
 	clearToolPicked,
@@ -2808,7 +2809,7 @@ describe("MobileTools: the Keyboard button hands the note to the keyboard", () =
 
 	/** Labels and dividers of the strip's own row, in the order they were built. */
 	const row = (pane: FakeEl): string[] => {
-		const el = pane.querySelector(".handwriting-mobile-tools");
+		const el = pane.querySelector(".handwriting-mobile-tools-face");
 		if (!el) throw new Error("no strip was built");
 		return el.children
 			.filter(
@@ -3145,7 +3146,7 @@ describe("MobileTools: the selection group dims rather than hides", () => {
 	 * Used below to confirm it stays visible even when every button after it
 	 * is dimmed. */
 	const dividerBefore = (pane: FakeEl, label: string): FakeEl => {
-		const el = pane.querySelector(".handwriting-mobile-tools");
+		const el = pane.querySelector(".handwriting-mobile-tools-face");
 		if (!el) throw new Error("no strip was built");
 		const at = el.children.findIndex((k) => k.dataset.tipLabel === label);
 		if (at < 1) throw new Error(`no ${label} button, or nothing before it`);
@@ -3842,7 +3843,9 @@ describe("MobileTools: the More chevron", () => {
 
 	it("sits AFTER every tool button, so nothing shifts under it", () => {
 		const { strip } = build();
-		const named = strip.children.filter((k) => k.dataset.tipLabel !== undefined);
+		const face = strip.querySelector(".handwriting-mobile-tools-face");
+		if (!face) throw new Error("no strip face was built");
+		const named = face.children.filter((k) => k.dataset.tipLabel !== undefined);
 		expect(named[named.length - 1]?.dataset.tipLabel).toBe("More tools");
 	});
 
@@ -3955,7 +3958,7 @@ describe("styles.css - the folded row is invisible until it is needed", () => {
 	// the glass - which is what the strip did before this slice and must go
 	// on doing when the plan cannot help.
 	it("keeps flex-wrap on the strip as the failsafe under the fold", () => {
-		expect(body(".handwriting-mobile-tools")).toMatch(/flex-wrap:\s*wrap/);
+		expect(body(".handwriting-mobile-tools-face")).toMatch(/flex-wrap:\s*wrap/);
 	});
 
 	// Anti-vacuity: a reader that found nothing would pass nothing above,
@@ -4353,7 +4356,7 @@ describe("MobileTools: a strip destroyed inside a timer's window fires nothing",
 	// an index would break every time a button is added.
 	it("the recording dot sits at the row's far end, past every button", () => {
 		const { pane } = build({ recordingOn: () => true });
-		const row = pane.querySelector(".handwriting-mobile-tools");
+		const row = pane.querySelector(".handwriting-mobile-tools-face");
 		expect(row, "the strip was not built").not.toBeNull();
 
 		const kids = row!.children;
@@ -4664,7 +4667,7 @@ describe("MobileTools: dragging the toolbar to an anchor", () => {
 
 	it("the grip is the strip's leading element and takes pointer capture", () => {
 		const rig = buildDrag();
-		expect(rig.el.children[0], "the grip is not the row's first element").toBe(rig.grip);
+		expect(rig.el.querySelector(".handwriting-mobile-tools-face")?.children[0], "the grip is not the row's first element").toBe(rig.grip);
 		expect(rig.grip.querySelector(".handwriting-tools-grip-dots")).not.toBeNull();
 
 		rig.grip.fire("pointerdown", { pointerId: 3, clientX: 0, clientY: 0 });
@@ -5267,6 +5270,9 @@ describe("MobileTools: pill tooltip and recording dot (items 138, 139, 173)", ()
 	const measurable = (pane: FakeEl, row: FakeEl): void => {
 		(row as unknown as { parentElement: unknown }).parentElement = pane;
 		(row as unknown as { clientWidth: number }).clientWidth = 0;
+		// layoutOverflow reads the border off the face now; FakeEl has no clientWidth of its own.
+		const face = row.querySelector(".handwriting-mobile-tools-face");
+		if (face) (face as unknown as { clientWidth: number }).clientWidth = 0;
 		(pane as unknown as { clientWidth: number }).clientWidth = 400;
 	};
 
@@ -5322,7 +5328,7 @@ describe("MobileTools: pill tooltip and recording dot (items 138, 139, 173)", ()
 		const { pane, row, strip } = build({ recordingOn: () => true });
 		measurable(pane, row);
 		(strip as unknown as { layoutOverflow(): void }).layoutOverflow();
-		const kids = row.children;
+		const kids = row.querySelector(".handwriting-mobile-tools-face")!.children;
 		console.log("KIDS", kids.map((k) => (k.classList.contains("handwriting-recording-dot") ? "DOT" : k.dataset.tipLabel ?? "-")).join("|"));
 		const dot = kids.findIndex((k) => k.classes.has("handwriting-recording-dot"));
 		const more = kids.findIndex((k) => k.classes.has("handwriting-tools-more"));
@@ -5437,5 +5443,59 @@ describe("step-aside by opacity only, unhittable while invisible (lane LAG)", ()
 		strip.setInking(false);
 		strip.destroy();
 		expect(t.cleared()).toBe(2);
+	});
+});
+
+/**
+ * THE FOLD BUDGET COUNTS THE FACE'S BORDER. The face carries the strip's 1px border and 4px padding, and the root has neither,
+ * so the row's budget in a 300px pane is 300 - 16 (the stylesheet's max-width margin) - 2 (border) - 8 (padding) = 274. A row
+ * of exactly 274 fits; one of 275 folds. Read off the root, the border would be 0, the budget 276, and the 275 row would stay
+ * on one line, overflowing the face by a pixel. Run on a bare strip, with every box the plan reads given its width.
+ */
+describe("the fold budget on the strip's face", () => {
+	const strip = (row: number) => {
+		const classes = new Set<string>();
+		const el = {
+			classList: { contains: (c: string) => classes.has(c) },
+			toggleClass: (c: string, on: boolean) => void (on ? classes.add(c) : classes.delete(c)),
+			style: { setProperty: () => {} },
+			parentElement: { clientWidth: 300 },
+			// The root has no border or padding: its two widths are one.
+			offsetWidth: 284,
+			clientWidth: 284,
+		};
+		// The face: offsetWidth less clientWidth is its border, 1px each side (the padding is inside both).
+		const face = { offsetWidth: 284, clientWidth: 282, insertBefore: () => {} };
+		const id = foldOrder[0]!;
+		// The collapse button (32 + gap 2) and the grip (24 + gap 2) are the fixed 60px; one button takes the rest.
+		const fields: Record<string, unknown> = {
+			el, face,
+			collapseBtn: { offsetWidth: 32 },
+			grip: { offsetWidth: 24 },
+			recordingDot: { offsetWidth: 0 },
+			slider: { pop: { classList: { contains: () => false } } },
+			penSlider: { pop: { classList: { contains: () => false } } },
+			hlSlider: { pop: { classList: { contains: () => false } } },
+			rowOrder: [],
+			buttons: [{ el: { offsetWidth: row - 60 - 2 }, spec: { commandId: id } }],
+			moreBtn: { offsetWidth: 32 },
+			moreRow: { appendChild: () => {} },
+			setMoreOpen: () => {},
+			appliedGrid: "", appliedPlan: "", appliedOrder: "",
+		};
+		const s = Object.create(MobileTools.prototype) as MobileTools;
+		for (const [k, v] of Object.entries(fields)) Object.defineProperty(s, k, { value: v, writable: true, configurable: true });
+		(s as unknown as { layoutOverflow(): void }).layoutOverflow();
+		return classes;
+	};
+
+	it("fits a 274px row in a 300px pane on one line", () => {
+		const c = strip(274);
+		expect(c.has("is-more-needed"), "a 274px row folded").toBe(false);
+		expect(c.has("is-wrapped"), "a 274px row wrapped").toBe(false);
+	});
+
+	it("folds a 275px row in a 300px pane", () => {
+		expect(strip(275).has("is-more-needed"), "a 275px row stayed on one line: the border was not counted").toBe(true);
 	});
 });

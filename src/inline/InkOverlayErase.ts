@@ -35,7 +35,8 @@ declare module "./InkOverlay" {
 	function eraseCandidates(this: InkOverlayPlugin, w: { x: number; y: number }, r: number): readonly InkStroke[] {
 		if (this.indexDirty) {
 			const path = this.filePath();
-			this.strokeIndex.rebuild(path ? this.noteStrokes(path) : []);
+			const list = path ? this.noteStrokes(path) : [], order = this.lineAnchors.storeOrder(list);
+			this.strokeIndex.rebuild(list, order?.depths, order?.pending);
 			this.indexDirty = false;
 		}
 		return this.strokeIndex.query(eraserRect(w.x, w.y, r));
@@ -77,32 +78,38 @@ declare module "./InkOverlay" {
 		// stroke stays. Each stroke comes out and its survivors go back in at
 		// the same position, so z-order holds; all of this pass's survivors go
 		// back in one call, which places them in the original order.
-		const back: Array<{ index: number; pieces: InkStroke[] }> = [];
+		const back: Array<{ index: number; pieces: InkStroke[]; parent: string; fresh?: boolean }> = [];
+		// Pieces go in the index once their group membership is set: a member's piece is shown with its group.
+		const placed: Array<{ piece: InkStroke; seen: InkStroke }> = [];
 		for (const { stroke, index } of inlineInk.takeLive(path, hits)) {
 			const seen = shown.get(stroke.id) ?? stroke;
 			this.damage.addRect(seen.bbox);
 			changed.push(seen.bbox);
 			for (const idx of indexes) idx.remove(seen);
-			// Cut in page coordinates: the ring moved by the correction this pane shows the stroke at.
-			const pieces = splitStrokeByCircle(stroke, w.x, w.y - (seen.bbox.y - stroke.bbox.y), r, newStrokeId);
+			// Cut in page coordinates: the ring moved by the correction this pane shows the stroke at (x for attached groups).
+			const pieces = splitStrokeByCircle(stroke, w.x - (seen.bbox.x - stroke.bbox.x), w.y - (seen.bbox.y - stroke.bbox.y), r, newStrokeId);
 			if (pieces.length === 1 && pieces[0] === stroke) {
 				// Hit by the bbox-then-segment test but the ring never crossed
 				// the line itself. Put it back exactly as it was.
-				back.push({ index, pieces: [stroke] });
+				back.push({ index, pieces: [stroke], parent: stroke.id });
 				for (const idx of indexes) idx.insertLike(seen, seen);
 				continue;
 			}
-			if (!this.erasePieces.delete(stroke.id)) {
+			// A piece this gesture made is cut again: not in any history step, so it leaves its group for its own pieces.
+			const fresh = this.erasePieces.delete(stroke.id);
+			if (!fresh) {
 				this.erased.push({ stroke, index });
 			}
 			// A group even when the ring swallowed the whole stroke (no pieces):
 			// reinsertLive counts groups as the strokes taken before each one.
-			back.push({ index, pieces });
+			back.push({ index, pieces, parent: stroke.id, fresh });
 			for (const piece of pieces) this.erasePieces.add(piece.id);
 			for (const piece of pieces) this.lineAnchors.inherit(piece, stroke);
-			for (const idx of indexes) for (const piece of pieces) idx.insertLike(this.lineAnchors.shownOf(piece), seen);
+			for (const piece of pieces) placed.push({ piece, seen });
 		}
 		inlineInk.reinsertLive(path, back);
+		if (placed.length > 0) this.lineAnchors.follow.setList(inlineInk.attachments(path));
+		for (const idx of indexes) for (const { piece, seen } of placed) idx.insertLike(this.lineAnchors.shownOf(piece), seen);
 		// Batched to the next frame, exactly like the canvas eraser.
 		this.scheduleRepaint("partial");
 		this.repaintPath(path, changed);

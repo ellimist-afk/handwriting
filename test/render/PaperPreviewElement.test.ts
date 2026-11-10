@@ -48,7 +48,7 @@
  * WHY SNAP_TWICE IS INERT HERE, and must not be re-added to these arms without reading this. On the scroller's own route
  * that plant applies the at-rest snap's residual a second time and the lift jump doubles. On this route the element's
  * offset is rounded so the rules land on the whole device px nearest the text (K5), and that rounding absorbs the doubled
- * residual: the plant changes no reading. Measured, not assumed (plant run p33: green, with its cell's premises holding).
+ * residual: the plant changes no reading. Measured, not assumed: green, with its cell's premises holding.
  * It is retired for this route - it stays on the current-route cells, where it still reddens - in favour of plants that
  * target where THIS mechanism would fail instead: STALE_AT_SWAP_OUT and RESIDUAL_WRONG_SIGN above.
  */

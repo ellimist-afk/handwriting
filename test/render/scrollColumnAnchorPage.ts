@@ -54,8 +54,12 @@ import { editorInfoField } from "./iphoneObsidianStub";
 import { emptyPage, parsePage, serializePage, type PageData } from "../../src/model/PageData";
 import { installZ10Recorder } from "./z10Recorder";
 import { reticleVisible } from "../../src/testUtils/ReticleShown";
+import { PAGE_GUIDES_CSS } from "./pageGuidesCss";
 
 installObsidianDom();
+// The page guides' rules, as Obsidian has them from styles.css: without them the guides' box sits in the scroller's
+// flex row and moves the text column (pageGuidesCss.ts).
+document.head.appendChild(document.createElement("style")).textContent = PAGE_GUIDES_CSS;
 
 const ids = new Map<string, string>();
 /** The bboxes the last seeded arm planted, so a cell can state the ink it is asserting against. */
@@ -496,8 +500,8 @@ const VISIBLE_PX = 0.5;
  * each frame. None of that geometry exists in the pinch-1.0 arms, which is why
  * those came back clean.
  */
-async function run(readable: boolean, plant: Plant = "none", pinch = 1, centringTheme = false, offsetDisabled = false, startScrollTop = 0, zoomTo = 0.25, lagOptions?: { axis: "x" | "y" | "both"; routed?: boolean; far?: boolean; rapid?: boolean; infiniteCanvas?: boolean; frames?: number; distance?: number; pixels?: boolean; farVisual?: number; host?: boolean; zoomCycles?: number; fitCommit?: boolean; fitThenPinch?: number[]; z10?: boolean; z10TransformHost?: boolean; z10PlantLimit?: number; z10External?: number; z10ResizeBy?: number; plantRectEase?: boolean }) {
-	const fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null; bounceSyncs: number; bounceResized: number; bounceMoved: number; sameInputResizes: number; syncs: { r: string; inputs: number[]; band: number[] | null }[] }[] = [];
+async function run(readable: boolean, plant: Plant = "none", pinch = 1, centringTheme = false, offsetDisabled = false, startScrollTop = 0, zoomTo = 0.25, lagOptions?: { axis: "x" | "y" | "both"; routed?: boolean; far?: boolean; rapid?: boolean; infiniteCanvas?: boolean; frames?: number; distance?: number; pixels?: boolean; farVisual?: number; host?: boolean; zoomCycles?: number; fitCommit?: boolean; fitThenPinch?: number[]; z10?: boolean; z10TransformHost?: boolean; z10PlantLimit?: number; z10External?: number; z10ResizeBy?: number; plantEaseLoop?: boolean }) {
+	const fitPinchSteps: { from: number; target: number; pinchScaleNow: number; cssScale: number; offsetWidth: number | null; bounceSyncs: number; bounceResized: number; bounceMoved: number; sameInputSyncs: number; syncs: { r: string; inputs: number[]; band: number[] | null }[] }[] = [];
 	if (lagOptions) Object.assign(Platform, { isMobile: false, isDesktop: true, isIosApp: false, isDesktopApp: true, isMobileApp: false, isPhone: false, isWin: true });
 	if (centringTheme) installCentringTheme();
 	if (plant === "minimal") installMinimalTheme();
@@ -598,26 +602,23 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			// Band syncs that move or resize the band while a bounce plays. Past a bound the count is a loop: the guard stops
 			// calling through, so the cell reads the count on its assertion instead of losing the renderer.
 			// Each counted sync records bandFor's inputs and the band it placed. Two syncs whose inputs differ are the settle
-			// correcting its own scroll or extent, by design; a resize from the SAME inputs as the previous counted sync is
-			// the loop of the band-regrowth lane (a width recomputed per sync from a cssScale read back from the rect).
-			let bounceSyncs = 0, bounceResized = 0, bounceMoved = 0, sameInputResizes = 0;
+			// correcting its own scroll or extent, by design; a sync from the SAME inputs as the previous counted sync,
+			// a move as much as a resize, is the regrowth loop (a width recomputed per sync from a cssScale read back from the rect).
+			let bounceSyncs = 0, bounceResized = 0, bounceMoved = 0, sameInputSyncs = 0;
 			let syncRecords: { r: string; inputs: number[]; band: number[] | null }[] = [];
+			let plantStep = 0;
 			const sync = overlay.syncBand.bind(overlay);
 			overlay.syncBand = () => {
 				if (overlay.bounceState && bounceSyncs > 100) return "none";
 				const s = overlay.view.scrollDOM;
 				const inputs = [s.scrollLeft, s.scrollTop, s.clientWidth, s.clientHeight, overlay.bandFreeScrollWidth ?? s.scrollWidth, s.scrollHeight, overlay.cssScale];
-				// PLANT (lagOptions.plantRectEase): the ease width recomputed at every sync from the cssScale the container's
-				// rect reports, the regrowth loop's mechanism. The rule below must go red on it.
-				const bounce = overlay.bounceState;
-				if (lagOptions.plantRectEase && bounce && overlay.container) {
-					const c = overlay.container as HTMLElement, rectScale = c.getBoundingClientRect().width / c.offsetWidth;
-					if (rectScale > 0) overlay.bandEase = { bounce, x: Math.sign(bounce.fromX) * Math.ceil(Math.abs(bounce.fromX) / rectScale), y: Math.sign(bounce.fromY) * Math.ceil(Math.abs(bounce.fromY) / rectScale) };
-				}
+				// PLANT (lagOptions.plantEaseLoop): while a bounce plays, every sync moves the ease by one px and back from unchanged
+				// inputs, the regrowth loop's shape forced on every run instead of where the settle lands. The rule below must go red on it.
+				if (lagOptions.plantEaseLoop && overlay.bounceState && overlay.bandEase) { plantStep = -plantStep || 1; overlay.bandEase = { ...overlay.bandEase, x: overlay.bandEase.x + plantStep, y: overlay.bandEase.y + plantStep }; }
 				const r = sync();
 				if (r !== "none" && overlay.bounceState) {
 					const prev = syncRecords[syncRecords.length - 1];
-					if (r === "resized" && prev && prev.inputs.every((v, i) => v === inputs[i])) sameInputResizes++;
+					if (prev && prev.inputs.every((v, i) => v === inputs[i])) sameInputSyncs++;
 					const b = overlay.band;
 					syncRecords.push({ r, inputs, band: b ? [b.left, b.top, b.width, b.height] : null });
 					bounceSyncs++; if (r === "resized") bounceResized++; else bounceMoved++;
@@ -626,7 +627,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 			};
 			for (const target of lagOptions.fitThenPinch ?? []) {
 				await settle(10);
-				bounceSyncs = 0; bounceResized = 0; bounceMoved = 0; sameInputResizes = 0; syncRecords = [];
+				bounceSyncs = 0; bounceResized = 0; bounceMoved = 0; sameInputSyncs = 0; syncRecords = [];
 				const r = pane.getBoundingClientRect();
 				const focal = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 				const from = overlay.pinchScaleNow;
@@ -634,7 +635,7 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 				overlay.pinch("move", target / from, focal);
 				overlay.pinch("end", target / from, focal);
 				await settle(10);
-				fitPinchSteps.push({ from, target, pinchScaleNow: overlay.pinchScaleNow, cssScale: overlay.cssScale, offsetWidth: overlay.container ? (overlay.container as HTMLElement).offsetWidth : null, bounceSyncs, bounceResized, bounceMoved, sameInputResizes, syncs: syncRecords });
+				fitPinchSteps.push({ from, target, pinchScaleNow: overlay.pinchScaleNow, cssScale: overlay.cssScale, offsetWidth: overlay.container ? (overlay.container as HTMLElement).offsetWidth : null, bounceSyncs, bounceResized, bounceMoved, sameInputSyncs, syncs: syncRecords });
 			}
 		} else {
 			const r = pane.getBoundingClientRect();
@@ -2138,11 +2139,18 @@ async function run(readable: boolean, plant: Plant = "none", pinch = 1, centring
 				// not change, so `handleResize`'s origin compare is silent too.
 				scroller.style.paddingRight = "15px";
 			} else if (plant === "recentre") {
-				// The cap itself changing. NOT the blind spot: this also caps
-				// `.cm-line`, so the lines really do resize and
+				// The pane narrowed below the width the ink was drawn at. NOT
+				// the blind spot: the lines really do resize and
 				// `originLineObserver` fires. Kept as the control that proves
-				// the correction path works when something does fire.
-				document.body.style.setProperty("--file-line-width", "500px");
+				// the correction path works when something does fire. The cap
+				// change this plant used before (700 to 500 px) no longer moves
+				// an inked note's column: with Infinite Canvas off the column is
+				// held at the ink's width whenever the pane has the room, so the
+				// only path that still moves it is a pane narrower than that
+				// width, where the text wraps as before.
+				// The editor is sized by its theme in this rig, so it narrows with the pane.
+				pane.style.width = "500px";
+				view.dom.style.width = "500px";
 			}
 			plantedAt.push(step);
 		}
@@ -4570,12 +4578,42 @@ async function runPaneScrollMount(pinch: number, farVisual: number, hostShell: b
 	surfaceExtents.grow(rig.path, { x: farVisual / pinch + 60000, y: farVisual / pinch + 60000 });
 	(overlay as any).updateExtent(true);
 	await settle(10);
-	scroller.scrollLeft = farVisual / pinch;
-	scroller.scrollTop = farVisual / pinch;
+	// The grown extent reaches the scroller's height a few frames after its width (the editor re-measures its height), so
+	// the mount waits for both ranges before it writes.
+	const far = farVisual / pinch;
+	const roomX = () => scroller.scrollWidth - scroller.clientWidth, roomY = () => scroller.scrollHeight - scroller.clientHeight;
+	for (let i = 0; i < 240 && (roomX() < far || roomY() < far); i++) await settle(1);
+	if (roomX() < far || roomY() < far) throw new Error(`pane-scroll mount: the grown extent never reached the scroller: room ${roomX()} x ${roomY()}, want ${far}`);
+	// A CodeMirror measure that finds the scroll moved since it last recorded it takes its scroll anchor again by height. Past
+	// an end line it has not measured, its height map answers a made-up top for that line, and the anchor restore compares it
+	// with the line's real top: the far scroll is pulled back by the whole grown room (measured: 114820 -> 9580). The
+	// mount brings the end line into the editor's viewport by the editor's own path (an unowned request: the overlay lets
+	// the native scroll run, no pan settle is live at mount), has it measure, and asserts the end is measured, so the write
+	// below is the only thing under test.
+	view.dispatch({ effects: EditorView.scrollIntoView(view.state.doc.length, { y: "end" }) });
+	await settle(2);
+	(view as any).measure();
+	await settle(1);
+	{
+		const v = view as any, vs = v.viewState, h = vs.docHeight + 8;
+		const byHeight = vs.lineBlockAtHeight(h).top as number, byPos = vs.lineBlockAt(view.state.doc.length).top as number;
+		if (Math.abs(byHeight - byPos) > 1) {
+			let leaf = vs.heightMap;
+			while (leaf && leaf.right) leaf = leaf.right;
+			throw new Error(`pane-scroll mount: the document end is not measured: top by height ${byHeight}, by position ${byPos}; last leaf ${leaf?.constructor?.name}, oracle line height ${vs.heightOracle?.lineHeight}, viewport ${vs.viewport?.from}-${vs.viewport?.to}, scaleY ${v.scaleY}, height map ${vs.heightMap?.height} against content height ${view.contentHeight}, scrollTop ${scroller.scrollTop} host px = ${scroller.scrollTop * v.scaleY} editor px`);
+		}
+	}
+	scroller.scrollLeft = far;
+	scroller.scrollTop = far;
 	scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
 	await settle(10);
 	await new Promise(res => setTimeout(res, 300));
 	await settle(6);
+	if (Math.abs(scroller.scrollLeft - far) > 1 || Math.abs(scroller.scrollTop - far) > 1) throw new Error(`pane-scroll mount: the far scroll did not hold: ${scroller.scrollLeft} x ${scroller.scrollTop}, want ${far}`);
+	// CodeMirror measures at its own times; one forced measure applies whatever it holds pending. The far position must hold.
+	(view as any).measure();
+	await settle(2);
+	if (Math.abs(scroller.scrollLeft - far) > 1 || Math.abs(scroller.scrollTop - far) > 1) throw new Error(`pane-scroll mount: the far scroll did not hold after one forced CodeMirror measure: ${scroller.scrollLeft} x ${scroller.scrollTop}, want ${far}`);
 	return runPaneScrollRead([]);
 }
 /** Write a scroll offset onto the owned pane, as a foreign scroll-into-view walk or script would. Returns what the pane reads back. */
@@ -4703,6 +4741,8 @@ function tileCanvases() {
 	const o = paneScrollRig!.overlay as any;
 	const layer = o.inkLayer as HTMLElement;
 	const fields = ["highlightCanvas", "highlightWetCanvas", "committedCanvas", "wetCanvas", "tailCanvas", "wetTileCanvas"];
+	// The attached ink pair lives on the attached layer, not on an overlay field of its own.
+	const attached: Record<string, HTMLCanvasElement | undefined> = { attachedPen: o.attachedLayer?.pen, attachedHl: o.attachedLayer?.hl };
 	const all = Array.from(layer.querySelectorAll("canvas")) as HTMLCanvasElement[];
 	return all.map((c, index) => {
 		c.setAttribute("data-hw-tile-probe", String(index));
@@ -4710,7 +4750,7 @@ function tileCanvases() {
 		const cssW = parseFloat(c.style.width) || parseFloat(cs.width), cssH = parseFloat(c.style.height) || parseFloat(cs.height);
 		const own = tileOwnScale(c.style.transform || "");
 		return {
-			index, field: fields.find(f => o[f] === c) ?? null,
+			index, field: fields.find(f => o[f] === c) ?? Object.keys(attached).find(f => attached[f] === c) ?? null,
 			left: c.style.left, top: c.style.top, offset: { l: c.offsetLeft, t: c.offsetTop },
 			css: { w: cssW, h: cssH }, transform: c.style.transform, origin: c.style.transformOrigin, computedTransform: cs.transform, opacity: cs.opacity,
 			backing: { w: c.width, h: c.height }, ownScale: own,
@@ -4816,9 +4856,10 @@ let tearRig: Awaited<ReturnType<typeof mount>> | null = null;
  * Mount at `pinch` (through the pinch gesture when below 1), grow the extent, scroll to `scrollLayout` on both
  * axes, then place the text anchor at the given fraction of the pane's width and height (viewport css px), by
  * moving the widget in layout px until its rect lands there. Returns the rects the test draws the ink anchor along.
+ * `readable` false mounts with Readable line length off.
  */
-async function runTearMount(pinch: number, scrollLayout: number, pane: { w: number; h: number } | null, hostShell: boolean, at: { fx: number; fy: number }) {
-	const rig = await mount("tear", true, true, undefined, hostShell, 400, pane ?? undefined);
+async function runTearMount(pinch: number, scrollLayout: number, pane: { w: number; h: number } | null, hostShell: boolean, at: { fx: number; fy: number }, readable = true) {
+	const rig = await mount("tear", readable, true, undefined, hostShell, 400, pane ?? undefined);
 	tearRig = rig; paneScrollRig = rig;
 	const { view, overlay, pane: paneEl } = rig;
 	const scroller = view.scrollDOM;

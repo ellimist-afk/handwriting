@@ -81,6 +81,18 @@ export function installObsidianDom(): void {
 		callback?.(el);
 		return el;
 	};
+	// Detached too: the attached layer's offscreen tile canvases have no parent.
+	g.createEl = (tag: string, o?: ElOpts | string, callback?: (el: HTMLElement) => void): HTMLElement => {
+		const el = document.createElement(tag);
+		const opts = typeof o === "string" ? { cls: o } : o ?? {};
+		const unknown = Object.keys(opts).filter(k => !["cls", "text", "attr"].includes(k));
+		if (unknown.length) throw new Error(`createEl shim does not model: ${unknown.join(", ")}`);
+		if (opts.cls) for (const c of opts.cls.split(/\s+/).filter(Boolean)) el.classList.add(c);
+		if (opts.text !== undefined) el.textContent = opts.text;
+		if (opts.attr) for (const [k, v] of Object.entries(opts.attr)) el.setAttribute(k, v);
+		callback?.(el);
+		return el;
+	};
 	g.createFragment = (callback?: (el: DocumentFragment) => void): DocumentFragment => {
 		const fragment = document.createDocumentFragment();
 		callback?.(fragment);

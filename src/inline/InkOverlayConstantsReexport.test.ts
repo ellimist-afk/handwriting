@@ -51,6 +51,7 @@ const MOVED = [
 	"ZOOM_STAND_IN_ENABLED",
 	"standInFactorFits",
 	"extentPairFits",
+	"extentPairCapPx",
 	"OVERSCROLL_BOUNCE_MS",
 	"OVERSCROLL_BOUNCE_MIN_PX",
 	"OVERSCROLL_GIVE_PX",
@@ -134,7 +135,7 @@ describe("no declaration is left behind in InkOverlay.ts", () => {
 			expect(declarations(constantsRaw, name), `${name} in InkOverlayConstants.ts`).toBe(1);
 			expect(declarations(overlayRaw, name), `${name} in InkOverlay.ts`).toBe(0);
 		}
-		expect(MOVED.length + MOVED_TYPES.length + SHARED_TYPES.length).toBe(38);
+		expect(MOVED.length + MOVED_TYPES.length + SHARED_TYPES.length).toBe(39);
 	});
 
 	it("writes the counter only through its function, and the new file takes nothing back from the overlay", () => {

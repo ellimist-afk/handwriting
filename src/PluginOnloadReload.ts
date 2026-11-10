@@ -437,8 +437,10 @@ function reloadStride(quietTicks: number): number {
 								const adoption = await inlineInk.adoptExternal?.(path, () => panesCurrent() &&
 									inlineInk.pageIdOf(path) === id && !this.store.hasQueuedWrite(id));
 								if (adoption?.outcome !== "adopted") continue;
+								// Every adoption brings the other device's attached groups, its strokes changed or not: the
+								// open note finds them in its text again. With the same strokes a held selection stays.
+								inkExternallyReloaded(path, adoption.changed);
 								if (adoption.changed) {
-									inkExternallyReloaded(path);
 									notifyInkChanged(path);
 									// The release line owns this line, not the cherry-pick:
 									// the quiet-tick backoff below reads it, and dropping it

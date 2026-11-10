@@ -76,6 +76,9 @@ jobs:
       - name: tests
         run: npm test
 
+      - name: no real sleeps or polling in tests
+        run: npm run check:no-sleep
+
       # The rendered-geometry suite: launches real Chromium, builds the tool
       # strip under the real stylesheet, and measures pixel widths. Kept out
       # of `npm test` on purpose so the unit count and timing stay clean; run

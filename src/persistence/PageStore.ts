@@ -24,7 +24,8 @@ export interface PageAdapterLike {
 	rename(from: string, to: string): Promise<void>;
 	remove(path: string): Promise<void>;
 	mkdir(path: string): Promise<void>;
-	stat(path: string): Promise<{ mtime: number } | null>;
+	/** Obsidian's also gives the size; the test doubles need not. */
+	stat(path: string): Promise<{ mtime: number; size?: number } | null>;
 	/** Obsidian provides this; the test doubles do not all need to. */
 	list?(path: string): Promise<{ files: string[]; folders: string[] }>;
 }
@@ -326,7 +327,8 @@ export function outgoingDiverges(outgoing: PageData, incoming: PageData): boolea
 	return (
 		lostFrom(mine.strokes, incoming.strokes) ||
 		lostFrom(mine.textBoxes, incoming.textBoxes) ||
-		lostFrom(mine.images, incoming.images)
+		lostFrom(mine.images, incoming.images) ||
+		lostFrom(mine.attachments ?? [], incoming.attachments ?? [])
 	);
 }
 
@@ -358,6 +360,23 @@ export class PageStore {
 	timers = new Map<string, number>();
 	/** One-shot maximum-dirty-interval timer per page; see MAX_DIRTY_MS. */
 	maxTimers = new Map<string, number>();
+	/**
+	 * How many times schedule() has been called for each page id, only ever counting up. A caller that must know
+	 * whether a save was asked for over a span reads it before and after: a save that was queued and has already
+	 * landed leaves no trace in hasQueuedWrite, but it leaves this count higher.
+	 */
+	scheduled = new Map<string, number>();
+	/**
+	 * Every id move keepAsideUnder made this session, by the old id: the new id it moved to and the stamp of what its
+	 * last round made the new id's live file (absent when that round set the file beside it as a copy). A save that
+	 * lands under the old id after the move took its file sits where nothing names it, so writePending runs one more
+	 * round of the same move for it (followMove). Only while `named` (the plugin's owner test) says no note names the old
+	 * id: once one does (the id set back, or another note that carries it), the old id's saves are that note's own, and the
+	 * entry is dropped for the rest of the session.
+	 */
+	movedIds = new Map<string, { to: string; stamp?: string; named: () => boolean }>();
+	/** Old ids a keepAsideUnder is moving now, with a count each: its own first write of the queue is that round's, not a late one. */
+	moving = new Map<string, number>();
 	/**
 	 * PENS DOWN RIGHT NOW, by pointer id. A save serializes the whole page on the main thread in one task (20 to 40 ms
 	 * at 3000 strokes), and the bounded-dirty timer fires 5 s into continuous writing, so on a big note it landed
@@ -921,6 +940,33 @@ export class PageStore {
 	/** Typed detail from the latest `externallyChanged` call for this page. */
 	externalChangeObservation(pageId: string): ExternalChangeObservation {
 		return this.externalChangeObservations.get(pageId) ?? "unchanged";
+	}
+
+	/** What `readPdfClaim` last read for each id this session, with the file's mtime and size at that read. */
+	private readonly pdfClaimsRead = new Map<string, { mtime: number; size: number | undefined; paths: string[] | null }>();
+
+	/**
+	 * `readPdfPaths` for a scan over many sidecars, with the file's mtime. The
+	 * file is stat'ed first; when its mtime and size are what they were at this
+	 * session's last read of it, the paths read then are returned and the file
+	 * is not read or parsed again. Null when there is no live sidecar.
+	 */
+	async readPdfClaim(pageId: string): Promise<{ paths: string[] | null; mtime: number } | null> {
+		try {
+			const final = await this.resolvePath(pageId);
+			const st = await this.app.vault.adapter.stat(final);
+			if (!st) {
+				this.pdfClaimsRead.delete(pageId);
+				return null;
+			}
+			const known = this.pdfClaimsRead.get(pageId);
+			if (known && known.mtime === st.mtime && known.size === st.size) return { paths: known.paths, mtime: st.mtime };
+			const paths = await this.readPdfPaths(pageId);
+			this.pdfClaimsRead.set(pageId, { mtime: st.mtime, size: st.size, paths });
+			return { paths, mtime: st.mtime };
+		} catch {
+			return null;
+		}
 	}
 
 	/**

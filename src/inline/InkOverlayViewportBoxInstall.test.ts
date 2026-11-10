@@ -41,8 +41,8 @@ const MOVED = [
 	"applyViewportBox",
 ] as const;
 
-/** What the box file takes back from InkOverlay.ts: the pan fit slack, the scale epsilon, the paper properties, and the class as a type. */
-const BACK = ["PAN_FIT_SLACK_PX", "SCALE_EPSILON", "PAPER_PROPERTIES", "InkOverlayPlugin"] as const;
+/** What the box file takes back from InkOverlay.ts: the pan fit slack, the scale epsilon, the paper properties, the ink store (the column hold reads the note's stored width from it), and the class as a type. */
+const BACK = ["PAN_FIT_SLACK_PX", "SCALE_EPSILON", "PAPER_PROPERTIES", "inlineInk", "InkOverlayPlugin"] as const;
 
 type Layout = NonNullable<InkOverlayPlugin["viewportLayout"]>;
 
@@ -112,7 +112,7 @@ describe("viewport layout and box methods on the overlay prototype", () => {
 		}
 	});
 
-	it("is installed once, after the class body closes, and takes back only its four names", () => {
+	it("is installed once, after the class body closes, and takes back only its five names", () => {
 		const text = overlayRaw.replace(/\r\n/g, "\n");
 		const box = boxRaw.replace(/\r\n/g, "\n");
 		const call = "installInkOverlayViewportBox(InkOverlayPlugin.prototype);";

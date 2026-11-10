@@ -78,7 +78,13 @@ export class InlineSelectionDeleteKeys {
 		private readonly removeSelection: () => void
 	) {}
 
-	keydown(event: DeleteKeyEvent): boolean {
+	/**
+	 * `editorIdle` answers whether the editor's own selection is empty. A swept
+	 * text range means the key is meant for the text, as Ctrl+C and Ctrl+X
+	 * already leave a range to the editor; the ink stays selected and the key
+	 * is not taken.
+	 */
+	keydown(event: DeleteKeyEvent, editorIdle: () => boolean = () => true): boolean {
 		const key = this.deleteKey(event.key);
 		if (!key) return false;
 		if (this.held === key) {
@@ -94,7 +100,7 @@ export class InlineSelectionDeleteKeys {
 			}
 			this.held = null;
 		}
-		if (event.altKey || event.ctrlKey || event.metaKey || !this.hasSelection()) return false;
+		if (event.altKey || event.ctrlKey || event.metaKey || !this.hasSelection() || !editorIdle()) return false;
 		this.held = key;
 		event.preventDefault();
 		this.removeSelection();

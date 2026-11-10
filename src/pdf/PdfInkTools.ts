@@ -312,11 +312,24 @@ declare module "./PdfInkController" {
 			// the stroke's own page div, one direct read, so the storm of
 			// unrelated mutations (canvas swaps while scrolling) costs one
 			// comparison and commits nothing.
+			//
+			// A turn of the page breaks the same contract, and the width alone
+			// does not show it: a half turn leaves the page box the same size,
+			// and so does a quarter turn of a page within a pixel of square.
+			// The turn is read live here instead. A turned page takes no new
+			// ink, so a live turn other than upright ends the gesture, and it
+			// marks every page measured so far as turned now rather than at the
+			// next repaint: the turn applies to the whole document, and a pen
+			// landing before that repaint would otherwise be let through. The
+			// repaint still decides each page from its own box, as before.
+			const turn = this.viewTurn();
+			const turned = turn !== null && turn !== 0;
+			if (turned) for (const pageNumber of this.pageSize.keys()) this.rotated.add(pageNumber);
 			const frame = this.frame;
 			if (frame && !this.idle) {
 				const el = this.pageElement(frame.scroller, this.strokePageNumber);
 				const box = frame.boxes.find((b) => b.pageNumber === this.strokePageNumber);
-				if (el && box && Math.abs(el.clientWidth - box.widthPx) > 1) {
+				if (turned || (el && box && Math.abs(el.clientWidth - box.widthPx) > 1)) {
 					this.penUp();
 				}
 			}
@@ -330,7 +343,7 @@ declare module "./PdfInkController" {
 			childList: true,
 			subtree: true,
 			attributes: true,
-			attributeFilter: ["style", "width", "height", "class"],
+			attributeFilter: ["style", "width", "height", "class", "data-main-rotation"],
 		});
 		this.disposers.push(() => mo.disconnect());
 
@@ -348,6 +361,12 @@ declare module "./PdfInkController" {
 		this.root.addEventListener("keydown", this.handleKeyDown, { capture: true });
 		this.disposers.push(() =>
 			this.root.removeEventListener("keydown", this.handleKeyDown, { capture: true })
+		);
+		// Ctrl+V with copied ink, on the same root and in the same phase as
+		// the keys above, so it runs ahead of the find bar and form fields.
+		this.root.addEventListener("paste", this.handlePaste, { capture: true });
+		this.disposers.push(() =>
+			this.root.removeEventListener("paste", this.handlePaste, { capture: true })
 		);
 
 		this.schedule();

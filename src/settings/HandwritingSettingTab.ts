@@ -5,12 +5,12 @@
  * back and re-exports HandwritingSettingTab, gatedCommandGroups, GatedCommandGroup and SYNC_ALL_TYPES_HINT, so
  * every import from main still resolves. This file imports only types from main, so there is no runtime cycle.
  */
-import { App, Notice, Platform, PluginSettingTab, Setting, SettingDefinitionItem, type SettingGroup } from "obsidian";
+import { App, ButtonComponent, ColorComponent, ExtraButtonComponent, Notice, Platform, PluginSettingTab, Setting, SettingDefinitionItem, type SettingGroup } from "obsidian";
 import { gatedCommands, type PaletteCommand } from "../CommandPaletteSplit";
-import { applyToolbarPlacement, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setShapeSnap } from "../inline/InkOverlay";
-import { setPressureSensitivity } from "../ink/PenStyle";
+import { applyToolbarPlacement, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setScribbleErase, setShapeSnap } from "../inline/InkOverlay";
 import { refreshInkTheme, setInkExportReadability, setInkThemeAdaptation } from "../ink/InkTheme";
-import { colorsFor, getInkColorHex } from "../ink/InkColor";
+import { colorsFor, defaultColorsFor, getInkColorHex, setInkColorHex, setInkPalette, setInkPaletteSlot } from "../ink/InkColor";
+import { paletteSlots } from "./SettingsModel";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { normalizePaperStyle } from "../inline/Paper";
 import { setScrollExpansionEnabled } from "../inline/InkOverlay";
@@ -27,6 +27,13 @@ import { TOOLBAR_CORNER_LABELS, normalizeToolbarCorner } from "../inline/Toolbar
 import { resetPressureCalibration } from "../ink/PressureGain";
 import type HandwritingPlugin from "../main";
 import type { HandwritingSettings } from "../main";
+
+/**
+ * Scribble to erase does not ship in this release: the pen's scribble stays off and the settings tab builds no row
+ * for it, whatever a vault stored. The code, its tests and the stored `scribbleErase` key stay as they are, so a
+ * vault's choice rides through load and save untouched and comes back when this is true again.
+ */
+export const SCRIBBLE_ERASE_SHIPS = false;
 
 /**
  * Ink is stored as .json files, and Obsidian Sync leaves .json out unless "Sync all other types" is on, so
@@ -240,22 +247,27 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Infinite canvas",
-						desc: "Let the page grow as you write and scroll. Also turns on the zoom bar. Global setting. A note can override it with handwriting-canvas: true or false in its frontmatter. Default off.",
+						desc: "Let the page grow as you write and scroll. Also turns on the zoom bar. Global setting. Default off.",
 						control: { type: "toggle", key: "extendCanvasWhileScrolling" },
 					},
 					{
 						name: "Hide status bar on handwriting notes",
-						desc: "Hide Obsidian's status bar on notes with handwriting. Global setting. Default off.",
+						desc: "Hide Obsidian's status bar on notes with handwriting. Default off.",
 						control: { type: "toggle", key: "hideStatusBarOnInkedNotes" },
 					},
 					{
 						name: "Paper background",
-						desc: "Lined, grid, or dotted paper. Global setting. A note can override it with handwriting-paper in its frontmatter. Default none.",
+						desc: "Lined, grid, or dotted paper. Global setting. Default none.",
 						control: {
 							type: "dropdown",
 							key: "paperStyle",
 							options: { none: "None", lines: "Lines", grid: "Grid", dots: "Dots" },
 						},
+					},
+					{
+						name: "Page guides",
+						desc: "Faint lines where each page ends, on Infinite canvas notes. Not in exports. Default on.",
+						control: { type: "toggle", key: "pageGuides" },
 					},
 				],
 			},
@@ -265,7 +277,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Toolbar visibility",
-						desc: "Show or hide the pen toolbar. Auto shows it on phones and tablets, on desktop once a pen is used, and moves it aside while you write. Global setting. Default auto.",
+						desc: "Show or hide the pen toolbar. Auto hides it while you write. Default auto.",
 						control: {
 							type: "dropdown",
 							key: "penTools",
@@ -276,7 +288,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// Option labels match the Toolbar visibility row's above
 						// verbatim - the two settings behave identically.
 						name: "Zoom bar",
-						desc: "Buttons to zoom the page in and out. Needs Infinite canvas on for the note. Auto moves it aside while you write. Global setting. Default auto.",
+						desc: "Show or hide the zoom bar. Needs Infinite canvas on for the note. Auto hides it while you write. Default auto.",
 						control: {
 							type: "dropdown",
 							key: "noteZoomControls",
@@ -285,7 +297,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Toolbar placement",
-						desc: "Where the toolbar sits. Global setting. Default top right.",
+						desc: "Where the toolbar sits. Default top right.",
 						// "Corner" is what this row was called for two releases and
 						// what the setting is still named in data.json, so it stays
 						// searchable: the settings search indexes name, desc and
@@ -306,9 +318,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					Platform.isAndroidApp ? {
 						name: "Pen side button",
 						desc:
-							"Click while hovering over the screen switches pen and eraser. Android takes a pen touch made with the button held for text " +
-							"selection, so the button only works while the pen hovers. Click it once in the air to switch pen and " +
-							"eraser; click again to switch back. Needs a pen that hovers (S Pen, Wacom EMR). Remembered on this device.",
+							"Switch pen and eraser with a side button click while the pen hovers. Remembered on this device.",
 						render: async (setting) => {
 							const { airSwitchEnabled, saveAirSwitch } = await import("../inline/TipMode");
 							setting.addToggle((toggle) => {
@@ -319,7 +329,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						},
 					} : {
 						name: "Pen side button",
-						desc: "Choose what a held pen side button does on contact. The mouse right button follows this choice. Remembered on this device; lasso stays on the toolbar.",
+						desc: "Choose what a held pen side button does on contact. The mouse right button follows this choice. Remembered on this device.",
 						render: async (setting) => {
 							const { sideButtonErasesEnabled, saveSideButtonErases } = await import("../inline/TipMode");
 							setting.addDropdown((dropdown) => {
@@ -373,7 +383,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// the rest, and the mechanism lives in InkPdfAppend.ts
 						// where it belongs.
 						name: "Ink color on PDFs",
-						desc: "Darken, lighten, or leave it alone. Global setting. Default darken.",
+						desc: "Darken, lighten, or leave it alone. Default darken.",
 						// Shipped in 1.4.18 as "Ink color when flattening PDFs".
 						// Search indexes name, desc and aliases only, so the old
 						// title stays findable here; see "Toolbar placement".
@@ -396,7 +406,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Ink color when exporting",
-						desc: "Keep pen ink readable in exports, prints, and snips. Global setting. Default automatic readability.",
+						desc: "Keep pen ink readable in exports, prints, and snips. Default automatic readability.",
 						aliases: ["print", "snip", "highlighter"],
 						control: {
 							type: "dropdown", key: "inkReadableInExports",
@@ -411,7 +421,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Ink prediction",
-						desc: "Reduce visible pen lag. Global setting. Default on.",
+						desc: "Reduce visible pen lag. Default on.",
 						aliases: ["latency", "nib", "sharp corners"],
 						control: {
 							type: "toggle",
@@ -427,7 +437,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Pressure sensitivity",
-						desc: "Adjust line width with pen pressure. Global setting. Default on.",
+						desc: "Adjust line width with pen pressure, for new strokes. Ink already drawn keeps its look. Default on.",
 						// The ordinary control path, not 1.4.19's `render` one. That
 						// row carried a Recalibrate button beside the toggle, and a
 						// button can only reach a row through `render`; Recalibrate
@@ -444,7 +454,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// this on the same day (boox thread, 2026-08-30) and were told to turn
 						// prediction off, which is a different feature and did nothing.
 						name: "Ink smoothing",
-						desc: "Smooth and taper strokes. Global setting. Default on.",
+						desc: "Smooth and taper strokes. Default on.",
 						aliases: ["shaping", "speed"],
 						control: {
 							type: "toggle",
@@ -454,7 +464,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Pen reticle",
-						desc: "Show a dot at the pen tip. Global setting. Default on.",
+						desc: "Show a dot at the pen tip. Default on.",
 						aliases: ["cursor"],
 						control: {
 							type: "toggle",
@@ -464,8 +474,33 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Shape snap",
-						desc: "Hold at the end of a stroke to snap it into a shape. Global setting. Default on.",
+						desc: "Hold at the end of a stroke to snap it into a shape. Default on.",
 						control: { type: "toggle", key: "shapeSnap" },
+					},
+					...(SCRIBBLE_ERASE_SHIPS ? [{
+						name: "Scribble to erase",
+						desc: "Scribble back and forth over ink to erase it. Default off.",
+						control: { type: "toggle" as const, key: "scribbleErase" as const },
+					}] : []),
+				],
+			},
+			{
+				type: "group",
+				heading: "Colors",
+				items: [
+					{
+						// Draft copy, Alan to edit. `render`: a row of pickers has
+						// no toggle or dropdown shape.
+						name: "Pen colors",
+						desc: "Change any of the eight pen colors.",
+						aliases: ["pen", "palette", "custom color"],
+						render: (setting) => this.renderPalette(setting, "pen"),
+					},
+					{
+						name: "Highlighter colors",
+						desc: "Change any of the five highlighter colors.",
+						aliases: ["pen", "palette", "custom color"],
+						render: (setting) => this.renderPalette(setting, "highlighter"),
 					},
 				],
 			},
@@ -491,7 +526,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 							"command palette",
 						],
 						desc:
-							"Add tool, color, size, and quick pen commands for hotkeys. Global setting. Default off." +
+							"Add tool, color, size, and quick pen commands for hotkeys. Default off." +
 							(this.plugin.gatedCommandRemovalAvailable()
 								? ""
 								: " Turning it off takes effect after the plugin reloads."),
@@ -546,7 +581,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					{
 						name: "Developer diagnostics",
 						desc:
-							"Show diagnostic commands after reloading the plugin. Global setting. Default off.",
+							"Show diagnostic commands after reloading the plugin. Default off.",
 						control: { type: "toggle", key: "devDiagnostics" },
 					},
 					{
@@ -554,7 +589,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// simplification). The rows it overrides keep their
 						// `disabled` read of it wherever they sit.
 						name: "Boox mode",
-						desc: "Adjust pen input and animations for e-ink screens. Global setting. Default off.",
+						desc: "Adjust pen input and animations for e-ink screens. Default off.",
 						control: { type: "toggle", key: "booxMode" },
 					},
 					{
@@ -650,14 +685,9 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				this.rerender();
 				break;
 			case "pressureSensitivity":
-				s.pressureSensitivity = on;
-				s.pressureChoice = on;
-				setPressureSensitivity(on);
-				// Saved strokes are shaped at render time from their stored
-				// samples, so the width law changes under ink already on the
-				// page: every overlay has to draw again to show it.
-				repaintAllInkOverlays();
-				embedInkRepaintAll(); // reading view, embeds and hovers (audit 25)
+				// New strokes only: each saved stroke draws under the value it
+				// carries (or this device's lock), so once locked nothing redraws.
+				this.plugin.setPressureSwitch(on);
 				break;
 			case "hideStatusBarOnInkedNotes":
 				s.hideStatusBarOnInkedNotes = on;
@@ -724,6 +754,10 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				s.shapeSnap = on;
 				setShapeSnap(on);
 				break;
+			case "scribbleErase":
+				s.scribbleErase = on;
+				setScribbleErase(on);
+				break;
 			case "colorSizeCommands":
 				s.colorSizeCommands = on;
 				// Live, not "after the plugin reloads": the gated commands go into
@@ -745,6 +779,12 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				this.plugin.applyPaper(style);
 				break;
 			}
+			case "pageGuides":
+				s.pageGuides = on;
+				// Live on every window: the guides' class rides the paper's
+				// road, so an open note loses or gets its lines at once.
+				this.plugin.applyPaper(s.paperStyle);
+				break;
 			case "penTools": {
 				const m = normalizePenToolsMode(str);
 				s.penTools = m;
@@ -923,6 +963,70 @@ export class HandwritingSettingTab extends PluginSettingTab {
 			}, 500);
 			this.plugin.registerInterval(timer);
 		}
+	}
+
+	/**
+	 * One colour picker per slot, each with its own reset, then a reset of
+	 * every slot of the tool. The pickers are the route to a custom colour;
+	 * the strip only picks from the slots.
+	 */
+	private renderPalette(setting: Setting, tool: InkTool): void {
+		const { controlEl } = setting;
+		controlEl.empty();
+		controlEl.addClass("handwriting-palette-control");
+		const grid = controlEl.createDiv({ cls: `handwriting-palette-grid is-${tool}` });
+		colorsFor(tool).forEach((slot, i) => {
+			const cell = grid.createDiv({ cls: "handwriting-palette-cell" });
+			new ColorComponent(cell).setValue(slot.hex).onChange((hex) => this.setPaletteSlot(tool, i, hex));
+			new ExtraButtonComponent(cell)
+				.setIcon("rotate-ccw")
+				.setTooltip(`Reset ${defaultColorsFor(tool)[i]!.name}`)
+				.onClick(() => {
+					this.setPaletteSlot(tool, i, null);
+					this.rerender();
+				});
+		});
+		new ButtonComponent(controlEl).setButtonText("Reset all").onClick(() => {
+			this.resetPalette(tool);
+			this.rerender();
+		});
+	}
+
+	/**
+	 * Set one slot (null puts back its default): the live palette, the
+	 * setting, and the selected colour when it was the slot's old colour.
+	 * A fresh map each time, never an edit of the one a save may hold.
+	 */
+	setPaletteSlot(tool: InkTool, index: number, hex: string | null): void {
+		const fallback = defaultColorsFor(tool)[index]?.hex;
+		if (fallback === undefined) return;
+		const selected = setInkPaletteSlot(tool, index, hex ?? fallback);
+		this.storePalette(tool, selected);
+	}
+
+	/**
+	 * Put back every slot of one tool. The selected colour follows the first
+	 * slot that held it, once: resetting slot by slot would carry it on to a
+	 * later slot that happened to hold the colour it had just moved to.
+	 */
+	resetPalette(tool: InkTool): void {
+		const defaults = defaultColorsFor(tool);
+		const held = colorsFor(tool).findIndex((c) => c.hex === getInkColorHex(tool));
+		setInkPalette(tool, defaults.map((d) => d.hex));
+		const selected = held >= 0 ? setInkColorHex(tool, defaults[held]!.hex) : getInkColorHex(tool);
+		this.storePalette(tool, selected);
+	}
+
+	private storePalette(tool: InkTool, selected: string): void {
+		const s = this.plugin.settings;
+		const slots = paletteSlots(colorsFor(tool).map((c) => c.hex));
+		if (tool === "pen") s.penPalette = slots;
+		else s.highlighterPalette = slots;
+		s.inkColors = { ...s.inkColors, [tool]: selected };
+		// Swatches on every strip and the hotkey labels show the slot's colour.
+		this.plugin.refreshColourCommandNames();
+		this.plugin.refreshSettingSurfaces();
+		this.plugin.saveSettingsNow();
 	}
 
 	/**

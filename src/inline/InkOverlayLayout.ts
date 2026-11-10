@@ -100,7 +100,7 @@ declare module "./InkOverlay" {
         layout.width=width;layout.height=height;layout.paneWidth=layout.parent.clientWidth;layout.paneHeight=layout.parent.clientHeight;
     const natural=this.measureNaturalColumn({width,height});
     if(natural.column>0){layout.column=natural.column;layout.columnBox=natural.columnBox;layout.lineContent=natural.lineContent;layout.gutterX=natural.gutterX;layout.sizerColumn=natural.sizerColumn;layout.columnInset=natural.columnInset;layout.ownLines=natural.ownLines;layout.left=natural.left;layout.right=natural.right;}
-    layout.columnLocal=natural.columnLocal;layout.columnReserve=natural.columnReserve;
+    layout.columnLocal=natural.columnLocal;layout.columnReserve=natural.columnReserve;layout.columnPad=natural.columnPad;
     layout.columnAuto=natural.columnAuto;
     // Hidden editors release their backings and invalidate geometry. Restore
     // the full physical viewport before navigation can reject that stale state,
@@ -308,6 +308,14 @@ declare module "./InkOverlay" {
 			// the same call returns the plain band box and no transform.
 			const box = canvasLayerBox(size.cssW, size.cssH, raster, this.zoomFormAt(this.pinchScaleNow));
 			c.setCssStyles({ width: `${box.width}px`, height: `${box.height}px`, transform: box.transform, transformOrigin: box.transform ? "0 0" : "" });
+		}
+		// Attached ink's canvases take the same box; their backings follow the committed layer's at their next paint, which is
+		// whole. With no group they keep their 0x0 backing.
+		const layer = this.attachedLayer;
+		if (layer) {
+			const box = canvasLayerBox(size.cssW, size.cssH, raster, this.zoomFormAt(this.pinchScaleNow));
+			for (const c of [layer.pen, layer.hl]) c.setCssStyles({ width: `${box.width}px`, height: `${box.height}px`, transform: box.transform, transformOrigin: box.transform ? "0 0" : "" });
+			layer.invalidate("layout");
 		}
 		// The backing just allocated against the device pixels the container
 		// really occupies. `rect` is the read this method already made and

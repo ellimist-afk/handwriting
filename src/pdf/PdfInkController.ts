@@ -24,6 +24,7 @@ import { diagnosticsEnabled } from "../diag/DiagSwitch";
 
 import { InkStroke } from "../ink/Stroke";
 import { EmptyPageNoticeGate } from "../inline/EmptyPageNotice";
+import { markerIsCurrent, markerToken } from "../inline/InkClipboard";
 import { Point2 } from "../ink/Smoothing";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
@@ -821,6 +822,40 @@ export class PdfInkController {
 	 * ink belongs to. See PdfInkHistory.
 	 */
 	history = new PdfInkHistory();
+
+	/**
+	 * The paste listener bound to this pane's root, beside the keydown one
+	 * below and for the same reasons a class field. Ctrl+V (or a right-click
+	 * paste, or a clipboard manager's history) pastes INK when the system
+	 * clipboard carries the copy marker, the note's rule (InkOverlayKeys.ts
+	 * handlePaste). Any other text is somebody's and passes straight
+	 * through untouched, which is what lets ordinary text still land in the
+	 * viewer's find bar or a form field.
+	 */
+	handlePaste = (ev: ClipboardEvent): void => {
+		const text = ev.clipboardData?.getData("text/plain") ?? "";
+		if (text === "" || markerToken(text) === null) return;
+		// Ours either way now: the marker is bookkeeping, and letting it
+		// land in the find bar or a form field as literal text would be the
+		// worse outcome.
+		ev.preventDefault();
+		ev.stopPropagation();
+		if (isTypingTarget(ev.target)) {
+			// The find bar and form fields are inside this pane, and the ink
+			// has no place in them. Say where it goes instead of pasting it
+			// onto a page the user was not looking at.
+			this.notify("Handwriting: ink pastes on the page, not in a text field");
+			return;
+		}
+		if (!markerIsCurrent(text)) {
+			// A marker outliving the ink it named: a clipboard manager
+			// replaying an entry from a previous run of the app.
+			this.notify("Handwriting: that ink was copied before the app restarted");
+			return;
+		}
+		// The command's own path, with its own gates and notices.
+		this.pasteFromClipboard();
+	};
 
 	/**
 	 * The keydown listener bound to this pane's root, above. A class field

@@ -66,8 +66,10 @@ export function getInlineTool(): InkTool {
 }
 
 export function setInlineTool(tool: InkTool): void {
+	// The tool already in use picked again changes nothing a held snap would commit, so the snap stays.
+	const changed = inlineTool !== tool;
 	inlineTool = tool;
-	for (const overlay of instances) overlay.clearSnapPreview();
+	if (changed) for (const overlay of instances) overlay.clearSnapPreview();
 	// THE NIB HALF OF "a tool has been picked" (MouseInk.ts, `toolPicked`).
 	// Here rather than in the two tool commands, the strip's two nib buttons,
 	// the colour commands and the quick-pen chips, because every one of them
@@ -324,8 +326,15 @@ export let eraserWholeStrokes = true;
 export let shapeSnapOn = true;
 
 export function setShapeSnap(on: boolean): void {
+	const was = shapeSnapOn;
 	shapeSnapOn = on;
-	if (!on) for (const overlay of instances) overlay.clearSnapPreview();
+	if (was && !on) for (const overlay of instances) overlay.clearSnapPreview();
+}
+
+export let scribbleEraseOn = false;
+
+export function setScribbleErase(on: boolean): void {
+	scribbleEraseOn = on;
 }
 
 export function setPenReticle(on: boolean): void {

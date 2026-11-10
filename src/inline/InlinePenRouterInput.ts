@@ -5,9 +5,9 @@
 import { sideButtonErasesEnabled } from "./TipMode";
 import { sideButtonAirHover, sideButtonAirInterrupt } from "./SideButtonAir";
 import { telemetry } from "../diag/Telemetry";
-import { paroleEarned } from "../input/PalmGate";
+import { PAROLE_MAX_CONTACT_PX, paroleEarned } from "../input/PalmGate";
 import { isAppleTouchPlatform } from "../input/PalmShield";
-import { PenSample, silentLift } from "../input/PointerRouter";
+import { PenSample, silentLift, TAP_MAX_MOVE_PX, TAP_MAX_MS } from "../input/PointerRouter";
 import { hideProbeMarkers, markRawPointer } from "./PenProbe";
 import { hitProbeDown, hitProbeHover, isHitProbeEnabled } from "./PenHitProbe";
 import { scrollProbeTouch } from "./ScrollProbe";
@@ -18,10 +18,89 @@ import { setPenInk } from "./PenInk";
 import { installMethods } from "./InstallMethods";
 import { backstopMayEnd, computedTouchActionNote, csOf, guardEnabled, liveRouters, tr, type InlinePenRouter } from "./InlinePenRouter";
 
+/**
+ * Each router's lone-finger landings, by pointer id, for the tap test at the lift (the same bounds as PointerRouter's
+ * own tap: TAP_MAX_MOVE_PX, TAP_MAX_MS). Only a finger that lands alone can end as a tap; a second contact spoils
+ * every start.
+ */
+type TapStart = { x: number; y: number; at: number; caught: boolean };
+const tapStarts = new WeakMap<InlinePenRouter, Map<number, TapStart>>();
+/** `caught`: the contact landed on a gliding or easing page, which stops a scroll and is scrolling, never a tap. */
+function noteTapStart(router: InlinePenRouter, e: PointerEvent, caught: boolean): void {
+	let starts = tapStarts.get(router);
+	if (!starts) tapStarts.set(router, (starts = new Map<number, TapStart>()));
+	if (router.touchPos.size === 0 && router.activePenId === null) starts.set(e.pointerId, { x: e.clientX, y: e.clientY, at: e.timeStamp, caught });
+	else starts.clear();
+}
+
+/**
+ * A finger that landed alone on the selection (its padded box, a handle, the Attach button or a pin: the surface's
+ * claimTouch). Nothing claims it at the down: no ink, no pan, no lasso. Past TAP_MAX_MOVE_PX from `x, y` the selection
+ * claims it with `down`, the sample where it landed, so the drag counts from there. A lift inside the limit is the tap
+ * it is today (onTapLift).
+ */
+type SelectionTouch = { pointerId: number; x: number; y: number; down: PenSample };
+const selectionTouches = new WeakMap<InlinePenRouter, SelectionTouch>();
+
+/** Does the surface's selection take this lone finger? Only a finger the palm rule would not call a palm by its size. */
+function selectionTakesTouch(router: InlinePenRouter, e: PointerEvent): boolean {
+	if (!router.cb.claimTouch || router.touchPos.size !== 0 || router.activePenId !== null || router.fingerInkBlockedUntilAllLift) return false;
+	const contactPx = typeof navigator !== "undefined" && isAppleTouchPlatform(navigator) ? 0 : Math.max(e.width || 0, e.height || 0);
+	if (contactPx > PAROLE_MAX_CONTACT_PX) return false;
+	router.refreshRect();
+	return router.cb.claimTouch(router.sampleFrom(e));
+}
+
+/** How long a tap the surface took keeps its trailing touch events and mouse fallout from the editor, ms. */
+export const TAP_FALLOUT_MS = 350;
+/** How far from the tap a trailing event may land and still be its fallout, css px. */
+export const TAP_FALLOUT_PX = 24;
+const TAP_FALLOUT_EVENTS = ["touchend", "mousedown", "mouseup", "click"] as const;
+const tapEaters = new WeakMap<InlinePenRouter, () => void>();
+/** Each router's one disposer that stops its armed eater, kept so a tap does not add a second to `disposers`. */
+const tapEaterDisposers = new WeakMap<InlinePenRouter, () => void>();
+
+/**
+ * A tap the surface took: its own eater, armed once on the window's capture phase ahead of the editor and Obsidian, for
+ * the touch's trailing touchend, its compatibility mousedown and mouseup and its click near the tap point, for
+ * TAP_FALLOUT_MS. The touchend is only prevented (the router's own touch bookkeeping still reads it), the rest prevented
+ * and stopped; the click ends it. The pen's ownership guard cannot do this: it lets touch fallout through on purpose.
+ */
+function eatTapFallout(router: InlinePenRouter, e: PointerEvent): void {
+	tapEaters.get(router)?.();
+	const win = router.winRef, x = e.clientX, y = e.clientY;
+	const near = (ev: Event): boolean => {
+		const t = (ev as TouchEvent).changedTouches?.[0], m = ev as MouseEvent;
+		const cx = t ? t.clientX : m.clientX, cy = t ? t.clientY : m.clientY;
+		return typeof cx !== "number" || typeof cy !== "number" || Math.hypot(cx - x, cy - y) <= TAP_FALLOUT_PX;
+	};
+	const eat = (ev: Event): void => {
+		if (!near(ev)) return;
+		ev.preventDefault();
+		if (ev.type !== "touchend") ev.stopPropagation();
+		if (ev.type === "click") stop();
+	};
+	let timer: number | null = null;
+	const stop = (): void => {
+		for (const type of TAP_FALLOUT_EVENTS) win.removeEventListener(type, eat, { capture: true });
+		if (timer !== null) win.clearTimeout(timer);
+		timer = null;
+		if (tapEaters.get(router) === stop) tapEaters.delete(router);
+	};
+	for (const type of TAP_FALLOUT_EVENTS) win.addEventListener(type, eat, { capture: true, passive: false });
+	timer = win.setTimeout(stop, TAP_FALLOUT_MS);
+	tapEaters.set(router, stop);
+	// The router's dispose stops the eater too, as it clears its own timers: a pane closed inside the window leaves no
+	// listener on the window and no timer behind.
+	let drop = tapEaterDisposers.get(router);
+	if (!drop) tapEaterDisposers.set(router, (drop = () => tapEaters.get(router)?.()));
+	if (!router.disposers.includes(drop)) router.disposers.push(drop);
+}
+
 declare module "./InlinePenRouter" {
 	interface InlinePenRouter {
 		pointerDown(e: PointerEvent): void;
-		claimFingerInk(e: PointerEvent): void;
+		claimFingerInk(e: PointerEvent, down?: PenSample): void;
 		cancelFingerInkForPinch(): void;
 		commitFingerInkForPenPreemption(): void;
 		traceHover(e: PointerEvent): void;
@@ -40,9 +119,17 @@ declare module "./InlinePenRouter" {
 }
 
 
+	/** Per router: the pen pointer whose button went down in the air, until its pointerup (GitHub issue 41). */
+	const airPress = new WeakMap<InlinePenRouter, number>();
+
 	// ---- pointerdown --------------------------------------------------------
 
 	function pointerDown(this: InlinePenRouter, e: PointerEvent): void {
+		// A new contact comes after the last taken tap's own fallout, so it ends that tap's eater: a second tap close by
+		// and soon after reaches the text. Any pointer, before any branch.
+		tapEaters.get(this)?.();
+		// Read before the two lines below stop them: a glide still running or the surface's ease still playing.
+		const caughtGlide = this.flingRaf !== 0 || (this.cb.easePlaying?.() ?? false);
 		this.cb.onViewportInput?.();
 		this.cancelFling(); // any new contact ends the glide (pen wins instantly)
 		// A contact in the middle of a side-button press in the air: the press
@@ -54,6 +141,16 @@ declare module "./InlinePenRouter" {
 		if (e.pointerType === "touch") {
 			this.lastTouchAt = performance.now();
 			scrollProbeTouch();
+			// A PRIMARY TOUCH IS THE ONLY TOUCH ON THE GLASS (Pointer Events: the primary touch pointer is the
+			// first contact made while no other touch is active). A contact this router still holds when one
+			// lands lost its lift, and the touchend that heals that on the browser's word (InlinePenRouterBind.ts)
+			// can be lost with it: the stale contact made this finger the second one, a pinch, and one finger
+			// moved nothing (issue 51, Linux). Retired here before anything reads the touch maps.
+			if (e.isPrimary && !this.touchPos.has(e.pointerId) && (this.touchPos.size > 0 || this.guardTouches.size > 0 || this.assistPointerId !== null)) {
+				tr("pointerdown", e, "primary touch with a contact still held: lost lift retired");
+				this.retireAllContactsOnNativeEnd();
+			}
+			noteTapStart(this, e, caughtGlide);
 			// A HAND IS LANDING. Asked BEFORE this contact is recorded, so a
 			// true answer means one was already there - a palm settling beside
 			// a working pen, or the second finger of a pinch - and the surface
@@ -87,12 +184,17 @@ declare module "./InlinePenRouter" {
 			// with one pane open the loop runs once and calls exactly the
 			// callback the old line called.
 			if (!this.handOnGlass()) for (const r of liveRouters) r.cb.onHandOnGlass?.();
+			// A second contact ends a finger still waiting on the selection: it is a pinch or a palm now.
+			if (selectionTouches.get(this)?.pointerId !== e.pointerId) selectionTouches.delete(this);
+			// Asked before the finger-ink claim: a finger on the selection makes no ink, on iPhone too.
+			const onSelection = selectionTakesTouch(this, e);
 
 			// Finger ink is a deliberately tiny opt-in: first contact only, on
 			// the ordinary-note host that supplied the predicate. Record it in
 			// the normal touch maps before claiming it so a second contact can
 			// atomically turn this same gesture into the existing pinch path.
 			if (
+				!onSelection &&
 				!this.fingerInkBlockedUntilAllLift &&
 				this.activePenId === null &&
 				this.touchPos.size === 0 &&
@@ -199,6 +301,12 @@ declare module "./InlinePenRouter" {
 			if (this.fingerInkBlockedUntilAllLift) {
 				e.preventDefault();
 				e.stopPropagation();
+				return;
+			}
+			// On the selection: no pan to begin. Held here until it passes the tap limit or lifts.
+			if (onSelection) {
+				selectionTouches.set(this, { pointerId: e.pointerId, x: e.clientX, y: e.clientY, down: this.sampleFrom(e) });
+				tr("pointerdown", e, "touch on the selection (waits for the tap limit)");
 				return;
 			}
 			// A DRAG THAT BEGINS AGAINST AN END IS OURS, whatever the guard thinks. The give is the
@@ -329,6 +437,18 @@ declare module "./InlinePenRouter" {
 			if (isHitProbeEnabled()) hitProbeDown(e, false, this.scrollEl);
 			return;
 		}
+		// A PEN DOWN WITH THE BARREL BIT AND NO TIP OR ERASER IS A BUTTON PRESSED IN THE AIR (GitHub issue 41). Linux
+		// reports the side button as a real button: pressed while the pen hovers it is a pointerdown with buttons 2 and pressure
+		// 0, and the tip landing afterwards is a pointermove with buttons 3, never a second pointerdown. Claimed here
+		// it started a lasso at pressure 0 that the next hover row ended as a silent lift, and the real contact then
+		// found no pen claimed. So it claims nothing; the pointer is remembered, and the move that brings the tip down
+		// is claimed in its place (pointerMove). Windows sends its side-button contact as this pointerdown, with pressure above 0; only the pressure-0 air press is held back here. A
+		// pointerdown with no button bit at all is claimed as before.
+		if (e.pointerType === "pen" && (e.buttons & 2) !== 0 && (e.buttons & 1) === 0 && (e.buttons & 32) === 0 && e.pressure === 0) {
+			airPress.set(this, e.pointerId);
+			tr("pointerdown", e, `pen NOT CLAIMED: button pressed in the air (buttons=${e.buttons}); the tip landing claims`);
+			return;
+		}
 
 		// EVERY pen contact is a Handwriting gesture now: tip = ink, eraser end =
 		// erase, side button held = lasso/manipulate (§52/§53, the interaction the
@@ -452,10 +572,12 @@ declare module "./InlinePenRouter" {
 	}
 
 	/** Claim one eligible touch without impersonating pen hardware or its palm gate. */
-	function claimFingerInk(this: InlinePenRouter, e: PointerEvent): void {
+	function claimFingerInk(this: InlinePenRouter, e: PointerEvent, down?: PenSample): void {
 		this.strokeDownAt = performance.now();
 		this.firstRawTraced = false;
-		this.inkFeed.strokeStart(e.timeStamp);
+		// The feed's floor is the down's time. A selection finger is claimed on a move (`down` is where it landed), and
+		// that move feeds next: floored at its own time it would feed nothing, and the box would skip it.
+		this.inkFeed.strokeStart(down ? down.timestamp : e.timeStamp);
 		e.preventDefault();
 		e.stopPropagation();
 		this.refreshRect();
@@ -475,7 +597,7 @@ declare module "./InlinePenRouter" {
 		// it before the first sample, retaining the pan it already painted.
 		this.cb.onViewportInput?.();
 		this.cb.onBeforePenDown?.();
-		this.cb.onPenDown(this.sampleFrom(e), e);
+		this.cb.onPenDown(down ?? this.sampleFrom(e), e);
 	}
 
 	/** Cancel, never commit, the one-finger preview before pinch owns the gesture. */
@@ -570,6 +692,27 @@ declare module "./InlinePenRouter" {
 		if (e.pointerType === "touch" && !ownedFinger) {
 			this.lastTouchAt = performance.now();
 			scrollProbeTouch();
+			// A finger waiting on the selection: inside the tap limit nothing moves; past it the selection claims the
+			// contact from where it landed, and this move is its first.
+			const waiting = selectionTouches.get(this);
+			if (waiting?.pointerId === e.pointerId) {
+				this.touchPos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+				if (Math.hypot(e.clientX - waiting.x, e.clientY - waiting.y) <= TAP_MAX_MOVE_PX) return;
+				selectionTouches.delete(this);
+				// Asked again at the claim: a pen that landed during the wait owns the contact, and a selection gone since the
+				// down has nothing to take. Either way the finger is a palm's to the lift: no claim, no ink, no pan.
+				if (this.activePenId !== null || this.fingerInkBlockedUntilAllLift || !(this.cb.claimTouch?.(waiting.down) ?? false)) {
+					this.swallowedTouches.add(e.pointerId);
+					tr("pointermove", e, "touch on the selection passed the tap limit: the pen or the selection went, swallowed");
+					e.preventDefault();
+					e.stopPropagation();
+					return;
+				}
+				tr("pointermove", e, "touch on the selection passed the tap limit: claimed");
+				this.claimFingerInk(e, waiting.down);
+				this.pointerMove(e);
+				return;
+			}
 			if (this.swallowedTouches.has(e.pointerId)) {
 				if (
 					e.pointerId === this.paroleId &&
@@ -664,6 +807,15 @@ declare module "./InlinePenRouter" {
 			// Only here, where no stroke is live. A claimed stroke runs to its
 			// own lift; see `InlinePenCallbacks.penOff`.
 			if (e.pointerType === "pen" && this.penOff()) return;
+			// The tip landing after a button pressed in the air (GitHub issue 41, see pointerDown): the same pointer,
+			// the tip bit set and pressure above 0. This row is the contact, claimed as a pointerdown would be, so the
+			// overlay reads its buttons (3: the side button held) and starts the lasso. Only after that air press, so
+			// a hover row that reports the tip pressed with no pointerdown at all is still not claimed.
+			if (e.pointerType === "pen" && airPress.get(this) === e.pointerId && e.pressure > 0) {
+				tr(e.type, e, "pen contact after a button pressed in the air: claimed on this row");
+				this.pointerDown(e);
+				return;
+			}
 			// Hovering keeps the palm gate warm ("palm placed before pen") and
 			// re-arms the standing guard instantly if a touch window was open.
 			this.lastPenHoverAt = performance.now();
@@ -703,6 +855,10 @@ declare module "./InlinePenRouter" {
 			this.silentLiftEnds++;
 			telemetry.bump("inline.penUp.silentLift");
 			tr(e.type, e, "SILENT LIFT, TERMINATES STROKE", undefined, "lifecycle", "silent-lift");
+			// A lift with the side button still held (Linux, GitHub issue 41): the button stays down in the air, so the
+			// next landing is a move row with buttons 3 and no pointerdown, claimed as after a press in the air. The
+			// pointerup that releases the button forgets it.
+			if (e.pointerType === "pen" && (e.buttons & 2) !== 0) airPress.set(this, e.pointerId);
 			this.endPenStroke(e, false);
 			return;
 		}
@@ -710,13 +866,14 @@ declare module "./InlinePenRouter" {
 		e.stopPropagation(); // no link-hover popovers under a moving nib
 		telemetry.bump("inline.penMove");
 		// iOS port: WebKit never fires pointerrawupdate, so while no pen raw
-		// has ever arrived this session the move stream carries the ink,
-		// expanded from its coalesced list (up to 4 samples per move on the
-		// iPad that proved this out; hardware report 2026-08-25). The first
-		// raw anywhere, hover included, retires this branch for the session,
-		// and on Chromium that has happened before any stroke exists. Same
-		// downstream contract as the raw path: onPenRaw feeds StrokeBuilder,
-		// the tools, the wet layer, all of it.
+		// has arrived this stroke the move stream carries the ink, expanded
+		// from its coalesced list (up to 4 samples per move on the iPad that
+		// proved this out; hardware report 2026-08-25). On Chromium the raw
+		// listener is new at every claim and its stream starts a few ms
+		// later, so the first moves of each stroke feed here until that
+		// stroke's first raw retires the branch (InkFeed.ts). Same downstream
+		// contract as the raw path: onPenRaw feeds StrokeBuilder, the tools,
+		// the wet layer, all of it.
 		// Finger ink is intentionally move-capable even if a real pen proved
 		// this browser's raw channel earlier in the session. WebKit may expose
 		// raw for Pencil but only moves for a direct touch; the arbiter's
@@ -785,18 +942,18 @@ declare module "./InlinePenRouter" {
 		const ownedFinger =
 			e.pointerType === "touch" && this.activeIsFinger && e.pointerId === this.activePenId;
 		if (!ownedFinger && e.pointerType !== "pen" && !this.ownedMouseStroke(e) && !this.mouseMayStartOrHover(e)) return;
-		// Any PEN/MOUSE raw, hover included, proves the channel exists for that
-		// pipeline and keeps its move handler out of the ink business. A direct
-		// touch does not impersonate that hardware capability: finger strokes
-		// remain move-capable even when their engine also emits raw events.
+		// A PEN/MOUSE raw in a stroke moves that stroke's ink to the raw stream
+		// and keeps its move handler out of the ink business. A direct touch
+		// does not impersonate that hardware capability: finger strokes remain
+		// move-capable even when their engine also emits raw events.
 		if (!ownedFinger) this.inkFeed.noteRawChannel();
 		if (this.activePenId === null) {
-			// PEN OFF, the raw stream's half of the hover gate above and for
-			// the same three reasons. `noteRawChannel()` stays ABOVE it: that
-			// records only that this engine HAS a raw channel, a fact about
-			// the machine rather than about the pen, and losing it while the
-			// pen is off would put the first stroke after it comes back on
-			// the slower move-fed path for no reason.
+			// No stroke: the raw listener is bound only from a claim to its end
+			// (InlinePenRouter.bindRawListener), so a raw lands here only in the
+			// gap between a claim and the router taking the pointer, or from a
+			// listener a test binds by hand. Hover bookkeeping lives on
+			// `pointermove`; this keeps the same steps for that gap. PEN OFF:
+			// the raw stream's half of the hover gate above.
 			if (e.pointerType === "pen" && this.penOff()) return;
 			this.lastPenHoverAt = performance.now();
 			// The raw stream's half of the pen-only stamp; same rule, same
@@ -823,6 +980,9 @@ declare module "./InlinePenRouter" {
 			this.silentLiftEnds++;
 			telemetry.bump("inline.penUp.silentLift");
 			tr(e.type, e, "SILENT LIFT, TERMINATES STROKE", undefined, "lifecycle", "silent-lift");
+			// The raw stream's half of the lift with the side button still held (see the move handler above). On
+			// Chromium the raw copy of a row comes first and ends the stroke here, so the move copy never reaches its line.
+			if (e.pointerType === "pen" && (e.buttons & 2) !== 0) airPress.set(this, e.pointerId);
 			this.endPenStroke(e, false);
 			return;
 		}
@@ -904,6 +1064,7 @@ declare module "./InlinePenRouter" {
 
 	function pointerUpOrCancel(this: InlinePenRouter, e: PointerEvent): void {
 		if (e.pointerType === "touch") {
+			if (selectionTouches.get(this)?.pointerId === e.pointerId) selectionTouches.delete(this);
 			const blockedFingerGesture = this.fingerInkBlockedUntilAllLift;
 			const ownedFinger = this.activeIsFinger && e.pointerId === this.activePenId;
 			if (ownedFinger) this.endPenStroke(e, false);
@@ -935,6 +1096,10 @@ declare module "./InlinePenRouter" {
 			const wasAssistPan = this.endAssist(e);
 			const duringStroke =
 				ownedFinger || (this.activePenId !== null && this.guardTouches.has(e.pointerId));
+			// Read before the lift below resets it: whether this gesture scrolled at any point.
+			const panned = this.gesturePanned || wasAssistPan;
+			const start = tapStarts.get(this)?.get(e.pointerId);
+			tapStarts.get(this)?.delete(e.pointerId);
 			if (this.guardTouches.delete(e.pointerId)) {
 				// `panned` = this gesture really scrolled (assist engaged at any
 				// point). Only then does the native touch window open on the
@@ -965,6 +1130,21 @@ declare module "./InlinePenRouter" {
 			if (!endedLivePinch && !wasAssistPan && !duringStroke && this.touchPos.size === 0 && this.guardTouches.size === 0) {
 				this.cb.onAllContactsLifted?.();
 			}
+			// A TAP: one finger, down and up near the same place and soon, with no pan, pinch, stroke or palm in it.
+			// The surface decides what a tap does (the note: select the attached ink it landed on, else let go of an ink
+			// selection it landed off). A tap it took is kept from the text: this lift and its fallout.
+			if (
+				e.type === "pointerup" && start !== undefined && !start.caught && !panned && !endedLivePinch && !duringStroke &&
+				!blockedFingerGesture && this.touchPos.size === 0 && this.guardTouches.size === 0 &&
+				Math.hypot(e.clientX - start.x, e.clientY - start.y) <= TAP_MAX_MOVE_PX &&
+				e.timeStamp - start.at <= TAP_MAX_MS
+			) {
+				if (this.cb.onTapLift?.(this.sampleFrom(e), e) === true) {
+					e.preventDefault();
+					e.stopPropagation();
+					eatTapFallout(this, e);
+				}
+			}
 			if (wasAssistPan || duringStroke || blockedFingerGesture) {
 				// The pan already happened (or a palm is lifting mid-stroke);
 				// keep the trailing tap machinery off the editor, matching a
@@ -978,6 +1158,8 @@ declare module "./InlinePenRouter" {
 			this.resumeEaseIfIdle();
 			return;
 		}
+		// The button pressed in the air is released: the next landing is an ordinary contact again.
+		if (e.pointerType === "pen" && airPress.get(this) === e.pointerId) airPress.delete(this);
 		const wasOurs = this.activePenId !== null && e.pointerId === this.activePenId;
 		tr(e.type, e, wasOurs ? "TERMINATES STROKE" : "");
 		if (wasOurs) {
@@ -1050,6 +1232,7 @@ declare module "./InlinePenRouter" {
 	 * stream and the branch that calls this has already maintained it.
 	 */
 	function retireAllContactsOnNativeEnd(this: InlinePenRouter): void {
+		selectionTouches.delete(this);
 		if (this.pinchLive) {
 			// Read the centroid while the contacts are still there, the same
 			// order the release path uses (audit-fixes-design.md 5i I2).

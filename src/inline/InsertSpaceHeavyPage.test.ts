@@ -209,7 +209,7 @@ async function labelRig(scrollLeft: number, bandLeft: number) {
 		spaceRowsCache: null, spaceLineY: null, spaceTotalDy: 0,
 		filePath: () => path,
 		camera: { screenToWorld: (x: number, y: number) => ({ x, y }), snapshot: { x: 0, y: 0, zoom: 1 } },
-		selection: { bounds: () => null },
+		selection: { bounds: () => null, isEmpty: true, strokeIds: [], revision: 0 },
 	});
 	inlineInk.applyAddLive(path, [mk("above", 300, 10, 320, 18), mk("below", 300, 200, 320, 208)]);
 	return {

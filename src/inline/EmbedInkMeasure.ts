@@ -83,8 +83,9 @@ const ROW_HOST = /^(UL|OL|PRE|P)$/;
 /**
  * The rows `el` shows, by its kind (EmbedInkLines.ts, `BlockRows`), read from the block itself or, where a wrapper holds
  * it (a reading view's section, a print's block), from its first element child: a list's items, a code block's rows of
- * code, a paragraph's lines as its hard breaks start them. Offsets are client rects from `el`'s own, brought to layout
- * px by `el`'s layout height over its rect height, so a zoom or transform on the way to the screen cancels out. A row
+ * code, a paragraph's lines as its hard breaks and the line feeds in its text start them (`lineStarts`). Offsets are
+ * client rects from `el`'s own, brought to layout px by `el`'s layout height over its rect height, so a zoom or
+ * transform on the way to the screen cancels out. A row
  * of text is found by its first character: characters of one font sit one distance under their line's top, so two
  * such characters' tops differ by what their lines' tops do. Nothing is read until a stroke asks for a row.
  */
@@ -135,17 +136,60 @@ function rowsOf(el: HTMLElement): BlockRows | null {
 			},
 		};
 	}
-	const breaks = Array.from(host.getElementsByTagName("br"));
+	const starts = lineStarts(host);
 	return {
 		kind: "breaks",
-		count: breaks.length + 1,
+		count: starts.length,
 		top: (k) => {
 			if (k === 0) return contentTop;
-			const after = breaks[k - 1];
-			if (!after) return null;
-			return fromFirst(firstCharTop(host, after, breaks[k] ?? null), firstCharTop(host, null, breaks[0] ?? null));
+			const at = starts[k], at0 = starts[0];
+			return at && at0 ? fromFirst(charTop(at[0], at[1]), charTop(at0[0], at0[1])) : null;
 		},
 	};
+}
+
+/** Inline elements whose text is the renderer's, not the source's: math, svg, an embed. */
+const NOT_LINES = "svg, math, mjx-container, .math, .internal-embed, .markdown-embed";
+
+/**
+ * A paragraph's source lines as it shows them, in document order: each line's first character that is not white space,
+ * null for a line with none. A line starts after each hard break and after each line feed in its text (strict line
+ * breaks on: the renderer keeps the source's line feeds and the layout flows the lines together); the line feed the
+ * renderer writes after a hard break starts no second line, and a line feed ending the text starts none. Text the
+ * renderer draws in place of the source (math, an svg, an embed) holds none of the paragraph's lines: it is skipped.
+ */
+function lineStarts(host: HTMLElement): Array<[Text, number] | null> {
+	const starts: Array<[Text, number] | null> = [null];
+	let afterBreak = false, endsInFeed = false;
+	const walker = host.ownerDocument.createTreeWalker(host, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+		acceptNode: (n) => (n.nodeType !== Node.TEXT_NODE && (n as Element).matches(NOT_LINES) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+	});
+	for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+		if (n.nodeType !== Node.TEXT_NODE) {
+			if ((n as Element).tagName === "BR") {
+				starts.push(null);
+				afterBreak = true;
+				endsInFeed = false;
+			}
+			continue;
+		}
+		const data = (n as Text).data;
+		for (let i = 0; i < data.length; i++) {
+			if (data.charCodeAt(i) === 10) {
+				if (afterBreak) afterBreak = false;
+				else {
+					starts.push(null);
+					endsInFeed = true;
+				}
+				continue;
+			}
+			if (/\s/.test(data[i]!)) continue;
+			afterBreak = endsInFeed = false;
+			if (starts[starts.length - 1] === null) starts[starts.length - 1] = [n as Text, i];
+		}
+	}
+	if (endsInFeed) starts.pop();
+	return starts;
 }
 
 function textNodes(root: HTMLElement): Text[] {
@@ -162,17 +206,6 @@ function charTop(node: Text, at: number): number | null {
 	range.setEnd(node, at + 1);
 	const rect = range.getClientRects().item(0);
 	return rect && (rect.height > 0 || rect.width > 0) ? rect.top : null;
-}
-
-/** The client top of the first character that is not white space after `after` (or from the start) and before `before`. */
-function firstCharTop(host: HTMLElement, after: Node | null, before: Node | null): number | null {
-	for (const node of textNodes(host)) {
-		if (after && !(after.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
-		if (before && before.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) return null;
-		const at = node.data.search(/\S/);
-		if (at >= 0) return charTop(node, at);
-	}
-	return null;
 }
 
 /** Top-level elements of a render that are not one of the note's sections. */

@@ -242,6 +242,8 @@ function makeRig(): Rig {
 		devicePixelRatio: 1,
 		getComputedStyle: () => ({ fontSize: "16px", paddingTop: undefined, position: "relative" }),
 		cancelAnimationFrame: () => undefined,
+		// Inert: the idle index rebuild never fires here, so a paint that leaves the index dirty has it rebuilt at the next read.
+		setTimeout: () => 0,
 		clearTimeout: () => undefined,
 		requestAnimationFrame: (fn: () => void) => {
 			frames.push(fn);

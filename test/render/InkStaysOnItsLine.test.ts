@@ -15,7 +15,9 @@
  *
  * Three cells, each on two mounts that must agree:
  *  - zoom: ctrl+wheel notches from 100 percent to about 50 and back, the pointer still on the ink. At every settle the
- *    text row under the ink's centre is the row it was written on, and the ink's centre is within one line of it.
+ *    text row under the ink's centre is the row it was written on, and the ink's centre is within one line of it. The zoom
+ *    rows are held per mount, not mount against mount: each settled notch keeps the ink within 2 device px of where it sat on
+ *    its text at the rest.
  *  - scroll: no zoom; scroll up to the top through the lines never drawn, then back to the same scrollTop. The row under
  *    the ink is the row it was written on.
  *  - typing: a wrapped paragraph inserted three lines above the ink. The editor lays the paragraph out under its old
@@ -23,7 +25,8 @@
  *    ink; the re-measure moves the ink with its line. So after the settle the ink's own words sit exactly the typed
  *    block's measured height lower under the ink than before (within one px).
  *  - lasso: the stroke lasso-moved to the line ten below, then the zoom cell's notches. The drop leaves the ink where the
- *    drag put it, on its new words, with its anchor on the line under its top, and the zoom keeps it on them.
+ *    drag put it, on its new words, with its anchor on the line under its top, and the zoom keeps it on them, within 2 device
+ *    px of where the drop left it on them, per mount.
  *  - insert space: two lines opened over the ink's line, then the editor's undo and redo of that step. After each, the
  *    ink sits on its words as at the rest, and its anchor names their line: the document change moves the anchor once.
  *
@@ -611,29 +614,54 @@ function judgeSpaced(name: string, rows: any[], fails: string[]): void {
 	judgeOnLine(name, rows, fails);
 }
 /**
- * The two mounts agree: every settled drift, less that mount's own rest drift, within one note px. The loop drawn at the mount
+ * The two mounts agree: every settled drift, less that mount's own rest drift, within one note px plus one device px in note px
+ * (1 / (dpr x k), this row's k, the mount's dpr). The device px is raster phase: the committed raster's pixel centroid moves
+ * one device px between mounts; at the gate's dpr 2 that is over one note px only below k 0.5. The loop drawn at the mount
  * lands up to about 2 note px from its text's centre, differently per mount, before anything moves.
+ *
+ * Zoom notch rows are left out: once a notch settles and the lines are measured, each mount's ink and text land on device px
+ * by their own sub-pixel phase, so the two mounts can differ by about one device px, which at k 0.6 is about one note px.
+ * judgeZoomDrift holds each mount to itself instead.
  */
-function agree(name: string, a: any[], b: any[], fails: string[]): void {
-	const sa = a.filter(r => r.phase === "settled"), sb = b.filter(r => r.phase === "settled");
+function agree(name: string, a: any[], b: any[], fails: string[], dpr: number): void {
+	const kept = (r: any) => r.phase === "settled" && r.dir !== "out" && r.dir !== "in";
+	const sa = a.filter(kept), sb = b.filter(kept);
 	const za = a.find(r => r.phase === "rest")?.driftNote, zb = b.find(r => r.phase === "rest")?.driftNote;
 	sa.forEach((r, i) => { const o = sb[i]; if (!o || typeof r.driftNote !== "number" || typeof o.driftNote !== "number" || typeof za !== "number" || typeof zb !== "number" ||
-		Math.abs((r.driftNote - za) - (o.driftNote - zb)) >= 1)
+		!(Number.isFinite(r.k) && r.k > 0) || !(Number.isFinite(dpr) && dpr > 0) || Math.abs((r.driftNote - za) - (o.driftNote - zb)) >= 1 + 1 / (dpr * r.k))
 		fails.push(`${name}: mounts disagree at ${r.dir} #${r.step}: drift ${f(r.driftNote)} from rest ${f(za)} against ${f(o?.driftNote)} from rest ${f(zb)}`); });
+}
+/** The most a zoom notch may move the ink against its own text, from where the mount's reference row had it, device px. */
+const ZOOM_DRIFT_DEVICE_PX = 2;
+/**
+ * A zoom cell, one mount: at every settled notch the ink's drift from its text, less the drift at the reference row (the rest,
+ * or the drop for a lasso-moved stroke), in device px at that row's scale, stays under ZOOM_DRIFT_DEVICE_PX: one note px at 100
+ * percent, device scale 2.
+ */
+function judgeZoomDrift(name: string, rows: any[], ref: "rest" | "dropped", dpr: number, fails: string[]): void {
+	const z = rows.find(r => r.phase === ref)?.driftNote;
+	if (typeof z !== "number") { fails.push(`${name}: no ${ref} row to judge the zoom against`); return; }
+	for (const r of rows) {
+		if (r.phase !== "settled" || (r.dir !== "out" && r.dir !== "in")) continue;
+		const moved = typeof r.driftNote === "number" ? (r.driftNote - z) * r.cssScale * dpr : NaN;
+		if (!(Math.abs(moved) < ZOOM_DRIFT_DEVICE_PX))
+			fails.push(`${name} ${r.dir} #${r.step} k ${f(r.k, 4)}: the ink moved ${f(moved)} device px against its text from the ${ref} row (bar ${ZOOM_DRIFT_DEVICE_PX})`);
+	}
 }
 
 const CELLS = [
-	{ name: "ctrl+wheel zoom out, 100 to about 50 percent and back in notches", steps: [["notches", 50, 7], ["notches", -50, 7]], judge: judgeOnLine, reach: (k: number) => k <= 0.55, saves: false },
+	{ name: "ctrl+wheel zoom out, 100 to about 50 percent and back in notches", steps: [["notches", 50, 7], ["notches", -50, 7]], judge: judgeOnLine, reach: (k: number) => k <= 0.55, saves: false, drift: "rest" },
 	{ name: "no zoom, scroll up through the never-drawn lines to the top and back", steps: [["scrollTrip", 400]], judge: judgeOnLine, reach: null, saves: false },
 	{ name: "a wrapped paragraph typed three lines above the ink", steps: [["typeAbove", 3, TYPED]], judge: judgeTyped, reach: null, saves: true },
 	{ name: "a short plain line typed three lines above the ink", steps: [["typeAbove", 3, PLAIN]], judge: judgePlain, reach: null, saves: true },
 	// Line 69, five lines above the ink, is a short line here: one row before and after its line height doubles.
 	{ name: "a wrapped paragraph typed three lines above the ink while a decoration doubles the line height five lines above it, as a styled heading changes it", steps: [["typeAbove", 3, TYPED, 5]], judge: judgeGrown, reach: null, saves: true, short: [69] },
-	{ name: "the stroke lasso-moved ten lines down, then ctrl+wheel zoom out to about 50 percent and back in notches", steps: [["lassoDown", 10], ["notches", 50, 7], ["notches", -50, 7]], judge: judgeMoved, reach: (k: number) => k <= 0.55, saves: false },
+	{ name: "the stroke lasso-moved ten lines down, then ctrl+wheel zoom out to about 50 percent and back in notches", steps: [["lassoDown", 10], ["notches", 50, 7], ["notches", -50, 7]], judge: judgeMoved, reach: (k: number) => k <= 0.55, saves: false, drift: "dropped" },
 	{ name: "insert space opening two lines above the ink, then its undo and its redo", steps: [["spaceUndoRedo", 2]], judge: judgeSpaced, reach: null, saves: false },
 ] as const;
 for (const cell of CELLS) it(`${cell.name}: the ink stays on the words it was written on, and typing never moves it`, async () => {
 	const fails: string[] = [], runs: any[][] = [];
+	let dprA = 0;
 	for (const mountName of ["A", "B"]) {
 		const short = (cell as { short?: readonly number[] }).short;
 		const { page, m, errors } = await mounted(short ? syntheticNote(short) : undefined);
@@ -643,6 +671,7 @@ for (const cell of CELLS) it(`${cell.name}: the ink stays on the words it was wr
 			const rows = [m.rest, ...out.flat()];
 			const name = `${cell.name} mount ${mountName}`;
 			runs.push(rows);
+			if (mountName === "A") dprA = m.dpr;
 			report.push({ cell: name, dsf: DSF, mount: { ...MOUNT, strokes: m.strokes, anchorLine: m.anchorLine, lines: m.lines, cursor: m.cursor, dpr: m.dpr,
 				inner: m.inner, canvasMode: m.canvasMode, idle: m.idle }, errors, rows });
 			// eslint-disable-next-line no-console
@@ -656,10 +685,12 @@ for (const cell of CELLS) it(`${cell.name}: the ink stays on the words it was wr
 			if (cell.reach && (!far || !cell.reach(far.k))) fails.push(`${name}: the zoom reached k ${f(far?.k, 4)}, not about 0.5`);
 			judgeCommon(name, rows, fails, cell.saves);
 			cell.judge(name, rows, fails);
+			const drift = (cell as { drift?: "rest" | "dropped" }).drift;
+			if (drift) judgeZoomDrift(name, rows, drift, m.dpr, fails);
 		} finally {
 			await page.context().close();
 		}
 	}
-	agree(cell.name, runs[0]!, runs[1]!, fails);
+	agree(cell.name, runs[0]!, runs[1]!, fails, dprA);
 	expect(fails, fails.join("\n")).toEqual([]);
 }, 300_000);

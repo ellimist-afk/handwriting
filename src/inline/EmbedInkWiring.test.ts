@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import mainSource from "../main.ts?raw";
 import onloadSource from "../PluginOnload.ts?raw";
 import tabSource from "../settings/HandwritingSettingTab.ts?raw";
+import settingsSource from "../settings/PluginSettings.ts?raw";
 
 // The onload phases live in PluginOnload.ts, read here with main.ts.
 const src = [mainSource, onloadSource].join("\n").replace(/\r\n/g, "\n");
@@ -21,8 +22,20 @@ function caseBody(name: string): string {
 }
 
 describe("main.ts calls the embed-ink hooks", () => {
-	it.each(["pressureSensitivity", "inkSmoothing", "booxMode"])("the %s setting repaints reading-view and embedded ink (audit 25)", (name) => {
+	it.each(["inkSmoothing", "booxMode"])("the %s setting repaints reading-view and embedded ink (audit 25)", (name) => {
 		expect(caseBody(name)).toContain("embedInkRepaintAll();");
+	});
+
+	// Since the 1.5.0 pressure lock the row hands the switch to setPressureSwitch, which repaints overlays and embeds
+	// only while unmarked ink still follows the switch (no lock yet); once locked a flip redraws nothing.
+	it("the pressureSensitivity setting repaints reading-view and embedded ink while unmarked ink follows it (audit 25)", () => {
+		expect(caseBody("pressureSensitivity")).toContain("this.plugin.setPressureSwitch(on);");
+		const settings = settingsSource.replace(/\r\n/g, "\n");
+		const at = settings.indexOf("function setPressureSwitch(");
+		expect(at, "premise: setPressureSwitch found").toBeGreaterThan(0);
+		const body = settings.slice(at, settings.indexOf("\n\t}\n", at));
+		expect(body).toContain("repaintAllInkOverlays();");
+		expect(body).toContain("embedInkRepaintAll();");
 	});
 
 	it("a note rename re-keys embed layers right after the ink store moves (audit 118)", () => {

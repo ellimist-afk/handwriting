@@ -3664,6 +3664,8 @@ describe("PdfInkController: a stroke torn down with no pointerup stands the surf
 	let ops: InkOp[];
 	let scroller: ReturnType<typeof fakeEl>;
 	let cursorStyle: Record<string, unknown>;
+	/** The router `bindTo` built for this test, disposed by `teardownSurface`. */
+	let boundRouter: { dispose(): void } | null = null;
 
 	/** The window blur the router registered, i.e. alt-tab with the pen down. */
 	function blur(): void {
@@ -3716,12 +3718,29 @@ describe("PdfInkController: a stroke torn down with no pointerup stands the surf
 		);
 		priv = controller as unknown as typeof priv;
 		(controller as unknown as { bindTo(el: unknown): void }).bindTo(el);
+		// Kept here, not read back from the controller at teardown: this suite
+		// binds with no mount, so no mount disposer disposes the router, and
+		// unmount nulls the controller's field before teardown can reach it.
+		boundRouter = (controller as unknown as { router: { dispose(): void } | null }).router;
 	});
 
-	afterEach(() => {
-		(controller as unknown as { router: { dispose(): void } | null }).router?.dispose();
+	/**
+	 * What every test here leaves behind. A named function so a test can run
+	 * it and then look at what is still live: the router's ownership disarm
+	 * timer (400 ms after a stroke ends) must not outlive the fake window, or
+	 * it fires into whatever file runs next and throws there.
+	 */
+	function teardownSurface(): void {
+		const current = (controller as unknown as { router: { dispose(): void } | null }).router;
+		if (current && current !== boundRouter) current.dispose();
+		boundRouter?.dispose();
+		boundRouter = null;
 		resetTipModeForTest();
 		setPenReticle(true);
+	}
+
+	afterEach(() => {
+		teardownSurface();
 	});
 
 	/**
@@ -4004,6 +4023,30 @@ describe("PdfInkController: a stroke torn down with no pointerup stands the surf
 		const persisted = parsePage(written!, id).data.strokes;
 		expect(persisted.length, "the written page does not hold the stroke drawn before the close").toBe(1);
 		expect(persisted[0]?.page).toBe(1);
+	});
+
+	it("and a pane closed mid-stroke leaves no ownership timer running once the test is torn down", () => {
+		// The close above ends the stroke through the router, which arms the
+		// 400 ms ownership disarm. Here the controller was bound with no mount,
+		// so no mount disposer disposes the router, and unmount drops its own
+		// reference to it. The test's teardown has to reach that router anyway:
+		// a timer left running fires after the fake window is gone and fails
+		// the whole run from another file.
+		const router = (controller as unknown as { router: { ownershipDisarmTimer: unknown } | null }).router;
+		expect(router, "the bind built no router").not.toBeNull();
+		inkContact();
+		priv.tools = Object.assign(toolsStub(), { destroy: () => {} });
+		const wet = wetStub();
+		Object.assign(wet.pair.wetCanvas, { remove: () => {} });
+		Object.assign(wet.pair.headCanvas, { remove: () => {} });
+		priv.pair = wet.pair;
+		priv.wetHostPage = 1;
+
+		controller.unmount();
+		expect(router!.ownershipDisarmTimer, "the close did not end the stroke through the router").not.toBeNull();
+
+		teardownSurface();
+		expect(router!.ownershipDisarmTimer, "the router's ownership timer outlives the test's teardown").toBeNull();
 	});
 
 	/**

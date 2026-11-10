@@ -180,6 +180,7 @@ import { installSlidesPenGuards } from "./SlidesPenGuards";
 import { installSlidesMount } from "./SlidesMount";
 import { installSlidesPointerPath } from "./SlidesPointerPath";
 import { installSlidesBind } from "./SlidesBind";
+import { FOLLOW_TIMEOUT_MS, installSlidesTransition, type SlidesFollow } from "./SlidesTransition";
 import { describe, log, now } from "./SlidesController";
 
 export const COMMITTED_CLASS = "handwriting-slides-ink";
@@ -321,6 +322,12 @@ export interface SlidesInkHost {
 	readSource(path: string): Promise<string | null>;
 	/** The note's persisted page id from cheap metadata, or null. */
 	readPageId(path: string): string | null;
+	/**
+	 * While this note and another share one page id with no owner decided, the
+	 * other note's path; otherwise null. Inline ink on both is read-only then,
+	 * and so is this surface.
+	 */
+	duplicateLockedWith?(path: string): string | null;
 	/** Atomically stamp (or discover) the page id in the Markdown. */
 	claimId(path: string, proposedId: string): Promise<{ pageId: string; futureVersion?: number }>;
 	/** A fresh page id to propose. */
@@ -707,6 +714,10 @@ export class SlidesDeck implements SlidesActions {
 	/** slide index -> strokes, in deck-logical units. */
 	readonly strokes = new Map<number, InkStroke[]>();
 	layers: Layers | null = null;
+	/** A slide change being followed until the slide lands (SlidesTransition.ts); null at rest. */
+	follow: SlidesFollow | null = null;
+	/** How long a follow may run before it lands anyway. A field so a render fixture can hold a paused transition. */
+	followTimeoutMs = FOLLOW_TIMEOUT_MS;
 	/**
 	 * The last answer `measureDeckTheme` set, so `onSlidesCssChange` can tell
 	 * a real flip from a `css-change` that left the deck's own paint alone.
@@ -1054,6 +1065,7 @@ installSlidesPenGuards(SlidesDeck.prototype);
 installSlidesMount(SlidesDeck.prototype);
 installSlidesPointerPath(SlidesDeck.prototype);
 installSlidesBind(SlidesDeck.prototype);
+installSlidesTransition(SlidesDeck.prototype);
 
 // ---- module-level controller (SlidesController.ts) ------------------------
 
@@ -1061,6 +1073,7 @@ export {
 	activeSlidesActions,
 	describe,
 	drains,
+	finishSlidesGesture,
 	isTextEntryElement,
 	log,
 	now,
@@ -1070,5 +1083,6 @@ export {
 	setSlidesInk,
 	settleSlidesInk,
 	slidesInkEnabled,
+	slidesParkedInk,
 	slidesReloadCandidate,
 } from "./SlidesController";

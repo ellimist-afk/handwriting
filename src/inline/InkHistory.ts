@@ -3,6 +3,8 @@ import { Annotation, Prec, StateEffect, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
 import { InkStroke } from "../ink/Stroke";
+import { invertAttachStep, type AttachStep } from "./InkAttachments";
+import type { StrokeShape } from "./LassoTransform";
 import { diagnosticsEnabled, diagnosticsEpoch } from "../diag/DiagSwitch";
 import { queueUndoPostObservation, recordUndoObservation, undoTraceIdentityForView } from "../diag/UndoHistoryTrace";
 
@@ -108,7 +110,19 @@ export type InkOp =
 			removedAt: number[];
 			inserted: InkStroke[];
 			insertedAt: number[];
-	  } & InkOpIdentity);
+	  } & InkOpIdentity)
+	/**
+	 * A lasso resize or rotate (LassoTransform.ts): each listed stroke's shape (points, width, bbox, line anchor) before and
+	 * after, as copies, in the order of `strokeIds`. Applied in place, so ids and stroke objects stay; the inverse swaps the two
+	 * halves, so an undo writes the before copy back byte for byte, with no float inverse of a turn.
+	 */
+	| ({ type: "transform"; path: string; strokeIds: string[]; before: StrokeShape[]; after: StrokeShape[] } & InkOpIdentity)
+	/**
+	 * Attach, Change attachment and Detach (InkAttachments.ts): the group's record before and after, null for none, and
+	 * the members' stored points moved in the same step when it settles them (Attach by each member's own correction,
+	 * Detach by the group's), so nothing shown moves. One step each; the inverse swaps the two records and negates the moves.
+	 */
+	| ({ path: string } & AttachStep & InkOpIdentity);
 
 /**
  * The history a shape snap leaves behind: TWO steps, not one.
@@ -244,6 +258,18 @@ export function invertInkOp(op: InkOp): InkOp {
 				inserted: op.removed,
 				insertedAt: op.removedAt,
 			};
+		case "attach":
+			return { path: op.path, historyIdentity: op.historyIdentity, pageId: op.pageId, ...invertAttachStep(op) };
+		case "transform":
+			return {
+				type: "transform",
+				path: op.path,
+				historyIdentity: op.historyIdentity,
+				pageId: op.pageId,
+				strokeIds: op.strokeIds,
+				before: op.after,
+				after: op.before,
+			};
 	}
 }
 
@@ -269,6 +295,10 @@ function isInkStep(effect: StateEffect<unknown>): boolean {
 			return Array.isArray(op.strokeIds) && typeof op.dx === "number" && typeof op.dy === "number";
 		case "replace":
 			return Array.isArray(op.removed) && Array.isArray(op.inserted);
+		case "attach":
+			return typeof op.id === "string" && op.before !== undefined && op.after !== undefined;
+		case "transform":
+			return Array.isArray(op.strokeIds) && Array.isArray(op.before) && Array.isArray(op.after);
 		default:
 			return false;
 	}

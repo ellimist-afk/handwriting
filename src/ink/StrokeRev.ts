@@ -49,13 +49,53 @@ export function bumpInkRevision(): void {
 	ink++;
 }
 
+let list = 0;
+
+/**
+ * The stroke-list revision: moves when a store's list changes in place (an add, a remove, a replace), never when a stroke
+ * moves or takes a new shape in place. A list kept beside this number holds the same objects in the same places while it
+ * stands.
+ */
+export function inkListRevision(): number {
+	return list;
+}
+
+/** Record that a stroke list changed in place: which objects it holds, or where. */
+export function bumpInkListRevision(): void {
+	list++;
+}
+
 /** The stroke's current revision. Never mutated = 0. */
 export function strokeRev(stroke: InkStroke): number {
 	return revs.get(stroke) ?? 0;
+}
+
+const sources = new WeakMap<InkStroke, InkStroke>();
+
+/**
+ * Record that `copy` shows `of` moved (a line or group correction): a cache keyed on the store's stroke reads
+ * the copy's source and that source's revision. A copy of a copy names the first source.
+ */
+export function markCopy(copy: InkStroke, of: InkStroke): void {
+	sources.set(copy, sources.get(of) ?? of);
+}
+
+/** The store stroke a shown copy was made from; the stroke itself when it is no copy. */
+export function sourceOf(stroke: InkStroke): InkStroke {
+	return sources.get(stroke) ?? stroke;
 }
 
 /** Record that this stroke's geometry changed under its own identity. */
 export function bumpStrokeRev(stroke: InkStroke): void {
 	revs.set(stroke, (revs.get(stroke) ?? 0) + 1);
 	ink++;
+}
+
+/**
+ * Record that a shown copy moved in place (a group's correction changed): its own revision moves, so the
+ * ribbon caches draw it at its new place, and the ink revision does not, as no store stroke or store list changed. Lists
+ * of shown copies are keyed on the follow's generation, which the move bumps.
+ */
+export function bumpCopyRev(copy: InkStroke): void {
+	revs.set(copy, (revs.get(copy) ?? 0) + 1);
 }

@@ -65,7 +65,7 @@ declare module "./MobileTools" {
 		// from two rows back to one FOUR times - at 460, 426, 392 and 358 -
 		// each of them a line of toolbar appearing and vanishing under the
 		// hand. Measured, and pinned by StripDragFlicker.test.ts.
-		const chrome = this.el.offsetWidth - this.el.clientWidth + 2 * pad;
+		const chrome = this.face.offsetWidth - this.face.clientWidth + 2 * pad;
 		const available = parent.clientWidth - 16 - chrome;
 		// Nothing to measure against: a detached strip, a pane not laid out
 		// yet, or the unit suite, whose elements answer 0 to every dimension.
@@ -203,7 +203,12 @@ declare module "./MobileTools" {
 		const key = plan.chevron ? plan.moved.join(",") : "";
 		const priority = [...foldOrder].reverse();
 		const orderKey = priority.join(",");
-		if (key === this.appliedPlan && orderKey === this.appliedOrder) return;
+		// An open pop hangs from rects this pass may just have moved, plan
+		// changed or not: the pane's edge can come in with the fold unchanged.
+		if (key === this.appliedPlan && orderKey === this.appliedOrder) {
+			this.rehangPops();
+			return;
+		}
 		this.appliedPlan = key;
 		this.appliedOrder = orderKey;
 		this.el.toggleClass("is-more-needed", plan.chevron);
@@ -221,7 +226,7 @@ declare module "./MobileTools" {
 			const node = draggable.has(original) ? ordered[slot++]! : original;
 			const spec = this.buttons.find((b) => b.el === node)?.spec;
 			if (spec && moved.has(spec.commandId)) continue;
-			this.el.insertBefore(node, this.moreBtn);
+			this.face.insertBefore(node, this.moreBtn);
 		}
 		// Then row two, in the order the plan says it reads.
 		for (const id of plan.moved) {
@@ -230,7 +235,8 @@ declare module "./MobileTools" {
 		}
 		// The dot is not in the row order, so the loop above left every tool after it. It belongs at the row's
 		// far end, before the chevron.
-		this.el.insertBefore(this.recordingDot, this.moreBtn);
+		this.face.insertBefore(this.recordingDot, this.moreBtn);
+		this.rehangPops();
 	}
 
 	/**

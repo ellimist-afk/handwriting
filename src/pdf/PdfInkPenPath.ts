@@ -10,7 +10,7 @@ import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { adaptiveCaps, buildTail, correctionError, EINK_CAPS } from "../ink/Prediction";
 import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
 import { predictionEinkOn, predictionEnabled } from "../inline/StrokePrediction";
-import { rowsOf, snapLine, strokeIdsBelow } from "../inline/InsertSpace";
+import { strokeIdsBelow } from "../inline/InsertSpace";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN } from "../ink/PenStyle";
 import { getInkColorHex } from "../ink/InkColor";
 import { getInkSizeMult, getInlineTool } from "../inline/InkOverlay";
@@ -304,9 +304,10 @@ declare module "./PdfInkController" {
 				this.notify("Handwriting: no ink below the line");
 				return;
 			}
-			// Snapped out of any row the line was drawn through, and DRAWN
-			// where it snapped: the seam shown is the seam that will cut.
-			this.spaceLineY = snapLine(rowsOf(here), p.y);
+			// Drawn under the pen, which is where it cuts: a row the line
+			// crosses splits at the line (strokeIdsBelow), so the seam shown
+			// is the seam that will cut.
+			this.spaceLineY = p.y;
 			this.spaceLastY = p.y;
 			this.spaceTotalDy = 0;
 			this.drawSpaceLine(box);

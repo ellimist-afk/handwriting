@@ -2,13 +2,16 @@
  * The slides surface's pointer path: pointerdown, move and end, the eraser, the rested-contact, hold and quiet timers, and the stroke commit.
  * They are methods of SlidesDeck, installed on its prototype when SlidesInkSurface.ts loads.
  */
+import type { CameraState } from "../camera/coordinates";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { markPenHardwareSeen } from "../inline/PenToolsMode";
 import { mouseInkEnabled } from "../inline/MouseInk";
+import { sideButtonAirInterrupt } from "../inline/SideButtonAir";
 import { predictionEinkOn } from "../inline/StrokePrediction";
 import { tipMode } from "../inline/TipMode";
 import { DEFAULT_ERASER_RADIUS_PX } from "../ink/EraserSize";
-import { newStrokeId } from "../ink/Stroke";
+import type { PenStyle } from "../ink/PenStyle";
+import { type InkPoint, type InkTool, newStrokeId } from "../ink/Stroke";
 import { coarseGridFor, StrokeBuilder } from "../ink/StrokeBuilder";
 import { pageOfSlide } from "./SlidesSections";
 import { SILENT_LIFT_QUIET_MS, silentLift, STROKE_HOLD_MS, type StrokeEndReason, strokeSessionReducer } from "./SlidesStrokeSession";
@@ -39,11 +42,38 @@ declare module "./SlidesInkSurface" {
 		logStrokeEndFocus(): void;
 		commitStroke(pointerId: number, reason: StrokeEndReason, samples: number): void;
 		totalStrokes(): number;
+		redrawLiveStroke(): void;
 	}
 }
 
+/**
+ * What the wet layer was handed for each live stroke, in order: the pen-down
+ * sample exactly as `beginStroke` took it, and every point the builder
+ * accepted after it. Kept beside the builder rather than read back out of it,
+ * because the builder stores the first sample with a stroke-relative time
+ * and the wet layer was given the raw one; replaying anything else would be
+ * a different stroke. Keyed by the builder so the record ends with it.
+ *
+ * The tool and the device go with it because a remount builds a fresh wet
+ * layer with the default look (pen, shaped, under the reveal): the redraw
+ * dresses that layer again the way pen-down did, or a mouse stroke comes
+ * back shaped and a highlighter stroke lands above the slide.
+ */
+const liveStrokes = new WeakMap<
+	StrokeBuilder,
+	{ first: InkPoint; flat: boolean; points: InkPoint[]; tool: InkTool; fromMouse: boolean }
+>();
+
 	function onPointerDown(this: SlidesDeck, ev: PointerEvent): void {
 		if (this.disposed) return;
+		// A contact in the middle of a pen button press in the air: the press is
+		// not a click, and a button held through this contact's lift cannot make
+		// one (SideButtonAir.ts). Any pointer, before any branch, as the note
+		// surface's pointerdown does.
+		{
+			const held = sideButtonAirInterrupt();
+			if (held !== null && diagnosticsEnabled()) log(held);
+		}
 		if (this.controlEvent(ev)) {
 			if (ev.pointerType !== "touch") {
 				this.finishGesture();
@@ -74,6 +104,11 @@ declare module "./SlidesInkSurface" {
 		// there is no await on this path and there must never be one, because a
 		// preventDefault after the task that delivered the event is ignored.
 		ev.preventDefault();
+		// A pen or eraser contact while a slide change is moving: the slide's
+		// ink goes to rest now (the repaint ends the follow), so the stroke and
+		// the erase work on settled layers exactly as at rest. The stroke never
+		// jumps; the slide's ink does, to where it lands anyway.
+		if (this.follow) this.repaint();
 		// B1: the tail eraser end erases, and so does the tip while the
 		// palette's Eraser mode is on - a pen without a tail end has no other
 		// way to take ink off a slide. Everything else, including a held
@@ -194,12 +229,10 @@ declare module "./SlidesInkSurface" {
 		const dpr = this.win().devicePixelRatio || 1;
 		this.builder.start(sample.timeStamp, fromMouse ? undefined : coarseGridFor("slides", sample.pointerType, dpr, dpr * slideScale(rect, layoutWidth)));
 		this.builder.add(p.x, p.y, sample.pressure, sample.timeStamp);
-		l.wet.beginStroke(
-			{ x: p.x, y: p.y, pressure: sample.pressure, t: sample.timeStamp },
-			this.activeStyle,
-			nib.tool === "highlighter",
-			this.builder.resolvedPressureProfile
-		);
+		const first: InkPoint = { x: p.x, y: p.y, pressure: sample.pressure, t: sample.timeStamp };
+		const flat = nib.tool === "highlighter";
+		liveStrokes.set(this.builder, { first, flat, points: [], tool: nib.tool, fromMouse });
+		l.wet.beginStroke(first, this.activeStyle, flat, this.builder.resolvedPressureProfile);
 		// The contact point, on screen from the first event. The wet layer
 		// paints nothing until a segment settles - and when it does, it starts
 		// at mid(p0, p1) - so without this the stroke's first half-segment is
@@ -563,10 +596,16 @@ declare module "./SlidesInkSurface" {
 		// `getCoalescedEvents()` would sit inside the timed window and inflate
 		// the number this trace exists to establish.
 		this.moveTrace.countSamples(list.length);
+		let accepted = 0;
+		const live = liveStrokes.get(this.builder);
 		for (const s of list) {
 			const p = mapScreenToSlide(s.clientX, s.clientY, rect, layoutWidth, this.samplePoint);
 			const point = this.builder.add(p.x, p.y, s.pressure, s.timeStamp);
-			if (point) l.wet.appendPoint(cam, style, point);
+			if (point) {
+				l.wet.appendPoint(cam, style, point);
+				live?.points.push(point);
+				accepted++;
+			}
 		}
 		// The live raw head, at the width the ribbon under it is being laid
 		// down at - the wet layer reports it rather than the head guessing
@@ -574,8 +613,34 @@ declare module "./SlidesInkSurface" {
 		// when this stroke's centerline is raw, and then the wet ribbon
 		// already reaches the nib and there is nothing to add.
 		l.tail.clear();
+		// A tap that rests: the move was under the builder's step, so nothing
+		// was accepted and the contact point is still the whole stroke. The
+		// clear above erased the dot drawn at pointerdown; draw it again at the
+		// contact width, or it shows at the live width (or not at all with
+		// smoothing off) until the lift turns it back into the nib dot.
+		const contact = accepted === 0 && this.builder.pointCount === 1 ? this.builder.lastPoint : undefined;
+		drawLiveHead(l, cam, style, contact);
+		ev.preventDefault();
+	}
+
+	/**
+	 * The live head on the tail layer: the contact dot while the contact point
+	 * is still the whole stroke, otherwise the raw stub from the settled curve
+	 * to the nib (none on a raw centerline). Shared by the move path and the
+	 * redraw after a resize, which must leave the same head on the glass.
+	 */
+	function drawLiveHead(l: Layers, cam: CameraState, style: PenStyle, contact: InkPoint | undefined): void {
 		const head = l.wet.head();
-		if (head) {
+		if (contact) {
+			l.tail.drawHead(
+				cam,
+				style,
+				{ x: contact.x, y: contact.y },
+				{ x: contact.x, y: contact.y },
+				contact.pressure,
+				l.wet.contactHalfWidth(style, contact.pressure)
+			);
+		} else if (head) {
 			l.tail.drawHead(
 				cam,
 				style,
@@ -585,7 +650,44 @@ declare module "./SlidesInkSurface" {
 				l.wet.liveHalfWidth(style, head.pressure)
 			);
 		}
-		ev.preventDefault();
+	}
+
+	/**
+	 * After a resize mid-stroke, put the part of the live stroke already drawn
+	 * back on the glass.
+	 *
+	 * Setting a canvas's width or height throws its pixels away, and the wet
+	 * and tail canvases hold the live stroke's only pixels until the lift: the
+	 * committed repaint cannot bring them back, because the stroke is not
+	 * committed yet. So the stroke goes through the wet layer again, from its
+	 * pen-down sample, through the same smoother and width shaper in the same
+	 * order, and the head goes back on the tail. Redrawn at the camera just
+	 * measured rather than kept at the old size: the resize can move the deck,
+	 * and the samples still to come map through the new camera, so pixels kept
+	 * from before would sit apart from the rest of the stroke.
+	 *
+	 * Both layers are cleared first, so a refresh that resized nothing paints
+	 * the same pixels it found. No live stroke, nothing to do.
+	 */
+	function redrawLiveStroke(this: SlidesDeck): void {
+		const l = this.layers;
+		const builder = this.builder;
+		const style = this.activeStyle;
+		if (!l || !builder || !style) return;
+		const live = liveStrokes.get(builder);
+		if (!live) return;
+		const cam = this.geometry().camera;
+		l.wet.clear(l.cssWidth, l.cssHeight);
+		l.tail.clearAll(l.cssWidth, l.cssHeight);
+		// The layers may be new (a remount), so dress them as pen-down did:
+		// the tool's place and look, and the device's shaping, set before
+		// `beginStroke` latches it.
+		this.dressWet(l, live.tool);
+		l.wet.shape = !live.fromMouse;
+		l.wet.beginStroke(live.first, style, live.flat, builder.resolvedPressureProfile);
+		for (const point of live.points) l.wet.appendPoint(cam, style, point);
+		const contact = builder.pointCount === 1 ? builder.lastPoint : undefined;
+		drawLiveHead(l, cam, style, contact);
 	}
 
 	/**
@@ -1036,5 +1138,6 @@ export function installSlidesPointerPath(proto: SlidesDeck): void {
 		logStrokeEndFocus,
 		commitStroke,
 		totalStrokes,
+		redrawLiveStroke,
 	});
 }

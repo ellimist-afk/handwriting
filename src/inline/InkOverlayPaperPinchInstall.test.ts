@@ -34,6 +34,9 @@ const MOVED = [
 	"watchPaperKind",
 	"syncGridPaperBox",
 	"removeGridPaperBox",
+	"syncPageGuideBox",
+	"removePageGuideBox",
+	"markPageGuidesPreview",
 	"stopPaperKindWatch",
 	"clearScrollerPan",
 	"gridBoxPaperStyle",
@@ -50,6 +53,12 @@ const MOVED = [
 	"updatePaperSpacing",
 	"writePaperVars",
 	"clearOwnPaperVars",
+	"putUpHeldRaster",
+	"heldRasterSource",
+	"placeHeldRasterCanvases",
+	"writeHeldRaster",
+	"landHeldRaster",
+	"takeDownHeldRaster",
 ] as const;
 
 describe("paper and pinch preview methods on the overlay prototype", () => {

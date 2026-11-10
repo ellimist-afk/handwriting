@@ -48,7 +48,7 @@ const MOVED = [
 ] as const;
 
 /** Every name the new file takes from the store, and nothing else. */
-const FROM_STORE = ["MAX_DIRTY_MS", "PageStore", "PageWriter", "folderOf"];
+const FROM_STORE = ["MAX_DIRTY_MS", "PageStore", "PageWriter", "contentStamp", "folderOf"];
 
 const storeSrc = storeRaw.replace(/\r\n/g, "\n");
 const fileSrc = fileRaw.replace(/\r\n/g, "\n");

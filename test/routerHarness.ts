@@ -65,9 +65,12 @@ export function installFakeWindow(): () => void {
 
 export function fakeEl() {
 	const handlers = new Map<string, Handler>();
+	/** Every add and remove of a `pointerrawupdate` listener, in order: the battery cells read the binding's lifetime. */
+	const rawLog: Array<"add" | "remove"> = [];
 	const classes = new Set<string>();
 	const el = {
 		handlers,
+		rawLog,
 		/** Replaced below with an identity check; the guards ask this. */
 		contains: (_node: unknown) => false,
 		style: { touchAction: "" },
@@ -88,9 +91,17 @@ export function fakeEl() {
 			},
 		},
 		addEventListener(type: string, h: Handler) {
+			if (type === "pointerrawupdate") rawLog.push("add");
 			handlers.set(type, h);
 		},
-		removeEventListener() {},
+		// Honoured for `pointerrawupdate` only: the router binds that one per
+		// stroke, and a browser sends no raw to an element with no listener.
+		// Every other registration lives for the router's life, as before.
+		removeEventListener(type: string, h: Handler) {
+			if (type !== "pointerrawupdate") return;
+			rawLog.push("remove");
+			if (handlers.get(type) === h) handlers.delete(type);
+		},
 		getBoundingClientRect: () => ({
 			left: 0,
 			top: 0,
@@ -249,6 +260,9 @@ export function harness() {
 	);
 	const fire = (ev: PointerEvent) => {
 		const h = el.handlers.get(ev.type);
+		// No raw listener, no raw event: the browser generates
+		// `pointerrawupdate` only while a listener exists.
+		if (!h && ev.type === "pointerrawupdate") return;
 		if (!h) throw new Error(`router registered no handler for ${ev.type}`);
 		h(ev);
 	};

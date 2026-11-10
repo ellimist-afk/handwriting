@@ -264,6 +264,14 @@ export interface ToolbarDragState {
 
 export class MobileTools {
 	el!: HTMLElement;
+	/**
+	 * The strip's visible row, inside `el`: every button, divider, the grip,
+	 * the tip and the folded row live here, and it carries the strip's look,
+	 * its 0.92 included. The slider pops are `el`'s children BESIDE it, so
+	 * they are not painted inside the 0.92 group and stay solid (styles.css,
+	 * `.handwriting-mobile-tools-face`). `el` and the face are the same box.
+	 */
+	face!: HTMLElement;
 	buttons: Array<{ el: HTMLElement; spec: ButtonSpec }> = [];
 	/**
 	 * The command ids this strip was actually BUILT with, so `stale()` can

@@ -113,7 +113,7 @@ const isOff = (r: Row): boolean => {
 describe("the Infinite Canvas row says what it turns on", () => {
 	it("carries the Infinite Canvas description, word for word", async () => {
 		const tab = await tabFor({});
-		expect(row(tab, "Infinite canvas").desc).toBe("Let the page grow as you write and scroll. Also turns on the zoom bar. Global setting. A note can override it with handwriting-canvas: true or false in its frontmatter. Default off.");
+		expect(row(tab, "Infinite canvas").desc).toBe("Let the page grow as you write and scroll. Also turns on the zoom bar. Global setting. Default off.");
 	});
 });
 

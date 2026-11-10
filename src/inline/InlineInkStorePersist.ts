@@ -9,12 +9,16 @@ import { forkFromAdoption, recordFork } from "../persistence/ForkResolution";
 import { runDetached } from "../util/Detached";
 import { notifyInkChanged } from "./InkEvents";
 import { installMethods } from "./InstallMethods";
+import { takeColumnRef } from "../ink/ColumnRef";
+import { isOpaqueAttachment, liveAttachments } from "./InkAttachments";
 import { ADOPTION_QUIET_MS, ADOPTION_RUN_GAP_MS, ADOPTION_STILL_FAILING, type ExternalAdoptionHeldReason, type ExternalAdoptionResult, INK_FILE_MISSING, inkFingerprint, type NoteRecord, InlineInkStore } from "./InlineInkStore";
 
 declare module "./InlineInkStore" {
 	interface InlineInkStore {
 		reloadExternal(path: string): Promise<boolean>;
 		adoptExternal(path: string, canAdopt?: () => boolean): Promise<ExternalAdoptionResult>;
+		adoptionPending(path: string): number;
+		adoptionFound(path: string): void;
 		noteAdoptionFailure(rec: NoteRecord, fileMissing?: boolean): void;
 		cacheStats(): { notes: number; strokes: number; points: number };
 		restoreRevision(pageId: string, page: PageData): Promise<string | null>;
@@ -44,6 +48,33 @@ declare module "./InlineInkStore" {
 }
 
 const ADOPTION_UNAVAILABLE: ExternalAdoptionResult = { outcome: "unavailable", changed: false };
+
+/**
+ * A note whose adopted ink file brought attached groups not yet found in the open note's text. Their targets stand on the
+ * text the other device saved, which may not have reached the open note yet: a sync writes the ink file and the note in its
+ * own order. The mark is the note's, not a list's: a rewrite of the list with no edit (a resolve, a correction stamped, a
+ * retake, a piece renamed) keeps it. A real edit of the groups, a read of the page again, or the open note finding the
+ * groups in the text a change leaves ends it. In memory only; nothing of it is written.
+ */
+interface AdoptionMark { serial: number; base: PageData; edits: number }
+const adoptionMarks = new WeakMap<NoteRecord, AdoptionMark>();
+let adoptionSerial = 0;
+
+/** The pending adoption's number for this note (each adoption has its own), or 0 with none pending. */
+function adoptionPending(this: InlineInkStore, path: string): number {
+	const rec = this.byPath.get(path), mark = rec && adoptionMarks.get(rec);
+	if (!rec || !mark) return 0;
+	// A real edit counts in attachOnlyEdits; a read of the page again replaces the base page.
+	if (rec.basePage === mark.base && (rec.attachOnlyEdits ?? 0) === mark.edits) return mark.serial;
+	adoptionMarks.delete(rec);
+	return 0;
+}
+
+/** The open note found the adopted groups in its text (or they stood there already): the adoption is no longer pending. */
+function adoptionFound(this: InlineInkStore, path: string): void {
+	const rec = this.byPath.get(path);
+	if (rec) adoptionMarks.delete(rec);
+}
 
 const TRANSIENT_NOTICE =
 	"Handwriting: this note's ink file could not be read yet. New ink on it is not saved until it loads.";
@@ -145,6 +176,9 @@ function hasChoice(rec: NoteRecord): boolean {
 		const keptBase = rec.basePage;
 		rec.basePage = null;
 		await this.loadRecord(path, rec, { basePage: keptBase });
+		// The session's attached groups belonged to the copy just replaced: the file read now answers with its own, resolved
+		// again by the open note. A read that failed kept the old page, and the session's list with it.
+		if (rec.basePage !== keptBase) rec.attachments = undefined;
 		// Joining viewers need the restored picture even when existing panes
 		// still show identical ink. Only actual changes notify the poller.
 		return inkFingerprint(this.strokes(path)) !== before;
@@ -326,11 +360,17 @@ function hasChoice(rec: NoteRecord): boolean {
 		// the artifact instead.
 		const choicesBefore = this.choicesKey(path);
 		rec.basePage = prep.prepared.data;
+		takeColumnRef(rec, prep.prepared.data);
 		rec.strokes = prep.prepared.data.strokes.slice();
 		rec.localStrokeIds.clear();
 		// The other device's choices come with its file, as its strokes do:
 		// the last device to save wins.
 		rec.choices = undefined;
+		// So do its attached groups; the open note resolves them against its text again.
+		rec.attachments = undefined;
+		if (prep.prepared.data.attachments?.length) {
+			adoptionMarks.set(rec, { serial: ++adoptionSerial, base: prep.prepared.data, edits: rec.attachOnlyEdits ?? 0 });
+		} else adoptionMarks.delete(rec);
 		if (this.choicesKey(path) !== choicesBefore) this.emitChoices(path);
 		// The incoming file's reference is the frame its ink is in. The record's
 		// own latch follows it, so a later read of this record does not move ink
@@ -434,8 +474,11 @@ function hasChoice(rec: NoteRecord): boolean {
 			if (rec.pageId !== pageId || rec.load !== "yes") continue;
 			if (rec.damagedLocked || rec.legacyLocked || rec.futureLocked || rec.duplicateLocked) return null;
 			rec.basePage = page;
+			takeColumnRef(rec, page);
 			rec.strokes = page.strokes.slice();
 			rec.localStrokeIds.clear();
+			// The restored page's attached groups, not the session's; the open note resolves them again.
+			rec.attachments = undefined;
 			rec.mutationGeneration++;
 			const snap = this.snapshot(rec);
 			const host = this.host;
@@ -580,12 +623,15 @@ function hasChoice(rec: NoteRecord): boolean {
 		if (rec.duplicateLocked) return null;
 		const base = rec.basePage ?? emptyPage(rec.pageId);
 		const fontRefPx = base.fontRefPx ?? rec.fontRefPx;
+		const columnRefPx = base.columnRefPx ?? rec.columnRefPx;
 		const page: PageData = {
 			...base,
 			pageId: rec.pageId,
 			surface: "inline",
 			strokes: rec.strokes,
 			...(fontRefPx !== undefined ? { fontRefPx } : {}),
+			...(columnRefPx !== undefined ? { columnRefPx } : {}),
+			...(rec.attachments !== undefined ? { attachments: [...rec.attachments] } : {}),
 		};
 		// A choice set this session replaces the file's, including a value
 		// this build could not read (kept in unknownTop until now).
@@ -789,14 +835,27 @@ function hasChoice(rec: NoteRecord): boolean {
 		const shared = new Set((rec.basePage?.strokes ?? []).map((s) => s.id));
 		const own = rec.strokes.filter((s) => rec.localStrokeIds.has(s.id) && !shared.has(s.id));
 		if (own.length === 0) return;
+		// Each attached group of that ink goes with it, pruned to it: its members are drawn at the group's shown move, so
+		// without the group the ink stops following its words and jumps back by the move. A group of the shared file's ink
+		// only, or one this build cannot read, is the other note's and stays behind.
+		const groups = liveAttachments((rec.attachments ?? rec.basePage?.attachments ?? []).filter((a) => !isOpaqueAttachment(a)), new Set(own.map((s) => s.id)));
 		const fresh = this.record(path);
 		fresh.strokes = own;
 		for (const s of own) fresh.localStrokeIds.add(s.id);
+		if (groups.length > 0) fresh.attachments = groups;
 		fresh.mutationGeneration++;
 		// Read first, then persist: the write waits on the read (persist), so
 		// the carried ink merges in after whatever the new id's sidecar holds.
 		this.trackPersist(
-			this.ensureLoaded(path).then(() => undefined),
+			this.ensureLoaded(path).then(() => {
+				// The session's list stands over the file's once read: the file's own groups join it, and the page is
+				// written again with both.
+				if (groups.length === 0 || this.byPath.get(path) !== fresh || !fresh.attachments) return;
+				const session = fresh.attachments;
+				const ids = new Set(session.map((a) => a.id));
+				const file = (fresh.basePage?.attachments ?? []).filter((a) => !ids.has(a.id));
+				if (file.length > 0) this.setAttachments(path, [...file, ...session], true);
+			}),
 			`load ${path} for the ink carried off its shared page id`
 		);
 		this.persist(path, fresh);
@@ -869,6 +928,8 @@ export function installInlineInkStorePersist(proto: InlineInkStore): void {
 	installMethods(proto, {
 		reloadExternal,
 		adoptExternal,
+		adoptionPending,
+		adoptionFound,
 		noteAdoptionFailure,
 		cacheStats,
 		restoreRevision,

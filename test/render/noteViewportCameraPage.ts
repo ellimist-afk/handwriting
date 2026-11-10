@@ -26,7 +26,7 @@ const settle = async () => { for(let i=0;i<8;i++) await new Promise<void>(r=>req
 const rest = async () => { await settle(); for(let f=0;f<90&&[...rigs.values()].some(r=>r.overlay?.overscrollBounceReadout?.().active);f++) await new Promise<void>(r=>requestAnimationFrame(()=>r())); };
 async function run(zoom:number,candidate:boolean,axis: "x" | "y" = "y",font=1,cancel=false) {
 	const path = `viewport-${zoom}-${axis}-${font}-${cancel}.md`;
-	// This rig drives the zoom bar buttons, gated busy with the canvas off - canvas on so
+	// This rig drives zoomNoteBy, the zoom bar's own call, gated busy with the canvas off - canvas on so
 	// the bar stays live; the fling below then runs under canvas's own shorter tau (InlinePenRouter.ts CANVAS_FLING_TAU_MS).
 	setScrollExpansionEnabled(true);
  surfaceExtents.grow(path,{x:250000,y:250000});
@@ -53,8 +53,10 @@ async function run(zoom:number,candidate:boolean,axis: "x" | "y" = "y",font=1,ca
 	if(font!==1){view.contentDOM.style.fontSize=`${16*font}px`;view.requestMeasure();await settle();}
  const layoutBefore=positions(font);const lineBoxBefore=lineBoxes();
 	const before={doc:view.state.doc.toString(),writes,history:undoDepth(view.state)};
-	for(let tries=0;tries<5&&(overlay as any).getNoteViewportState().zoom>zoom;tries++){host.querySelector<HTMLButtonElement>('[aria-label="Zoom out"]')!.click();await settle();}
- for(let tries=0;tries<5&&(overlay as any).getNoteViewportState().zoom<zoom;tries++){host.querySelector<HTMLButtonElement>('[aria-label="Zoom in"]')!.click();await settle();}
+	// The zoom bar's buttons step a quarter at a time (ZoomStep.ts), so 0.5, 2 and 0.25 are not one tap
+	// away; the commanded zoom is reached in one zoomNoteBy call, the call the buttons make. The old tap
+	// loop's five tries stay, for a call refused while the overlay is still busy loading.
+	for(let tries=0;tries<5&&(overlay as any).getNoteViewportState().zoom!==zoom;tries++){(overlay as any).zoomNoteBy(zoom/(overlay as any).getNoteViewportState().zoom);await settle();}
  view.requestMeasure(); await settle();
  if((overlay as any).getNoteViewportState().zoom!==zoom)throw Error(JSON.stringify({state:(overlay as any).getNoteViewportState(),loaded:inlineInk.isLoaded(path),mode:(overlay as any).mode,builder:(overlay as any).builder,valid:(overlay as any).scaleGeometryValid,button:host.querySelector<HTMLButtonElement>('[aria-label="Zoom out"]')?.disabled}));
 	const layoutAfter=positions(zoom*font);const lineBoxAfter=lineBoxes();
@@ -224,8 +226,9 @@ async function fit(id:string) {const r=rigs.get(id)!.overlay.fitHandwriting();aw
  * count pixels that are painted but scrolled out of view.
  */
 function visiblePainted(id:string):number {
- const {host,view}=rigs.get(id)!;
- const canvas=host.querySelectorAll<HTMLCanvasElement>(".handwriting-ink-layer canvas")[2];
+ const {host,view,overlay}=rigs.get(id)!;
+ // The overlay's own committed canvas, by identity: the ink layer's DOM order changes as layers are added.
+ const canvas=(overlay as any).committedCanvas as HTMLCanvasElement|undefined;
  if(!canvas) throw new Error("committed canvas missing");
  const ctx=canvas.getContext("2d");
  if(!ctx) throw new Error("committed context missing");
@@ -260,7 +263,7 @@ function visiblePainted(id:string):number {
  */
 function strokesPainted(id:string):{id:string;painted:number;sampled:boolean}[] {
  const {host,view,overlay,path}=rigs.get(id)!;
- const canvas=host.querySelectorAll<HTMLCanvasElement>(".handwriting-ink-layer canvas")[2];
+ const canvas=(overlay as any).committedCanvas as HTMLCanvasElement|undefined;
  if(!canvas) throw new Error("committed canvas missing");
  const ctx=canvas.getContext("2d");
  if(!ctx) throw new Error("committed context missing");
@@ -362,6 +365,9 @@ function paperOriginNow(id:string){
  const panX=num(ss.getPropertyValue("--handwriting-paper-pan-x"),0),panY=num(ss.getPropertyValue("--handwriting-paper-pan-y"),0);
  return {source:"scroller" as const,x:rr.left+(sc.clientLeft+phaseX+panX-sc.scrollLeft)*k,y:rr.top+(sc.clientTop+phase+panY-sc.scrollTop)*k,k,pitch,phase,phaseX,panX,panY};
 }
+// Sets a rig's zoom to an exact value through zoomNoteBy, the zoom bar's own call, for cells whose subject is the layout at that zoom,
+// not the button: the bar steps a quarter per tap, so 0.5 is no longer one Zoom out tap away.
+async function zoomTo(id:string,zoom:number){const o=rigs.get(id)!.overlay as any;for(let tries=0;tries<5&&o.getNoteViewportState().zoom!==zoom;tries++){o.zoomNoteBy(zoom/o.getNoteViewportState().zoom);await settle();}return snap(id);}
 async function growTo(id:string,x:number,y:number){surfaceExtents.grow(rigs.get(id)!.path,{x,y});rigs.get(id)!.overlay.updateExtent(true);await settle();return snap(id);}
 (window as any).viewportFixture={setup,snap,fit,fitVisible,growEmpty,growTo,reopen,switchPath,reloadOverlay,gesture,stale,settle,rest,
  preview:(id:string)=>!!(rigs.get(id)!.overlay as any).pinchPreview,
@@ -392,6 +398,7 @@ async function growTo(id:string,x:number,y:number){surfaceExtents.grow(rigs.get(
  original:async(id:string)=>{const r=rigs.get(id)!;r.view.dom.style.setProperty("width","640px","important");r.view.dom.style.setProperty("transform","scale(0.8)");r.view.requestMeasure();await settle();return r.view.dom.getAttribute("style");},
  dispose:(id:string)=>{const r=rigs.get(id)!;r.view.destroy();return {style:r.view.dom.getAttribute("style"),classes:r.view.dom.className,parent:r.host.className};},
 };
+(window as any).viewportFixture.zoomTo=zoomTo;
 
 /**
  * Mounted sync admission proof. This reuses the real editors, hit-tested pen /
@@ -423,7 +430,7 @@ async function growTo(id:string,x:number,y:number){surfaceExtents.grow(rigs.get(
  for(const point of incoming.strokes[0]!.points){point.x+=140;point.y+=60;}
  adapter.externalWrite(live,serializePage(incoming));
  const painted=(id:string)=>{
-  const {host}=rigs.get(id)!,canvas=host.querySelectorAll<HTMLCanvasElement>(".handwriting-ink-layer canvas")[2]!;
+  const canvas=(rigs.get(id)!.overlay as any).committedCanvas as HTMLCanvasElement;
   const bytes=canvas.getContext("2d")!.getImageData(0,0,canvas.width,canvas.height).data;
   let hash=2166136261;for(let i=3;i<bytes.length;i+=4)hash=Math.imul(hash^bytes[i]!,16777619);
   return {alphaHash:hash>>>0,visible:visiblePainted(id)};

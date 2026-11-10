@@ -109,6 +109,8 @@ interface Reading {
 	dsf: number; zoom: number; fontPx: number; zoomSeen: number;
 	pitchLayout: number; ruleLayout: number; k: number; pitchDevice: number; ruleDevice: number; pitchDeviceWhole: boolean;
 	phase: number; phaseX: number; phaseDevice: number; phaseXDevice: number; textHidingMovedThePlan: boolean;
+	/** The page guides' box was in the scroller before the hide: the fixture runs Infinite Canvas on, so it should be. */
+	guideBoxBefore: boolean;
 	/** Every painted rule against where the plan puts it, in device px: the largest miss, and the first and last one. */
 	driftMax: number; driftSpan: number; driftFirst: number; driftLast: number; ruleToFirstLine: number; scrollTop: number;
 	periodsRows: number; periodsCols: number; rows: AxisSummary; rowsMid: AxisSummary; cols: AxisSummary; sameRowsBothStrips: boolean;
@@ -214,13 +216,17 @@ async function readArm(dsf: number, zoom: number, fontPx: number, v: Variant = {
 		const before = await p.evaluate(() => {
 			const host = document.querySelector(".cm-editor") as HTMLElement, cs = getComputedStyle(host);
 			const num = (n: string): number => Number.parseFloat(cs.getPropertyValue(n)) || 0;
-			return { pitch: num("--handwriting-paper-pitch"), rule: num("--handwriting-paper-rule"), phase: num("--handwriting-paper-phase"), phaseX: num("--handwriting-paper-phase-x") };
+			return { pitch: num("--handwriting-paper-pitch"), rule: num("--handwriting-paper-rule"), phase: num("--handwriting-paper-phase"), phaseX: num("--handwriting-paper-phase-x"),
+				guideBox: !!document.querySelector(".cm-scroller > .handwriting-page-guides") };
 		});
+		// The page guides are a screen line over the paper on an Infinite Canvas note, not paper: hidden below with the text.
+		expect(before.guideBox, `premise: the page guides' box is up before the hide (dsf${dsf}@${zoom}/${fontPx}px ${v.name}); none here means the hide proves nothing`).toBe(true);
 		const g = await p.evaluate(async ({ v, dsf }) => {
 			// The text is ink the profile would read as paper. `visibility` keeps its layout, so the note origin the
-			// phase is planned from does not move - the plan is read back below to say so.
+			// phase is planned from does not move - the plan is read back below to say so. The page guides' faint line
+			// is a screen line over the paper, not a rule of it: hidden the same way.
 			const style = document.createElement("style");
-			style.textContent = ".cm-line, .cm-widgetBuffer { visibility: hidden !important; }";
+			style.textContent = ".cm-line, .cm-widgetBuffer, .handwriting-page-guides { visibility: hidden !important; }";
 			document.head.appendChild(style);
 			// The plugin's own furniture is ink, not paper: the pen strip, the zoom chip and every ink canvas sit over
 			// the scroller and a profile would read their boxes as rules. Hidden, not removed, so nothing relayouts.
@@ -440,6 +446,7 @@ async function readArm(dsf: number, zoom: number, fontPx: number, v: Variant = {
 			pitchDeviceWhole: Math.abs(pitchDevice - Math.round(pitchDevice)) <= 1e-3,
 			phase: g.phase, phaseX: g.phaseX, phaseDevice: round(g.phase * g.k * dsf, 4), phaseXDevice: round(g.phaseX * g.k * dsf, 4),
 			// The E2 arms overwrite the rule themselves, so only the properties this arm did not set are compared.
+			guideBoxBefore: before.guideBox,
 			textHidingMovedThePlan: before.pitch !== g.pitch || (!v.ruleDevicePx && before.rule !== g.rule) || before.phase !== g.phase || before.phaseX !== g.phaseX,
 			driftMax, driftSpan, driftFirst: drifts[0] ?? Number.NaN, driftLast: drifts[drifts.length - 1] ?? Number.NaN, ruleToFirstLine, scrollTop: g.scrollTop,
 			periodsRows: round(rowsHigh * dsf / periodDevice, 1), periodsCols: round(colsWide * dsf / periodDevice, 1),

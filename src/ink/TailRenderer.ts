@@ -7,6 +7,7 @@ import { inkColorFor } from "./InkTheme";
 import type { InkStroke } from "./Stroke";
 import { strokeRev } from "./StrokeRev";
 import { canvasLayerBox } from "../inline/ZoomScale";
+import { drawAttachButton as paintAttachButton, drawTransformHandles, framePoints, type AttachButtonColours, type TransformParams } from "../inline/LassoTransform";
 
 /**
  * How much width the predicted tail gives up by its tip.
@@ -557,10 +558,17 @@ export class TailRenderer {
 		this.dirty = null; // selection UI clears with clearAll, not a dirty rect
 	}
 
+	/**
+	 * `handles`: the lasso's four corner handles and its rotate knob on the box too (LassoTransform.drawTransformHandles).
+	 * `step`: during a resize or turn, the step the preview shows; the frame is then `box`, the grab's box, under it, and
+	 * turns with the ink (LassoTransform.framePoints).
+	 */
 	drawSelectionBox(
 		cam: CameraState,
 		box: { x: number; y: number; width: number; height: number },
-		color: string
+		color: string,
+		handles = false,
+		step?: TransformParams
 	): void {
 		this.markPaint();
 		const ctx = this.ctx;
@@ -569,13 +577,51 @@ export class TailRenderer {
 		ctx.strokeStyle = color;
 		ctx.lineWidth = 1.5;
 		ctx.setLineDash([4, 4]);
-		ctx.strokeRect(
-			(box.x - cam.x) * cam.zoom - pad,
-			(box.y - cam.y) * cam.zoom - pad,
-			box.width * cam.zoom + pad * 2,
-			box.height * cam.zoom + pad * 2
-		);
+		if (step) {
+			const corners = framePoints(box, step, cam.zoom, this.inlineBacking?.cssScale ?? 1).corners;
+			ctx.beginPath();
+			ctx.moveTo((corners[0].x - cam.x) * cam.zoom, (corners[0].y - cam.y) * cam.zoom);
+			for (let i = 1; i < 4; i++) ctx.lineTo((corners[i]!.x - cam.x) * cam.zoom, (corners[i]!.y - cam.y) * cam.zoom);
+			ctx.closePath();
+			ctx.stroke();
+		} else {
+			ctx.strokeRect(
+				(box.x - cam.x) * cam.zoom - pad,
+				(box.y - cam.y) * cam.zoom - pad,
+				box.width * cam.zoom + pad * 2,
+				box.height * cam.zoom + pad * 2
+			);
+		}
 		ctx.restore();
+		if (handles) drawTransformHandles(ctx, box, cam, color, this.inlineBacking?.cssScale ?? 1, step);
+		this.dirty = null;
+	}
+
+	/**
+	 * The Attach button under the selection box (LassoTransform.drawAttachButton): the selection colour when the selection
+	 * is attached, the muted text colour when it is loose. Selection chrome: it clears with clearAll.
+	 */
+	drawAttachButton(cam: CameraState, box: { x: number; y: number; width: number; height: number }, attached: boolean, colours: AttachButtonColours): void {
+		this.markPaint();
+		paintAttachButton(this.ctx, box, cam, attached, colours, this.inlineBacking?.cssScale ?? 1);
+		this.dirty = null;
+	}
+
+	/**
+	 * One attached-ink label at a box's top-left, outside the selection box's padding: the text on a filled pill in the
+	 * page's background, sized in css px whatever the zoom. World-anchored, so a camera move redraws it from the box and
+	 * the camera alone. Selection chrome: it clears with clearAll.
+	 */
+	drawGroupTag(cam: CameraState, box: { x: number; y: number }, label: string, color: string, background: string, cssScale: number): void {
+		this.markPaint();
+		drawTagPill(this.ctx, cam, box, label, color, background, cssScale);
+		this.dirty = null;
+	}
+
+	/** An attached group's pin at its point (drawPin). Selection chrome: it clears with clearAll. */
+	drawAttachPin(cam: CameraState, at: Point2, color: string, background: string, cssScale: number): void {
+		this.markPaint();
+		drawPin(this.ctx, cam, at, color, background, cssScale);
 		this.dirty = null;
 	}
 
@@ -775,4 +821,54 @@ export class TailRenderer {
 		this.growDirty(x0, y0, x1, y1, base / 2 + 2);
 		this.untrackedPixels = untracked;
 	}
+}
+
+/** The pin's head, a disc this many css px across. */
+export const PIN_HEAD_PX = 10;
+/** From the pin's point up to its head's centre, css px: the stem and half the head. */
+export const PIN_LIFT_PX = 13;
+
+/**
+ * Draw a pin on any css-px layer: a stem from its point up to a disc PIN_HEAD_PX across, in `color`, with a dot of the
+ * page's background in the disc. Sized in css px whatever the zoom.
+ */
+export function drawPin(ctx: CanvasRenderingContext2D, cam: CameraState, at: Point2, color: string, background: string, cssScale: number): void {
+	const x = (at.x - cam.x) * cam.zoom, y = (at.y - cam.y) * cam.zoom, u = 1 / cssScale, hy = y - PIN_LIFT_PX * u;
+	ctx.save();
+	ctx.setLineDash([]);
+	ctx.strokeStyle = color;
+	ctx.fillStyle = color;
+	ctx.lineWidth = 1.5 * u;
+	ctx.beginPath();
+	ctx.moveTo(x, y);
+	ctx.lineTo(x, hy);
+	ctx.stroke();
+	ctx.beginPath();
+	ctx.arc(x, hy, (PIN_HEAD_PX / 2) * u, 0, Math.PI * 2);
+	ctx.fill();
+	ctx.fillStyle = background;
+	ctx.beginPath();
+	ctx.arc(x, hy, 1.5 * u, 0, Math.PI * 2);
+	ctx.fill();
+	ctx.restore();
+}
+
+/**
+ * An attached-ink label on any css-px layer: the text on a filled pill in the page's background, 6 css px left of and
+ * above the box's top-left, sized in css px whatever the zoom. The tail draws it with the selection; the committed
+ * layer draws a held group's tag with nothing selected.
+ */
+export function drawTagPill(ctx: CanvasRenderingContext2D, cam: CameraState, box: { x: number; y: number }, label: string, color: string, background: string, cssScale: number): void {
+	const pad = 6;
+	ctx.save();
+	ctx.translate((box.x - cam.x) * cam.zoom - pad, (box.y - cam.y) * cam.zoom - pad);
+	ctx.scale(1 / cssScale, 1 / cssScale);
+	ctx.font = "12px sans-serif";
+	ctx.setLineDash([]);
+	const w = ctx.measureText(label).width;
+	ctx.fillStyle = background;
+	ctx.fillRect(0, -18, w + 8, 16);
+	ctx.fillStyle = color;
+	ctx.fillText(label, 4, -6);
+	ctx.restore();
 }

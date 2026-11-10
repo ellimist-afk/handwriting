@@ -221,7 +221,15 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 			() => this.firstFreePath((n) => (n === 1 ? `${base}.pdf` : `${base}-${n}.pdf`)),
 			(path) => this.app.vault.createBinary(path, result.bytes.buffer as ArrayBuffer)
 		);
-		new Notice(`Handwriting: exported ${out}`);
+		// Ink on pages another app cut off is not in the copy; say how much.
+		const left = result.leftOut;
+		const leftOut =
+			left === 0
+				? ""
+				: left === 1
+					? ". 1 stroke on a page this PDF no longer has was left out."
+					: `. ${left} strokes on pages this PDF no longer has were left out.`;
+		new Notice(`Handwriting: exported ${out}${leftOut}`);
 	}
 
 export function installSnips(proto: HandwritingPlugin): void {

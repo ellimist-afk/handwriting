@@ -2,6 +2,7 @@ import { EditorState, StateField, Prec, type Extension } from "@codemirror/state
 import { history, redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { Decoration, EditorView, WidgetType, type ViewPlugin } from "@codemirror/view";
 import { InkOverlayPlugin, inlineInk, inkOverlayExtension, inkExternallyReloaded, overlayForPath } from "../../src/inline/InkOverlay";
+import { instances } from "../../src/inline/InkOverlayRegistry";
 import type { InkStroke } from "../../src/ink/Stroke";
 import type { SelectionModel } from "../../src/objects/SelectionModel";
 import { installObsidianDom } from "./obsidianDom";
@@ -342,6 +343,10 @@ async function pixels(bytes: number[], reference?: number[]) {
 
 // Count by nearest CM root, never by file path or the first overlay instance.
 // Include a detached child's own subtree as well as every connected document.
+/** Every mounted overlay's committed canvas, by identity: the ink layer's DOM order changes as layers are added. */
+function committedCanvases(): Set<HTMLCanvasElement> {
+	return new Set([...instances].map((p) => p.committedCanvas).filter((c): c is HTMLCanvasElement => !!c));
+}
 function surfaceRoots() {
 	const roots = new Set<Element>();
 	for (const doc of [document, ...(popoutFrame?.contentDocument ? [popoutFrame.contentDocument] : [])]) {
@@ -351,12 +356,13 @@ function surfaceRoots() {
 	return [...roots];
 }
 function census() {
+	const committed = committedCanvases();
 	const surfaces = surfaceRoots().map((root, index) => {
 		const cm = root.closest(".cm-editor");
 		const entry = editors.find(e => e.view.dom === cm);
 		return { index, editor: entry?.id ?? "unregistered", kind: entry?.kind ?? "unknown", connected: root.isConnected,
 			cmRect: cm ? rect(cm) : null, rect: rect(root), insideTable: !!root.closest(".cm-table-widget"),
-			canvases: [...root.querySelectorAll("canvas")].map((canvas, layer) => ({ layer, width: canvas.width,
+			canvases: [...root.querySelectorAll("canvas")].map((canvas, layer) => ({ layer, committed: committed.has(canvas), width: canvas.width,
 				height: canvas.height, rect: rect(canvas), raster: canvasRaster(canvas) })) };
 	});
 	return { surfaces, editors: editors.map(e => ({ id: e.id, kind: e.kind, connected: e.view.dom.isConnected,
@@ -587,10 +593,11 @@ async function setPaneRootEligibility(popout: boolean, eligible: boolean) {
 	return census();
 }
 function layerPNGs() {
+	const committed = committedCanvases();
 	return surfaceRoots().flatMap((root, index) => {
 		const entry = editors.find(e => e.view.dom === root.closest(".cm-editor"));
 		return [...root.querySelectorAll("canvas")].map((canvas, layer) => ({ editor: entry?.id ?? `unregistered-${index}`,
-			surface: index, layer, width: canvas.width, height: canvas.height,
+			surface: index, layer, committed: committed.has(canvas), width: canvas.width, height: canvas.height,
 			png: canvas.width && canvas.height ? canvas.toDataURL("image/png") : null }));
 	});
 }

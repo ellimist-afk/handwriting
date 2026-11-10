@@ -269,7 +269,7 @@ describe("note highlighter tip wears the same wash as its trail", () => {
 
 		// Precondition: the real stack, in DOM order (later sibling paints on top; no z-index on any).
 		const wetTileCanvas = o.wetTileCanvas as unknown as El;
-		expect(canvases).toEqual([highlightCanvas, highlightWetCanvas, committedCanvas, wetCanvas, wetTileCanvas, tailCanvas]);
+		expect(canvases).toEqual([highlightCanvas, highlightWetCanvas, (o.attachedLayer as unknown as { hl: El }).hl, committedCanvas, (o.attachedLayer as unknown as { pen: El }).pen, wetCanvas, wetTileCanvas, tailCanvas]);
 		for (const c of canvases) expect(c.style.zIndex).toBeUndefined();
 		// Precondition: the trail layer carries the highlighter wash.
 		expect(cssOpacity(highlightWetCanvas)).toBeCloseTo(HIGHLIGHTER_ALPHA, 6);

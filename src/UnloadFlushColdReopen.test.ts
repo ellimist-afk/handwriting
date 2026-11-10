@@ -68,6 +68,8 @@ import {
 import { InkPoint, InkStroke, InkTool, computeBBox } from "./ink/Stroke";
 import { PageData, parsePage, serializePage, emptyPage } from "./model/PageData";
 import { FakeDoc, FakeEl } from "./testUtils/fakeDom";
+import { InlinePenRouter } from "./inline/InlinePenRouter";
+import { harness, installFakeWindow, penEvent } from "../test/routerHarness";
 
 // ---- the two host blocks: main.ts builds the inline one inside onload; the PDF
 // ---- one is built in loadSettings, which moved to settings/PluginSettings.ts;
@@ -278,6 +280,7 @@ interface Device {
 	pdf: PdfInkStore;
 	plugin: Record<string, unknown> & {
 		finishPersistence(): Promise<void>;
+		flushOnHide(): void;
 		onunload(): void;
 		startSlidesInk(): void;
 	};
@@ -731,5 +734,303 @@ describe("onunload starts the flush, and every surface's pending write lands", (
 		expect(model(onDisk(d.adapter, inline.id) ?? [])).toEqual(model(inline.ink));
 		expect(model(onDisk(d.adapter, pdf.id) ?? [])).toEqual(model(pdf.ink));
 		expect(model(onDisk(d.adapter, slides.sidecar) ?? [])).toEqual(model([...slides.before.values()].flat()));
+	});
+});
+
+/**
+ * THE HIDE FLUSH, for ink parked behind a read or a claim. A hide is the last
+ * moment a phone gives JS before it may freeze or kill the app. `flushOnHide`
+ * dispatches the page store at once, but a stroke parked behind a sidecar read
+ * or a first-stroke claim reaches the page store only when that lands, and
+ * then waits out the 700 ms quiet period like any other write. A kill inside
+ * that window lost it. Timers are never advanced here, so a write on disk is
+ * one the hide path dispatched, not the debounce.
+ */
+describe("a hide writes ink parked behind a read or a claim as soon as it lands", () => {
+	async function settleAll(): Promise<void> {
+		for (let i = 0; i < 4; i++) await drainMicrotasks();
+	}
+
+	it("pdf: a stroke drawn while the sidecar is still being read", async () => {
+		const d = device();
+		const id = fresh("pdf-hidden-loading");
+		const saved = [stroke(`${id}-saved`, 10, 10, "pen", { page: 2 })];
+		d.adapter.dirs.add(".handwriting");
+		d.adapter.externalWrite(sidecarPath(id), serializePage({ ...emptyPage(id), surface: "pdf", strokes: saved }));
+		const read = gate();
+		d.adapter.readGate = read.promise;
+		const loading = d.pdf.ensureLoaded(id);
+		const late = stroke(`${id}-late`, 33.33, 44.44, "pen", { page: 4 });
+		d.pdf.commit(id, late);
+
+		d.plugin.flushOnHide();
+		d.adapter.readGate = null;
+		read.release();
+		await loading;
+		await settleAll();
+
+		expect(idsOnDisk(d.adapter, id), "the parked PDF stroke waited for the quiet period after a hide").toEqual([
+			saved[0]!.id,
+			late.id,
+		]);
+	});
+
+	it("slides: a first stroke whose claim is still running", async () => {
+		const d = device();
+		const note = `${fresh("HiddenDeck")}.md`;
+		const { deck, show } = present(d, note);
+		await drainMicrotasks();
+		d.claimGate = gate();
+		show.draw(slideWord(300, 300));
+		const drawn = [...deckModel(deck).values()].flat();
+		expect(drawn).toHaveLength(1);
+
+		d.plugin.flushOnHide();
+		d.claimGate.release();
+		await settleAll();
+
+		const sidecar = slidesSidecarId(d.ids.get(note)!);
+		expect(model(onDisk(d.adapter, sidecar) ?? []), "the parked Slides stroke waited for the quiet period after a hide").toEqual(
+			model(drawn)
+		);
+	});
+
+	it("slides: a stroke drawn while the deck's sidecar is still being read", async () => {
+		const d = device();
+		const note = `${fresh("HiddenLoadingDeck")}.md`;
+		const pageId = fresh("hidden-deck-page");
+		d.ids.set(note, pageId);
+		const sidecar = slidesSidecarId(pageId);
+		d.adapter.dirs.add(".handwriting");
+		d.adapter.externalWrite(sidecarPath(sidecar), serializePage({ ...emptyPage(sidecar), surface: "slides" } as PageData));
+		const read = gate();
+		d.adapter.readGate = read.promise;
+		const { deck, show } = present(d, note);
+		await drainMicrotasks();
+		show.draw(slideWord(300, 300));
+		const drawn = [...deckModel(deck).values()].flat();
+		expect(drawn).toHaveLength(1);
+
+		d.plugin.flushOnHide();
+		d.adapter.readGate = null;
+		read.release();
+		await settleAll();
+
+		expect(model(onDisk(d.adapter, sidecar) ?? []), "the Slides stroke drawn while loading waited for the quiet period after a hide").toEqual(
+			model(drawn)
+		);
+	});
+
+	it("inline: a stroke drawn while the sidecar is still being read", async () => {
+		const d = device();
+		const path = `${fresh("HiddenLoading")}.md`;
+		const id = fresh("inline-hidden-loading");
+		d.ids.set(path, id);
+		const saved = word(`${id}-saved`, 12.5, 30);
+		d.adapter.dirs.add(".handwriting");
+		d.adapter.externalWrite(sidecarPath(id), serializePage({ ...emptyPage(id), surface: "inline", strokes: saved }));
+		const read = gate();
+		d.adapter.readGate = read.promise;
+		const loading = inlineInk.ensureLoaded(path);
+		const late = word(`${id}-late`, 800.75, 20.25);
+		inlineInk.commitGesture(path, late);
+
+		d.plugin.flushOnHide();
+		d.adapter.readGate = null;
+		read.release();
+		await loading;
+		await settleAll();
+
+		expect(model(onDisk(d.adapter, id) ?? []), "the note stroke drawn while loading waited for the quiet period after a hide").toEqual(
+			model([...saved, ...late])
+		);
+	});
+
+	it("inline: a first stroke whose page-id claim is still running", async () => {
+		const d = device();
+		const path = `${fresh("HiddenUnclaimed")}.md`;
+		await inlineInk.ensureLoaded(path);
+		d.claimGate = gate();
+		const ink = word(fresh("hidden-claimed"), 310.25, 12.5);
+		inlineInk.commitGesture(path, ink);
+		expect(d.claims).toEqual([path]);
+
+		d.plugin.flushOnHide();
+		d.claimGate.release();
+		await settleAll();
+
+		const id = d.ids.get(path)!;
+		expect(model(onDisk(d.adapter, id) ?? []), "the parked note stroke waited for the quiet period after a hide").toEqual(
+			model(ink)
+		);
+	});
+});
+
+/**
+ * THE HIDE ENDS A STROKE STILL ON THE GLASS. A hide on a phone or tablet can
+ * come with no window blur first (iOS sends visibilitychange alone), so a stroke
+ * the pen is still drawing when the app goes to the background never reached
+ * its commit, and the hide's dispatch wrote the page without it. The hide now
+ * ends every live stroke the way a blur does, before it dispatches.
+ *
+ * Notes and PDFs share InlinePenRouter: a REAL router here (test/routerHarness),
+ * fed scroller pointer events with no lift. Its penUp callback stands in for the
+ * surface's own penUp, which commits the drawn ink to that surface's store; the
+ * commit goes to the REAL inlineInk / PdfInkStore over this device's PageStore.
+ * Slides is the real deck mounted through startSlidesInk, its pen left down.
+ * Timers are never advanced: a write on disk is one the hide dispatched.
+ */
+describe("a hide ends a stroke still on the glass, and the hide's write carries it", () => {
+	let undoWindow: () => void = () => undefined;
+	let pen = 5000;
+	const routers: InlinePenRouter[] = [];
+
+	beforeEach(() => {
+		// The router binds its blur and capture listeners on `window`; the outer
+		// stand-in (globalThis) has none, so these cells use the router harness's.
+		delete (globalThis as { window?: unknown }).window;
+		undoWindow = installFakeWindow();
+	});
+
+	afterEach(() => {
+		for (const r of routers.splice(0)) r.dispose();
+		undoWindow();
+		(globalThis as { window?: unknown }).window = globalThis;
+	});
+
+	async function settleAll(): Promise<void> {
+		for (let i = 0; i < 4; i++) await drainMicrotasks();
+	}
+
+	/** A real router whose lift commits `commit()`'s ink, the way the surface's penUp does. */
+	function liveRouter(commit: () => void): ReturnType<typeof harness> {
+		const h = harness();
+		routers.push(h.router);
+		const up = h.rec.cb.onPenUp;
+		h.rec.cb.onPenUp = (event) => {
+			up(event);
+			commit();
+		};
+		return h;
+	}
+
+	/** The pen lands and draws; nothing lifts, cancels, loses capture or blurs. */
+	function penStillDown(h: ReturnType<typeof harness>): void {
+		const opts = { pointerId: 9, pointerType: "pen", pressure: 0.5, buttons: 1 };
+		h.fire(penEvent("pointerdown", (pen += 16), { ...opts, x: 200, y: 200 }));
+		h.fire(penEvent("pointermove", (pen += 16), { ...opts, x: 220, y: 210 }));
+		h.fire(penEvent("pointermove", (pen += 16), { ...opts, x: 240, y: 222 }));
+		expect(h.rec.downs, "premise: the pen is writing").toBe(1);
+		expect(h.rec.ups, "premise: the stroke is still open").toBe(0);
+	}
+
+	/**
+	 * The stroke is in a file the hide's own synchronous dispatch wrote (the
+	 * page's flush carrier, written with no await in front of it). Read before
+	 * any await: a commit made after the dispatch reaches disk only through a
+	 * later write, and is not here yet.
+	 */
+	const carriedNow = (d: Device, strokeId: string): boolean =>
+		[...(d.adapter as unknown as { files: Map<string, string> }).files.values()].some((text) => text.includes(`"${strokeId}"`));
+
+	it("inline: a stroke the pen is still drawing is in the write the hide dispatches", async () => {
+		const d = device();
+		const path = `${fresh("HiddenLive")}.md`;
+		const id = fresh("inline-hidden-live");
+		d.ids.set(path, id);
+		await inlineInk.ensureLoaded(path);
+		const ink = word(`${id}-live`, 410.5, 22.25);
+		const h = liveRouter(() => inlineInk.commitGesture(path, ink));
+		penStillDown(h);
+
+		d.plugin.flushOnHide();
+
+		expect(h.rec.ups, "the hide did not end the stroke on the glass").toBe(1);
+		expect(h.rec.abandons, "the hide dropped the stroke instead of committing it").toBe(0);
+		expect(carriedNow(d, ink[0]!.id), "the stroke was committed after the hide's dispatch").toBe(true);
+		await settleAll();
+		expect(model(onDisk(d.adapter, id) ?? []), "the note stroke on the glass was not written by the hide").toEqual(model(ink));
+	});
+
+	it("pdf: a stroke the pen is still drawing is in the write the hide dispatches", async () => {
+		const d = device();
+		const id = fresh("pdf-hidden-live");
+		await d.pdf.ensureLoaded(id);
+		const ink = stroke(`${id}-live`, 120.5, 340.25, "pen", { page: 3 });
+		const h = liveRouter(() => d.pdf.commit(id, ink));
+		penStillDown(h);
+
+		d.plugin.flushOnHide();
+
+		expect(h.rec.ups, "the hide did not end the stroke on the glass").toBe(1);
+		expect(h.rec.abandons, "the hide dropped the stroke instead of committing it").toBe(0);
+		expect(carriedNow(d, ink.id), "the stroke was committed after the hide's dispatch").toBe(true);
+		await settleAll();
+		expect(idsOnDisk(d.adapter, id), "the PDF stroke on the glass was not written by the hide").toEqual([ink.id]);
+	});
+
+	it("slides: a stroke the pen is still drawing is in the write the hide dispatches", async () => {
+		const d = device();
+		const note = `${fresh("HiddenLiveDeck")}.md`;
+		const pageId = fresh("hidden-live-deck");
+		d.ids.set(note, pageId);
+		const { deck, show } = present(d, note);
+		await drainMicrotasks();
+		const points = slideWord(300, 300);
+		const [first, ...rest] = points;
+		const ev = (type: string, [x, y, pressure]: [number, number, number]) => ({
+			type, pointerId: 7, pointerType: "pen", isPrimary: true, buttons: 1, button: 0, clientX: x, clientY: y, pressure,
+			timeStamp: (clock += 16), preventDefault: () => undefined, stopPropagation: () => undefined,
+		});
+		show.reveal.dispatch(ev("pointerdown", first!));
+		for (const p of rest) show.reveal.dispatch(ev("pointermove", p));
+		expect([...deckModel(deck).values()].flat(), "premise: nothing is committed while the pen is down").toHaveLength(0);
+
+		d.plugin.flushOnHide();
+
+		const drawn = [...deckModel(deck).values()].flat();
+		expect(drawn, "the hide did not end the Slides stroke on the glass").toHaveLength(1);
+		const sidecar = slidesSidecarId(pageId);
+		expect(carriedNow(d, drawn[0]!.id), "the stroke was committed after the hide's dispatch").toBe(true);
+		await settleAll();
+		expect(model(onDisk(d.adapter, sidecar) ?? []), "the Slides stroke on the glass was not written by the hide").toEqual(model(drawn));
+	});
+
+	it("control: a blur, then a hide, commits the stroke once", async () => {
+		const d = device();
+		const path = `${fresh("BlurThenHide")}.md`;
+		const id = fresh("inline-blur-hide");
+		d.ids.set(path, id);
+		await inlineInk.ensureLoaded(path);
+		const ink = word(`${id}-live`, 90.5, 18.75);
+		const h = liveRouter(() => inlineInk.commitGesture(path, ink));
+		penStillDown(h);
+		h.fireWin({ type: "blur" } as unknown as PointerEvent);
+		expect(h.rec.ups, "premise: the blur committed the stroke").toBe(1);
+
+		d.plugin.flushOnHide();
+
+		expect(h.rec.ups, "the hide committed the blurred stroke a second time").toBe(1);
+		expect(h.rec.abandons).toBe(0);
+		await settleAll();
+		expect(model(onDisk(d.adapter, id) ?? [])).toEqual(model(ink));
+	});
+
+	it("control: a lifted Slides stroke, then a hide, is written once", async () => {
+		const d = device();
+		const note = `${fresh("LiftThenHideDeck")}.md`;
+		const pageId = fresh("lift-hide-deck");
+		d.ids.set(note, pageId);
+		const { deck, show } = present(d, note);
+		await drainMicrotasks();
+		show.draw(slideWord(300, 300));
+		const drawn = [...deckModel(deck).values()].flat();
+		expect(drawn).toHaveLength(1);
+
+		d.plugin.flushOnHide();
+
+		expect([...deckModel(deck).values()].flat(), "the hide committed a second Slides stroke").toHaveLength(1);
+		await settleAll();
+		expect(model(onDisk(d.adapter, slidesSidecarId(pageId)) ?? [])).toEqual(model(drawn));
 	});
 });

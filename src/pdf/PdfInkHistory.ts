@@ -94,6 +94,12 @@ export function applyOp(strokes: readonly InkStroke[], op: InkOp): InkStroke[] {
 			}
 			return kept;
 		}
+		// Ink attached to text belongs to notes: a PDF has no attachments, so the stroke list and its order stay as they are.
+		case "attach":
+			return out;
+		// Only the note surface resizes and rotates ink in this build: a PDF's stroke list and its order stay as they are.
+		case "transform":
+			return out;
 	}
 }
 

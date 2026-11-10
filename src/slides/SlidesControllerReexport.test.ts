@@ -40,6 +40,8 @@ const MOVED_VALUES = [
 	"slidesReloadCandidate",
 	"reloadSlidesExternal",
 	"settleSlidesInk",
+	"slidesParkedInk",
+	"finishSlidesGesture",
 	"setSlidesInk",
 	"activeSlidesActions",
 ] as const;

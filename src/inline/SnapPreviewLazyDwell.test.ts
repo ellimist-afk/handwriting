@@ -34,7 +34,7 @@ it("a lift at 300 ms after a move leaves nothing for the re-armed timer either",
 	vi.advanceTimersByTime(200);
 	r.p.move(140, 1);
 	vi.advanceTimersByTime(100);
-	expect(r.p.take(r.builder.finishReleaseFiltered(), true)).toBeNull();
+	expect(r.p.take(r.builder.finishReleaseFiltered())).toBeNull();
 	vi.advanceTimersByTime(1000);
 	expect(r.show).not.toHaveBeenCalled();
 });

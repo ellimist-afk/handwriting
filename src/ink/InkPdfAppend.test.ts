@@ -123,12 +123,6 @@ describe("the file around the ink", () => {
 		expect(out.slice(src.length)).not.toContain("/Info");
 	});
 
-	it("refuses ink for a page the document does not have", () => {
-		const r = appendInkToPdf(bytes(document(2)), [stroke(3)]);
-		expect(r.ok).toBe(false);
-		expect(r.ok || r.reason).toContain("page 3");
-	});
-
 	it("refuses a page number that is not a page number", () => {
 		const half = { ...stroke(1), page: 1.5 };
 		const r = appendInkToPdf(bytes(document(2)), [half]);
@@ -142,6 +136,62 @@ describe("the file around the ink", () => {
 		]);
 		expect(r.ok).toBe(false);
 		expect(r.ok || r.reason).toContain("encrypted");
+	});
+});
+
+describe("ink on a page the document no longer has", () => {
+	// Another app cut the PDF from 10 pages to 8 after the ink was drawn. The
+	// page 10 ink has nowhere to go, and nothing in the app can select it to
+	// clear it, so refusing the whole copy left the user stuck.
+	const eight = (): string => document(8);
+	const second = (page: number): InkStroke => ({ ...stroke(page), id: `s-${page}-second` });
+
+	it("writes the copy without the strokes past the end, and counts them", () => {
+		const src = bytes(eight());
+		const r = appendInkToPdf(src, [stroke(2), stroke(10), second(10), stroke(9)]);
+		expect(r.ok).toBe(true);
+		if (!r.ok) return;
+		expect(r.leftOut).toBe(3);
+		// Absent, not moved: the copy is the very file the page 2 ink alone makes.
+		expect(latin1(r.bytes)).toBe(latin1(appended(eight(), [stroke(2)])));
+	});
+
+	it("hands back the original bytes when every stroke is past the end", () => {
+		const src = bytes(eight());
+		const r = appendInkToPdf(src, [stroke(10), second(10)]);
+		expect(r.ok).toBe(true);
+		if (!r.ok) return;
+		expect(r.bytes).toBe(src);
+		expect(r.leftOut).toBe(2);
+	});
+
+	it("counts nothing when every page is still there", () => {
+		const strokes = [1, 2, 3, 4, 5, 6, 7, 8].map((p) => stroke(p));
+		const r = appendInkToPdf(bytes(eight()), strokes);
+		expect(r.ok && r.leftOut).toBe(0);
+		const none = appendInkToPdf(bytes(eight()), []);
+		expect(none.ok && none.leftOut).toBe(0);
+	});
+
+	it("flattens every page that is still there", () => {
+		const strokes = [1, 2, 3, 4, 5, 6, 7, 8].map((p) => stroke(p));
+		const doc = reread(appended(eight(), strokes));
+		// The fixture's eight pages are objects 3 to 10, none with content of
+		// its own, so a content list on each is the ink arriving.
+		for (let num = 3; num <= 10; num++) {
+			expect(dictEntries(objectBody(doc, num)!).get("/Contents")).toMatch(/\d+ 0 R/);
+		}
+	});
+
+	it.each([0, -1, 2.5])("still refuses page %s", (page) => {
+		const r = appendInkToPdf(bytes(eight()), [{ ...stroke(1), page }]);
+		expect(r.ok).toBe(false);
+		expect(r.ok || r.reason).toContain(`page ${page}`);
+	});
+
+	it("still refuses a bad page number when other ink is past the end", () => {
+		const r = appendInkToPdf(bytes(eight()), [stroke(10), { ...stroke(1), page: 0 }]);
+		expect(r.ok).toBe(false);
 	});
 });
 

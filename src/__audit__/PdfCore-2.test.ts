@@ -160,9 +160,11 @@ describe("PdfCore-2: a copy opened in the same session must start blank", () => 
 		const b = await h.open(COPY);
 		// Precondition: the copy hashed to the same family (same bytes) and the
 		// candidate enumeration found nothing on disk.
-		expect(h.listIds).toHaveBeenCalledTimes(2);
-		expect(h.listIds.mock.calls[0]![0]).toBe(h.listIds.mock.calls[1]![0]);
-		expect(await h.listIds.mock.results[1]!.value).toEqual([]);
+		// Only the family's own listings: an open of a fresh id also lists every PDF ink file once.
+		const family = h.listIds.mock.calls[0]![0];
+		const familyCalls = h.listIds.mock.calls.flatMap((c, i) => (c[0] === family ? [i] : []));
+		expect(familyCalls).toHaveLength(2);
+		expect(await h.listIds.mock.results[familyCalls[1]!]!.value).toEqual([]);
 
 		// CORRECT: a copy is its own instance (PdfIdentity.ts:199-201).
 		expect.soft(b.id, "copy resolved to the original's instance id").not.toBe(a.id);

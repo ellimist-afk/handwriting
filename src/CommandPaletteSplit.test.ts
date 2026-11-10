@@ -111,6 +111,7 @@ describe("the gated set: table and registration agree", () => {
 		expect(gatedGeneratedCommands()).toEqual([
 			...INK_SIZE_STEPS.map((s) => ({ id: `ink-size-${s.name}`, name: `Ink size: ${s.name}` })),
 			...inkColorNames().map((n) => ({ id: `ink-color-${n}`, name: `Ink color: ${n}` })),
+			// Default palette: every slot's label is its default name.
 			...HIGHLIGHTER_COLORS.map((c) => ({
 				id: `highlighter-color-${c.name}`,
 				name: `Highlighter color: ${c.name}`,
@@ -126,9 +127,9 @@ describe("the gated set: table and registration agree", () => {
 			"id: `ink-size-${step.name}`",
 			"name: `Ink size: ${step.name}`",
 			"id: `ink-color-${name}`",
-			"name: `Ink color: ${name}`",
+			"name: `Ink color: ${inkColorCommandLabel(name)}`",
 			"id: `highlighter-color-${c.name}`",
-			"name: `Highlighter color: ${c.name}`",
+			"name: `Highlighter color: ${inkColorLabel(\"highlighter\", i)}`",
 		]) {
 			expect(MAIN, needle).toContain(needle);
 		}
@@ -143,9 +144,10 @@ describe("the gated set: table and registration agree", () => {
 		expect(MAIN).not.toContain('id: "pen-tools-cycle"');
 		// Fourteen after `pen-ink-toggle` and `pen-tools-cycle` both left the
 		// palette; fifteen with the toolbar and zoom bar on / off toggle (1.4.20),
-		// a new id, not the retired cycle. The exact count stops either retired
-		// command creeping back in.
-		expect(ALWAYS_COMMANDS).toHaveLength(15);
+		// a new id, not the retired cycle; seventeen with the lasso's attach and
+		// detach (1.5.0). The exact count stops either retired command creeping
+		// back in.
+		expect(ALWAYS_COMMANDS).toHaveLength(17);
 	});
 });
 

@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { SnapPreview } from "./SnapPreview";
+import { SnapPreview, transformed } from "./SnapPreview";
+import { shapedHalfWidths } from "../ink/InkShape";
+import { EXP7_PEN } from "../ink/PenStyle";
+import { computeBBox, InkStroke } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { snapStroke } from "../ink/ShapeSnap";
 
@@ -25,10 +28,10 @@ it("ordinary motion fits nothing; one pause fits once despite stationary pressur
  for(let i=0;i<20;i++){r.builder.add(120,1,0.8,130);r.p.move(923,1);vi.advanceTimersByTime(100);}
  expect(r.fit).toHaveBeenCalledTimes(1);
 });
-it("meaningful movement clears a ready candidate and rearms exactly once",()=>{
- const r=rig();vi.advanceTimersByTime(350);r.p.move(126,1);
- expect(r.p.take(r.builder.finishReleaseFiltered(),true)).toBeNull();
- r.p.start(126,1);vi.advanceTimersByTime(350);expect(r.fit).toHaveBeenCalledTimes(2);
+it("a meaningful move after the shape shows adjusts it and is not ink: nothing is cleared and nothing is fitted again",()=>{
+ const r=rig();r.hide.mockClear();vi.advanceTimersByTime(350);expect(r.p.move(126,1)).toBe(true);
+ vi.advanceTimersByTime(2000);expect(r.fit).toHaveBeenCalledTimes(1);expect(r.hide).not.toHaveBeenCalled();
+ expect(r.p.take(r.builder.finishReleaseFiltered())).toBe(r.fit.mock.results[0]!.value);
 });
 it("no-fit is memoized until meaningful movement",()=>{
  const r=rig(true);vi.advanceTimersByTime(2000);r.p.move(122,1);vi.advanceTimersByTime(2000);
@@ -36,16 +39,15 @@ it("no-fit is memoized until meaningful movement",()=>{
 });
 it.each(["waiting","ready"])("invalid contact/setting/note/style clears %s state", state=>{
  const r=rig();if(state==="ready")vi.advanceTimersByTime(350);r.invalidate();r.p.check();
- expect(r.p.take(r.builder.finishReleaseFiltered(),true)).toBeNull();vi.advanceTimersByTime(1000);expect(r.fit).toHaveBeenCalledTimes(state==="ready"?1:0);
+ expect(r.p.take(r.builder.finishReleaseFiltered())).toBeNull();vi.advanceTimersByTime(1000);expect(r.fit).toHaveBeenCalledTimes(state==="ready"?1:0);
 });
 it("a removed snapshot body cannot be accepted",()=>{
  const r=rig();vi.advanceTimersByTime(350);const final=r.builder.finishReleaseFiltered();final[0]!.points.shift();
- expect(r.p.take(final,true)).toBeNull();
+ expect(r.p.take(final)).toBeNull();
 });
-it("a retained point pressure update cannot change the displayed candidate",()=>{
+it("a point added to the stroke after the shape showed leaves the freehand: the final stroke must equal the fitted body",()=>{
  const r=rig();vi.advanceTimersByTime(350);
- const shown=r.fit.mock.results[0]!.value;const points=structuredClone(shown.points);
- r.builder.add(120,1,0.9,600);expect(r.p.take(r.builder.finishReleaseFiltered(),true)?.points).toEqual(points);
+ r.builder.add(200,1,0.9,600);expect(r.p.take(r.builder.finishReleaseFiltered())).toBeNull();
 });
 it("an already queued callback is inert after clear or a new gesture",()=>{
  const callbacks:Array<()=>void>=[];
@@ -54,5 +56,17 @@ it("an already queued callback is inert after clear or a new gesture",()=>{
  p.start(0,0);p.clear();p.start(20,0);callbacks[0]!();expect(snapshot).not.toHaveBeenCalled();callbacks[1]!();expect(snapshot).toHaveBeenCalledTimes(1);
 });
 it("a candidate that never painted cannot be accepted",()=>{
- const r=rig();r.show.mockReturnValue(false);vi.advanceTimersByTime(350);expect(r.p.take(r.builder.finishReleaseFiltered(),true)).toBeNull();
+ const r=rig();r.show.mockReturnValue(false);vi.advanceTimersByTime(350);expect(r.p.take(r.builder.finishReleaseFiltered())).toBeNull();
+});
+it("a snap figure sized by the drag keeps the pen's width all along: the speed thinning sees the speed it was drawn at",()=>{
+ // A figure at 1.5 units per ms, width 2.2. The drag scales its points and keeps its width; were the times kept, the
+ // shaped law would see the speed times the scale and draw it thinner (larger) or thicker (smaller) than the pen.
+ const points=Array.from({length:30},(_,i)=>({x:120+i*12,y:210,pressure:0.5,t:i*8}));
+ const base:InkStroke={id:"f",tool:"pen",color:"#fff",width:2.2,points,bbox:computeBBox(points,4.4),createdAt:1};
+ const want=shapedHalfWidths(base.points,{...EXP7_PEN,baseWidth:base.width});
+ for(const scale of [3,0.5]){
+  const out=transformed(base,120,210,scale,0);
+  const got=shapedHalfWidths(out.points,{...EXP7_PEN,baseWidth:out.width});
+  for(let i=10;i<20;i++) expect(Math.abs(got[i]!-want[i]!),`scale ${scale}, sample ${i}`).toBeLessThan(0.02);
+ }
 });

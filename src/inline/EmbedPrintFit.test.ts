@@ -18,6 +18,7 @@ import { initEmbedInkPrintCanvas, initEmbedInkPrintPaper, paperHeightFor, paperW
 import { holdLineAnchors, InkStroke, releaseLineAnchors } from "../ink/Stroke";
 import { lineKey } from "./LineAnchor";
 import { recordLines } from "./EmbedInkMeasure";
+import type { AttachmentData } from "./InkAttachments";
 import pluginOnloadSource from "../PluginOnload.ts?raw";
 import registrySource from "./InkOverlayRegistry.ts?raw";
 import { ribbonOf } from "../ink/StrokeOutline";
@@ -1355,6 +1356,59 @@ describe("anchored ink and the text's size reach every placement", () => {
 		exportCalls(root);
 		// The held top is px; the correction is in world units: 100 px at s is 100 / s world units, over the anchor's top.
 		expect(layerBottom(root)).toBe(LINE_TOP + 24 + (SCREEN_SPANS[1]! / S - LINE_TOP));
+	});
+
+	it("a print fits the column to an attached member's right edge after its group's sideways move", () => {
+		// Defect: the fit took the stored ink's right edge, so a member its group moved right ran past the page by the move.
+		const DX = 30;
+		const s = anchoredStroke();
+		const wide = { ...s, points: [{ x: 20, y: LINE_TOP + 4, pressure: 0.5, t: 0 }, { x: 900, y: LINE_TOP + 24, pressure: 0.5, t: 8 }], bbox: { x: 20, y: LINE_TOP + 4, width: 880, height: 20 } } as InkStroke;
+		const record = {
+			v: 1, id: "g1", strokeIds: [wide.id], target: { from: 7, to: 11 }, ref: { x: 20, y: LINE_TOP },
+			layout: { width: 700, font: 26 }, probe: { id: wide.id, x: 22, y: LINE_TOP + 6 }, shown: { dx: DX, dy: 0 },
+		} as unknown as AttachmentData;
+		embedInk.initEmbedInkAttachments((p) => (p === "a.md" ? [record] : []));
+		ink = [wide];
+		initEmbedInkRefresh(() => ink);
+		const { root, blocks } = blockContainer(doc, 739);
+		recordBlocks(root, blocks);
+		doc.printMedia = false;
+		const placed = embedInk.placeStrokes(root as unknown as HTMLElement, ink, undefined, 1, "a.md").strokes[0]!;
+		expect(placed.bbox.x, "precondition: the member is placed its group's move to the right").toBe(20 + DX);
+		attachEmbedInk(root as unknown as HTMLElement, "a.md", ink);
+		exportCalls(root);
+		expect(root.style.width, "the text still wraps at the column").toBe("764px");
+		expect(Number(root.style.zoom), "the fit left out the group's move").toBeCloseTo(739 / (900 + DX + 16 + 64), 5);
+	});
+
+	it("a canvas note printed as one page is padded by an attached member's reach after its group's move left", () => {
+		// Defect: the reach took the stored ink's left edge, so a member its group moved left of the text was cut off at the page's edge.
+		const DX = -200;
+		const s = anchoredStroke();
+		const record = {
+			v: 1, id: "g1", strokeIds: [s.id], target: { from: 7, to: 11 }, ref: { x: 40, y: LINE_TOP },
+			layout: { width: 700, font: 26 }, probe: { id: s.id, x: 41, y: LINE_TOP + 6 }, shown: { dx: DX, dy: 0 },
+		} as unknown as AttachmentData;
+		embedInk.initEmbedInkAttachments((p) => (p === "a.md" ? [record] : []));
+		initEmbedInkPrintCanvas(() => true);
+		initEmbedInkPrintPaper(() => ({ pageSize: "Letter", landscape: false, margin: "0", downscalePercent: 100 }));
+		try {
+			ink = [s];
+			initEmbedInkRefresh(() => ink);
+			const { root, blocks } = blockContainer(doc, 739);
+			heightFollowsMinHeight(root, 300);
+			recordBlocks(root, blocks);
+			doc.printMedia = false;
+			const placed = embedInk.placeStrokes(root as unknown as HTMLElement, ink, undefined, 1, "a.md").strokes[0]!;
+			expect(placed.bbox.x, "precondition: the member is placed its group's move to the left").toBe(40 + DX);
+			expect(s.bbox.x, "precondition: the stored stroke is right of the text's origin").toBeGreaterThan(0);
+			attachEmbedInk(root as unknown as HTMLElement, "a.md", ink);
+			exportCalls(root);
+			expect(root.style.paddingLeft, "the container is not padded by the placed member's reach left of the text").toBe(`${32 - (40 + DX)}px`);
+		} finally {
+			initEmbedInkPrintCanvas(null);
+			initEmbedInkPrintPaper(null);
+		}
 	});
 
 	it("a print honours anchors under the open editor's signature, as Reading view does: an anchor taken at another width stays where it was drawn", () => {

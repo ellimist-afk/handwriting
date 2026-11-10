@@ -164,6 +164,20 @@ async function mountLines(dsf: number, z: number) {
 		(document.querySelector(".cm-scroller") as HTMLElement).scrollTop = 600;
 		await (window as any).viewportFixture.settle();
 	}, z);
+	// The page guides' faint line is a screen line over the paper on an Infinite Canvas note, not a rule of it: hidden
+	// through the test's own style, after the box is seen up and before any read, and the paper's plan read back unchanged.
+	const hide = await p.evaluate(async () => {
+		const host = document.querySelector(".cm-editor") as HTMLElement;
+		const plan = () => { const cs = getComputedStyle(host); return ["--handwriting-paper-pitch", "--handwriting-paper-rule", "--handwriting-paper-phase"].map(n => cs.getPropertyValue(n)).join("|"); };
+		const box = !!document.querySelector(".cm-scroller > .handwriting-page-guides"), before = plan();
+		const style = document.createElement("style");
+		style.textContent = ".handwriting-page-guides { visibility: hidden !important; }";
+		document.head.appendChild(style);
+		await (window as any).viewportFixture.settle();
+		return { box, before, after: plan() };
+	});
+	expect(hide.box, `premise: the page guides' box is up before the hide (${dsf}@${z}); none here means the hide proves nothing`).toBe(true);
+	expect(hide.after, `premise: hiding the page guides left the paper plan alone (${dsf}@${z})`).toBe(hide.before);
 	// The host-set placements count from the note origin itself (the content's top padding at scrollTop's whole pitches),
 	// not from the overlay's plan, which puts the phase on the device px grid.
 	const basePhase = await p.evaluate(() => Number.parseFloat(getComputedStyle(document.querySelector(".cm-content") as HTMLElement).paddingTop) || 0);

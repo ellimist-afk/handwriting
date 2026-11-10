@@ -1,7 +1,69 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { decideWhatsNew, RELEASE_NOTES, whatsNewDurationMs, whatsNewFragment } from "./WhatsNew";
 
 const NOTES = { "1.3.10": ["undo works"], "1.3.11": ["more"] };
+
+/** Alan's 1.5.0 list as he typed it, one entry per line of his text. */
+const ALAN_1_5_0 = [
+	"new feature release 1.5.0 :)",
+	"attach ink to text",
+	"lasso resize and rotate ink",
+	"custom colors!",
+	"shape snap resize and rotate + 5 more shapes (arrow, pentagon, hexagon, octagon, star)",
+	"zoom v2.0",
+	"",
+	"fixes:",
+	"more performance fixes",
+	"pressure sens toggle now changes how new ink looks (no longer global toggle, pls message me if you want old behavior back)",
+	"zoom with image embeds fix (ty woominKO)",
+	"ink + typing fixes",
+	"palm rejection small fix",
+	"pdf dead input fix (linux users)",
+	"side button setting works",
+	"zoombar+toolbar polish and compatibility fix",
+	"ui fixes",
+];
+
+describe("the 1.5.0 update shows Alan's one list", () => {
+	const versionKeys = () =>
+		Object.keys(JSON.parse(readFileSync(fileURLToPath(new URL("../../versions.json", import.meta.url)), "utf8")) as Record<string, string>);
+	const below = (v: string) => {
+		const [a, b] = v.split(".").map(Number);
+		return a! < 1 || (a === 1 && b! < 5);
+	};
+
+	it("from 1.4.24: one group, 1.5.0, his list", () => {
+		const d = decideWhatsNew("1.5.0", "1.4.24", false);
+		expect(d.show).toBe(true);
+		if (!d.show) return;
+		expect(d.groups?.map((g) => g.version)).toEqual(["1.5.0"]);
+		expect(d.groups?.[0]?.notes).toEqual(ALAN_1_5_0);
+	});
+
+	it("from no stored version, and from every release before 1.5.0: the 1.5.0 group is his list as typed", () => {
+		// A line of his that an older list also holds ("ui fixes") stays in his list.
+		const seens: (string | null)[] = [null, ...versionKeys().filter(below)];
+		expect(seens.length).toBeGreaterThan(10);
+		for (const seen of seens) {
+			const d = decideWhatsNew("1.5.0", seen, false);
+			expect(d.show, `seen ${seen}`).toBe(true);
+			if (!d.show) return;
+			const g = d.groups?.find((x) => x.version === "1.5.0");
+			expect(g?.notes, `seen ${seen}`).toEqual(ALAN_1_5_0);
+		}
+	});
+
+	it("from 1.4.23: the 1.4.24 list, then his 1.5.0 list", () => {
+		const d = decideWhatsNew("1.5.0", "1.4.23", false);
+		expect(d.show).toBe(true);
+		if (!d.show) return;
+		expect(d.groups?.map((g) => g.version)).toEqual(["1.4.24", "1.5.0"]);
+		expect(d.groups?.[0]?.notes).toEqual(RELEASE_NOTES["1.4.24"]);
+		expect(d.groups?.[1]?.notes).toEqual(ALAN_1_5_0);
+	});
+});
 
 describe("decideWhatsNew", () => {
 	it("the case the feature exists for: updating from a build that never stored a version", () => {
@@ -61,13 +123,14 @@ describe("decideWhatsNew", () => {
 		expect(d).toMatchObject({ notes: ["undo works", "more"] });
 	});
 
-	it("does not repeat a line two releases both carry", () => {
+	it("the landed release's list shows as written, even a line an older release also carried", () => {
 		// The copy-forward workaround is still in the shipped notes: the pdf
-		// headline appears under 1.4.0 and again under 1.4.2. Nobody wants to
-		// read it twice.
+		// headline appears under 1.4.0 and again under 1.4.2. Alan's list for
+		// the version landed on is the contract, so 1.4.2 keeps its copy; only
+		// older groups drop a line an earlier group already showed.
 		const dupes = { "1.4.0": ["write on pdfs", "a"], "1.4.2": ["write on pdfs", "b"] };
 		const d = decideWhatsNew("1.4.2", "1.3.11", false, dupes);
-		expect(d).toMatchObject({ notes: ["write on pdfs", "a", "b"] });
+		expect(d).toMatchObject({ notes: ["write on pdfs", "a", "write on pdfs", "b"] });
 	});
 
 	it("a build older than the key itself hears about one release, not all of them", () => {
@@ -92,10 +155,10 @@ describe("decideWhatsNew", () => {
 	});
 
 	it("1.4.24 notes are Alan's nine lines, character for character", () => {
-		// Alan wrote this text himself; the smiley and the lower
+		// Alan wrote this text himself; the capitals, the smiley and the lower
 		// case are his and are pinned as typed. Nine lines, in this order.
 		expect(RELEASE_NOTES["1.4.24"]).toEqual([
-			"big latency and performance patch. hope you guys enjoy -alan :)",
+			"BIG BIG latency and performance patch. hope you guys enjoy -alan :)",
 			"many reading view ink fixes",
 			"slides fixes",
 			"pdf scroll fix",
@@ -106,6 +169,12 @@ describe("decideWhatsNew", () => {
 			"android click to erase setting added",
 		]);
 		expect(RELEASE_NOTES["1.4.24"]).toHaveLength(9);
+	});
+
+	it("1.5.0 notes are Alan's one list, character for character, and 1.4.25 has no list of its own", () => {
+		// Alan typed this list himself: his case, his spelling, his blank line, nothing added.
+		expect(RELEASE_NOTES["1.5.0"]).toEqual(ALAN_1_5_0);
+		expect(Object.keys(RELEASE_NOTES)).not.toContain("1.4.25");
 	});
 
 	it("1.3.10 -> 1.4.5 is five versions, but only the newest two show in full - this test used to pin all five (23 lines) at once, which is exactly the spam this feature exists to stop", () => {
@@ -121,14 +190,15 @@ describe("decideWhatsNew", () => {
 		expect(d.groups.map((g) => g.version)).toEqual(["", "1.4.4", "1.4.5"]);
 		expect(d.groups[0]?.collapsedCount).toBe(3);
 		expect(d.groups[0]?.notes).toEqual(["and 3 earlier updates"]);
-		// "bug fixes" was first seen in the now-collapsed 1.3.11, so it no
-		// longer appears anywhere in what's kept.
+		// "bug fixes" was first seen in the now-collapsed 1.3.11, so the older
+		// 1.4.4 group drops it. 1.4.5 is the version landed on, and its list
+		// shows as written, "bug fixes" and "ui fixes" included.
 		expect(d.groups[1]?.notes).not.toContain("bug fixes");
-		expect(d.groups[2]?.notes).not.toContain("bug fixes");
-		// 1 collapsed line + 1.4.4's kept lines + 1.4.5's kept lines, once
-		// dedup against the whole 1.3.11..1.4.5 span (not just what's kept
-		// visible) has already run.
-		expect(d.notes).toHaveLength(9);
+		expect(d.groups[2]?.notes).toEqual(RELEASE_NOTES["1.4.5"]);
+		// 1 collapsed line + 1.4.4's 4 kept lines + 1.4.5's 6 lines as written.
+		// Dedup against the whole 1.3.11..1.4.4 span (not just what's kept
+		// visible) has already run on the older groups.
+		expect(d.notes).toHaveLength(11);
 	});
 });
 
@@ -276,6 +346,28 @@ describe("whatsNewFragment", () => {
 				},
 			],
 		});
+	});
+
+	it("his 1.5.0 list renders his blank line as one bullet-less gap row at his index, every other line a normal row", () => {
+		// His seventh line (index 6) is blank: it renders as an empty row with the gap class (no bullet, no text).
+		const GAP = 6;
+		expect(ALAN_1_5_0[GAP]).toBe("");
+		const expected = ALAN_1_5_0.map((line, i) =>
+			i === GAP
+				? { tag: "li", cls: "handwriting-whats-new-gap", text: undefined, children: [] }
+				: { tag: "li", cls: undefined, text: line, children: [] }
+		);
+		const lastList = (frag: unknown) => {
+			const lists = (shape(frag) as { children: { tag: string; children: unknown[] }[] }).children.filter((c) => c.tag === "ul");
+			return lists[lists.length - 1]?.children;
+		};
+		// From 1.4.24 the toast is one list under the 1.5.0 heading; from 1.4.23 his list is the second group.
+		for (const seen of ["1.4.24", "1.4.23"]) {
+			const d = decideWhatsNew("1.5.0", seen, false);
+			expect(d.show, `seen ${seen}`).toBe(true);
+			if (!d.show) return;
+			expect(lastList(whatsNewFragment(d.version, d.notes, d.groups)), `seen ${seen}`).toEqual(expected);
+		}
 	});
 });
 
@@ -478,5 +570,29 @@ describe("collapsing groups older than the two most recent", () => {
 		const rawTotal = Object.values(RELEASE_NOTES).reduce((n, v) => n + v.length, 0);
 		expect(d.notes.length, "the collapse kept every line").toBeLessThan(rawTotal);
 		expect(reducedDuration).toBeLessThan(whatsNewDurationMs(rawTotal));
+	});
+});
+
+describe("release version files", () => {
+	// The release is 1.5.0 only when every file Obsidian and npm read says so.
+	// The store reads manifest.json and versions.json; versions.json maps each
+	// release to the oldest Obsidian it runs on, and 1.5.0 asks for no newer
+	// Obsidian than 1.4.25 did.
+	const json = (path: string) =>
+		JSON.parse(readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), "utf8")) as Record<string, unknown>;
+
+	it("manifest.json, package.json and package-lock.json all say 1.5.0", () => {
+		expect(json("manifest.json").version, "manifest.json").toBe("1.5.0");
+		expect(json("package.json").version, "package.json").toBe("1.5.0");
+		const lock = json("package-lock.json") as { version: string; packages: Record<string, { version?: string }> };
+		expect(lock.version, "package-lock.json top").toBe("1.5.0");
+		expect(lock.packages[""]?.version, "package-lock.json root package").toBe("1.5.0");
+	});
+
+	it("versions.json lists 1.5.0 with the same oldest Obsidian as 1.4.25, and the manifest agrees", () => {
+		const versions = json("versions.json");
+		expect(versions["1.5.0"], "versions.json 1.5.0").toBe(versions["1.4.25"]);
+		expect(versions["1.5.0"], "versions.json 1.5.0 value").toBe("1.12.3");
+		expect(json("manifest.json").minAppVersion, "manifest.json minAppVersion").toBe(versions["1.5.0"]);
 	});
 });

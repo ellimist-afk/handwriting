@@ -22,6 +22,9 @@ import { blockNotice } from "./view/Notices";
 import { installMethods } from "./inline/InstallMethods";
 import type { HandwritingPlugin } from "./main";
 
+/** On the body of every window while the Page guides setting is off; styles.css hides the guides' box under it. */
+const PAGE_GUIDES_OFF_CLASS = "handwriting-page-guides-off";
+
 declare module "./main" {
 	interface HandwritingPlugin {
 		pickUpNib(tool: InkTool): void;
@@ -34,8 +37,8 @@ declare module "./main" {
 		tipModeOffNotice(): string;
 		armTipModeInput(): boolean;
 		applySlidesInk(on: boolean): void;
-		applyPaper(style: PaperStyle): void;
-		applyPaperTo(doc: Document, style: PaperStyle): void;
+		applyPaper(style: PaperStyle, guidesOff?: boolean): void;
+		applyPaperTo(doc: Document, style: PaperStyle, guidesOff?: boolean): void;
 		reloadPanesHidden(mainDoc: { hidden: boolean }): boolean;
 		applyStatusBarVisibility(): void;
 		registeredGatedCommandIds(): string[];
@@ -292,8 +295,12 @@ declare module "./main" {
 
 	// ---- settings -----------------------------------------------------------
 
-	/** One ruled style at a time: clear both classes, then set the one asked for. */
-	function applyPaper(this: HandwritingPlugin, style: PaperStyle): void {
+	/**
+	 * One ruled style at a time: clear both classes, then set the one asked for. The page guides' off class rides
+	 * the same road (load, window-open, a synced file, the rows), read from the setting unless the caller says;
+	 * unload says false, so no window keeps it.
+	 */
+	function applyPaper(this: HandwritingPlugin, style: PaperStyle, guidesOff = this.settings?.pageGuides === false): void {
 		// Every window, not just the main one: popout editors carry their
 		// own document, and paper that stops at the popout border reads as
 		// broken. window-open (registered at load) stamps late arrivals.
@@ -301,11 +308,11 @@ declare module "./main" {
 		this.app.workspace.iterateAllLeaves((leaf) => {
 			docs.add(leaf.view.containerEl.ownerDocument);
 		});
-		for (const doc of docs) this.applyPaperTo(doc, style);
+		for (const doc of docs) this.applyPaperTo(doc, style, guidesOff);
 		this.notePaper?.refresh();
 	}
 
-	function applyPaperTo(this: HandwritingPlugin, doc: Document, style: PaperStyle): void {
+	function applyPaperTo(this: HandwritingPlugin, doc: Document, style: PaperStyle, guidesOff = this.settings?.pageGuides === false): void {
 		doc.body.classList.remove(
 			"handwriting-paper-lines",
 			"handwriting-paper-grid",
@@ -313,6 +320,9 @@ declare module "./main" {
 		);
 		const cls = paperClass(style);
 		if (cls) doc.body.classList.add(cls);
+		// add/remove, not toggle: bare-plugin test documents stub only these two.
+		if (guidesOff) doc.body.classList.add(PAGE_GUIDES_OFF_CLASS);
+		else doc.body.classList.remove(PAGE_GUIDES_OFF_CLASS);
 	}
 
 	/**

@@ -257,8 +257,8 @@ function selection(overlay: InkOverlayPlugin): {
 
 /** Pixels the user can see: committed canvas cropped to the scroller viewport. */
 function visibleCommitted(note: MountedNote): PixelProbe {
-	const canvases = note.wrapper.querySelectorAll<HTMLCanvasElement>(".handwriting-ink-layer canvas");
-	const committed = canvases[2];
+	// The overlay's own committed canvas, by identity: the ink layer's DOM order changes as layers are added.
+	const committed = note.overlay.committedCanvas;
 	if (!committed) throw new Error("committed canvas missing");
 	const ctx = committed.getContext("2d");
 	if (!ctx) throw new Error("committed context missing");

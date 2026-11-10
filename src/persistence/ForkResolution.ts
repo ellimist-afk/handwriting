@@ -1,5 +1,7 @@
 import { PageData, parsePage, serializePage } from "../model/PageData";
 import { ADOPTED_BY_KEY, outgoingDiverges, recoverExactPage } from "./PageStore";
+import { isLiveSidecarName } from "./InkFolder";
+import { isSyncToolCopyName, syncToolCopyOf } from "./SyncToolCopies";
 
 /**
  * WHAT THE USER DOES ABOUT A FORK, once the store has preserved both sides.
@@ -262,6 +264,13 @@ const MOVE_COPY = /^(.+)\.conflict-migration-(\d+(?:-\d+)?)\.json$/;
  * `<id>.conflict-<mtime>.json` and writes this device's page. Both revisions
  * are then on disk, and the other one is in a file nothing in Obsidian can
  * reach. Each such copy is listed against the live page beside it.
+ *
+ * A SYNC TOOL'S COPY IS ONE TOO. When Syncthing, Dropbox or iCloud finds two
+ * devices changed the same ink file, it keeps one revision under its own
+ * copy name (`SyncToolCopies.ts`) beside the live page. That copy holds the
+ * other device's strokes, so it is listed the same way, for note and PDF
+ * pages alike. A sync tool's copy of one of the plugin's own copies or pair
+ * legs names no live page, so it is not listed against one.
  */
 export async function scanForForks(host: ForkHost, folder: string): Promise<ForkRecord[]> {
 	if (!host.list) return [];
@@ -287,13 +296,14 @@ export async function scanForForks(host: ForkHost, folder: string): Promise<Fork
 	for (const name of names) {
 		const base = name.slice(name.lastIndexOf("/") + 1);
 		const m = KEPT_COPY.exec(base) ?? MOVE_COPY.exec(base);
-		if (!m) continue;
+		const pageId = m ? m[1]! : livePageOfSyncToolCopy(base);
+		if (!pageId) continue;
 		const incoming = `${folder}/${base}`;
 		const st = await host.stat(incoming).catch(() => null);
 		out.push({
-			pageId: m[1]!,
-			path: m[1]!,
-			outgoingPath: `${folder}/${m[1]!}.json`,
+			pageId,
+			path: pageId,
+			outgoingPath: `${folder}/${pageId}.json`,
 			incomingPath: incoming,
 			at: st?.mtime ?? 0,
 			kept: true,
@@ -325,6 +335,12 @@ export async function scanForForks(host: ForkHost, folder: string): Promise<Fork
 		});
 	}
 	return out;
+}
+
+/** The live page a sync tool's copy was made from, or null when the copy is of anything else. */
+function livePageOfSyncToolCopy(name: string): string | null {
+	const id = syncToolCopyOf(name);
+	return id !== null && isLiveSidecarName(`${id}.json`) ? id : null;
 }
 
 /** The install that wrote a pair, from its outgoing leg, or null when none is recorded or it cannot be read. */
@@ -672,16 +688,17 @@ async function applyChangingDecision(
  * `<id>.conflict-resolved-<mtime>.json`, and a copy the folder move kept,
  * `<id>.conflict-migration-<ms>.json`, becomes
  * `<id>.conflict-resolved-migration-<ms>.json`; the other leg of either is the
- * live page and is never renamed. A failed rename keeps the decision for this session only; the
+ * live page and is never renamed. A sync tool's copy (`SyncToolCopies.ts`)
+ * has no `.conflict-` part to rewrite, so it becomes
+ * `<id>.conflict-resolved-sync-<mtime>.json` beside it, with `-<n>` added
+ * while that name is taken. A failed rename keeps the decision for this session only; the
  * next run lists the fork again, which is safe.
  */
 async function markResolved(host: ForkHost, rec: ForkRecord): Promise<void> {
 	if (!host.rename) return;
 	for (const leg of rec.kept ? [rec.incomingPath] : [rec.outgoingPath, rec.incomingPath]) {
 		const to = rec.kept
-			? leg
-					.replace(/\.conflict-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-")
-					.replace(/\.conflict-migration-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-migration-")
+			? await resolvedKeptCopyName(host, rec, leg)
 			: leg.replace(".conflict-external-", ".conflict-resolved-");
 		if (to === leg) continue;
 		try {
@@ -690,6 +707,21 @@ async function markResolved(host: ForkHost, rec: ForkRecord): Promise<void> {
 			console.error("[handwriting] could not mark a decided fork", leg, err);
 		}
 	}
+}
+
+/** The name a decided kept copy is renamed to, or `leg` itself when there is none free. */
+async function resolvedKeptCopyName(host: ForkHost, rec: ForkRecord, leg: string): Promise<string> {
+	const own = leg
+		.replace(/\.conflict-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-")
+		.replace(/\.conflict-migration-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-migration-");
+	const slash = leg.lastIndexOf("/");
+	if (own !== leg || !isSyncToolCopyName(leg.slice(slash + 1))) return own;
+	const stem = `${leg.slice(0, slash + 1)}${rec.pageId}.conflict-resolved-sync-${Math.round(rec.at)}`;
+	for (let n = 1; n <= 99; n++) {
+		const to = n === 1 ? `${stem}.json` : `${stem}-${n}.json`;
+		if ((await host.stat(to).catch(() => null)) === null) return to;
+	}
+	return leg;
 }
 
 /** The live sidecar beside a pair: the store writes both legs next to it. */
@@ -725,7 +757,8 @@ async function livePageHolds(host: ForkHost, rec: ForkRecord, page: PageData): P
 	return (
 		same(onDisk.strokes, wanted.strokes) &&
 		same(onDisk.textBoxes, wanted.textBoxes) &&
-		same(onDisk.images, wanted.images)
+		same(onDisk.images, wanted.images) &&
+		same(onDisk.attachments ?? [], wanted.attachments ?? [])
 	);
 }
 

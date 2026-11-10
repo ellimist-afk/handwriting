@@ -6,11 +6,13 @@
  */
 import { installMethods } from "../inline/InstallMethods";
 import { Notice } from "obsidian";
-import { copySelectionNotice, copySelectionNoticeIsRoutine, cutSelectionNotice, cutSelectionNoticeIsRoutine, inlineInk } from "../inline/InkOverlay";
+import { copySelectionNotice, copySelectionNoticeIsRoutine, cutSelectionNotice, cutSelectionNoticeIsRoutine, inlineInk, overlayForActiveEditor } from "../inline/InkOverlay";
 import { lassoDeleteNotice } from "../inline/InlineSelectionDelete";
+import { ATTACH_STRINGS, selectionChips } from "../inline/AttachDecoration";
 import { stripMarkdownExtension } from "../util/MarkdownPath";
 import { routineNoticesVisible } from "../diag/RoutineNotices";
 import { inkToSvg } from "../ink/SvgExport";
+import { keptShownStrokes } from "../inline/AttachFollow";
 import { inkToPdf } from "../ink/InkPdf";
 import { bytesOf } from "../pdf/PdfSyntax";
 import { createFreshFile } from "../export/CreateFreshFile";
@@ -18,10 +20,12 @@ import { clipboardSize } from "../inline/InkClipboard";
 import { runDetached } from "../util/Detached";
 import { ConfirmDeleteInkModal } from "../ink/DeleteAllInk";
 import type { HandwritingPlugin } from "../main";
+import type { InkStroke } from "../ink/Stroke";
 
 declare module "../main" {
 	interface HandwritingPlugin {
 		registerExportSelectionCommands(): void;
+		exportedStrokes(path: string): readonly InkStroke[];
 	}
 }
 
@@ -40,12 +44,13 @@ declare module "../main" {
 			name: "Export ink as SVG (drawing only)",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
-				const strokes = file ? inlineInk.strokes(file.path) : undefined;
-				if (!file || file.extension !== "md" || !strokes?.some((stroke) => stroke.points.length > 0)) {
+				const stored = file ? inlineInk.strokes(file.path) : undefined;
+				if (!file || file.extension !== "md" || !stored?.some((stroke) => stroke.points.length > 0)) {
 					return false;
 				}
 				if (!checking) {
-					const svg = inkToSvg(strokes);
+					// Attached ink where it is shown; mapped only for the run, not for each availability check.
+					const svg = inkToSvg(this.exportedStrokes(file.path));
 					if (!svg) {
 						new Notice("Handwriting: no ink to export on this note");
 						return true;
@@ -83,12 +88,13 @@ declare module "../main" {
 			name: "Export ink as PDF (drawing only)",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
-				const strokes = file ? inlineInk.strokes(file.path) : undefined;
-				if (!file || file.extension !== "md" || !strokes?.some((stroke) => stroke.points.length > 0)) {
+				const stored = file ? inlineInk.strokes(file.path) : undefined;
+				if (!file || file.extension !== "md" || !stored?.some((stroke) => stroke.points.length > 0)) {
 					return false;
 				}
 				if (!checking) {
-					const pdf = inkToPdf(strokes);
+					// Attached ink where it is shown; mapped only for the run, not for each availability check.
+					const pdf = inkToPdf(this.exportedStrokes(file.path));
 					if (!pdf) {
 						new Notice("Handwriting: no ink to export on this note");
 						return true;
@@ -325,6 +331,33 @@ declare module "../main" {
 				return true;
 			},
 		});
+		// Attach and Detach: the note's lasso selection only (a pdf holds no attached ink), listed only while the
+		// selection allows each, the same answer the selection's own controls read.
+		this.addCommand({
+			id: "attach-ink-to-text",
+			name: "Lasso: attach ink to text",
+			checkCallback: (checking) => {
+				const surface = this.activeInkSurface();
+				if (surface?.kind !== "inline") return false;
+				const path = surface.overlay.filePath();
+				if (!path || !selectionChips(surface.overlay, inlineInk.attachments(path)).attach) return false;
+				// An Attach with no text under the ink says so. The pin moves the hook afterwards.
+				if (!checking && !surface.overlay.attachSelected()) new Notice(ATTACH_STRINGS.noText);
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "detach-ink",
+			name: "Lasso: detach ink from text",
+			checkCallback: (checking) => {
+				const surface = this.activeInkSurface();
+				if (surface?.kind !== "inline") return false;
+				const path = surface.overlay.filePath();
+				if (!path || !selectionChips(surface.overlay, inlineInk.attachments(path)).detach) return false;
+				if (!checking) surface.overlay.detachSelected();
+				return true;
+			},
+		});
 		this.addCommand({
 			id: "delete-all-ink",
 			name: "Delete all ink on this note",
@@ -349,8 +382,19 @@ declare module "../main" {
 		});
 	}
 
+	/**
+	 * A note's strokes for an export: through the active editor's overlay when it shows the note, so attached ink is
+	 * where it is shown; when no overlay shows it, the stored strokes with each group at the correction its record kept.
+	 */
+	function exportedStrokes(this: HandwritingPlugin, path: string): readonly InkStroke[] {
+		const active = this.app.workspace?.activeEditor, file = active?.file;
+		const overlay = active?.editor && file && file.path === path ? overlayForActiveEditor(active.editor, file) : null;
+		return overlay ? overlay.exportStrokes(path) : keptShownStrokes(inlineInk.strokes(path), inlineInk.attachments(path));
+	}
+
 export function installRegisterExportCommands(proto: HandwritingPlugin): void {
 	installMethods(proto, {
 		registerExportSelectionCommands,
+		exportedStrokes,
 	});
 }

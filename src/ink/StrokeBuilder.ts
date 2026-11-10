@@ -1,3 +1,4 @@
+import { pressureSensitivityEnabled } from "./PenStyle";
 import { InkPoint, InkStroke, InkTool, computeBBox, newStrokeId } from "./Stroke";
 import type { StrokeWidthMode, PressureProfile } from "./StrokeWidth";
 
@@ -322,6 +323,9 @@ export class StrokeBuilder {
 			...(this.device === "mouse" ? { device: this.device } : {}),
 			...(this.widthMode === "uniform" || tap ? { widthMode: "uniform" as const } : {}),
 			...(this.pressureProfile && !tap ? { pressureProfile: this.pressureProfile } : {}),
+			// Every new stroke, taps, mouse, finger and highlighter ink included, carries the pressure setting the wet
+			// layer drew it under, read at lift, so it paints, caches and exports under that setting for good.
+			pressureSensitivity: pressureSensitivityEnabled() ? "on" : "off",
 		};
 	}
 

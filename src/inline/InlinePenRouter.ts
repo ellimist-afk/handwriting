@@ -428,8 +428,38 @@ export class InlinePenRouter {
 	// and how late did its first input-rate samples arrive?
 	strokeDownAt = 0;
 	firstRawTraced = false;
-	/** Raw-vs-move ink arbitration; see InkFeed.ts for the whole story. */
-	inkFeed = new InkFeedArbiter();
+	/**
+	 * Raw-vs-move ink arbitration; see InkFeed.ts for the whole story. Its
+	 * stroke start and end bind and unbind the raw listener, so every path
+	 * that starts or ends a stroke (claim, finger claim, lift, blur commit,
+	 * abandon, pinch cancel) carries the listener with it.
+	 */
+	inkFeed = new InkFeedArbiter({
+		strokeStarted: () => this.bindRawListener(),
+		strokeEnded: () => this.unbindRawListener(),
+	});
+	/** The `pointerrawupdate` listener while a stroke is in flight; null otherwise. */
+	rawListener: ((ev: Event) => void) | null = null;
+
+	/**
+	 * Listen for raw input for this stroke. Chromium generates
+	 * `pointerrawupdate` only while a listener exists, so a pen that only
+	 * hovers costs no raw dispatch at all; hover bookkeeping runs on
+	 * `pointermove`. Capture phase, like every other pointer listener here.
+	 */
+	bindRawListener(): void {
+		if (this.rawListener) return;
+		const h = (ev: Event) => this.pointerRawUpdate(ev as PointerEvent);
+		this.rawListener = h;
+		this.scrollEl.addEventListener("pointerrawupdate", h, { capture: true });
+	}
+
+	unbindRawListener(): void {
+		const h = this.rawListener;
+		if (!h) return;
+		this.rawListener = null;
+		this.scrollEl.removeEventListener("pointerrawupdate", h, { capture: true });
+	}
 
 	// Acquisition context printed with every CLAIMED pen-down.
 	lastTouchAt = Number.NEGATIVE_INFINITY;
@@ -677,6 +707,7 @@ export class InlinePenRouter {
 		disarmWindowMirror();
 		for (const d of this.disposers) d();
 		this.disposers = [];
+		this.unbindRawListener();
 		this.disarmEndBackstop();
 		this.restoreGuardStyle();
 		if (this.ownershipDisarmTimer !== null) {
@@ -1029,6 +1060,17 @@ export class InlinePenRouter {
 			tiltY: e.tiltY,
 		};
 	}
+}
+
+/**
+ * The app is going to the background: commit every live stroke on every open note and PDF. A hide can arrive
+ * with no blur first, and a stroke still on the glass then never reaches its commit before the hide writes the
+ * page. Committed, not dropped. A hide is not a loss of continuity, so nothing else is torn down: a router with
+ * no live stroke is left as it was, its tail and touch-action guard still armed, and its tail timer fires on
+ * resume.
+ */
+export function finishLiveStrokesOnHide(): void {
+	for (const r of [...liveRouters]) r.finishActiveStroke();
 }
 
 installInlinePenRouterNav(InlinePenRouter.prototype);

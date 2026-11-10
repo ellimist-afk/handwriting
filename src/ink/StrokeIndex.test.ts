@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BUCKET_WORLD, StrokeIndex } from "./StrokeIndex";
+import { BUCKET_WORLD, StrokeIndex, strokesIn } from "./StrokeIndex";
 import { InkPoint, InkStroke, computeBBox } from "./Stroke";
 import { eraserRect, strokesHitByCircle } from "./Eraser";
 
@@ -112,6 +112,23 @@ describe("StrokeIndex z-order", () => {
 		const ids = hit.map((s) => Number(s.id.slice(1)));
 		expect(ids).toEqual([...ids].sort((a, b) => a - b));
 		expect(ids.length).toBe(16);
+	});
+});
+
+// The cull of a moving paint with a dirty index: the walk must return what a rebuilt index would.
+describe("strokesIn", () => {
+	it("returns the index query's strokes, in the same order, and skips a non-finite bbox", () => {
+		const list: InkStroke[] = [];
+		for (let i = 0; i < 300; i++) list.push(stroke(`s${i}`, (i % 20) * 37, Math.floor(i / 20) * 53, 5 + (i % 7) * 11, 4 + (i % 5) * 9));
+		list.push(stroke("big", 0, 0, BUCKET_WORLD * 40, BUCKET_WORLD * 40), stroke("nan", NaN, 0));
+		const idx = new StrokeIndex();
+		idx.rebuild(list);
+		const rect = { x: 120, y: 90, width: 400, height: 300 };
+		const walked = strokesIn(list, rect).map((s) => s.id);
+		expect(walked.length).toBeGreaterThan(10);
+		expect(walked).toContain("big");
+		expect(walked).not.toContain("nan");
+		expect(walked).toEqual(idx.query(rect).map((s) => s.id));
 	});
 });
 
@@ -310,5 +327,24 @@ describe("StrokeIndex / eraser equivalence", () => {
 		expect(bad).toEqual([]);
 		// A run where no circle touched anything would prove nothing.
 		expect(touching).toBeGreaterThan(20);
+	});
+});
+
+describe("StrokeIndex.replaceMoved", () => {
+	const shifted = (s: InkStroke, dy: number): InkStroke => ({ ...s, points: s.points.map((p) => ({ ...p, y: p.y + dy })), bbox: { ...s.bbox, y: s.bbox.y + dy } });
+	const ids = (list: InkStroke[]) => list.map((s) => s.id);
+	it("X1: a move inside the same cells and one across cells answer every query as remove and insertLike do, at the old depth", () => {
+		const strokes = [stroke("a", 10, 10), stroke("b", 20, 20), stroke("c", 30, BUCKET_WORLD - 15), stroke("d", 40, 40)];
+		const swap = new StrokeIndex(), plain = new StrokeIndex();
+		swap.rebuild(strokes); plain.rebuild(strokes);
+		for (const [i, dy] of [[1, 20], [2, 30]] as const) {
+			const old = strokes[i]!, now = shifted(old, dy);
+			swap.replaceMoved(old, now);
+			plain.remove(old); plain.insertLike(now, old);
+			strokes[i] = now;
+		}
+		for (const rect of [{ x: 0, y: 0, width: 100, height: 100 }, { x: 0, y: BUCKET_WORLD - 20, width: 100, height: 60 }, { x: 0, y: 0, width: 2 * BUCKET_WORLD, height: 2 * BUCKET_WORLD }])
+			expect(ids(swap.query(rect)), JSON.stringify(rect)).toEqual(ids(plain.query(rect)));
+		expect(ids(swap.query({ x: 0, y: 0, width: 2 * BUCKET_WORLD, height: 2 * BUCKET_WORLD })), "paint order kept").toEqual(["a", "b", "c", "d"]);
 	});
 });

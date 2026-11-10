@@ -10,7 +10,7 @@ import { addStripSurface, inkOverlayExtension, inlineInk, inlineReloadBindings, 
 import { armForegroundRepaint } from "./inline/ForegroundRepaint";
 import { syncUndoTraceForDiagnostics } from "./diag/UndoHistoryTrace";
 import { surfaceExtents } from "./inline/SurfaceExtent";
-import { noteCameras } from "./inline/NoteCamera";
+import { noteCameras, setNoteCameraStore } from "./inline/NoteCamera";
 import { refreshInkTheme } from "./ink/InkTheme";
 import { setDiagnosticsChangedListener } from "./diag/DiagSwitch";
 import { isMarkdownPath } from "./util/MarkdownPath";
@@ -19,6 +19,7 @@ import { embedInkChanged, embedInkFileOpened, embedInkRenamed, initEmbedInkFontR
 import { initEmbedInkPrintPaper } from "./inline/EmbedInkPrint";
 import { onInkChanged } from "./inline/InkEvents";
 import { setPenHardwareStore } from "./inline/PenToolsMode";
+import { setLegacyPressureStore } from "./settings/LegacyPressureLock";
 import { canvasForNote, CanvasNoteOverride } from "./inline/CanvasNoteOverride";
 import { PageStore, WRITE_ATTEMPTS } from "./persistence/PageStore";
 import { runDetached } from "./util/Detached";
@@ -68,12 +69,29 @@ declare module "./main" {
 			load: (key) => this.app.loadLocalStorage(key) as string | boolean | null,
 			save: (key, value) => this.app.saveLocalStorage(key, value),
 		});
+		// What old ink draws under is this device's too: a lock in data.json could reach another device's old ink.
+		// Above loadSettings, which takes the lock through this seam.
+		setLegacyPressureStore({
+			load: (key) => this.app.loadLocalStorage(key) as unknown,
+			save: (key, value) => this.app.saveLocalStorage(key, value),
+		});
 		// The side-button choice belongs to this device, never synced settings.
 		const { setSideButtonStore } = await import("./inline/TipMode");
 		setSideButtonStore({
 			load: (key) => this.app.loadLocalStorage(key) as unknown,
 			save: (key, value) => this.app.saveLocalStorage(key, value),
 			defaultErases: Platform.isAndroidApp,
+		});
+		// Each note's zoom and scroll belongs to this device too: a phone's zoom must never
+		// reach a desktop. The paths the vault no longer has go at layout-ready, once the vault is indexed; at onload a
+		// note not yet indexed would read as gone.
+		setNoteCameraStore({
+			load: (key) => this.app.loadLocalStorage(key) as unknown,
+			save: (key, value) => this.app.saveLocalStorage(key, value),
+		});
+		this.app.workspace.onLayoutReady(() => {
+			if (this.unloaded) return;
+			noteCameras.dropVanished((path) => this.app.vault.getAbstractFileByPath(path) !== null);
 		});
 		initPressureGain(Platform.isIosApp ? IOS_WEBKIT_CEILING : 0);
 	}
@@ -479,6 +497,10 @@ declare module "./main" {
 			if (document.visibilityState === "hidden") this.flushOnHide();
 		});
 		this.registerDomEvent(window, "pagehide", () => this.flushOnHide());
+		// Closing the desktop app: Obsidian waits on quit tasks before the window
+		// goes, and onunload does not wait at all, so ink still saving at a close
+		// gets a capped task here. See flushOnQuit.
+		this.registerEvent(this.app.workspace.on("quit", (tasks) => this.flushOnQuit(tasks)));
 
 		// ---- foreground repaint (1.4.12 §14) ----------------------------------
 		// The mirror of the flush above, on the way BACK. WebKit reclaims a

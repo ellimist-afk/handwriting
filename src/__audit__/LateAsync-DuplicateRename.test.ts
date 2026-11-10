@@ -152,6 +152,7 @@ function rig(): Rig {
 				return { kind: "registered" };
 			},
 			snapshot: () => ({}),
+			owner: () => undefined,
 		},
 		settings: { cameras: {}, pageOwners: {} },
 		settingsDirty: false,

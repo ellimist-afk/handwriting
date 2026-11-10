@@ -205,8 +205,10 @@ for (const dpr of [1, 2]) {
 			expect(actual.state.editors.find(e => e.id === id)?.file).toBe("synthetic-issue22.md");
 			const surfaces = actual.state.surfaces.filter(s => s.editor === id);
 			expect(surfaces, "legitimate same-file pane retains its own ink surface").toHaveLength(1);
-			expect(surfaces[0]!.canvases[2]!.raster.count, "legitimate second pane paints shared note ink").toBeGreaterThan(100);
-			const crop = surfaces[0]!.canvases[2]!.raster.screen!;
+			// The pane's committed canvas, by identity: the ink layer's DOM order changes as layers are added.
+			const committed = surfaces[0]!.canvases.find((c) => c.committed);
+			expect(committed?.raster.count ?? 0, "legitimate second pane paints shared note ink").toBeGreaterThan(100);
+			const crop = committed!.raster.screen!;
 			const frameRect = popout ? await subject.page.locator("iframe").boundingBox() : null;
 			if (popout && !frameRect) throw Error("second-window frame has no visible rectangle");
 			const composite = await subject.page.screenshot({ clip: { ...crop,
@@ -225,7 +227,7 @@ for (const dpr of [1, 2]) {
 			assertOriginal(restored.state, before);
 			const remounted = restored.state.surfaces.filter(s => s.editor === id);
 			expect(remounted, "same pane remounts after regaining its owned root").toHaveLength(1);
-			expect(remounted[0]!.canvases[2]!.raster.count, "remounted legitimate pane still paints shared ink").toBeGreaterThan(100);
+			expect(remounted[0]!.canvases.find((c) => c.committed)?.raster.count ?? 0, "remounted legitimate pane still paints shared ink").toBeGreaterThan(100);
 			expect(subject.errors).toEqual([]);
 		} finally { await subject.page.close(); }
 	});

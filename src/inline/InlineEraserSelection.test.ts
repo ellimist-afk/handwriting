@@ -30,6 +30,8 @@ import { DEFAULT_PEN } from "../ink/PenStyle";
 /** The selection's world bounds; the contact below lands in the middle. */
 const BOUNDS = { x: 0, y: 0, width: 100, height: 100 };
 const INSIDE = { x: 50, y: 50 };
+/** Clear of the padded box, its handles and the Attach button below it. */
+const OUTSIDE = { x: 300, y: 300 };
 
 interface Rig {
 	/** A pen contact at `at`, through the real `penDown`. */
@@ -45,6 +47,8 @@ interface Rig {
 	headDown: ReturnType<typeof vi.fn>;
 	/** Per-stroke pressure state that gates persisted hardware calibration. */
 	pressureState(): { gain: number; observesPen: boolean };
+	/** Whether the live selection is gone. */
+	selectionEmpty(): boolean;
 }
 
 function makeRig(): Rig {
@@ -84,7 +88,8 @@ function makeRig(): Rig {
 	// focusClaimedPenEditor's whole contract: already focused, nothing to do.
 	view.view = { hasFocus: true, focus: () => undefined };
 	view.frame = { locked: false, begin: () => undefined, end: () => undefined, cancel: () => undefined };
-	view.camera = { screenToWorld: (x: number, y: number) => ({ x, y }) };
+	// The lasso's handle test reads the camera's zoom: a selection's handles are sized in screen px.
+	view.camera = { screenToWorld: (x: number, y: number) => ({ x, y }), snapshot: { x: 0, y: 0, zoom: 1 } };
 
 	// A live selection: one stroke id is enough, since the grab test asks
 	// `isEmpty` and then consults `selectionBounds` rather than the members.
@@ -128,6 +133,7 @@ function makeRig(): Rig {
 			gain: view.strokeGain as number,
 			observesPen: view.strokePenGesture as boolean,
 		}),
+		selectionEmpty: () => selection.isEmpty,
 	};
 }
 
@@ -158,13 +164,29 @@ describe("a pen landing inside a live selection", () => {
 		expect(rig.grabbed).toHaveBeenCalledTimes(1);
 	});
 
-	it("clears a stale selection and inks when the eligible contact is a finger", () => {
+	it("a finger the router claimed inside the box takes the selection: a lasso contact, no ink, the selection kept", () => {
+		// Since the Attach rethink a finger reaches penDown inside the box only as the router's claim past the tap limit.
 		setTipMode("nib");
 		setInlineTool("pen");
 		const rig = makeRig();
 
 		rig.penDown(INSIDE, "touch");
 
+		expect(rig.mode()).toBe("lasso");
+		expect(rig.grabbed).toHaveBeenCalledTimes(1);
+		expect(rig.wetDown).not.toHaveBeenCalled();
+		expect(rig.headDown).not.toHaveBeenCalled();
+		expect(rig.selectionEmpty(), "the selection kept").toBe(false);
+	});
+
+	it("clears a stale selection and inks when the eligible contact is a finger outside the padded box", () => {
+		setTipMode("nib");
+		setInlineTool("pen");
+		const rig = makeRig();
+
+		rig.penDown(OUTSIDE, "touch");
+
+		expect(rig.selectionEmpty(), "the selection cleared").toBe(true);
 		expect(rig.mode()).toBe("ink");
 		expect(rig.grabbed).not.toHaveBeenCalled();
 		expect(rig.wetDown).toHaveBeenCalledTimes(1);
