@@ -3,398 +3,1346 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Handwriting for Obsidian</title>
-<meta name="description" content="An Obsidian plugin for writing on your notes with a pen. Pressure ink, highlighter, eraser and lasso on ordinary Markdown. Free, and the source code is available on GitHub.">
+<meta name="color-scheme" content="dark">
+<title>Handwriting for Obsidian: write on your notes and PDFs with a pen</title>
+<meta name="description" content="Free Obsidian plugin. Write, highlight, erase
+and lasso on your notes and PDFs with Apple Pencil or any pen. Export a PDF
+copy with your ink in it. Your notes stay Markdown.">
 <meta property="og:title" content="Handwriting for Obsidian">
 <meta property="og:description" content="Write on your notes with a pen. The note stays a .md file.">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://ellimist-afk.github.io/handwriting/">
-<meta property="og:image" content="https://ellimist-afk.github.io/handwriting/card.png">
+<meta property="og:url" content="https://handwriting.md/">
+<meta property="og:image" content="https://handwriting.md/card.png">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="preload" href="fonts/instrument-serif.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/instrument-sans.woff2" as="font" type="font/woff2" crossorigin>
+<script>window.HANDWRITING_STATS = { umamiId: "" };</script>
+<script>window.HANDWRITING_SIGNUP = { kitFormUrl: "" };</script>
 <style>
+@font-face { font-family: "Instrument Serif"; font-style: normal;
+  font-weight: 400; font-display: swap;
+  src: url(fonts/instrument-serif.woff2) format("woff2"); }
+@font-face { font-family: "Instrument Serif"; font-style: italic;
+  font-weight: 400; font-display: swap;
+  src: url(fonts/instrument-serif-italic.woff2) format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-style: normal;
+  font-weight: 400 700; font-display: swap;
+  src: url(fonts/instrument-sans.woff2) format("woff2"); }
+@font-face { font-family: "Caveat"; font-style: normal; font-weight: 600;
+  font-display: swap; src: url(fonts/caveat.woff) format("woff"); }
+
+/* The headline centred and alone, the tablet huge and
+   nearly flat under it, wider than the text column. Then a shelf: every
+   feature is one full-width row, words one side, the shot the other, sides
+   alternating, 140 px of dark purple desk between rows. */
 :root {
-	--paper: #f4f3f8;
-	--card: #fbfaff;
-	--ink: #1b1a23;
-	--ink-soft: #56526a;
-	--rule: #dcd8ea;
-	--accent: #6d3fc4;
-	--accent-soft: #ece4ff;
-	--shadow: 0 1px 2px rgba(27, 26, 35, .06), 0 8px 24px rgba(27, 26, 35, .05);
-	--display: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
-	--body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
-	--mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --desk: #171420;
+  --desk-2: #1f1b2b;
+  --desk-3: #2a2538;
+  --ink: #ece8f3;
+  --dim: #a69eb8;
+  --line: #383048;
+  --line-soft: #292336;
+  --blue: #4f8cff;
+  --blue-hover: #3a74e0;
+  --btn: #f3effa;
+  --btn-hover: #e4ddf3;
+  --btn-ink: #171420;
+  --accent: #8fc1e3;
+  --violet: #a9c4ff;
+  --glow: rgba(165, 135, 225, 0.18);
+  --halo: rgba(150, 120, 215, 0.14);
+  --film: #0c0a11;
+  --bezel: #352d43;
+  --film-edge: #05040a;
+  --shade: rgba(0, 0, 0, 0.85);
+  --serif: "Instrument Serif", Georgia, serif;
+  --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  /* spacing scale: 8 / 16 / 24 / 40 / 64 / 96 / 140 */
+  --s1: 8px; --s2: 16px; --s3: 24px; --s4: 40px; --s5: 64px;
+  --s6: 96px; --s7: 140px;
+  --row-gap: 140px;
+  --gut: max(24px, calc((100vw - 1240px) / 2));
 }
-@media (prefers-color-scheme: dark) {
-	:root:not([data-theme="light"]) {
-		--paper: #15141c;
-		--card: #1c1a26;
-		--ink: #e9e6f4;
-		--ink-soft: #a09bb8;
-		--rule: #2c2939;
-		--accent: #b98cf0;
-		--accent-soft: #2a2140;
-		--shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
-	}
-}
-:root[data-theme="dark"] {
-	--paper: #15141c;
-	--card: #1c1a26;
-	--ink: #e9e6f4;
-	--ink-soft: #a09bb8;
-	--rule: #2c2939;
-	--accent: #b98cf0;
-	--accent-soft: #2a2140;
-	--shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
-}
-
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+html { scroll-behavior: smooth; }
 body {
-	margin: 0;
-	background: var(--paper);
-	color: var(--ink);
-	font-family: var(--body);
-	font-size: 18px;
-	line-height: 1.65;
-	font-optical-sizing: auto;
+  margin: 0; color: var(--ink); font: 17px/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(ellipse 80% 1100px at 50% 440px,
+      var(--halo), transparent 70%),
+    var(--desk);
 }
-main {
-	max-width: 46rem;
-	margin: 0 auto;
-	padding: 0 1.5rem 5rem;
-}
-section {
-	padding: 3rem 0;
-	border-top: 1px solid var(--rule);
-	display: flex;
-	flex-direction: column;
-	gap: 1.1rem;
-}
-section > * { margin: 0; }
-h1, h2, h3 {
-	font-family: var(--display);
-	font-weight: 700;
-	letter-spacing: -.02em;
-	text-wrap: balance;
-	line-height: 1.15;
-	margin: 0;
-}
-h1 { font-size: clamp(2.6rem, 8vw, 3.8rem); }
-h2 { font-size: 1.7rem; }
-h3 { font-size: 1.3rem; font-weight: 600; letter-spacing: -.01em; }
-p { margin: 0; max-width: 62ch; }
-a { color: var(--accent); text-underline-offset: .18em; text-decoration-thickness: 1px; }
-a:hover { text-decoration-thickness: 2px; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
-code, kbd { font-family: var(--mono); font-size: .85em; }
-ul { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: .35rem; }
-li::marker { color: var(--accent); }
-.soft { color: var(--ink-soft); }
-.eyebrow {
-	font-family: var(--display);
-	font-weight: 500;
-	font-size: .78rem;
-	letter-spacing: .14em;
-	text-transform: uppercase;
-	color: var(--ink-soft);
-}
+a { color: inherit; }
+img, video { display: block; max-width: 100%; }
+figure { margin: 0; }
+.wrap { width: min(1240px, 100% - 48px); margin: 0 auto; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px;
+  border-radius: 6px; }
+code, .mono { font: 0.92em var(--mono); }
 
-/* hero */
-header { padding: 4.5rem 0 2.5rem; display: flex; flex-direction: column; gap: 1.1rem; }
-.lede { font-size: 1.2rem; max-width: 40ch; }
-.actions { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding-top: .4rem; }
-.btn {
-	font-family: var(--display);
-	font-weight: 500;
-	font-size: .95rem;
-	text-decoration: none;
-	padding: .6rem 1.1rem;
-	border-radius: 999px;
-	border: 1px solid var(--accent);
-	background: var(--accent);
-	color: var(--paper);
-	transition: transform .12s ease;
-}
-.btn.ghost { background: transparent; color: var(--accent); }
-.btn:hover { transform: translateY(-1px); }
+/* type scale: 13 / 15 / 17 / 20 / 24 / 32 / 48 / 64 / 112 */
+h1, h2, h3 { font-weight: 400; margin: 0; color: var(--ink); }
+h1 { font: 400 clamp(52px, 9vw, 112px)/0.95 var(--serif);
+  letter-spacing: -0.025em; text-wrap: balance; }
+h2 { font: 400 clamp(36px, 4.6vw, 64px)/1.04 var(--serif);
+  letter-spacing: -0.015em; }
+h3 { font: 400 clamp(30px, 3.4vw, 48px)/1.08 var(--serif);
+  letter-spacing: -0.01em; }
+p { margin: 0; }
+main { overflow-x: clip; }
 
-/* the writable surface */
-.surface {
-	position: relative;
-	background: var(--card);
-	border: 1px solid var(--rule);
-	border-radius: 10px;
-	box-shadow: var(--shadow);
-	overflow: hidden;
-}
-.paper {
-	position: relative;
-	height: min(46vh, 340px);
-	background-image: repeating-linear-gradient(
-		to bottom,
-		transparent 0,
-		transparent 27px,
-		var(--rule) 27px,
-		var(--rule) 28px
-	);
-}
-#ink-demo { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
-#ink-hint {
-	position: absolute;
-	inset: 0;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	font-family: var(--display);
-	font-size: 1.5rem;
-	color: var(--ink-soft);
-	opacity: .55;
-	pointer-events: none;
-	transition: opacity .25s ease;
-}
-#ink-hint[data-written] { opacity: 0; }
-.strip {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: .5rem;
-	padding: .6rem .7rem;
-	border-top: 1px solid var(--rule);
-}
-.strip button {
-	font-family: var(--display);
-	font-size: .82rem;
-	font-weight: 500;
-	color: var(--ink);
-	background: transparent;
-	border: 1px solid var(--rule);
-	border-radius: 999px;
-	padding: .3rem .7rem;
-	cursor: pointer;
-}
-.strip button:hover { border-color: var(--accent); }
-.strip button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
-.swatch { width: .7rem; height: .7rem; border-radius: 50%; display: inline-block; vertical-align: -1px; margin-right: .4rem; }
-.strip .spacer { flex: 1; }
-.caption { font-size: .9rem; color: var(--ink-soft); }
-.video {
-	position: relative;
-	width: 100%;
-	aspect-ratio: 16 / 9;
-	border-radius: 10px;
-	overflow: hidden;
-	border: 1px solid var(--rule);
-	box-shadow: var(--shadow);
-	background: var(--card);
-}
-.video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+/* nav */
+nav.top { position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--desk) 86%, transparent);
+  backdrop-filter: blur(10px); border-bottom: 1px solid var(--line-soft); }
+nav.top .wrap { display: flex; align-items: center; gap: var(--s4);
+  height: 72px; }
+.brand { font: 26px/1 var(--serif); text-decoration: none;
+  color: var(--ink); }
+.links { display: flex; gap: var(--s4); margin-right: auto; }
+.links a { text-decoration: none; color: var(--dim); font-size: 15px; }
+.links a:hover { color: var(--ink); }
+.btn { display: inline-flex; align-items: center; text-decoration: none;
+  font-weight: 600; font-size: 15px; padding: 13px 22px; border-radius: 999px;
+  background: var(--btn); color: var(--btn-ink); }
+.btn:hover { background: var(--btn-hover); }
+.btn.quiet { background: transparent; color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line); font-weight: 500; }
+.btn.quiet:hover { box-shadow: inset 0 0 0 1px var(--dim); }
 
-/* content bits */
-.tree {
-	font-family: var(--mono);
-	font-size: .82rem;
-	line-height: 1.7;
-	background: var(--card);
-	border: 1px solid var(--rule);
-	border-radius: 8px;
-	padding: 1rem 1.1rem;
-	overflow-x: auto;
-	white-space: pre;
-	color: var(--ink-soft);
+/* hero: the headline centred with air around it, then the tablet, huge,
+   almost flat, wider than the text column. Nothing sits on the film. */
+.hero { padding: var(--s6) 0 0; text-align: center; }
+.hero .words { max-width: 48rem; margin: 0 auto; }
+.hero .sub { max-width: 28em; margin: var(--s3) auto 0; font-size: 22px;
+  color: var(--dim); text-wrap: balance; }
+.cta { display: flex; gap: var(--s2); flex-wrap: wrap; justify-content: center;
+  margin-top: var(--s4); }
+.cta .btn { font-size: 16px; padding: 16px 28px; }
+.stage { perspective: 2800px; perspective-origin: 50% 0;
+  padding: var(--s6) 0 0; }
+.tablet { margin: 0 auto; width: min(1560px, 100vw - 32px);
+  padding: 1.1%; border-radius: 40px; background: var(--film);
+  box-shadow:
+    inset 0 0 0 1px var(--bezel),
+    0 0 0 1px var(--film-edge),
+    0 90px 140px -50px var(--shade),
+    0 0 240px 20px var(--glow);
+  /* --tx and --ty: a slight lean toward the mouse, set by the script.
+     --ix, --iy, --iz: a slow drift of its own, off under reduced motion. */
+  transform: translateY(var(--iz, 0px))
+    rotateX(calc(8deg + var(--tx, 0deg) + var(--ix, 0deg)))
+    rotateY(calc(var(--ty, 0deg) + var(--iy, 0deg)));
+  transform-origin: 50% 0;
+  animation: float 9s ease-in-out infinite alternate;
+  aspect-ratio: 16 / 9; }
+@property --ix { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --iy { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --iz { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@keyframes float {
+  0% { --ix: -1deg; --iy: -1.5deg; --iz: 0px; }
+  50% { --ix: 0.5deg; --iy: 0.3deg; --iz: -10px; }
+  100% { --ix: -0.3deg; --iy: 1.5deg; --iz: -4px; } }
+.tablet > :is(img, video) { width: 100%; height: 100%; object-fit: cover;
+  border-radius: 22px; }
+.tablet > [hidden] { display: none; }
+.sound-row { text-align: center; margin: var(--s4) 0 0; }
+.sound { font: inherit; font-size: 15px; color: var(--dim);
+  background: transparent; border: 0; padding: 8px 14px; border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--dim); cursor: pointer; }
+.sound:hover, .sound[aria-pressed="true"] { color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink); }
+
+/* facts, one quiet line of them */
+.facts-row { text-align: center; padding: var(--s6) 0 0; }
+.facts { display: flex; flex-wrap: wrap; justify-content: center;
+  margin: 0; padding: 0; }
+.facts div { padding: var(--s1) var(--s4); }
+.facts div + div { border-left: 1px solid var(--line); }
+.facts dt { font-size: 13px; color: var(--dim); }
+.facts dd { margin: 2px 0 0; font-weight: 600; font-size: 15px;
+  color: var(--accent); }
+.facts code { color: var(--accent); }
+.runs { font-size: 15px; color: var(--dim); margin: var(--s3) 0 0; }
+
+/* statement */
+.statement { text-align: center; padding: var(--s7) 0; }
+.statement p { font: 400 clamp(30px, 3.6vw, 52px)/1.2 var(--serif);
+  max-width: 22em; margin: 0 auto; text-wrap: balance; }
+
+/* the clip strip: its own sideways scroller. Without the script it scrolls
+   and snaps; with it, it loops, drifts slowly and drags. */
+.strip-head { display: flex; justify-content: space-between;
+  align-items: baseline; gap: var(--s2); padding-bottom: var(--s2); }
+.strip-head h2 { font: 400 15px/1.3 var(--sans); color: var(--dim);
+  letter-spacing: 0; }
+.strip-head p { font-size: 13px; color: var(--dim); }
+.strip { overflow-x: auto; scroll-snap-type: x mandatory;
+  scroll-padding-left: var(--gut); background: var(--desk);
+  scrollbar-color: var(--line) var(--desk); }
+.strip.looping { scroll-snap-type: none; cursor: grab; touch-action: pan-y; }
+.strip.dragging { cursor: grabbing; user-select: none; }
+.strip.dragging a { pointer-events: none; }
+.reel { list-style: none; margin: 0; display: flex; gap: 16px;
+  width: max-content; padding: 12px var(--gut) 20px; }
+.reel li { scroll-snap-align: start; width: clamp(240px, 26vw, 360px); }
+.reel a { display: block; text-decoration: none; }
+.reel :is(video, img) { width: 100%; height: auto; aspect-ratio: 16 / 9;
+  object-fit: cover; object-position: top center; border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--line), 0 0 40px -8px var(--glow); }
+.reel span { display: block; padding: 10px 2px 0; font-size: 13px;
+  color: var(--dim); }
+.reel a:hover span, .reel a:focus-visible span { color: var(--ink); }
+
+/* clip pop-out: a strip click opens the clip big over the page. */
+.pop { border: 0; padding: 0; background: transparent; color: var(--ink);
+  width: min(1120px, 94vw, 150vh); max-width: none; max-height: none; }
+.pop::backdrop { background: rgba(0, 0, 0, 0.86); }
+.pop .sheet { padding: 14px 14px 18px; }
+.pop :is(video, img) { width: 100%; height: auto; aspect-ratio: 16 / 9;
+  object-fit: cover; object-position: top center; border-radius: 1px; }
+.pop .bar { display: flex; justify-content: space-between;
+  align-items: baseline; gap: var(--s2); padding: 12px 4px 0; }
+.pop .bar span { font: 500 14px/1 var(--sans); letter-spacing: 0.02em;
+  color: var(--dim); }
+.pop .bar button { font: 600 14px/1 var(--sans); color: var(--dim);
+  background: transparent; border: 1px solid var(--line); border-radius: 999px;
+  padding: 8px 14px; cursor: pointer; }
+.pop .bar button:hover { color: var(--ink); border-color: var(--dim); }
+
+/* the shelf: every feature one full-width row, words one side, the shot the
+   other, sides alternating, --row-gap of desk between rows */
+.shelf { padding-top: var(--s7); }
+.head { text-align: center; max-width: 32em; margin: 0 auto; }
+.head p { color: var(--dim); font-size: 20px; margin-top: var(--s2); }
+.head + .feat, .head + .qa { margin-top: var(--s5); }
+.feat { display: grid; grid-template-columns: 1fr 1fr;
+  gap: clamp(40px, 7vw, 96px); align-items: center; }
+.feat > * { min-width: 0; }
+.feat + .feat, .feat + .range-block { margin-top: var(--row-gap); }
+.feat.flip .words { order: 2; }
+.feat .sheet, .feat .frame { --sx: 18px; }
+.feat.flip .sheet, .feat.flip .frame { --sx: -18px; }
+.words h2, .words h3 { font-size: clamp(32px, 3.6vw, 48px);
+  line-height: 1.06; text-wrap: balance; }
+.words p { margin-top: var(--s3); color: var(--dim); font-size: 20px;
+  max-width: 22em; }
+.words code { color: var(--ink); background: var(--desk-3);
+  padding: 2px 7px; border-radius: 5px; }
+
+/* a shot on the desk: the clip itself, a hairline edge, a soft glow. No mat. */
+.sheet { border-radius: 12px;
+  box-shadow:
+    var(--sx, 18px) 30px 60px -20px var(--shade),
+    0 0 110px -10px var(--glow); }
+.sheet > :is(img, video) {
+  width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover;
+  object-position: top center; border-radius: 12px;
+  box-shadow: inset 0 0 0 1px var(--line); }
+.sheet figcaption { font: 500 14px/1 var(--sans); letter-spacing: 0.02em;
+  color: var(--dim); margin: 14px 2px 0; }
+.frame { background: #1e1e1e; border-radius: 12px; overflow: hidden;
+  box-shadow: 0 0 0 1px var(--line),
+    var(--sx, 18px) 30px 60px -30px var(--shade),
+    0 0 110px -10px var(--glow); }
+.frame > :is(img, video) { width: 100%; height: auto; aspect-ratio: 16 / 9;
+  object-fit: cover; object-position: top left; }
+
+/* Write on PDFs: a lighter purple band, edge to edge. The white PDF pages
+   in its clips read as paper on it. Light text #f2f0f8, dim #d2c8e6
+   (5.4:1 on #51427f). The shelf after it keeps its 140 px gap. */
+.band { --ink: #f2f0f8; --dim: #d2c8e6; --line: rgba(0, 0, 0, 0.2);
+  --shade: rgba(0, 0, 0, 0.45); --glow: transparent;
+  background: #51427f; color: var(--ink);
+  margin-top: var(--s7); padding: var(--s6) 0 var(--s7); }
+
+/* where ink attaches: five small diagrams under the attach row. Grey bars
+   for text rows, one ink mark each, an outlined blue band for the
+   quarter-line range under a row. */
+.range-block { text-align: center; }
+.range-head { font: 400 clamp(26px, 2.6vw, 32px)/1.2 var(--serif);
+  color: var(--ink); }
+.range { display: grid; grid-template-columns: repeat(5, 1fr); gap: 28px;
+  margin-top: var(--s4); text-align: left; }
+.range > * { min-width: 0; }
+.rp svg { width: 100%; height: auto; display: block; border-radius: 10px;
+  background: var(--desk-2); box-shadow: inset 0 0 0 1px var(--line); }
+.rp .row { fill: #63707c; }
+.rp .band { fill: var(--blue); fill-opacity: 0.5; stroke: var(--blue);
+  stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.rp .ink { fill: none; stroke: #c084fc; stroke-width: 3.2; stroke-linecap: round;
+  stroke-linejoin: round; }
+.rp .ink.miss { stroke: var(--dim); stroke-dasharray: 6 5; }
+.rp .mid { fill: none; stroke: var(--dim); stroke-width: 1.2; stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke; }
+.rp figcaption { margin-top: var(--s2); font-size: 15px; line-height: 1.5;
+  color: var(--dim); }
+.rp figcaption b { color: var(--ink); font-weight: 600; }
+@media (max-width: 1200px) { .range { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 900px) { .range { grid-template-columns: 1fr 1fr;
+  gap: var(--s4); }
+  .range .rp:last-child { grid-column: 1 / -1; display: grid;
+    grid-template-columns: 1fr 1fr; gap: var(--s4); align-items: center; }
+  .range .rp:last-child figcaption { margin-top: 0; } }
+@media (max-width: 600px) { .range { grid-template-columns: 1fr; }
+  .range .rp:last-child { display: block; }
+  .range .rp:last-child figcaption { margin-top: var(--s2); } }
+
+/* support, signup, questions, install: one centred column each */
+.support { text-align: center; }
+.support p { max-width: 30em; margin: var(--s2) auto 0;
+  color: var(--dim); font-size: 19px; }
+.support p:first-of-type { margin-top: var(--s3); }
+.support p:last-of-type { margin-bottom: var(--s4); }
+.support p a { color: var(--ink); }
+.signup { text-align: center; }
+.signup p { max-width: 32em; margin: var(--s3) auto var(--s4);
+  color: var(--dim); }
+.signup form { display: flex; justify-content: center; gap: var(--s1);
+  flex-wrap: wrap; }
+.signup input { font: inherit; color: var(--ink); background: var(--desk-2);
+  border: 1px solid var(--line); border-radius: 999px; padding: 13px 20px;
+  width: min(320px, 100%); }
+.signup button { font: inherit; font-weight: 600; border: 0;
+  border-radius: 999px; padding: 13px 24px; background: var(--btn);
+  color: var(--btn-ink); cursor: pointer; }
+.signup .fine { font-size: 15px; margin-top: var(--s2); }
+#pdf-faq .qa { max-width: 40em; margin: var(--s5) auto 0; display: grid;
+  gap: var(--s4); }
+#pdf-faq .q, #pdf-faq .a { margin: 0; }
+#pdf-faq .q { font: 400 clamp(26px, 2.6vw, 32px)/1.2 var(--serif);
+  letter-spacing: -0.01em; text-wrap: balance; }
+#pdf-faq .a { margin-top: var(--s1); color: var(--dim); font-size: 18px;
+  max-width: 32em; text-wrap: pretty; }
+.install { text-align: center; padding-bottom: var(--s7); }
+.install ol { list-style: none; counter-reset: s; display: grid; gap: 14px;
+  width: max-content; max-width: 100%; margin: var(--s4) auto; padding: 0;
+  text-align: left; }
+.install li { counter-increment: s; display: grid;
+  grid-template-columns: 3.4rem 1fr; column-gap: 8px; align-items: baseline;
+  font: 400 24px/1.2 var(--serif); }
+.install li::before { content: counter(s, decimal-leading-zero);
+  font: 400 34px/1 var(--serif); color: var(--violet); }
+
+footer { border-top: 1px solid var(--line-soft); padding: var(--s4) 0 var(--s5);
+  color: var(--dim); font-size: 15px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: var(--s3);
+  justify-content: space-between; align-items: center; }
+footer nav { display: flex; flex-wrap: wrap; gap: var(--s3); }
+footer a { text-decoration: none; }
+footer a:hover { color: var(--ink); }
+footer .brand { font-size: 22px; }
+
+@media (max-width: 900px) {
+  :root { --row-gap: 96px; }
+  .links { display: none; }
+  nav.top .wrap { justify-content: space-between; }
+  .hero { padding-top: var(--s5); }
+  .hero .sub { font-size: 19px; }
+  .stage { padding-top: var(--s5); }
+  .tablet { border-radius: 22px;
+    transform: rotateX(calc(5deg + var(--tx, 0deg))) rotateY(var(--ty, 0deg)); }
+  .tablet > :is(img, video) { border-radius: 12px; }
+  .facts-row { padding-top: var(--s5); }
+  .statement { padding: var(--s6) 0; }
+  .shelf { padding-top: var(--s6); }
+  .band { margin-top: var(--s6); padding: var(--s5) 0 var(--s6); }
+  .feat, .feat.flip { grid-template-columns: 1fr; gap: var(--s4); }
+  .feat.flip .words { order: 0; }
+  .words p { font-size: 18px; }
+  .install { padding-bottom: var(--s6); }
 }
-.tree b { color: var(--ink); font-weight: 600; }
-.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.5rem 2rem; }
-.platforms { display: flex; flex-wrap: wrap; gap: .4rem; }
-.platforms span {
-	font-family: var(--display);
-	font-weight: 500;
-	font-size: .85rem;
-	border: 1px solid var(--accent);
-	border-radius: 999px;
-	padding: .22rem .7rem;
-	background: var(--accent);
-	color: var(--paper);
-}
-ol { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: .3rem; }
-footer {
-	border-top: 1px solid var(--rule);
-	padding: 2.5rem 0 0;
-	display: flex;
-	flex-direction: column;
-	gap: .6rem;
-	font-size: .92rem;
-	color: var(--ink-soft);
-}
-@media (max-width: 34rem) {
-	body { font-size: 17px; }
-	header { padding-top: 3rem; }
+@media (max-width: 420px) {
+  :root { --gut: 16px; --row-gap: 80px; }
+  .wrap { width: calc(100% - 32px); }
+  nav.top .btn { padding: 10px 16px; font-size: 14px; }
+  .cta .btn { padding: 14px 22px; }
+  .facts div, .facts div + div { flex-basis: 100%; border-left: 0;
+    padding: var(--s1) 0; }
+  .strip-head { flex-wrap: wrap; }
+  .install li { font-size: 20px; }
 }
 @media (prefers-reduced-motion: reduce) {
-	* { transition: none !important; }
+  /* No motion anywhere: the tablet tilt is a still transform and stays;
+     every video keeps its poster. The strip does not drift (the script
+     reads this same query); dragging it still works. */
+  html, .strip { scroll-behavior: auto; }
+  *, *::before, *::after { transition: none !important;
+    animation: none !important; }
+  .tablet { transition: none; animation: none; }
 }
 </style>
 </head>
 <body>
-<main>
+<nav class="top" aria-label="Main">
+  <div class="wrap">
+    <a class="brand" href="#">Handwriting</a>
+    <div class="links">
+      <a href="#notes">Notes</a>
+      <a href="#pdfs">PDFs</a>
+      <a href="#files">Your files</a>
+      <a href="https://github.com/ellimist-afk/handwriting#readme">Readme</a>
+    </div>
+    <a class="btn" href="https://community.obsidian.md/plugins/handwriting"
+      data-install="nav">Get it for Obsidian</a>
+  </div>
+</nav>
 
-<header>
-	<p class="eyebrow">Obsidian plugin</p>
-	<h1>Handwriting</h1>
-	<p class="lede">pen ink on ordinary Markdown notes. open a note and write. the note stays a <code>.md</code> file.</p>
-	<div class="actions">
-		<a class="btn" href="https://community.obsidian.md/plugins/handwriting">Get it from the plugin directory</a>
-		<a class="btn ghost" href="https://github.com/ellimist-afk/handwriting">GitHub</a>
-	</div>
+<main>
+<header class="hero" id="hero" data-section="hero">
+  <div class="wrap">
+  <div class="words">
+    <h1>Write on your notes</h1>
+    <p class="sub">Pen ink on ordinary Markdown notes and PDFs in
+      Obsidian.</p>
+    <div class="cta">
+      <a class="btn" href="https://community.obsidian.md/plugins/handwriting"
+        data-install="hero">Get it for Obsidian</a>
+      <a class="btn quiet" href="https://youtu.be/XfuZS_YF0aE">Watch the
+        demo</a>
+    </div>
+  </div>
+  </div>
+  <div class="stage">
+    <figure class="tablet">
+      <video id="tower" autoplay muted loop playsinline width="1280"
+        height="720" poster="assets/landing/hero/short-2026-11-07-8-17PM.png"
+        aria-label="The Handwriting demo: writing, highlighting, erasing,
+        lasso, shapes, insert space, canvas, PDFs, snip and flatten, one
+        after another on Obsidian notes."><source
+        src="assets/landing/hero/short-2026-11-09-4-19PM.mp4"
+        type="video/mp4"><img
+        src="assets/landing/hero/short-2026-11-07-8-17PM.png" width="1280"
+        height="720" alt="Handwriting on an Obsidian note, the first frame
+        of the demo film."></video>
+    </figure>
+    <p class="sound-row"><button class="sound" id="sound" type="button"
+      aria-pressed="false">Turn sound on</button></p>
+  </div>
 </header>
 
-<section>
-	<h2>see it work</h2>
-	<div class="video">
-		<iframe src="https://www.youtube-nocookie.com/embed/TUeniA9BZcc" title="Handwriting inside of Obsidian" loading="lazy" allow="accelerometer; clipboard-write; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
-	</div>
+<section class="facts-row wrap" data-section="facts">
+  <dl class="facts">
+    <div><dt>Downloads</dt><dd>13,000+</dd></div>
+    <div><dt>Price</dt><dd>Free</dd></div>
+    <div><dt>Ink stored in</dt><dd><code>.handwriting</code> folder in your
+      vault</dd></div>
+    <div><dt>Telemetry</dt><dd>None</dd></div>
+  </dl>
+  <p class="runs">Runs on Windows, macOS, Linux, iPad, BOOX and Android.</p>
 </section>
 
-<section>
-	<h2>try it here first</h2>
-	<p>this is the plugin's own ink code running in this page. if your pen writes here, it writes the same in a note.</p>
-	<div class="surface">
-		<div class="paper">
-			<canvas id="ink-demo"></canvas>
-			<div id="ink-hint">Write here</div>
-		</div>
-		<div class="strip">
-			<button data-tool="violet" aria-pressed="true"><span class="swatch" style="background:#6d3fc4"></span>Pen</button>
-			<button data-tool="ink" aria-pressed="false"><span class="swatch" style="background:#1b1a23"></span>Black</button>
-			<button data-tool="red" aria-pressed="false"><span class="swatch" style="background:#c0392f"></span>Red</button>
-			<button data-tool="highlighter" aria-pressed="false"><span class="swatch" style="background:#f2c14b"></span>Highlighter</button>
-			<span class="spacer"></span>
-			<button id="ink-export">Save as SVG</button>
-			<button id="ink-undo">Undo</button>
-			<button id="ink-clear">Clear</button>
-		</div>
-	</div>
-	<p class="caption" id="ink-pointer-note">no pen? drag with the mouse.</p>
-	<p class="caption">save as SVG is the plugin's own export. same file you get beside your note.</p>
+<section class="statement wrap" data-section="statement">
+  <p>Open a note and write. Handwriting is free.</p>
 </section>
 
-<section>
-	<h2>why it exists</h2>
-	<p>Lack of handwriting integration kept Obsidian from becoming my main notebook. back in uni, taking notes for biochem and comp sci in onenote with pen and keyboard seamlessly on my tablet truly made me love learning.</p>
-	<p>I wish I could've used Obsidian back then to take all my notes. I built this plugin to solve that problem retroactively</p>
-	<p class="soft">for students, educators, engineers, artists, or anyone who writes and types in the same place.</p>
+<section id="features" class="clips" data-section="clips"
+  aria-labelledby="strip-title">
+  <div class="strip-head wrap">
+    <h2 id="strip-title">Features</h2>
+    <p>Drag sideways</p>
+  </div>
+  <div class="strip" role="region" aria-label="Clips of each feature"
+    tabindex="0">
+    <ol class="reel">
+      <li><a href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/write.png"
+        aria-label="Writing a line of notes under typed text on a note, then
+        highlighting a phrase."><source
+        src="assets/landing/clips/write.mp4" type="video/mp4"><img
+        src="assets/landing/posters/write.png" width="1200" height="674"
+        alt="Writing a line of notes under typed text on a note, then
+        highlighting a phrase."></video><span
+        >Write on your notes</span></a></li>
+      <li><a href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/lasso.png"
+        aria-label="Lassoing a small orange note, dragging it to a clear
+        spot, turning it level and pulling it big enough to read."><source
+        src="assets/landing/clips/lasso.mp4" type="video/mp4"><img
+        src="assets/landing/posters/lasso.png" width="1200" height="674"
+        alt="Lassoing a small orange note, dragging it to a clear
+        spot, turning it level and pulling it big enough to read."></video><span
+        >Lasso, move, resize and rotate</span></a></li>
+      <li><a href="#pdfs"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/pdf.png"
+        aria-label="Writing “why?” in the margin of the Handwriting manual PDF, then switching to the highlighter and highlighting a line."><source
+        src="assets/landing/clips/pdf.mp4" type="video/mp4"><img
+        src="assets/landing/posters/pdf.png" width="1200" height="674"
+        alt="Writing “why?” in the margin of the Handwriting manual PDF, then switching to the highlighter and highlighting a line."></video><span
+        >Write on a PDF</span></a></li>
+      <li><a href="#attach"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/attach-ink-tap.png"
+        aria-label="Handwriting attached to a line of text; the ink follows the
+        text as the note is edited."><source
+        src="assets/landing/clips/attach-ink-tap.mp4" type="video/mp4"><img
+        src="assets/landing/posters/attach-ink-tap.png" width="1200" height="674"
+        alt="Handwriting attached to a line of text; the ink follows the
+        text as the note is edited."></video><span
+        >Attach ink to a line of text</span></a></li>
+      <li><a href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/snap.png"
+        aria-label="A rough hand-drawn box snapping to a clean rectangle,
+        then dragged level and snug around the note."><source
+        src="assets/landing/clips/snap.mp4" type="video/mp4"><img
+        src="assets/landing/posters/snap.png" width="1200" height="674"
+        alt="A rough hand-drawn box snapping to a clean rectangle,
+        then dragged level and snug around the note."></video><span
+        >Shapes snap, then resize and rotate</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/highlighter.png"
+        aria-label="Switching to the highlighter and highlighting the first two lines of a paragraph."><source
+        src="assets/landing/clips/highlighter.mp4" type="video/mp4"><img
+        src="assets/landing/posters/highlighter.png" width="1200" height="674"
+        alt="Switching to the highlighter and highlighting the first two lines of a paragraph."></video><span
+        >Highlighter</span></a></li>
+      <li><a href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/canvas-pan-v2.png"
+        aria-label="Pulling back from a close-up to show a whole infinite canvas of
+        colored diagrams."><source
+        src="assets/landing/clips/canvas-pan-v2.mp4" type="video/mp4"><img
+        src="assets/landing/posters/canvas-pan-v2.png" width="1200" height="674"
+        alt="Pulling back from a close-up to show a whole infinite canvas of
+        colored diagrams."></video><span
+        >Infinite canvas</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/undo-retake.png"
+        aria-label="Writing two words, a stray line landing on them, then undo, redo and undo again."><source
+        src="assets/landing/clips/undo-retake.mp4" type="video/mp4"><img
+        src="assets/landing/posters/undo-retake.png" width="1200" height="674"
+        alt="Writing two words, a stray line landing on them, then undo, redo and undo again."></video><span
+        >Undo and redo</span></a></li>
+      <li><a href="#pdfs"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/flatten.png"
+        aria-label="Flattening the Handwriting manual PDF into a copy with the
+        highlight and handwriting drawn in."><source
+        src="assets/landing/clips/flatten.mp4" type="video/mp4"><img
+        src="assets/landing/posters/flatten.png" width="1200" height="674"
+        alt="Flattening the Handwriting manual PDF into a copy with the
+        highlight and handwriting drawn in."></video><span
+        >Export the PDF with your ink</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/size-color.png"
+        aria-label="Opening the pen palette, dragging the size slider up and
+        writing a big word in the new color."><source
+        src="assets/landing/clips/size-color.mp4" type="video/mp4"><img
+        src="assets/landing/posters/size-color.png" width="1200" height="674"
+        alt="Opening the pen palette, dragging the size slider up and
+        writing a big word in the new color."></video><span
+        >Pen size and color</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/pressure.png"
+        aria-label="Writing “why?” lightly, then again pressing hard below it; the line width follows the pen."><source
+        src="assets/landing/clips/pressure.mp4" type="video/mp4"><img
+        src="assets/landing/posters/pressure.png" width="1200" height="674"
+        alt="Writing “why?” lightly, then again pressing hard below it; the line width follows the pen."></video><span
+        >Pressure</span></a></li>
+      <li><a href="#pdfs"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/snip.png"
+        aria-label="Lassoing a phrase of the Handwriting manual PDF, snipping it, and pasting the image with its link back into a note."><source
+        src="assets/landing/clips/snip.mp4" type="video/mp4"><img
+        src="assets/landing/posters/snip.png" width="1200" height="674"
+        alt="Lassoing a phrase of the Handwriting manual PDF, snipping it, and pasting the image with its link back into a note."></video><span
+        >Snip a PDF into a note</span></a></li>
+      <li><a href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/insert-space.png"
+        aria-label="Dragging down from a line on an exam page to open a gap;
+        everything below slides down with the pen."><source
+        src="assets/landing/clips/insert-space.mp4" type="video/mp4"><img
+        src="assets/landing/posters/insert-space.png" width="1200"
+        height="674"
+        alt="Dragging down from a line on an exam page to open a gap;
+        everything below slides down with the pen."></video><span
+        >Insert space</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/zoom.png"
+        aria-label="Zooming in on the word “chlorophyll” in a highlighted note; the word stays under the cursor."><source
+        src="assets/landing/clips/zoom.mp4" type="video/mp4"><img
+        src="assets/landing/posters/zoom.png" width="1200" height="674"
+        alt="Zooming in on the word “chlorophyll” in a highlighted note; the word stays under the cursor."></video><span
+        >Pinch to zoom</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/copy-ink.png"
+        aria-label="Lassoing a circle and a line, copying them, and pasting them into another note."><source
+        src="assets/landing/clips/copy-ink.mp4" type="video/mp4"><img
+        src="assets/landing/posters/copy-ink.png" width="1200" height="674"
+        alt="Lassoing a circle and a line, copying them, and pasting them into another note."></video><span
+        >Copy ink to another note</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/embed.png"
+        aria-label="A note that embeds a second handwritten note; the ink inside the embed shows and the page scrolls."><source
+        src="assets/landing/clips/embed.mp4" type="video/mp4"><img
+        src="assets/landing/posters/embed.png" width="1200" height="674"
+        alt="A note that embeds a second handwritten note; the ink inside the embed shows and the page scrolls."></video><span
+        >Ink works in embeds</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/erase.png"
+        aria-label="Erasing part of a stroke, then a whole stroke, on a page of
+        handwritten notes."><source
+        src="assets/landing/clips/erase.mp4" type="video/mp4"><img
+        src="assets/landing/posters/erase.png" width="1200" height="674"
+        alt="Erasing part of a stroke, then a whole stroke, on a page of
+        handwritten notes."></video><span
+        >Erase a whole stroke or part of one</span></a></li>
+      <li><a href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/mouse.png"
+        aria-label="Turning on mouse drawing from the command palette, then drawing a line with the mouse."><source
+        src="assets/landing/clips/mouse.mp4" type="video/mp4"><img
+        src="assets/landing/posters/mouse.png" width="1200" height="674"
+        alt="Turning on mouse drawing from the command palette, then drawing a line with the mouse."></video><span
+        >Draw with the mouse</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/write.png"
+        aria-label="Writing a line of notes under typed text on a note, then
+        highlighting a phrase."><source
+        src="assets/landing/clips/write.mp4" type="video/mp4"><img
+        src="assets/landing/posters/write.png" width="1200" height="674"
+        alt="Writing a line of notes under typed text on a note, then
+        highlighting a phrase."></video><span
+        >Write on your notes</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/lasso.png"
+        aria-label="Lassoing a small orange note, dragging it to a clear
+        spot, turning it level and pulling it big enough to read."><source
+        src="assets/landing/clips/lasso.mp4" type="video/mp4"><img
+        src="assets/landing/posters/lasso.png" width="1200" height="674"
+        alt="Lassoing a small orange note, dragging it to a clear
+        spot, turning it level and pulling it big enough to read."></video><span
+        >Lasso, move, resize and rotate</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#pdfs"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/pdf.png"
+        aria-label="Writing “why?” in the margin of the Handwriting manual PDF, then switching to the highlighter and highlighting a line."><source
+        src="assets/landing/clips/pdf.mp4" type="video/mp4"><img
+        src="assets/landing/posters/pdf.png" width="1200" height="674"
+        alt="Writing “why?” in the margin of the Handwriting manual PDF, then switching to the highlighter and highlighting a line."></video><span
+        >Write on a PDF</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#attach"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/attach-ink-tap.png"
+        aria-label="Handwriting attached to a line of text; the ink follows the
+        text as the note is edited."><source
+        src="assets/landing/clips/attach-ink-tap.mp4" type="video/mp4"><img
+        src="assets/landing/posters/attach-ink-tap.png" width="1200" height="674"
+        alt="Handwriting attached to a line of text; the ink follows the
+        text as the note is edited."></video><span
+        >Attach ink to a line of text</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/snap.png"
+        aria-label="A rough hand-drawn box snapping to a clean rectangle,
+        then dragged level and snug around the note."><source
+        src="assets/landing/clips/snap.mp4" type="video/mp4"><img
+        src="assets/landing/posters/snap.png" width="1200" height="674"
+        alt="A rough hand-drawn box snapping to a clean rectangle,
+        then dragged level and snug around the note."></video><span
+        >Shapes snap, then resize and rotate</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/highlighter.png"
+        aria-label="Switching to the highlighter and highlighting the first two lines of a paragraph."><source
+        src="assets/landing/clips/highlighter.mp4" type="video/mp4"><img
+        src="assets/landing/posters/highlighter.png" width="1200" height="674"
+        alt="Switching to the highlighter and highlighting the first two lines of a paragraph."></video><span
+        >Highlighter</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/canvas-pan-v2.png"
+        aria-label="Pulling back from a close-up to show a whole infinite canvas of
+        colored diagrams."><source
+        src="assets/landing/clips/canvas-pan-v2.mp4" type="video/mp4"><img
+        src="assets/landing/posters/canvas-pan-v2.png" width="1200" height="674"
+        alt="Pulling back from a close-up to show a whole infinite canvas of
+        colored diagrams."></video><span
+        >Infinite canvas</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/undo-retake.png"
+        aria-label="Writing two words, a stray line landing on them, then undo, redo and undo again."><source
+        src="assets/landing/clips/undo-retake.mp4" type="video/mp4"><img
+        src="assets/landing/posters/undo-retake.png" width="1200" height="674"
+        alt="Writing two words, a stray line landing on them, then undo, redo and undo again."></video><span
+        >Undo and redo</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#pdfs"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/flatten.png"
+        aria-label="Flattening the Handwriting manual PDF into a copy with the
+        highlight and handwriting drawn in."><source
+        src="assets/landing/clips/flatten.mp4" type="video/mp4"><img
+        src="assets/landing/posters/flatten.png" width="1200" height="674"
+        alt="Flattening the Handwriting manual PDF into a copy with the
+        highlight and handwriting drawn in."></video><span
+        >Export the PDF with your ink</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/size-color.png"
+        aria-label="Opening the pen palette, dragging the size slider up and
+        writing a big word in the new color."><source
+        src="assets/landing/clips/size-color.mp4" type="video/mp4"><img
+        src="assets/landing/posters/size-color.png" width="1200" height="674"
+        alt="Opening the pen palette, dragging the size slider up and
+        writing a big word in the new color."></video><span
+        >Pen size and color</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/pressure.png"
+        aria-label="Writing “why?” lightly, then again pressing hard below it; the line width follows the pen."><source
+        src="assets/landing/clips/pressure.mp4" type="video/mp4"><img
+        src="assets/landing/posters/pressure.png" width="1200" height="674"
+        alt="Writing “why?” lightly, then again pressing hard below it; the line width follows the pen."></video><span
+        >Pressure</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#pdfs"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/snip.png"
+        aria-label="Lassoing a phrase of the Handwriting manual PDF, snipping it, and pasting the image with its link back into a note."><source
+        src="assets/landing/clips/snip.mp4" type="video/mp4"><img
+        src="assets/landing/posters/snip.png" width="1200" height="674"
+        alt="Lassoing a phrase of the Handwriting manual PDF, snipping it, and pasting the image with its link back into a note."></video><span
+        >Snip a PDF into a note</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#notes"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/insert-space.png"
+        aria-label="Dragging down from a line on an exam page to open a gap;
+        everything below slides down with the pen."><source
+        src="assets/landing/clips/insert-space.mp4" type="video/mp4"><img
+        src="assets/landing/posters/insert-space.png" width="1200"
+        height="674"
+        alt="Dragging down from a line on an exam page to open a gap;
+        everything below slides down with the pen."></video><span
+        >Insert space</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/zoom.png"
+        aria-label="Zooming in on the word “chlorophyll” in a highlighted note; the word stays under the cursor."><source
+        src="assets/landing/clips/zoom.mp4" type="video/mp4"><img
+        src="assets/landing/posters/zoom.png" width="1200" height="674"
+        alt="Zooming in on the word “chlorophyll” in a highlighted note; the word stays under the cursor."></video><span
+        >Pinch to zoom</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/copy-ink.png"
+        aria-label="Lassoing a circle and a line, copying them, and pasting them into another note."><source
+        src="assets/landing/clips/copy-ink.mp4" type="video/mp4"><img
+        src="assets/landing/posters/copy-ink.png" width="1200" height="674"
+        alt="Lassoing a circle and a line, copying them, and pasting them into another note."></video><span
+        >Copy ink to another note</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/embed.png"
+        aria-label="A note that embeds a second handwritten note; the ink inside the embed shows and the page scrolls."><source
+        src="assets/landing/clips/embed.mp4" type="video/mp4"><img
+        src="assets/landing/posters/embed.png" width="1200" height="674"
+        alt="A note that embeds a second handwritten note; the ink inside the embed shows and the page scrolls."></video><span
+        >Ink works in embeds</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/erase.png"
+        aria-label="Erasing part of a stroke, then a whole stroke, on a page of
+        handwritten notes."><source
+        src="assets/landing/clips/erase.mp4" type="video/mp4"><img
+        src="assets/landing/posters/erase.png" width="1200" height="674"
+        alt="Erasing part of a stroke, then a whole stroke, on a page of
+        handwritten notes."></video><span
+        >Erase a whole stroke or part of one</span></a></li>
+      <li aria-hidden="true"><a tabindex="-1" href="#features"><video
+        autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/mouse.png"
+        aria-label="Turning on mouse drawing from the command palette, then drawing a line with the mouse."><source
+        src="assets/landing/clips/mouse.mp4" type="video/mp4"><img
+        src="assets/landing/posters/mouse.png" width="1200" height="674"
+        alt="Turning on mouse drawing from the command palette, then drawing a line with the mouse."></video><span
+        >Draw with the mouse</span></a></li>
+    </ol>
+  </div>
 </section>
 
-<section>
-	<h2>what the pen does</h2>
-	<p>the tip inks. the eraser end erases. the side button lassos: hold it and circle some ink, then drag the selection to move it or press Delete to remove it.</p>
-	<p>two tools, pen and highlighter. each has a nib size slider and its own palette: eight pen inks, five highlighter colors.</p>
-	<p>type above your ink and the strokes don't move. the insert space tool is the only thing that shifts them. ink scales with Obsidian's zoom and scrolls with the note, and Ctrl+Z undoes ink and text edits in the order they happened. draw past the last line or far off to the right and the note grows scroll room to reach it.</p>
-	<div class="cols">
-		<ul>
-			<li>pressure sensitivity</li>
-			<li>palm rejection</li>
-			<li>ink prediction and smoothing</li>
-			<li>pinch to zoom</li>
-			<li>infinite canvas</li>
-			<li>pen toolbar with auto-hide</li>
-			<li>pen off, so the keyboard can have the note</li>
-		</ul>
-		<ul>
-			<li>lined, grid, and dotted paper</li>
-			<li>handwriting to shape</li>
-			<li>insert space</li>
-			<li>ink embeds</li>
-			<li>export ink as SVG</li>
-		</ul>
-	</div>
+<section id="attach" class="shelf wrap" data-section="attach">
+  <article class="feat">
+    <div class="words">
+      <h2>Attach ink to text</h2>
+      <p>Lasso ink next to a line of text. Tap the link button. The ink now
+        moves with that text when you type above it.</p>
+    </div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/attach-ink-tap.png"
+        aria-label="Handwriting attached to a line of text; the ink follows the
+        text as the note is edited."><source
+        src="assets/landing/clips/attach-ink-tap.mp4" type="video/mp4"><img
+        src="assets/landing/posters/attach-ink-tap.png" width="1200" height="674"
+        alt="Handwriting attached to a line of text; the ink follows the
+        text as the note is edited."></video>
+      <figcaption>attach ink to text</figcaption>
+    </figure>
+  </article>
+  <div class="range-block">
+  <h3 class="range-head">Where ink attaches</h3>
+  <div class="range" role="group" aria-label="Where ink has to sit to attach">
+    <figure class="rp">
+      <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-word">
+        <title id="rp-word">Inside one row: Ink that sits inside one row attaches to the word or words under it.</title>
+        <rect class="row" x="30" y="40" width="200" height="10" rx="5"/><rect class="row" x="30" y="70" width="230" height="10" rx="5"/><rect class="row" x="30" y="100" width="160" height="10" rx="5"/><path class="ink" d="M118 62 C104 60 96 70 100 80 C106 92 158 92 166 80 C172 68 160 58 140 58 C130 58 122 60 118 62 Z"/>
+      </svg>
+      <figcaption><b>Inside one row.</b> Ink that sits inside one row attaches to the word or words under it.</figcaption>
+    </figure>
+    <figure class="rp">
+      <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-under">
+        <title id="rp-under">Just under a row: Ink up to a quarter line under a row (an underline) attaches to that row. The blue band is that range.</title>
+        <rect class="row" x="30" y="40" width="200" height="10" rx="5"/><rect class="row" x="30" y="70" width="230" height="10" rx="5"/><rect class="row" x="30" y="100" width="160" height="10" rx="5"/><rect class="band" x="30" y="110" width="160" height="17.5"/><path class="ink" d="M34 122 C60 118 80 126 104 121 C128 116 150 126 186 120"/>
+      </svg>
+      <figcaption><b>Just under a row.</b> Ink up to a quarter line under a row (an underline) attaches to that row. The blue band is that range.</figcaption>
+    </figure>
+    <figure class="rp">
+      <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-block">
+        <title id="rp-block">Across rows: Ink taller than a line and a half attaches to the paragraph at its center (the dashed line). Lines broken with Enter are separate paragraphs.</title>
+        <rect class="row" x="30" y="40" width="200" height="10" rx="5"/><rect class="row" x="30" y="70" width="230" height="10" rx="5"/><rect class="row" x="30" y="100" width="160" height="10" rx="5"/><path class="mid" d="M26 75 H272"/><path class="ink" d="M22 32 C14 50 14 100 22 118 M22 32 C30 30 240 30 248 32 M22 118 C30 120 170 120 178 118"/>
+      </svg>
+      <figcaption><b>Across rows.</b> Ink taller than a line and a half attaches to the paragraph at its center (the dashed line). Lines broken with Enter are separate paragraphs.</figcaption>
+    </figure>
+    <figure class="rp">
+      <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-margin">
+        <title id="rp-margin">Beside a paragraph: Ink in the margin, with no words under it, attaches to the paragraph at its center (the dashed line) and moves with it.</title>
+        <rect class="row" x="30" y="40" width="140" height="10" rx="5"/><rect class="row" x="30" y="70" width="140" height="10" rx="5"/><rect class="row" x="30" y="100" width="110" height="10" rx="5"/>
+        <path class="mid" d="M8 75 H190"/><path class="ink" d="M196 57 C210 49 226 63 240 55 M196 77 C212 69 230 85 248 75 M196 97 C206 91 220 101 232 95"/>
+      </svg>
+      <figcaption><b>Beside a paragraph.</b> Ink in the margin, with no words under it, attaches to the paragraph at its center (the dashed line) and moves with it.</figcaption>
+    </figure>
+    <figure class="rp">
+      <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-gap">
+        <title id="rp-gap">Too far down: Ink below the blue band, in a blank gap, attaches to nothing. A notice says so, and the ink stays where you drew it.</title>
+        <rect class="row" x="30" y="40" width="200" height="10" rx="5"/><rect class="row" x="30" y="70" width="150" height="10" rx="5"/><rect class="band" x="30" y="80" width="150" height="17.5"/><path class="ink miss" d="M60 124 C80 110 100 138 120 122 C140 108 160 134 180 120"/>
+      </svg>
+      <figcaption><b>Too far down.</b> Ink below the blue band, in a blank gap, attaches to nothing. A notice says so, and the ink stays where you drew it.</figcaption>
+    </figure>
+  </div>
+  </div>
 </section>
 
-<section>
-	<h2>how it works</h2>
-
-	<h3>writing</h3>
-	<p>when you put pen to screen, you are writing on an overlay drawn over the Obsidian text editor - this overlay is drawn in codemirror 6</p>
-	<p>the overlay claims pen input only. touch, mouse, typing, selection and caret placement all fall through to Obsidian untouched</p>
-	<p>the only thing ever written into your markdown is a single <code>handwriting-page-id</code> line in frontmatter which is placed when you start writing</p>
-
-	<h3>where is ink stored</h3>
-	<p>your ink is one json file per note in <code>/.handwriting/</code></p>
-	<div class="tree">&lt;vault&gt;/
-  <b>Some note.md</b>              your text, plus one frontmatter property
-  <b>.handwriting/</b>
-    3f2a….json               the ink for that note
-    trash/                   a copy kept from a delete</div>
-	<p>sidecar is a digital photography term that refers to a small file beside a main file, that holds information about the main file. this is a useful analogy</p>
-	<p>in this case, the sidecar stores your ink as coordinates - your note is linked to your ink by a single properties line in the properties field of your note. this link + the coordinates tells Obsidian where all the ink is</p>
-	<p>what this means practically is that no matter what happens to the ink, the text in your note will be safe, as the note itself is not modified (besides its frontmatter).</p>
-	<p><code>.handwriting/</code> is hidden, and about half of all sync tools don't carry hidden folders by default. Obsidian Sync, iCloud and Dropbox don't. if you use one of these, turn on Compatibility with Obsidian Sync, iCloud and Dropbox in the settings panel to get your ink syncing across devices</p>
-
-	<h3>how the ink is stored</h3>
-	<p>ink is stored in note-surface coordinates. origin at the top-left of the text column, y absolute down the document. markdown reflows wherever it wants. your ink stays where you put it. editing text will never move ink except in the case of the insert space tool, by design</p>
-
-	<h3>how the ink is placed</h3>
-	<p>drawing happens on raw pointer events. the line behind the nib is smoothed with math; the last stub to the pen tip is raw so the ink will always reach the tip of the pen</p>
+<section id="notes" class="shelf wrap" data-section="notes">
+  <article class="feat flip">
+    <div class="words">
+      <h2>On notes</h2>
+      <p>Write and type on the same note.</p>
+    </div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/write.png"
+        aria-label="Writing a line of notes under typed text on a note, then
+        highlighting a phrase."><source
+        src="assets/landing/clips/write.mp4" type="video/mp4"><img
+        src="assets/landing/posters/write.png" width="1200" height="674"
+        alt="Writing a line of notes under typed text on a note, then
+        highlighting a phrase."></video>
+      <figcaption>write and highlight</figcaption>
+    </figure>
+  </article>
+  <article class="feat" id="lasso">
+    <div class="words"><h3>Lasso and move it</h3><p>Lasso ink to move it, resize or rotate it,
+      delete it, or paste it into another note.</p></div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/lasso.png"
+        aria-label="Lassoing a small orange note, dragging it to a clear
+        spot, turning it level and pulling it big enough to read."><source
+        src="assets/landing/clips/lasso.mp4" type="video/mp4"><img
+        src="assets/landing/posters/lasso.png" width="1200" height="674"
+        alt="Lassoing a small orange note, dragging it to a clear spot,
+        turning it level and pulling it big enough to read."></video>
+      <figcaption>lasso</figcaption>
+    </figure>
+  </article>
+  <article class="feat flip" id="snap">
+    <div class="words"><h3>Shapes that snap</h3><p>Hold the pen still at the
+      end of a stroke and it snaps into a line, arrow, circle, rectangle,
+      star or other shape. Keep the pen down and move it to resize and rotate it.</p></div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/snap.png"
+        aria-label="A rough hand-drawn box snapping to a clean rectangle,
+        then dragged level and snug around the note."><source
+        src="assets/landing/clips/snap.mp4" type="video/mp4"><img
+        src="assets/landing/posters/snap.png" width="1200" height="674"
+        alt="A rough hand-drawn box snapping to a clean rectangle, then
+        dragged level and snug around the note."></video>
+      <figcaption>shapes</figcaption>
+    </figure>
+  </article>
+  <article class="feat" id="space">
+    <div class="words"><h3>Insert space</h3><p>Press on a line and drag
+      down. Everything below moves with your pen.</p></div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/insert-space.png"
+        aria-label="Dragging down from a line on an exam page to open a gap;
+        everything below slides down with the pen."><source
+        src="assets/landing/clips/insert-space.mp4" type="video/mp4"><img
+        src="assets/landing/posters/insert-space.png" width="1200"
+        height="674" alt="Dragging down from a line on an exam page to open
+        a gap; everything below slides down with the pen."></video>
+      <figcaption>insert space</figcaption>
+    </figure>
+  </article>
+  <article class="feat flip" id="canvas">
+    <div class="words"><h3>Infinite canvas</h3><p>Zoom out and keep writing
+      past the edge. Fit brings all your ink back on screen.</p></div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200"
+        height="674" poster="assets/landing/posters/canvas-pan-v2.png"
+        aria-label="Pulling back from a close-up to show a whole infinite canvas of
+        colored diagrams."><source
+        src="assets/landing/clips/canvas-pan-v2.mp4" type="video/mp4"><img
+        src="assets/landing/posters/canvas-pan-v2.png" width="1200" height="674"
+        alt="Pulling back from a close-up to show a whole infinite canvas of
+        colored diagrams."></video>
+      <figcaption>infinite canvas</figcaption>
+    </figure>
+  </article>
+  <article class="feat" id="paper">
+    <div class="words"><h3>Lined, grid or dots</h3><p>One paper for the whole
+      vault, or a different one for each note.</p></div>
+    <figure class="sheet">
+      <img loading="lazy" src="assets/landing/paper-lines.png"
+        width="1200" height="675" alt="the paper background picker over a
+        note: global, none, lines, grid, dots, with lines picked">
+      <figcaption>paper</figcaption>
+    </figure>
+  </article>
 </section>
 
-<section>
-	<h2>where it runs</h2>
-	<div class="platforms">
-		<span>Windows</span><span>macOS</span><span>Linux</span><span>iPad</span><span>Android</span><span>Boox</span>
-	</div>
-	<p class="soft">Obsidian 1.12.3 or newer. built and tested mostly on a Surface Pro, with some testing on an iPad. please send reports.</p>
-	<h3>two things worth knowing</h3>
-	<ul>
-		<li><b>iPad:</b> turn off Scribble, or iOS draws its own black ink over your strokes. Settings &gt; Apple Pencil &gt; Scribble.</li>
-		<li><b>Obsidian Sync:</b> it skips hidden folders, so ink won't sync until you turn on Handwriting settings &gt; Compatibility with Obsidian Sync, iCloud and Dropbox.</li>
-	</ul>
+<section id="pdfs" class="band" data-section="pdfs">
+<div class="wrap">
+  <div class="head">
+    <h2>Write on PDFs</h2>
+      <p>Same toolbar, same tools.</p>
+  </div>
+  <article class="feat flip" id="pdf">
+    <div class="words"><h3>Write on a PDF</h3><p>Highlight and write on
+      the PDF itself.</p></div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/pdf.png"
+        aria-label="Writing “why?” in the margin of the Handwriting manual PDF, then switching to the highlighter and highlighting a line."><source src="assets/landing/clips/pdf.mp4"
+        type="video/mp4"><img src="assets/landing/posters/pdf.png"
+        width="1200" height="674" alt="Writing “why?” in the margin of the Handwriting manual PDF, then switching to the highlighter and highlighting a line."></video>
+    </figure>
+  </article>
+  <article class="feat" id="export">
+    <div class="words"><h3>Export the PDF with your ink</h3><p>Flatten to a
+      copy with your ink drawn in. It opens in any PDF app.</p></div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/flatten.png"
+        aria-label="Flattening the Handwriting manual PDF into a copy with the
+        highlight and handwriting drawn in."><source
+        src="assets/landing/clips/flatten.mp4" type="video/mp4"><img
+        src="assets/landing/posters/flatten.png" width="1200" height="674"
+        alt="Flattening the Handwriting manual PDF into a copy with the
+        highlight and handwriting drawn in."></video>
+      <figcaption>the flattened copy, ink drawn in</figcaption>
+    </figure>
+  </article>
+  <article class="feat flip" id="snip">
+    <div class="words"><h3>Snip a PDF into a note</h3><p>Snip part of the page
+      and paste it into a note. The snip links back to the PDF
+      page.</p></div>
+    <figure class="sheet">
+      <video autoplay muted loop playsinline width="1200" height="674"
+        poster="assets/landing/posters/snip.png"
+        aria-label="Lassoing a phrase of the Handwriting manual PDF, snipping it, and pasting the image with its link back into a note."><source src="assets/landing/clips/snip.mp4"
+        type="video/mp4"><img src="assets/landing/posters/snip.png"
+        width="1200" height="674" alt="Lassoing a phrase of the Handwriting manual PDF, snipping it, and pasting the image with its link back into a note."></video>
+    </figure>
+  </article>
+</div>
 </section>
 
-<section>
-	<h2>installing</h2>
-	<ol>
-		<li>Settings &gt; Community plugins &gt; browse</li>
-		<li>search <b>Handwriting</b></li>
-		<li>install, then enable</li>
-	</ol>
-	<p class="soft">or from the directory: <a href="https://community.obsidian.md/plugins/handwriting">community.obsidian.md/plugins/handwriting</a>. for beta builds before they're released, add <code>ellimist-afk/handwriting</code> to BRAT.</p>
-	<p class="soft">longer reading: the <a href="https://github.com/ellimist-afk/handwriting/blob/master/docs/manual.md">manual</a>, and <a href="https://github.com/ellimist-afk/handwriting/blob/master/docs/storage.md">how ink is stored</a>.</p>
+<section id="more" class="shelf wrap" data-section="more">
+  <div class="head"><h2>A couple more things</h2></div>
+  <article class="feat" id="toolbar">
+    <div class="words"><h3>Toolbar where you want it</h3>
+      <p>Drag it to any of nine spots, or collapse it.</p></div>
+    <figure class="sheet"><img loading="lazy"
+        src="assets/landing/toolbar-spots.png" width="1200" height="675"
+        alt="nine small pages, the toolbar in a different spot on each; the
+        middle one mid-drag"></figure>
+  </article>
+  <article class="feat flip">
+    <div class="words"><h3>Ink on slides</h3>
+      <p>Draw on your slides while you present.</p></div>
+    <figure class="sheet"><img loading="lazy"
+        src="assets/landing/slides-ink.png" width="1200" height="675"
+        alt="handwriting on a Lewis structures slide while
+        presenting"></figure>
+  </article>
 </section>
 
-<section>
-	<h2>coming</h2>
-	<ul>
-		<li>native PDF annotation</li>
-		<li>OCR, handwriting to text</li>
-		<li>searchable handwriting</li>
-		<li>handwriting to math and LaTeX</li>
-		<li>audio alongside ink</li>
-		<li>ruler and compass on screen</li>
-	</ul>
+<section id="files" class="shelf wrap" data-section="files">
+  <article class="feat">
+    <div class="words">
+      <h2>Your notes stay plain Markdown.</h2>
+      <p>Ink never goes into the note. It lives in its own file, in a
+        <code>.handwriting</code> folder in your vault.</p>
+    </div>
+    <figure class="frame" data-clip="explorer"><video autoplay muted loop
+      playsinline width="1200" height="674"
+      poster="assets/landing/clips/explorer-poster.png"
+      aria-label="the .handwriting folder in File Explorer, the json file
+      with the same id boxed"><source
+      src="assets/landing/clips/explorer.mp4" type="video/mp4"><img
+      src="assets/landing/clips/explorer-poster.png" width="1200"
+      height="674" alt="the .handwriting folder in File Explorer, the json
+      file with the same id boxed"></video></figure>
+  </article>
+  <article class="feat flip">
+    <div class="words">
+      <p>The note gets one hidden property: the id of that file. Rename or
+        move the note and the ink follows. Turn the plugin off and the note
+        reads like any other Markdown.</p>
+    </div>
+    <figure class="frame"><img loading="lazy"
+      src="assets/landing/note-with-id.png" width="1200" height="675"
+      alt="the EXAM 2 note in the Chemistry folder with the plugin off, its
+      ink file id boxed"></figure>
+  </article>
 </section>
 
-<section>
-	<h2>found a bug</h2>
-	<p>open an issue on <a href="https://github.com/ellimist-afk/handwriting/issues">GitHub</a> and say what happened, which device, and which pen.</p>
-	<p>a pen trace helps. everything below is a command palette entry, so hit Ctrl+P (Cmd+P on Mac) and type the name.</p>
-	<ol>
-		<li><code>Diagnostics: begin recording</code></li>
-		<li>reproduce the bug.</li>
-		<li><code>Diagnostics: show pen trace</code></li>
-		<li>press Copy in the window that opens, and paste it into the issue.</li>
-	</ol>
+<section class="support shelf wrap" data-section="support">
+  <h2>Support Handwriting</h2>
+  <p>Handwriting is free. source code is available here:
+    <a href="https://github.com/ellimist-afk/handwriting"
+      >github.com/ellimist-afk/handwriting</a></p>
+  <p>I still work on it almost every night. if you want to buy me
+    a coffee: <a href="https://ko-fi.com/ellimistafk"
+      >ko-fi.com/ellimistafk</a></p>
+  <p>thank you for using my plugin.</p>
+  <a class="btn quiet" href="https://ko-fi.com/ellimistafk"
+    data-support="kofi">Support on Ko-fi</a>
 </section>
+
+<section class="signup desk wrap center" id="signup" data-section="signup"
+  hidden>
+  <h2>Get an email when it updates</h2>
+  <p>I send the release notes when a new version comes out. Not often.</p>
+  <form method="post" data-signup>
+    <input type="email" name="email_address" placeholder="you@example.com"
+      aria-label="Email address" autocomplete="email" required>
+    <button type="submit">Sign up</button>
+  </form>
+  <p class="fine">You get one email to confirm first. Unsubscribe anytime.</p>
+</section>
+
+<section id="pdf-faq" class="shelf wrap" data-section="pdf-faq">
+  <div class="head"><h2>Questions</h2></div>
+  <div class="qa">
+    <article class="item">
+      <h3 class="q">So can I draw directly on my notes?</h3>
+      <p class="a">Yes!!</p>
+    </article>
+    <article class="item">
+      <h3 class="q">What happens to my notes if I uninstall or disable it?</h3>
+      <p class="a">Disable the plugin and your text stays exactly the same, the ink just
+        stops rendering. Your notes stay .md. The only thing ever written into
+        one is a single handwriting-page-id line in the properties.</p>
+    </article>
+    <article class="item">
+      <h3 class="q">Is there a risk of corruption?</h3>
+      <p class="a">A note you never inked on is never modified. A note you have inked on
+        gets one line in its properties: handwriting-page-id. Nothing else.
+        Your ink lives in its own file in .handwriting/ at your vault root.</p>
+    </article>
+    <article class="item">
+      <h3 class="q">Does my ink drift away from my text?</h3>
+      <p class="a">Ink sits at a spot on the page, so when the text above it is
+        edited the words can move while the ink stays put. If you want ink to
+        stay with a line, attach it: lasso the ink next to that line. Tap the
+        link button. The ink then moves with that text when you type above
+        it.</p>
+    </article>
+    <article class="item">
+      <h3 class="q">Can I write on PDFs in Obsidian like Notability?</h3>
+      <p class="a">Yes. Open the PDF in Obsidian and write on it with the same toolbar
+        you use on notes. Highlight, erase and lasso work there too.</p>
+    </article>
+    <article class="item">
+      <h3 class="q">Does it work with Apple Pencil?</h3>
+      <p class="a">Yes. On iPad, turn Scribble off first: iPad Settings > Apple Pencil >
+        Scribble > Off.</p>
+    </article>
+    <article class="item">
+      <h3 class="q">Can I send someone the PDF with my ink on it?</h3>
+      <p class="a">Yes. Run the command “Handwriting: Flatten ink into a copy of
+        this PDF”. It draws your ink into a copy that opens in any PDF
+        app.</p>
+    </article>
+    <article class="item">
+      <h3 class="q">Can I pull part of a PDF into a note?</h3>
+      <p class="a">Yes. Snip part of the page and paste it into a note. The snip links
+        back to the PDF page.</p>
+    </article>
+    <article class="item">
+      <h3 class="q">What does it run on?</h3>
+      <p class="a">iPad, Android, BOOX, Windows, Mac and Linux.</p>
+    </article>
+    <article class="item">
+      <h3 class="q">Is it free?</h3>
+      <p class="a">Yes.</p>
+    </article>
+  </div>
+</section>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+{"@type":"Question","name":"So can I draw directly on my notes?","acceptedAnswer":{"@type":"Answer","text":"Yes!!"}},
+{"@type":"Question","name":"What happens to my notes if I uninstall or disable it?","acceptedAnswer":{"@type":"Answer","text":"Disable the plugin and your text stays exactly the same, the ink just stops rendering. Your notes stay .md. The only thing ever written into one is a single handwriting-page-id line in the properties."}},
+{"@type":"Question","name":"Is there a risk of corruption?","acceptedAnswer":{"@type":"Answer","text":"A note you never inked on is never modified. A note you have inked on gets one line in its properties: handwriting-page-id. Nothing else. Your ink lives in its own file in .handwriting/ at your vault root."}},
+{"@type":"Question","name":"Does my ink drift away from my text?","acceptedAnswer":{"@type":"Answer","text":"Ink sits at a spot on the page, so when the text above it is edited the words can move while the ink stays put. If you want ink to stay with a line, attach it: lasso the ink next to that line. Tap the link button. The ink then moves with that text when you type above it."}},
+{"@type":"Question","name":"Can I write on PDFs in Obsidian like Notability?","acceptedAnswer":{"@type":"Answer","text":"Yes. Open the PDF in Obsidian and write on it with the same toolbar you use on notes. Highlight, erase and lasso work there too."}},
+{"@type":"Question","name":"Does it work with Apple Pencil?","acceptedAnswer":{"@type":"Answer","text":"Yes. On iPad, turn Scribble off first: iPad Settings > Apple Pencil > Scribble > Off."}},
+{"@type":"Question","name":"Can I send someone the PDF with my ink on it?","acceptedAnswer":{"@type":"Answer","text":"Yes. Run the command “Handwriting: Flatten ink into a copy of this PDF”. It draws your ink into a copy that opens in any PDF app."}},
+{"@type":"Question","name":"Can I pull part of a PDF into a note?","acceptedAnswer":{"@type":"Answer","text":"Yes. Snip part of the page and paste it into a note. The snip links back to the PDF page."}},
+{"@type":"Question","name":"What does it run on?","acceptedAnswer":{"@type":"Answer","text":"iPad, Android, BOOX, Windows, Mac and Linux."}},
+{"@type":"Question","name":"Is it free?","acceptedAnswer":{"@type":"Answer","text":"Yes."}}
+]}
+</script>
+
+<section class="install shelf wrap" data-section="install">
+  <h2>Install it</h2>
+  <ol>
+    <li>Settings</li>
+    <li>Community plugins</li>
+    <li>Browse</li>
+    <li>search Handwriting</li>
+    <li>Install and enable</li>
+  </ol>
+  <a class="btn" href="https://community.obsidian.md/plugins/handwriting"
+    data-install="footer">Get it for Obsidian</a>
+</section>
+</main>
 
 <footer>
-	<p>Handwriting is free. source code is available here: <a href="https://github.com/ellimist-afk/handwriting">github.com/ellimist-afk/handwriting</a></p>
-	<p>I'm still working on it almost every night. if you want to buy me a coffee: <a href="https://ko-fi.com/ellimistafk">ko-fi.com/ellimistafk</a></p>
-	<p>thank you for using my plugin.</p>
+  <div class="wrap">
+    <a class="brand" href="#">Handwriting</a>
+    <nav aria-label="Footer">
+      <a href="https://github.com/ellimist-afk/handwriting">GitHub</a>
+      <a href="https://github.com/ellimist-afk/handwriting#readme">Readme</a>
+      <a href="storage.md">Where ink is stored</a>
+      <a href="https://github.com/ellimist-afk/handwriting/issues">Report a
+        bug</a>
+      <a href="https://youtu.be/XfuZS_YF0aE">Demo video</a>
+      <a href="https://ko-fi.com/ellimistafk">Support on Ko-fi</a>
+    </nav>
+  </div>
 </footer>
+<dialog class="pop" data-pop aria-label="Clip">
+  <figure class="sheet">
+    <video muted loop playsinline width="1200" height="674"></video>
+    <figcaption class="bar"><span data-pop-name></span>
+      <button type="button" data-pop-close>Close</button></figcaption>
+  </figure>
+</dialog>
+<script>
+/* Tablet lean: follows the mouse anywhere on the page (up to 4 degrees),
+   eased per frame, never snaps back. Mouse only; nothing under reduced
+   motion. */
+(function () {
+  var tablet = document.querySelector(".stage .tablet");
+  if (!tablet) return;
+  var still = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var MAX = 4, EASE = 0.1;
+  var want = { x: 0, y: 0 }, have = { x: 0, y: 0 }, live = false;
+  window.addEventListener("pointermove", function (e) {
+    if (e.pointerType !== "mouse" || still.matches) return;
+    var r = tablet.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    var dx = (e.clientX - cx) / (window.innerWidth / 2);
+    var dy = (e.clientY - cy) / (window.innerHeight / 2);
+    want.x = Math.max(-1, Math.min(1, dx)) * MAX;
+    want.y = Math.max(-1, Math.min(1, dy)) * MAX * -0.6;
+    if (!live) { live = true; requestAnimationFrame(step); }
+  }, { passive: true });
+  function step() {
+    have.x += (want.x - have.x) * EASE;
+    have.y += (want.y - have.y) * EASE;
+    tablet.style.setProperty("--ty", have.x.toFixed(3) + "deg");
+    tablet.style.setProperty("--tx", have.y.toFixed(3) + "deg");
+    if (Math.abs(want.x - have.x) + Math.abs(want.y - have.y) < 0.002) {
+      live = false; return; }
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+<script>
+/* Tablet: the full demo film loops muted. The button under it turns the
+   film's sound on (from the start) and off again. */
+(function () {
+  var film = document.getElementById("tower");
+  var btn = document.getElementById("sound");
+  if (!film || !btn) return;
+  btn.addEventListener("click", function () {
+    var on = film.muted;
+    film.muted = !on;
+    if (on) { film.currentTime = 0; film.play(); }
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.textContent = on ? "Turn sound off" : "Turn sound on";
+  });
+})();
+</script>
+<script>
+/* Film strip: loops the eighteen clips and drags with mouse, pen or finger.
+   The reel holds the eighteen twice (the copies are aria-hidden); when the
+   strip
+   passes one set's width it jumps back by exactly that width, so the same
+   frame is on screen and it never runs out. It drifts slowly unless reduced
+   motion is on, or the pointer, focus or a drag is on it. */
+(function () {
+  var strip = document.querySelector(".strip");
+  var reel = strip && strip.querySelector(".reel");
+  if (!reel || reel.children.length < 2) return;
+  var items = reel.children;
+  var half = items.length / 2;
+  var still = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var drag = null, moved = false, hover = false, focus = false;
+  var seen = true, last = 0, acc = 0;
+  strip.classList.add("looping");
 
-</main>
-<script src="demo.js"></script>
+  /* a: where the first clip starts in the reel (the left padding);
+     w: one set's width, first clip of the copies minus first clip. Any
+     scroll in [a, a + w) looks the same as that scroll plus w. */
+  function wrapped(left) {
+    var r0 = reel.getBoundingClientRect().left;
+    var i0 = items[0].getBoundingClientRect().left;
+    var w = items[half].getBoundingClientRect().left - i0;
+    var a = i0 - r0;
+    if (w <= 0) return left;
+    while (left >= a + w) left -= w;
+    /* Only at the very start does it jump forward a set. */
+    while (left < 1) left += w;
+    return left;
+  }
+  function wrap() {
+    if (drag) return;
+    var left = wrapped(strip.scrollLeft);
+    if (left !== strip.scrollLeft) strip.scrollLeft = left;
+  }
+
+  strip.addEventListener("pointerdown", function (e) {
+    if (e.button !== 0) return;
+    drag = { id: e.pointerId, x: e.clientX, left: strip.scrollLeft };
+    moved = false;
+  });
+  strip.addEventListener("pointermove", function (e) {
+    if (!drag || e.pointerId !== drag.id) return;
+    var dx = e.clientX - drag.x;
+    if (!moved) {
+      if (Math.abs(dx) < 6) return;
+      moved = true;
+      strip.setPointerCapture(e.pointerId);
+      strip.classList.add("dragging");
+    }
+    var left = drag.left - dx;
+    var fixed = wrapped(left);
+    drag.left += fixed - left;
+    strip.scrollLeft = fixed;
+    e.preventDefault();
+  });
+  function end(e) {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag = null;
+    strip.classList.remove("dragging");
+  }
+  strip.addEventListener("pointerup", end);
+  strip.addEventListener("pointercancel", end);
+  /* A drag is not a click on the clip under the pointer. */
+  strip.addEventListener("click", function (e) {
+    if (moved) { e.preventDefault(); e.stopPropagation(); moved = false;
+      return; }
+    var a = e.target.closest && e.target.closest(".reel a");
+    if (a && pop(a)) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  /* The pop-out. Falls back to the anchor when <dialog> is missing. */
+  var box = document.querySelector("[data-pop]");
+  var vid = box && box.querySelector("video");
+  function pop(a) {
+    if (!box || !box.showModal) return false;
+    var src = a.querySelector("source");
+    var clip = a.querySelector("video");
+    var name = a.querySelector("span");
+    if (!src || !clip) return false;
+    vid.poster = clip.getAttribute("poster") || "";
+    vid.setAttribute("aria-label", clip.getAttribute("aria-label") || "");
+    vid.src = src.getAttribute("src");
+    box.querySelector("[data-pop-name]").textContent =
+      name ? name.textContent : "";
+    box.showModal();
+    vid.play().catch(function () {});
+    return true;
+  }
+  function shut() { if (box.open) box.close(); }
+  if (box) {
+    box.querySelector("[data-pop-close]").addEventListener("click", shut);
+    box.addEventListener("click", function (e) {
+      if (e.target === box) shut();
+    });
+    box.addEventListener("close", function () {
+      vid.pause(); vid.removeAttribute("src"); vid.load();
+    });
+  }
+  strip.addEventListener("dragstart", function (e) { e.preventDefault(); });
+  strip.addEventListener("scroll", wrap, { passive: true });
+
+  strip.addEventListener("pointerenter", function (e) {
+    if (e.pointerType === "mouse") hover = true;
+  });
+  strip.addEventListener("pointerleave", function () { hover = false; });
+  strip.addEventListener("focusin", function () { focus = true; });
+  strip.addEventListener("focusout", function (e) {
+    focus = strip.contains(e.relatedTarget);
+  });
+  if ("IntersectionObserver" in window) {
+    new IntersectionObserver(function (entries) {
+      seen = entries[0].isIntersecting;
+    }).observe(strip);
+  }
+
+  function tick(t) {
+    var dt = last ? Math.min(t - last, 64) : 0;
+    last = t;
+    if (!still.matches && !drag && !hover && !focus && seen &&
+        !document.hidden) {
+      acc += dt * 0.03; /* 30 px a second */
+      var whole = Math.floor(acc);
+      if (whole) {
+        acc -= whole;
+        strip.scrollLeft = wrapped(strip.scrollLeft + whole);
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+<script src="signup.js" defer></script>
+<script src="stats.js" defer></script>
 </body>
 </html>

@@ -1,8 +1,7 @@
 # the Handwriting manual
 
 Everything that used to be on the front page. Updating, what the pen does to
-touch and mouse, where ink lives, the canvas, limitations, building from
-source. For the sidecar format and every recovery path, see
+touch and mouse, where ink lives, limitations, building from source. For the sidecar format and every recovery path, see
 [storage.md](storage.md).
 
 ## updating
@@ -39,13 +38,13 @@ redraws as a line, triangle, rectangle, circle or ellipse. **Shape snap** is a
 switch in Settings, on by default. With a mouse, pause at the end of a stroke
 and a Snap button appears; click it to snap.
 
-Press harder and the line thickens. **Pressure sensitivity** is a switch in
-Settings, on by default, with a **Recalibrate** button beside it: the plugin
+Press harder and the line thickens. Pressure is always on: the plugin
 learns the hardest press your pen has actually made and scales the width law
 to it, so a tablet that reports a narrow pressure range still gets the full
-range of widths. Recalibrate forgets what it learned and starts again - worth
-doing if you change pens. What it learns is kept per device, not in the
-synced settings file, because one pen's range must not silence another's.
+range of widths. **Recalibrate pen pressure**, under Developer in Settings,
+forgets what it learned and starts again - worth doing if you change pens.
+What it learns is kept per device, not in the synced settings file, because
+one pen's range must not silence another's.
 
 ## commands
 
@@ -246,7 +245,7 @@ E-ink pays for every redraw, and the Android webview on those devices hands
 over pen events late: the first NoteAir trace measured a median 58ms between
 the pen moving and the plugin hearing about it. Two things follow.
 
-Turn on **Boox mode** in the plugin settings. It sizes ink prediction to that
+Turn on **Boox mode**, under Developer in the plugin settings. It sizes ink prediction to that
 delay, turns off smoothing and the pen reticle, stops the toolbar animating,
 and makes the end of a stroke clear only the ink it drew instead of the whole
 screen, which on e-ink was a full refresh per stroke. Your own settings come
@@ -370,29 +369,6 @@ To wipe a document, run `Delete all ink on this PDF`. It asks first and
 copies the ink to `.handwriting/trash/` before removing anything, the same
 bargain the note command makes.
 
-## the canvas
-
-**The canvas is early and rough. Parts of it are broken and I wouldn't
-trust important ink to it yet — bug reports are welcome. Your strokes are
-stored in the same sidecar as notes and PDFs, so this won't touch your
-Markdown, but treat the surface itself as experimental.**
-
-A note with `handwriting: page` in its frontmatter opens in a dedicated
-canvas view instead of the editor, with its own toolbar, free-placed text
-boxes, images as vault attachments and a pannable camera. Adding that line to
-a note's frontmatter is how you make one, and removing it puts the note back
-in the editor. The canvas has no palette commands of its own for now - they
-were taking up room in a list people were searching for the export and flatten
-commands in, and they come back when the canvas is past experimental.
-
-The canvas shares the ink engine and the sidecar format with the inline
-surface, but a note's ink belongs to one surface or the other. Ink drawn on
-the canvas doesn't show up in the editor, and the editor won't write over a
-canvas page's file.
-
-It predates inline ink and is still supported, though the inline surface is
-where the work goes now.
-
 ## slides
 
 Start Obsidian's own Slides plugin on a note and the pen writes on the
@@ -438,11 +414,6 @@ A quit before a pending write lands loses what that write was carrying.
 Handwriting flushes on unload, but Obsidian doesn't wait for that flush, so
 don't count on it.
 
-Don't open the same canvas page in two panes. The canvas still uses per-view
-snapshots, so the last pane to save can replace changes from the other one.
-Ordinary Markdown notes with inline ink use a shared record and don't have
-this problem.
-
 On iOS and iPadOS the system can reclaim a canvas's pixels under memory
 pressure without telling the page, which shows up as ink that vanishes on a
 long note beside photos or a PDF. Ink repaints when the app comes back to the
@@ -462,7 +433,7 @@ Save to vault up front, and a Show data button that expands the raw trace
 were active) if you want to look at it.
 
 Upload sends the trace to the developer's server; the id it returns appears
-in the modal, tap-to-select, so you can put it in your issue instead of the
+in the modal with a Copy ID button, so you can put it in your issue instead of the
 whole trace. It's the only thing Handwriting sends over the network, and
 only on that press - Copy and Save to vault stay offline. The trace is pen
 coordinates, timing and device info, never your note's text.
@@ -503,7 +474,9 @@ Node 20 or newer.
 ```
 npm ci            # install the locked dependency set
 npx tsc -noEmit   # typecheck
-npm test          # the full test suite
+npm test          # unit tests
+npm run test:render  # render tests
+npm run gate      # every check, both test suites, then the build
 npm run build     # typecheck, then a production main.js
 ```
 
