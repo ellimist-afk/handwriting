@@ -7,9 +7,10 @@
  *
  * A real EditorView with the real overlay, the note loaded from its sidecar as a saved note is. No hand call to the
  * overlay's redraw. Read back from the committed canvas: the pixels in the tag's own rect (7 css px left of the group's
- * shown box and 25 above it, the bound the committed layer damages for a tag) before and after the delete.
+ * shown box and 25 above it, the bound the committed layer damages for a tag) before and after the delete. Then the way
+ * back: the editor's undo brings the words back, the tag is gone and the link icon (its own square) is painted again.
  *
- * HW_HELD_TAG_PLANT=1 adds one hand redraw after the open and one after the delete.
+ * HW_HELD_TAG_PLANT=1 adds one hand redraw after the open, one after the delete and one after the undo.
  *
  * Run: npx vitest run --config vitest.render.mts test/render/AttachHeldTagMount.test.ts
  */
@@ -34,10 +35,10 @@ const WIDE = 900;
 const PAGE = `
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { history } from "@codemirror/commands";
+import { history, undo } from "@codemirror/commands";
 import { inlineInk, inkOverlayExtension, setScrollExpansionEnabled, setInlineTool } from "../../src/inline/InkOverlay";
 import { instances } from "../../src/inline/InkOverlayRegistry";
-import { ATTACH_STRINGS, themeColours } from "../../src/inline/AttachDecoration";
+import { ATTACH_STRINGS, linkIconRect, themeColours } from "../../src/inline/AttachDecoration";
 import { setPenInk } from "../../src/inline/PenInk";
 import { installObsidianDom } from "./obsidianDom";
 import { editorInfoField } from "./iphoneObsidianStub";
@@ -118,6 +119,21 @@ function rgbOf(css) {
 	const m = /^#([0-9a-f]{6})$/i.exec(g.fillStyle);
 	return m ? [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)) : null;
 }
+/** The painted pixels (alpha over 40) on the committed canvas inside a device rect (AttachLinkIconMount's reading). */
+function paintedIn(p, d) {
+	const c = p.overlay.committedCanvas, g = c.getContext("2d");
+	const x = Math.max(0, d.x), y = Math.max(0, d.y), w = Math.min(c.width - x, d.w), h = Math.min(c.height - y, d.h);
+	if (w <= 0 || h <= 0) return { pixels: 0, rect: d };
+	const img = g.getImageData(x, y, w, h).data;
+	let n = 0;
+	for (let i = 0; i < img.length; i += 4) if (img[i + 3] > 40) n++;
+	return { pixels: n, rect: d };
+}
+/** The link icon's square for the group as shown now, and the painted pixels the committed canvas holds there. */
+function iconAt(p, box) {
+	const o = p.overlay, r = linkIconRect(box, o.camera.snapshot.zoom, o.cssScale);
+	return { world: r, ...paintedIn(p, devRect(p, r)) };
+}
 const handRedraw = async (p, plant) => { if (!plant) return 0; p.overlay.redrawSelectionUI(); await quiet(p.view); return 1; };
 
 window.lim = {
@@ -138,15 +154,21 @@ window.lim = {
 		const follow = p.overlay.lineAnchors.follow;
 		const selected = p.overlay.selection.isEmpty === false;
 		const list0 = inlineInk.attachments(path).map(a => a.id), follows0 = follow.followsText(rec.id);
-		const open = shownBox(p, rec.strokeIds), atOpen = tagAt(p, open.box, [error, background]);
+		const open = shownBox(p, rec.strokeIds), atOpen = tagAt(p, open.box, [error, background]), iconOpen = iconAt(p, open.box);
 		// The target's words deleted, as a selection and Backspace reach the editor.
-		const from = p.view.state.doc.toString().indexOf(rec.target.text);
+		const text0 = p.view.state.doc.toString(), from = text0.indexOf(rec.target.text);
 		p.view.dispatch({ changes: { from, to: from + rec.target.text.length }, userEvent: "delete.backward" });
 		await quiet(p.view);
 		redraws += await handRedraw(p, plant);
-		const after = shownBox(p, rec.strokeIds), atAfter = tagAt(p, after.box, [error, background]);
+		const after = shownBox(p, rec.strokeIds), atAfter = tagAt(p, after.box, [error, background]), iconAfter = iconAt(p, after.box);
+		const follows1 = follow.followsText(rec.id);
+		// The way back: the editor's undo brings the words back, the group follows them again.
+		undo(p.view);
+		await quiet(p.view);
+		redraws += await handRedraw(p, plant);
+		const back = shownBox(p, rec.strokeIds), atBack = tagAt(p, back.box, [error, background]), iconBack = iconAt(p, back.box);
 		return { needs: th.needs, error, background: th.background, backgroundRgb: background, selected, list0, list1: inlineInk.attachments(path).map(a => a.id),
-			follows0, follows1: follow.followsText(rec.id), open, after, atOpen, atAfter, redraws };
+			follows0, follows1, follows2: follow.followsText(rec.id), textBack: p.view.state.doc.toString() === text0, open, after, back, atOpen, atAfter, atBack, iconOpen, iconAfter, iconBack, redraws };
 	},
 };
 `;
@@ -202,10 +224,13 @@ it(`a group turned held by typing shows its tag, nothing selected, no hand redra
 ${JSON.stringify(r)}`;
 		console.log(`[held-tag-mount] plant=${PLANT ? 1 : 0} ${JSON.stringify(r)}`);
 		expect(errors, "page errors").toEqual([]);
-		expect([r.list0, r.list1, r.selected, r.open.members, r.after.members, r.redraws], `premise: one group listed before and after, nothing selected, six members shown, hand redraws${brief}`).toEqual([["lim-group"], ["lim-group"], false, 6, 6, PLANT ? 2 : 0]);
+		expect([r.list0, r.list1, r.selected, r.open.members, r.after.members, r.back.members, r.redraws], `premise: one group listed before and after, nothing selected, six members shown, hand redraws${brief}`).toEqual([["lim-group"], ["lim-group"], false, 6, 6, 6, PLANT ? 3 : 0]);
 		expect([r.follows0, r.follows1, r.error !== null, r.backgroundRgb !== null], `premise: the group followed its text, then not; both theme colours read${brief}`).toEqual([true, false, true, true]);
 		expect(r.atOpen.error, `premise: no tag before the delete${brief}`).toBe(0);
 		// The tag after the delete: its words in the error colour, on its page-background pill.
 		expect([r.atAfter.error > 0, r.atAfter.background > 0], `[error-colour words, background pill] in the tag's rect after the delete${brief}`).toEqual([true, true]);
+		// The way back: undo of the delete, the words back and followed again; no tag left, the link icon painted again.
+		expect([r.textBack, r.follows2, r.iconOpen.pixels > 0], `premise: undo brought the words back, the group follows them again, the icon was painted at open${brief}`).toEqual([true, true, true]);
+		expect([r.atBack.error, r.iconBack.pixels > 0], `[error-colour pixels in the tag's rect, link icon painted] after the undo${brief}`).toEqual([0, true]);
 	} finally { await page.close(); }
 }, 120_000);

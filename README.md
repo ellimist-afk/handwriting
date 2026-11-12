@@ -186,11 +186,11 @@ on a note you can also resize and rotate what you lassoed: drag a corner to resi
 
 ### attach ink to text
 
-lasso some ink next to your text, tap the link button on the selection, then **Attach ink to text**. the ink now moves with that text when you type above it. when you hook it initially, the hooked text lights up (if your ink hooked the wrong text, tap the correct text with your pen or mouse within the 4 second grace period to fix the hook).
+lasso some ink next to your text, then tap the link button on the selection. the ink now moves with that text when you type above it. when you hook it initially, the hooked text lights up. if your ink hooked the wrong text, drag the pin to the correct text.
 
 tap attached ink with your finger to select it. attached ink shows a small grey link icon at its top-left.
 
-if attached text gets deleted or can't be found, orphaned ink shows "Needs reattachment". **detach ink from text** in the same menu will detach the ink.
+if attached text gets deleted or can't be found, orphaned ink shows "Drag the pin to the text". tap the link button again to detach the ink.
 
 both are also commands: `Handwriting: Lasso: attach ink to text` and `Handwriting: Lasso: detach ink from text`.
 
@@ -300,7 +300,7 @@ this method is extremely cheap: each drawing costs the same, bc typing doesnt re
 
 this feature is intended to fix sync between devices. your desktop might wrap a paragraph into 3 lines and your phone into 7, so everything below shifts and ink ends up next to the wrong paragraph. attached ink just looks for its words and sits beside them, on any screen.
 
-if the paragraph gets deleted, or can’t be found after a sync, the ink stays where it was last shown and gets a “Needs reattachment” tag.
+if the paragraph gets deleted, or can’t be found after a sync, the ink stays where it was last shown and gets a “Drag the pin to the text” tag.
 
 the attachment info lives as JSON in your vault’s .handwriting folder with everything else
 

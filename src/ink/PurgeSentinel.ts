@@ -20,8 +20,10 @@ import { countPaintedPixels } from "../diag/Raster";
  * oversight. `getImageData` is a synchronous readback: WebKit's GPU-process
  * architecture makes it a blocking IPC round trip, and this repo has already
  * been here once - `WetInkRenderer.countPainted` is documented "never on the
- * hot path", and the one `getImageData` in this codebase (diag/Raster.ts) is
- * a diagnostics call reached once per pen-up. What nobody could establish
+ * hot path", and of the two `getImageData` sites in this codebase,
+ * diag/Raster.ts is a diagnostics call reached once per pen-up and
+ * PdfViewerProbe.ts reads a PDF page's shade once per finished page canvas,
+ * never on a pen or scroll path. What nobody could establish
  * from a primary source is whether the pixel TRANSFER is scoped to the
  * requested 1x1 rect or to the whole multi-megapixel surface. That unknown is
  * the difference between microseconds and milliseconds at 3 Hz, during a
@@ -87,8 +89,9 @@ export function paintPurgeSentinel(ctx: CanvasRenderingContext2D): void {
  * Read the marker back: 1 if it is there, 0 if the canvas was reclaimed,
  * -1 if the readback was refused.
  *
- * Reached through `countPaintedPixels` rather than a second `getImageData`
- * call site, so this codebase keeps exactly one, and so the refusal path
+ * Reached through `countPaintedPixels` rather than a third `getImageData`
+ * call site, so this codebase keeps exactly two (the other is the PDF page
+ * shade read in PdfViewerProbe.ts), and so the refusal path
  * (a tainted or failed canvas returns -1 instead of throwing) is the one
  * that is already written and already tested.
  *

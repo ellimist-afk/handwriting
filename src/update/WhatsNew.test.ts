@@ -177,6 +177,17 @@ describe("decideWhatsNew", () => {
 		expect(Object.keys(RELEASE_NOTES)).not.toContain("1.4.25");
 	});
 
+	it("1.5.1 notes are Alan's five lines, character for character", () => {
+		// Alan typed these five lines himself: his case, his punctuation, nothing added.
+		expect(RELEASE_NOTES["1.5.1"]).toEqual([
+			"performance fix",
+			"ink attach fix, attach range increased to two lines",
+			"ink fixes",
+			"save sync fix",
+			"pdf highlight fix + pdf fixes",
+		]);
+	});
+
 	it("1.3.10 -> 1.4.5 is five versions, but only the newest two show in full - this test used to pin all five (23 lines) at once, which is exactly the spam this feature exists to stop", () => {
 		// Measured against the shipped RELEASE_NOTES: 1.3.10 -> 1.4.5 is five
 		// versions (1.3.11, 1.4.1, 1.4.2, 1.4.4, 1.4.5). This test formerly
@@ -574,25 +585,25 @@ describe("collapsing groups older than the two most recent", () => {
 });
 
 describe("release version files", () => {
-	// The release is 1.5.0 only when every file Obsidian and npm read says so.
+	// The release is 1.5.1 only when every file Obsidian and npm read says so.
 	// The store reads manifest.json and versions.json; versions.json maps each
-	// release to the oldest Obsidian it runs on, and 1.5.0 asks for no newer
-	// Obsidian than 1.4.25 did.
+	// release to the oldest Obsidian it runs on, and 1.5.1 asks for no newer
+	// Obsidian than 1.5.0 did.
 	const json = (path: string) =>
 		JSON.parse(readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), "utf8")) as Record<string, unknown>;
 
-	it("manifest.json, package.json and package-lock.json all say 1.5.0", () => {
-		expect(json("manifest.json").version, "manifest.json").toBe("1.5.0");
-		expect(json("package.json").version, "package.json").toBe("1.5.0");
+	it("manifest.json, package.json and package-lock.json all say 1.5.1", () => {
+		expect(json("manifest.json").version, "manifest.json").toBe("1.5.1");
+		expect(json("package.json").version, "package.json").toBe("1.5.1");
 		const lock = json("package-lock.json") as { version: string; packages: Record<string, { version?: string }> };
-		expect(lock.version, "package-lock.json top").toBe("1.5.0");
-		expect(lock.packages[""]?.version, "package-lock.json root package").toBe("1.5.0");
+		expect(lock.version, "package-lock.json top").toBe("1.5.1");
+		expect(lock.packages[""]?.version, "package-lock.json root package").toBe("1.5.1");
 	});
 
-	it("versions.json lists 1.5.0 with the same oldest Obsidian as 1.4.25, and the manifest agrees", () => {
+	it("versions.json lists 1.5.1 with the same oldest Obsidian as 1.5.0, and the manifest agrees", () => {
 		const versions = json("versions.json");
-		expect(versions["1.5.0"], "versions.json 1.5.0").toBe(versions["1.4.25"]);
-		expect(versions["1.5.0"], "versions.json 1.5.0 value").toBe("1.12.3");
-		expect(json("manifest.json").minAppVersion, "manifest.json minAppVersion").toBe(versions["1.5.0"]);
+		expect(versions["1.5.1"], "versions.json 1.5.1").toBe(versions["1.5.0"]);
+		expect(versions["1.5.1"], "versions.json 1.5.1 value").toBe("1.12.3");
+		expect(json("manifest.json").minAppVersion, "manifest.json minAppVersion").toBe(versions["1.5.1"]);
 	});
 });

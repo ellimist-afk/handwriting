@@ -583,7 +583,7 @@ describe("line anchors", () => {
 		// A lasso drag 160 down: shown at 197, on line 6 (top 190). The drag itself keeps the anchor's line.
 		translateStroke(s, 0, 160);
 		expect(s.lineAnchor!.line).toBe(2);
-		anchors.retake(PATH, [s]);
+		anchors.retake(PATH, [s], undefined, [s]);
 		expect(s.lineAnchor!.line).toBe(6);
 		expect(anchors.dyOf(s), "the drop moves nothing on screen").toBe(-10);
 		// Line 4 is measured 30 taller: the dropped stroke, below it, moves with line 6, not with line 2 above it.

@@ -379,6 +379,8 @@ export interface ChromeOverlay extends AttachSurface {
 			followsText(id: string): boolean;
 			/** Bumped on every correction change: a group's shown place moved. */
 			readonly generation?: number;
+			/** The list the follow last took (setList): its followsText answers for this list's records. */
+			readonly attachments?: readonly AttachmentData[];
 		};
 		freeFor(path: string, src: readonly InkStroke[]): { members: ReadonlyMap<string, readonly InkStroke[]> };
 	};
@@ -408,8 +410,12 @@ interface OverlayKept {
 	 * stroke list and its generation, the follow's generation and the selection's revision.
 	 */
 	held?: { ids: string; icons: string; list: readonly AttachmentData[]; strokes: readonly InkStroke[]; gen: number; fgen: number; rev: number };
-	/** What the committed repaint's check last saw with nothing selected (staleTagsOnPaint). */
-	painted?: { list: readonly AttachmentData[]; strokes: readonly InkStroke[]; gen: number; fgen: number; rev: number };
+	/**
+	 * What the committed repaint's check last saw with nothing selected (staleTagsOnPaint), with each record's place in the
+	 * marks: its id, whether it follows its text and, when it does not, its kept correction; or the opaque record itself
+	 * (showsOf). Null when the follow had not taken the list.
+	 */
+	painted?: { list: readonly AttachmentData[]; strokes: readonly InkStroke[]; gen: number; fgen: number; rev: number; shows: readonly Show[] | null };
 }
 /**
  * Each stroke list's ids, built only for an opaque record's members, kept with the list's generation: the store changes a
@@ -519,20 +525,76 @@ export function syncWithoutChrome(o: ChromeOverlay, list: readonly AttachmentDat
 
 /**
  * At the top of a committed repaint with nothing selected, before the stale flag is read: the marks (held tags, link icons)
- * go stale when the list, the stroke list or its generation, the follow's generation or the selection's revision moved
- * since this check last saw them. Opening a note and typing reach no redraw, so without this a group's icon or tag would
- * not show at open, nor follow its ink, until the next select. Identity and number compares only: no list walk, no string
- * built, no DOM or layout read. No repaint asked: refreshHeldTags adds the old and new rects to this paint, so a mark
- * moves in the same frame as its ink. A note with no group and no mark shown keeps nothing.
+ * go stale when the stroke list or its generation, the follow's generation, the selection's revision, or which groups the
+ * list holds and which of them follow their text moved since this check last saw them. Opening a note and typing reach no
+ * redraw, so without this a group's icon or tag would not show at open, nor follow its ink, until the next select. A
+ * keystroke hands over a new list object with every record mapped: when the follow has taken that list and each record
+ * holds the same place in the marks (same id in the same order, following its text or not as before, a record that does
+ * not follow its text at the same kept correction, an opaque record the same object), the marks stay as they are. One
+ * walk of the list's records, no string built, no DOM or layout read. No repaint asked: refreshHeldTags adds the old and
+ * new rects to this paint, so a mark moves in the same frame as its ink. A note with no group and no mark shown keeps
+ * nothing.
  */
 export function staleTagsOnPaint(o: ChromeOverlay, list: readonly AttachmentData[], strokes: readonly InkStroke[], gen: number): void {
 	const kept = overlayKept.get(o);
 	if (list.length === 0 && !(kept?.tags && kept.tags.length > 0)) return;
-	const fgen = o.lineAnchors.follow.generation ?? 0, rev = o.selection.revision, seen = kept?.painted;
-	if (seen && seen.list === list && seen.strokes === strokes && seen.gen === gen && seen.fgen === fgen && seen.rev === rev) return;
+	markCounts.checks++;
+	const follow = o.lineAnchors.follow, fgen = follow.generation ?? 0, rev = o.selection.revision, seen = kept?.painted;
+	if (seen && seen.strokes === strokes && seen.gen === gen && seen.fgen === fgen && seen.rev === rev) {
+		if (seen.list === list) {
+			markCounts.same++;
+			return;
+		}
+		if (seen.shows && follow.attachments === list && sameShows(follow, list, seen.shows)) {
+			seen.list = list;
+			markCounts.listOnly++;
+			return;
+		}
+	}
 	const k = kept ?? (overlayKept.set(o, {}), overlayKept.get(o)!);
-	k.painted = { list, strokes, gen, fgen, rev };
+	k.painted = { list, strokes, gen, fgen, rev, shows: follow.attachments === list ? showsOf(follow, list) : null };
 	k.tagsStale = true;
+	markCounts.stale++;
+}
+
+/**
+ * The marks check on each committed paint with nothing selected: checks made, answered by the same list, answered by a
+ * new list whose records hold the same places, and marks made stale. Counted always; the rig reads them.
+ */
+export const markCounts = { checks: 0, same: 0, listOnly: 0, stale: 0 };
+
+type Show = string | boolean | number | AttachmentData | null;
+
+/**
+ * Each record's place in the marks, four entries a record: an opaque record itself and three nulls; else its id, whether
+ * it follows its text, and, for a record that does not, its kept correction's dx and dy (a held or collapsed group's ink
+ * and tag sit there). A following record's kept correction is left out: a keystroke stamps it, and its tag follows the
+ * follow's correction, which the follow's generation counts.
+ */
+function showsOf(follow: ChromeOverlay["lineAnchors"]["follow"], list: readonly AttachmentData[]): Show[] {
+	const out: Show[] = [];
+	for (const a of list) {
+		if (isOpaqueAttachment(a)) out.push(a, null, null, null);
+		else if (follow.followsText(a.id)) out.push(a.id, true, null, null);
+		else out.push(a.id, false, a.shown?.dx ?? 0, a.shown?.dy ?? 0);
+	}
+	return out;
+}
+
+/** Whether every record of `list` holds the place `shows` kept for it, in the same order. */
+function sameShows(follow: ChromeOverlay["lineAnchors"]["follow"], list: readonly AttachmentData[], shows: readonly Show[]): boolean {
+	if (shows.length !== 4 * list.length) return false;
+	for (let i = 0; i < list.length; i++) {
+		const a = list[i]!, j = 4 * i;
+		if (isOpaqueAttachment(a)) {
+			if (shows[j] !== a) return false;
+			continue;
+		}
+		const follows = follow.followsText(a.id);
+		if (shows[j] !== a.id || shows[j + 1] !== follows) return false;
+		if (!follows && (shows[j + 2] !== (a.shown?.dx ?? 0) || shows[j + 3] !== (a.shown?.dy ?? 0))) return false;
+	}
+	return true;
 }
 
 /** Whether a redraw left this overlay's held tags for the next committed repaint to work out. */

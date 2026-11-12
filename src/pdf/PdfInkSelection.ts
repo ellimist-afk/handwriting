@@ -6,6 +6,7 @@ import { padBBox, pointInBBox, polygonBounds, strokeInLasso, unionBounds } from 
 import { copyInk, inkClipboardMarker, pasteInk } from "../inline/InkClipboard";
 import { withInkDestination } from "../ink/InkTheme";
 import { pdfPageDestination } from "../ink/InkPdf";
+import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
 import { PenSample } from "../input/PointerRouter";
 import { clipboardSize } from "../inline/InkClipboard";
 import { PageBox, snipViewport } from "./PageMap";
@@ -216,6 +217,8 @@ const SELECTION_GRAB_PAD_PX = 8;
 		const vp = snipViewport(b, 8, wPt, size.hPt, pxPerPt, MAX_SNIP_PX);
 		if (!vp) return { ok: false, reason: "the selection lies off the page" };
 		const out = createEl("canvas");
+		// Set inside the painter below; asserted so the finally still reads it.
+		let hl = null as HTMLCanvasElement | null;
 		try {
 			out.width = Math.max(1, Math.round((vp.x1 - vp.x0) * vp.scale));
 			out.height = Math.max(1, Math.round((vp.y1 - vp.y0) * vp.scale));
@@ -245,17 +248,49 @@ const SELECTION_GRAB_PAD_PX = 8;
 			// open across the await would give a live repaint in that gap the
 			// snip's colours.
 			const strokes = this.strokes(page);
-			withInkDestination(pdfPageDestination(this.pageAssumption()), () =>
-				this.drawCommitted(ctx, { x: 0, y: 0, zoom: vp.scale }, strokes)
-			);
+			const cam = { x: 0, y: 0, zoom: vp.scale };
+			withInkDestination(pdfPageDestination(this.pageAssumption()), () => {
+				// The same composite the page shows (`paint`): the highlights
+				// opaque on a layer of their own, laid on the page once at the
+				// wash, multiplied so the page's text stays dark under them; the
+				// pen ink over that. Where the page is dark the plain wash
+				// stays, as on screen: the answer the page already has, with no
+				// read of its pixels here.
+				if (strokes.some((s) => s.tool === "highlighter") && this.highlightLayered(page)) {
+					hl = createEl("canvas");
+					hl.width = out.width;
+					hl.height = out.height;
+					const hctx = hl.getContext("2d");
+					if (hctx) {
+						hctx.setTransform(1, 0, 0, 1, -vp.x0 * vp.scale, -vp.y0 * vp.scale);
+						this.drawHighlights(hctx, cam, strokes);
+						ctx.save();
+						ctx.setTransform(1, 0, 0, 1, 0, 0);
+						ctx.globalAlpha = HIGHLIGHTER_ALPHA;
+						ctx.globalCompositeOperation = "multiply";
+						ctx.drawImage(hl, 0, 0);
+						ctx.restore();
+					}
+					// With no context for the layer the highlights go on at the
+					// plain wash, as the page then shows them.
+					this.drawCommitted(ctx, cam, hctx ? strokes.filter((s) => s.tool !== "highlighter") : strokes);
+				} else {
+					this.drawCommitted(ctx, cam, strokes);
+				}
+			});
 			const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, "image/png"));
 			if (!blob) return { ok: false, reason: "the image could not be encoded" };
 			return { ok: true, bytes: new Uint8Array(await blob.arrayBuffer()), pageNumber: page };
 		} finally {
 			// The backing store is the size of the cap; released now rather
-			// than whenever the collector gets to a detached canvas.
+			// than whenever the collector gets to a detached canvas. The
+			// highlight layer is the same size and goes the same way.
 			out.width = 0;
 			out.height = 0;
+			if (hl) {
+				hl.width = 0;
+				hl.height = 0;
+			}
 		}
 	}
 

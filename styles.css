@@ -371,6 +371,15 @@ div.handwriting-snap-chip.handwriting-snap-chip {
 	z-index: 3;
 }
 
+/* A PDF page's highlights, one layer under its saved pen ink (PdfInkBand.ts,
+   HighlightLayer): the wash laid on the page once, multiplied, so the page's
+   text stays dark under it. The opacity is HIGHLIGHTER_ALPHA; a cell holds
+   the two equal. */
+.handwriting-pdf-ink.handwriting-pdf-highlight-group {
+	opacity: 0.35;
+	mix-blend-mode: multiply;
+}
+
 .handwriting-embed-ink {
 	position: absolute;
 	left: 0;

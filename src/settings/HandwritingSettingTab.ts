@@ -734,12 +734,14 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				refreshAllStrips();
 				break;
 			case "inkPdfColorMode":
-				// Read at flatten time from `this.settings`, so there is no
-				// renderer to notify and nothing to repaint: the next flatten
-				// asks and gets the new answer. Normalised on the way in as
-				// well as on load, so a control that somehow yields an unknown
-				// string cannot store one.
+				// Read from `this.settings` at flatten and snip time, and by each
+				// open PDF's overlay: a page's highlights get a layer of their
+				// own except where the pages are declared dark. So every open PDF
+				// repaints now, or it shows the old look until its next sync.
+				// Normalised on the way in as well as on load, so a control that
+				// somehow yields an unknown string cannot store one.
 				s.inkPdfColorMode = normalizePdfPageAssumption(str);
+				for (const controller of this.plugin.pdfInk.values()) controller.refresh();
 				break;
 			case "inkReadableInExports":
 				// Keep the persisted boolean and its existing renderer semantics.

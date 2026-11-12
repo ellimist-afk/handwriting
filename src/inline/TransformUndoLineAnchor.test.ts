@@ -79,12 +79,12 @@ function run(kind: "transform" | "move", turn: Turn = { scale: 1.5, angle: 0.3, 
 		const t = { pivot: { x: s.bbox.x, y: pivotY }, scale: turn.scale, angle: turn.angle };
 		const edits = transformEdits(src, ["s"], t, (k) => a.dyOf(k), () => 0);
 		store.rewriteStrokes(PATH, edits.strokeIds.map((id, i) => ({ id, shape: edits.after[i]! })));
-		a.retake(PATH, [s]);
+		a.retake(PATH, [s], undefined, src);
 		op = { type: "transform", path: PATH, strokeIds: edits.strokeIds, before: edits.before, after: edits.after } as InkOp;
 	} else {
 		const from = [{ ...s.points[0]! }];
 		store.moveStrokes(PATH, ["s"], 30, 50);
-		a.retake(PATH, [s]);
+		a.retake(PATH, [s], undefined, src);
 		op = { type: "move", path: PATH, strokeIds: ["s"], dx: 30, dy: 50, from } as InkOp;
 	}
 	measure();
@@ -108,7 +108,7 @@ function run(kind: "transform" | "move", turn: Turn = { scale: 1.5, angle: 0.3, 
 	const inv = invertInkOp(op);
 	if (inv.type === "transform") store.rewriteStrokes(PATH, inv.strokeIds.map((id, i) => ({ id, shape: inv.after[i]! })));
 	else if (inv.type === "move") store.moveStrokes(PATH, inv.strokeIds, inv.dx, inv.dy);
-	a.retake(PATH, [s]);
+	a.retake(PATH, [s], undefined, src);
 	measure();
 	const undone = { s: shown(s), twin: shown(twin), points: s.points.map((p) => ({ x: p.x, y: p.y })), twinPoints: twin.points.map((p) => ({ x: p.x, y: p.y })) };
 	const anchors = { s: s.lineAnchor, twin: twin.lineAnchor };

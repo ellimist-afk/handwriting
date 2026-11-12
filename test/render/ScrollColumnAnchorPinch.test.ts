@@ -2161,6 +2161,43 @@ for (const axis of ['left', 'corner'] as const) for (const readable of [false, t
 	}, 120000);
 }
 
+// THE EASE WIDENING'S OTHER DRIVER, read only. The band is widened for an ease that starts left of or above its rest
+// (syncBand); the drag arms no longer start one past the band margin, so this reads the zoom-out commit with Infinite
+// Canvas on, on a short pane, eased only inside the room past the far edge. With the canvas off a two-finger gesture is
+// not a zoom (InkOverlayPinch.ts, pinch()), so no ease starts there and those arms are not read. Per arm it reports the
+// ease's start offset against the rest (painted px, and in band px), the band margin at that scale, the start past the
+// margin, and the scroll room. It asserts only that the read is the case it names: zoomed out at the lift. The verdict is
+// the numbers. Each arm's premises report on their own, so one arm does not hide the arms after it.
+const SHORT_PANE = { w: 1397.5, h: 560 };
+it('ease widening read: a zoom-out commit on a short pane with Infinite Canvas on', async () => {
+	const arms: { readable: boolean; infiniteCanvas: boolean; external: number; corner: boolean; toScale: number; paneSize: { w: number; h: number } }[] = [];
+	for (const external of [1, 1.25]) for (const corner of [false, true])
+		arms.push({ readable: true, infiniteCanvas: true, external, corner, toScale: .5, paneSize: SHORT_PANE });
+	const out: any[] = [];
+	for (const a of arms) {
+		const page = await browser.newPage({ viewport: { width: 1800, height: 1100 }, deviceScaleFactor: 2 });
+		try {
+			await page.setContent('<!doctype html><body style="margin:0"></body>');
+			await page.addStyleTag({ content: css + READABLE_LINE_WIDTH_CSS }); await page.addScriptTag({ content: script });
+			const r = await page.evaluate(x => (window as any).scrollColumnAnchor.runFarEndEase(x), a);
+			const c = r.cover, label = `IC=${a.infiniteCanvas} external=${a.external} ${a.corner ? 'corner' : 'top'}`;
+			const sides = [0, 1].map(i => {
+				const from = c.from ? c.from[i] : null;
+				const startPx = from === null ? null : Math.ceil(Math.abs(from) / c.cssScale);
+				return { axis: i ? 'y' : 'x', from, startPx, margin: c.from ? c.margin : null, pastMargin: from !== null && from < 0 ? startPx! - c.margin : null, room: c.room ? c.room[i] : null };
+			});
+			out.push({ label, ...a, before: r.before, atLift: r.atLift, after: r.after, cover: c, sides });
+			console.log(`EASE WIDENING READ ${label}: k at lift ${r.atLift.k.toFixed(3)}, blank right ${r.atLift.blankRight.toFixed(2)} bottom ${r.atLift.blankBottom.toFixed(2)}, ` +
+				(c.from ? sides.map(s => `${s.axis} start ${s.from!.toFixed(2)} (${s.startPx} band px) margin ${s.margin} past margin ${s.pastMargin ?? '-'} room ${s.room!.toFixed(2)}`).join('; ') : `no ease in ${c.frames} frames`));
+			const seen = JSON.stringify({ before: r.before, atLift: r.atLift });
+			expect.soft(r.before.rangeY, `${label}: premise: the note has scroll range below (${seen})`).toBeGreaterThan(0);
+			expect.soft(r.atLift.k, `${label}: premise: zoomed out at the lift (${seen})`).toBeLessThan(.9);
+		} finally { await page.close(); }
+	}
+	report.push({ note: 'ease widening read', out });
+	if (process.env.HW_EASE_WIDENING_OUT) writeFileSync(process.env.HW_EASE_WIDENING_OUT, JSON.stringify(out, null, 1));
+}, 240000);
+
 // THE INSTRUMENTED READ, one run, two cells, no fix. READ ONLY: it asserts nothing about the
 // product, because its whole job is to say WHICH of the three causes the ruling names is the real one
 // before a line of the fix is written.

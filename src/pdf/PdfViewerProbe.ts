@@ -219,6 +219,80 @@ export function wholePageCanvasOf(pageEl: HTMLElement): HTMLCanvasElement | null
 }
 
 /**
+ * Has the viewer finished drawing this page?
+ *
+ * pdf.js puts `loadingIcon` on the page div while a draw of the page runs and
+ * takes it off when the draw ends. On a slow first draw the page canvas is on
+ * the page before it is done and the last pixels land in the same element, so
+ * the canvas being there is not the canvas being finished. A page whose class
+ * comes or goes is a record for the root observer (it watches `class` under
+ * the leaf), so the sync after the draw ends sees the final pixels.
+ */
+export function pageDrawFinished(pageEl: HTMLElement): boolean {
+	return !pageEl.classList.contains("loadingIcon");
+}
+
+/** The read's sample side: the page is drawn into a sample at most this many pixels a side, 65,536 pixels at most. */
+const SHADE_SAMPLE = 256;
+
+/**
+ * Is this page canvas dark? The mean luminance of the page, on the stored 0
+ * to 255 values weighted 0.2126 R + 0.7152 G + 0.0722 B, under one half.
+ *
+ * The whole page is drawn once, scaled down with smoothing, into one sample
+ * canvas at most 256 x 256, and the sample is read back once. A smoothed
+ * downscale averages the page's pixels into the sample's, so the sample's
+ * mean is the page's: a dark band or thin rules count by the share of the
+ * page they cover, and fine print does not read as its glyphs. A canvas
+ * narrower or shorter than the sample is drawn that side 1:1.
+ *
+ * One draw from the page canvas at any size: in the app the page canvas can
+ * be a GPU canvas, where each draw from it costs about the whole canvas, not
+ * the part it names, so the read's cost is its number of draws.
+ *
+ * Drawn over white, so a see-through canvas (another plugin's, laid over the
+ * page) reads as the paper under it rather than as black.
+ *
+ * Null when the canvas cannot be read: no size, no sample canvas to draw in,
+ * no context, or a draw or read that throws. Nothing here throws.
+ *
+ * The sample canvas comes from Obsidian's global createEl, as the snip's do.
+ */
+export function readCanvasDark(canvas: HTMLCanvasElement): boolean | null {
+	const made: HTMLCanvasElement[] = [];
+	try {
+		const w = canvas.width;
+		const h = canvas.height;
+		if (!(w > 0 && h > 0)) return null;
+		const sw = Math.min(SHADE_SAMPLE, w);
+		const sh = Math.min(SHADE_SAMPLE, h);
+		const sample = createEl("canvas");
+		made.push(sample);
+		sample.width = sw;
+		sample.height = sh;
+		const ctx = sample.getContext("2d");
+		if (!ctx) return null;
+		ctx.fillStyle = "#ffffff";
+		ctx.fillRect(0, 0, sw, sh);
+		ctx.imageSmoothingEnabled = true;
+		ctx.imageSmoothingQuality = "medium";
+		ctx.drawImage(canvas, 0, 0, w, h, 0, 0, sw, sh);
+		const px = ctx.getImageData(0, 0, sw, sh).data;
+		let sum = 0;
+		for (let i = 0; i < px.length; i += 4) sum += 0.2126 * px[i]! + 0.7152 * px[i + 1]! + 0.0722 * px[i + 2]!;
+		return sum / (sw * sh) < 127.5;
+	} catch {
+		return null;
+	} finally {
+		// Released now rather than whenever the collector reaches a detached canvas.
+		for (const c of made) {
+			c.width = 0;
+			c.height = 0;
+		}
+	}
+}
+
+/**
  * Where the viewer's page canvas sits within its page div.
  *
  * `offsetLeft`/`offsetTop` are relative to the nearest positioned ancestor,

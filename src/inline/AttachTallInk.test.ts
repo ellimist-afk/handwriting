@@ -151,3 +151,94 @@ describe("attach with a selection taller than its line", () => {
 		expect(r.target?.text, "the line above").toBe("Alpha");
 	});
 });
+
+describe("attach across a gap: the nearest text line up to two lines from the box", () => {
+	const para = (doc: Text, n: number) => ({ kind: "paragraph", from: doc.line(n).from, to: doc.line(n).to, text: doc.line(n).text });
+
+	it("a: Alan's case, a box starting a few px under the note's last line and running ten lines down, attaches to it", () => {
+		// Line 5 ends at height 69.6, note px 36.0. The box runs 39..219 note px, heights 75.4..423.4: a gap of 5.8 under
+		// the line, no overlap; its centre is 179.8 under the line.
+		const r = attach("gap-orion.md", ORION_NOTE, ORION_BLOCKS, { x: 85.8, y: 39, width: 34, height: 180 }, ORION);
+		expect(r.answered, "a box a few px under the text attaches").toBe(true);
+		expect(r.target, "to the note's line, as a paragraph").toEqual({ kind: "paragraph", from: 67, to: 83, text: "This is the test" });
+	});
+
+	it("b: one blank line between the box and the text above, a gap under two lines: attaches to that line", () => {
+		const doc = Text.of(["Alpha", "", "", "", "", "Omega"]);
+		// Alpha 0..30, blank lines 30..150, Omega 150..180. The box runs 65..85: 35 under Alpha, 65 over Omega (past the reach, 60).
+		const r = attach("gap-blank-above.md", doc, textBlocks(doc, 30), { x: 10, y: 65, width: 30, height: 20 }, { lineHeight: 30 });
+		expect(r.answered, "the box attaches across the blank line").toBe(true);
+		expect(r.target, "to Alpha, as a paragraph").toEqual(para(doc, 1));
+	});
+
+	it("c: a box in a blank gap between two paragraphs, nearer the lower: takes the lower", () => {
+		const doc = Text.of(["Alpha", "", "", "", "Beta"]);
+		// Alpha 0..30, blank lines 30..120, Beta 120..150. The box runs 75..100: 45 under Alpha, 20 over Beta.
+		const r = attach("gap-between-nearer.md", doc, textBlocks(doc, 30), { x: 10, y: 75, width: 30, height: 25 }, { lineHeight: 30 });
+		expect(r.answered, "the box attaches").toBe(true);
+		expect(r.target, "to the nearer line, Beta, as a paragraph").toEqual(para(doc, 5));
+	});
+
+	it("c: a box in a blank gap as far from both paragraphs: takes the upper", () => {
+		const doc = Text.of(["Alpha", "", "", "", "Beta"]);
+		// The box runs 60..90: 30 under Alpha, 30 over Beta.
+		const r = attach("gap-between-tie.md", doc, textBlocks(doc, 30), { x: 10, y: 60, width: 30, height: 30 }, { lineHeight: 30 });
+		expect(r.answered, "the box attaches").toBe(true);
+		expect(r.target, "a tie takes the upper line, Alpha, as a paragraph").toEqual(para(doc, 1));
+	});
+
+	it("d: a gap of two lines exactly attaches", () => {
+		const doc = Text.of(["Alpha", "", "", "", ""]);
+		// Alpha 0..30. The box runs 90..110: 60 under Alpha, the reach.
+		const r = attach("gap-two-lines.md", doc, textBlocks(doc, 30), { x: 10, y: 90, width: 30, height: 20 }, { lineHeight: 30 });
+		expect(r.answered, "two lines away attaches").toBe(true);
+		expect(r.target, "to Alpha").toEqual(para(doc, 1));
+	});
+
+	it("d: a gap of two lines and 2 px attaches nothing", () => {
+		const doc = Text.of(["Alpha", "", "", "", ""]);
+		// The box runs 92..112: 62 under Alpha, 2 past the reach.
+		const r = attach("gap-past-reach.md", doc, textBlocks(doc, 30), { x: 10, y: 92, width: 30, height: 20 }, { lineHeight: 30 });
+		expect(r.answered, "past two lines: nothing attaches").toBe(false);
+	});
+
+	it("e: a widget block between the box and the only text line in reach attaches nothing", () => {
+		const doc = Text.of(["Alpha", "![[pic]]", ""]);
+		// Alpha 0..30, a block embed's widget 30..60, a blank line 60..90. The box runs 65..85: 35 under Alpha, the picture between.
+		const blocks: Block[] = [
+			{ from: 0, to: 5, top: 0, bottom: 30, type: BlockType.Text },
+			{ from: 6, to: 14, top: 30, bottom: 60, type: BlockType.WidgetRange },
+			{ from: 15, to: 15, top: 60, bottom: 90, type: BlockType.Text },
+		];
+		const r = attach("gap-widget-between.md", doc, blocks, { x: 10, y: 65, width: 30, height: 20 }, { lineHeight: 30 });
+		expect(r.answered, "a picture in the way: nothing attaches").toBe(false);
+	});
+
+	it("e-down: a widget block between the box and the only text line in reach below attaches nothing", () => {
+		const doc = Text.of(["", "![[note]]", "Omega"]);
+		// A blank line 0..30, a note embed's widget 30..60, Omega 60..90. The box runs 5..25: 35 over Omega, the embed between.
+		const blocks: Block[] = [
+			{ from: 0, to: 0, top: 0, bottom: 30, type: BlockType.Text },
+			{ from: 1, to: 10, top: 30, bottom: 60, type: BlockType.WidgetRange },
+			{ from: 11, to: 16, top: 60, bottom: 90, type: BlockType.Text },
+		];
+		const r = attach("gap-widget-below.md", doc, blocks, { x: 10, y: 5, width: 30, height: 20 }, { lineHeight: 30 });
+		expect(r.answered, "a note embed in the way below: nothing attaches").toBe(false);
+	});
+
+	it("f: a box above the note's first line, a gap under two lines: attaches to the first line", () => {
+		const doc = Text.of(["First line", "Second line"]);
+		// The box runs -50..-20: 20 over line 1, no overlap.
+		const r = attach("gap-above-first.md", doc, textBlocks(doc, 30), { x: 10, y: -50, width: 30, height: 30 }, { lineHeight: 30 });
+		expect(r.answered, "the box attaches downward").toBe(true);
+		expect(r.target, "to line 1, as a paragraph").toEqual(para(doc, 1));
+	});
+
+	it("h: hidden front matter (a widget with no height) between the box and the first text line does not stop the reach", () => {
+		// The Orion note: front matter hidden at height 0, the blank line 4 at 0..34.8, line 5 at 34.8..69.6. The box runs
+		// -20..-5 note px, heights -38.67..-9.67: above the note, 44.47 over line 5, the front matter and line 4 between.
+		const r = attach("gap-front-matter.md", ORION_NOTE, ORION_BLOCKS, { x: 85.8, y: -20, width: 34, height: 15 }, ORION);
+		expect(r.answered, "the box attaches across hidden front matter").toBe(true);
+		expect(r.target, "to the note's line, as a paragraph").toEqual({ kind: "paragraph", from: 67, to: 83, text: "This is the test" });
+	});
+});

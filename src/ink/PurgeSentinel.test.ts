@@ -281,15 +281,19 @@ describe("the readback is behind the guards", () => {
 		expect(renderer).toMatch(/if \(sentinel\) paintPurgeSentinel\(ctx\);/);
 	});
 
-	it("stays the only getImageData in production source, through countPaintedPixels", () => {
-		// This repo has exactly one readback call site and a comment on the
-		// wet renderer saying "never on the hot path". The heal must not
-		// become the second one. Read across every production file, so code
-		// moving between files cannot carry a second site past this check.
+	it("keeps getImageData to two production sites: countPaintedPixels and the PDF page shade", () => {
+		// This repo has exactly two readback call sites, one each. The first
+		// is countPaintedPixels (diag/Raster.ts), with a comment on the wet
+		// renderer saying "never on the hot path"; the heal goes through it
+		// rather than adding its own. The second is the PDF page shade
+		// (PdfViewerProbe.ts): one read per finished page canvas, never on a
+		// pen or scroll path. A third must not arrive unseen. Read across every
+		// production file, so code moving between files cannot carry another
+		// site past this check.
 		const sites = Object.entries(PRODUCTION_SOURCES).flatMap(([file, text]) =>
 			(codeOnly(text).match(/getImageData\(/g) ?? []).map(() => file)
 		);
 		expect(Object.keys(PRODUCTION_SOURCES).length, "precondition: the glob found the source tree").toBeGreaterThan(50);
-		expect(sites).toEqual(["/src/diag/Raster.ts"]);
+		expect([...sites].sort()).toEqual(["/src/diag/Raster.ts", "/src/pdf/PdfViewerProbe.ts"]);
 	});
 });

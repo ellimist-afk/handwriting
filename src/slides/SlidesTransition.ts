@@ -108,6 +108,18 @@ function atRest(p: SectionPose): boolean {
 	return p.pure && p.dx === 0 && p.dy === 0 && p.opacity >= 1;
 }
 
+/**
+ * Throw a pair away. Sized to nothing before it goes: a removed canvas is collectible, but its backing store is held
+ * until the collector reaches it, and an extra pair is made at every slide change (as PdfInkBand.ts `paint` does).
+ */
+function release(pair: FollowPair): void {
+	for (const c of [pair.committed, pair.highlight]) {
+		c.width = 0;
+		c.height = 0;
+		c.remove();
+	}
+}
+
 function place(pair: FollowPair, p: SectionPose): void {
 	const transform = `translate(${p.dx}px, ${p.dy}px)`;
 	const opacity = String(p.opacity);
@@ -238,8 +250,7 @@ function place(pair: FollowPair, p: SectionPose): void {
 		const pin = sectionPose(f.inc, k, win);
 		const pout = sectionPose(f.out, k, win);
 		if (f.mode === "translate" && !(pin.pure && pout.pure)) {
-			f.extra?.committed.remove();
-			f.extra?.highlight.remove();
+			if (f.extra) release(f.extra);
 			f.extra = null;
 			f.mode = "hide";
 		}
@@ -276,8 +287,7 @@ function place(pair: FollowPair, p: SectionPose): void {
 		if (f.frame !== null) win.cancelAnimationFrame(f.frame);
 		if (f.timer !== null) win.clearTimeout(f.timer);
 		f.inc.removeEventListener("transitionend", f.onEnd);
-		f.extra?.committed.remove();
-		f.extra?.highlight.remove();
+		if (f.extra) release(f.extra);
 		for (const c of [f.main.committed, f.main.highlight]) {
 			c.style.removeProperty("transform");
 			c.style.removeProperty("opacity");

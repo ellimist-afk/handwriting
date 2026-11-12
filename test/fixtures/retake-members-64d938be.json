@@ -1,0 +1,2992 @@
+{
+	"onePane": [
+		{
+			"step": "attached, quiet",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				}
+			]
+		},
+		{
+			"step": "letter",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				}
+			]
+		},
+		{
+			"step": "enter above",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				}
+			]
+		},
+		{
+			"step": "enter above, quiet",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 120,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3557845918
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 200,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3048955970
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				}
+			]
+		},
+		{
+			"step": "wrap",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 42,
+						"key": 1955708750,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 69,
+						"key": 1955708750,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 120,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3557845918
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 200,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3048955970
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				}
+			]
+		},
+		{
+			"step": "wrap, quiet",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 42,
+						"key": 1955708750,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 69,
+						"key": 1955708750,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 160,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 755261717
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 240,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3819976281
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				}
+			]
+		},
+		{
+			"step": "unwrap",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 160,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 755261717
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 240,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3819976281
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						3
+					]
+				}
+			]
+		},
+		{
+			"step": "unwrap, quiet",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 120,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3557845918
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 200,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3048955970
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				}
+			]
+		},
+		{
+			"step": "width change",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					2
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 4,
+						"top": 40,
+						"y": 42,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3557845918
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 4,
+						"top": 40,
+						"y": 69,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3557845918
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 120,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3557845918
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 200,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3048955970
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				}
+			]
+		},
+		{
+			"step": "width change, new signature",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 280,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 280,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 463325655,
+						"width": 280,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 463325655,
+						"width": 280,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 2,
+						"top": 80,
+						"y": 88,
+						"key": 2166136261,
+						"width": 280,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 3,
+						"top": 120,
+						"y": 166,
+						"key": 463325655,
+						"width": 280,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						4
+					]
+				}
+			]
+		},
+		{
+			"step": "first read",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 280,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						false
+					],
+					"stamp": [
+						null
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 280,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						false
+					],
+					"stamp": [
+						null
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 463325655,
+						"width": 280,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						false
+					],
+					"stamp": [
+						null
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 463325655,
+						"width": 280,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						false
+					],
+					"stamp": [
+						null
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 2,
+						"top": 80,
+						"y": 88,
+						"key": 2166136261,
+						"width": 280,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						false
+					],
+					"stamp": [
+						null
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 3,
+						"top": 120,
+						"y": 166,
+						"key": 463325655,
+						"width": 280,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						false
+					],
+					"stamp": [
+						null
+					]
+				}
+			]
+		},
+		{
+			"step": "first read, quiet",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 463325655,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 843431254,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2403721388
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				}
+			]
+		}
+	],
+	"twoPanes": [
+		{
+			"step": "two panes, attached, quiet",
+			"answers": [
+				[],
+				[
+					0
+				]
+			],
+			"retaken": [
+				[],
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				}
+			]
+		},
+		{
+			"step": "two panes, enter above",
+			"answers": [
+				[
+					0
+				],
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				],
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						1,
+						null
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						1,
+						null
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				}
+			]
+		},
+		{
+			"step": "two panes, wrap",
+			"answers": [
+				[
+					0
+				],
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				],
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 42,
+						"key": 3904037164,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 69,
+						"key": 3904037164,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						0,
+						null
+					]
+				}
+			]
+		},
+		{
+			"step": "two panes, wrap, quiet",
+			"answers": [
+				[],
+				[]
+			],
+			"retaken": [
+				[],
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 42,
+						"key": 3904037164,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 69,
+						"key": 3904037164,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 160,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2703590131
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 240,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3668898679
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				}
+			]
+		},
+		{
+			"step": "two panes, unwrap",
+			"answers": [
+				[
+					0
+				],
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				],
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						3,
+						null
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						3,
+						null
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 160,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2703590131
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 240,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3668898679
+					},
+					"vouched": [
+						true,
+						true
+					],
+					"stamp": [
+						2,
+						null
+					]
+				}
+			]
+		}
+	],
+	"memberBelow": [
+		{
+			"step": "member below, quiet",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b3",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 44,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				}
+			]
+		},
+		{
+			"step": "member below, enter above",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b3",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 44,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				}
+			]
+		},
+		{
+			"step": "member below, enter above, quiet",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 4,
+						"top": 120,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 1150635214
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 6,
+						"top": 200,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 1554445170
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "b3",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 44,
+						"key": 2166136261,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				}
+			]
+		}
+	],
+	"twiceStored": [
+		{
+			"step": "id twice, quiet",
+			"answers": [
+				[]
+			],
+			"retaken": [
+				[]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 2,
+						"top": 40,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 3840264402
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						null
+					]
+				}
+			]
+		},
+		{
+			"step": "id twice, enter above",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 4,
+						"top": 80,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 965689228
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 40,
+						"y": 69,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 4,
+						"top": 80,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 965689228
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						1
+					]
+				}
+			]
+		},
+		{
+			"step": "id twice, wrap",
+			"answers": [
+				[
+					0
+				]
+			],
+			"retaken": [
+				[
+					0
+				]
+			],
+			"strokes": [
+				{
+					"id": "b1",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 2,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "b2",
+					"anchor": {
+						"line": 1,
+						"top": 0,
+						"y": 29,
+						"key": 2654443165,
+						"width": 420,
+						"fontPx": 26,
+						"above": 2166136261
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 4,
+						"top": 160,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 4071599062
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "a2",
+					"anchor": {
+						"line": 3,
+						"top": 0,
+						"y": 69,
+						"key": 3904037164,
+						"width": 420,
+						"fontPx": 26,
+						"above": 554023159
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				},
+				{
+					"id": "f1",
+					"anchor": {
+						"line": 3,
+						"top": 80,
+						"y": 88,
+						"key": 2317077102,
+						"width": 420,
+						"fontPx": 26,
+						"above": 738969145
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "f2",
+					"anchor": {
+						"line": 5,
+						"top": 160,
+						"y": 166,
+						"key": 4094324426,
+						"width": 420,
+						"fontPx": 26,
+						"above": 611203325
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						0
+					]
+				},
+				{
+					"id": "a1",
+					"anchor": {
+						"line": 4,
+						"top": 160,
+						"y": 42,
+						"key": 2351082247,
+						"width": 420,
+						"fontPx": 26,
+						"above": 4071599062
+					},
+					"vouched": [
+						true
+					],
+					"stamp": [
+						2
+					]
+				}
+			]
+		}
+	],
+	"retook": [
+		"width change"
+	]
+}

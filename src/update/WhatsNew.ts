@@ -228,6 +228,13 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"zoombar+toolbar polish and compatibility fix",
 		"ui fixes",
 	],
+	"1.5.1": [
+		"performance fix",
+		"ink attach fix, attach range increased to two lines",
+		"ink fixes",
+		"save sync fix",
+		"pdf highlight fix + pdf fixes",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

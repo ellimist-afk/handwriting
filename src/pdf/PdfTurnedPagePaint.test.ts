@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InkStroke, computeBBox } from "../ink/Stroke";
 import { resetTipModeForTest } from "../inline/TipMode";
+import type { PdfPageAssumption } from "../ink/InkPdf";
 import { installFakeWindow } from "../../test/routerHarness";
 
 declare const process: { env: Record<string, string | undefined> };
@@ -194,8 +195,19 @@ interface Rig {
 /**
  * One page, wholly inside the band, at a scale of 1 css px per point.
  * `openTurn` is the turn the viewer is at before the first paint.
+ *
+ * `assumption` is the "Ink color on PDFs" setting. The call-log cells pass its
+ * dark choice ("lighten"): there a page's highlights are still filled on the
+ * saved-ink canvas at the wash, the paint the golden recorded, unchanged. On
+ * the other choices highlights have a layer of their own; its turn is held by
+ * PdfHighlightLayer.test.ts (U6).
  */
-function rig(strokes: InkStroke[], openTurn: 0 | 90 | 180 | 270 = 0, source: "viewer" | "none" = "viewer"): Rig {
+function rig(
+	strokes: InkStroke[],
+	openTurn: 0 | 90 | 180 | 270 = 0,
+	source: "viewer" | "none" = "viewer",
+	assumption: PdfPageAssumption = "darken"
+): Rig {
 	resetTipModeForTest();
 	const uninstall = installFakeWindow();
 	cleanups.push(uninstall);
@@ -280,7 +292,19 @@ function rig(strokes: InkStroke[], openTurn: 0 | 90 | 180 | 270 = 0, source: "vi
 		cancelAnimationFrame: () => {},
 		getComputedStyle: () => ({ position: "relative" }),
 	};
-	const controller = new PdfInkController({} as HTMLElement, win as unknown as Window, () => strokes, () => "doc-1", () => strokes, () => {});
+	const controller = new PdfInkController(
+		{} as HTMLElement,
+		win as unknown as Window,
+		() => strokes,
+		() => "doc-1",
+		() => strokes,
+		() => {},
+		() => {},
+		() => {},
+		() => {},
+		() => false,
+		() => assumption
+	);
 	const priv = controller as unknown as { mounted: boolean; bindTo(el: unknown): void; sync(): void; invalidateProbe(): void; router: { dispose(): void } | null };
 	cleanups.push(() => priv.router?.dispose());
 	// The viewer's own page turn, as the code that builds the controller reads
@@ -424,7 +448,7 @@ describe("saved ink on a PDF page turned in the viewer", () => {
 	});
 
 	it("upright: every paint call is the same as before turned pages were painted (byte-for-byte control)", () => {
-		const r = rig(uprightSet());
+		const r = rig(uprightSet(), 0, "viewer", "lighten");
 		r.sync();
 		const first = r.paints()[r.paints().length - 1]!.calls;
 		r.turn(90);
@@ -464,7 +488,7 @@ describe("saved ink on a PDF page turned in the viewer", () => {
 
 describe("a turn that cannot be read, or that the box does not show yet", () => {
 	it("a source that answers null paints an upright page byte-for-byte as before", () => {
-		const r = rig(uprightSet());
+		const r = rig(uprightSet(), 0, "viewer", "lighten");
 		r.report(null);
 		r.sync();
 		const calls = r.paints()[r.paints().length - 1]!.calls;
@@ -475,11 +499,11 @@ describe("a turn that cannot be read, or that the box does not show yet", () => 
 	});
 
 	it("a source that answers null on a page turned 90 paints exactly as a controller with no source", () => {
-		const withNull = rig(uprightSet());
+		const withNull = rig(uprightSet(), 0, "viewer", "lighten");
 		withNull.sync();
 		withNull.report(null);
 		withNull.turn(90);
-		const none = rig(uprightSet(), 0, "none");
+		const none = rig(uprightSet(), 0, "none", "lighten");
 		none.sync();
 		none.turn(90);
 		const a = withNull.paints()[withNull.paints().length - 1]!.calls;
@@ -493,7 +517,7 @@ describe("a turn that cannot be read, or that the box does not show yet", () => 
 
 	it("a source that answers something other than a turn reads as null: upright paints as before", () => {
 		for (const bad of [Number.NaN, 45, Number.POSITIVE_INFINITY]) {
-			const r = rig(uprightSet());
+			const r = rig(uprightSet(), 0, "viewer", "lighten");
 			r.report(bad);
 			r.sync();
 			const calls = r.paints()[r.paints().length - 1]!.calls;
@@ -505,7 +529,7 @@ describe("a turn that cannot be read, or that the box does not show yet", () => 
 	});
 
 	it("a source that throws reads as null: upright paints as before", () => {
-		const r = rig(uprightSet());
+		const r = rig(uprightSet(), 0, "viewer", "lighten");
 		setViewTurnSource(r.controller, () => {
 			throw new Error("the view is gone");
 		});

@@ -729,19 +729,20 @@ const BOX_SCALE_SLACK = 0.01;
 	 * `dys`: each stroke of `ids`, in that order, taken at the correction given (an attach step).
 	 */
 	function retakeLineAnchors(this: InkOverlayPlugin, path: string, ids: readonly string[], dys?: readonly number[]): void {
+		const src = inlineInk.strokes(path);
 		if (!dys) {
 			const wanted = new Set(ids);
-			this.lineAnchors.retake(path, inlineInk.strokes(path).filter((s) => wanted.has(s.id)));
+			this.lineAnchors.retake(path, src.filter((s) => wanted.has(s.id)), undefined, src);
 			return;
 		}
-		const byId = new Map(inlineInk.strokes(path).map((s) => [s.id, s] as const)), list: InkStroke[] = [], at: number[] = [];
+		const byId = new Map(src.map((s) => [s.id, s] as const)), list: InkStroke[] = [], at: number[] = [];
 		ids.forEach((id, i) => {
 			const s = byId.get(id);
 			if (!s) return;
 			list.push(s);
 			at.push(dys[i]!);
 		});
-		this.lineAnchors.retake(path, list, at);
+		this.lineAnchors.retake(path, list, at, src);
 	}
 
 	/**
@@ -900,8 +901,12 @@ const BOX_SCALE_SLACK = 0.01;
 		const h = (box.y + box.height / 2) * px, doc = view.state.doc;
 		let block = view.lineBlockAtHeight(h), above: { from: number; to: number } | null = null;
 		// Where the centre finds no text line, ink taller than its line (a box from above the words to well under them) takes
-		// the text line its span overlaps nearest the centre; overlapping none, it attaches nothing.
-		const overlapped = () => overlappedTextLine(view, box.y * px, (box.y + box.height) * px, h);
+		// the text line its span overlaps nearest the centre; overlapping none, the nearest text line up to two lines from
+		// the box, across blank lines (reachedTextLine); with none in reach, it attaches nothing.
+		const overlapped = () => {
+			const top = box.y * px, bottom = (box.y + box.height) * px;
+			return overlappedTextLine(view, top, bottom, h) ?? reachedTextLine(view, top, bottom, 2 * view.defaultLineHeight);
+		};
 		if (h < block.top) {
 			const o = overlapped();
 			if (!o) return false;
@@ -1034,6 +1039,46 @@ const BOX_SCALE_SLACK = 0.01;
 			if (b.top >= bottom || b.to >= end) break;
 		}
 		return best;
+	}
+
+	/**
+	 * The text line (not blank, not a widget) nearest the span `top` to `bottom` that it does not overlap, with a gap of at
+	 * most `reach`: above, the span's top less the line's bottom; below, the line's top less the span's bottom. The smaller
+	 * gap wins; a tie takes the upper line. Blank lines are crossed and count only as distance. A widget block with height
+	 * (a note embed, a table) met before a text line ends that direction with nothing; a span that overlaps one reaches in
+	 * neither. A widget with no height (hidden front matter) is not in the way. Null when nothing is in reach. Walks by
+	 * position, as overlappedTextLine does: down from the block at the span's top, then up from the last block the walk
+	 * down passed above the span (the height map may answer a block above the span for its top), else from the block
+	 * before the first one it read.
+	 */
+	function reachedTextLine(view: EditorView, top: number, bottom: number, reach: number): BlockInfo | null {
+		if (!(reach > 0)) return null;
+		const end = view.state.doc.length, start = view.lineBlockAtHeight(top);
+		const inTheWay = (b: BlockInfo) => isWidgetBlock(b) && b.bottom > b.top;
+		const isText = (b: BlockInfo) => b.to > b.from && !isWidgetBlock(b);
+		let below: BlockInfo | null = null, lastAbove: BlockInfo | null = start.from > 0 ? view.lineBlockAt(start.from - 1) : null;
+		for (let b = start; ; b = view.lineBlockAt(b.to + 1)) {
+			if (b.bottom <= top) lastAbove = b;
+			else if (b.top >= bottom) {
+				if (b.top - bottom > reach || inTheWay(b)) break;
+				if (isText(b)) {
+					below = b;
+					break;
+				}
+			} else if (inTheWay(b)) return null;
+			if (b.to >= end) break;
+		}
+		let above: BlockInfo | null = null;
+		for (let b = lastAbove; b; b = b.from > 0 ? view.lineBlockAt(b.from - 1) : null) {
+			if (top - b.bottom > reach || inTheWay(b)) break;
+			if (isText(b)) {
+				above = b;
+				break;
+			}
+		}
+		if (!above) return below;
+		if (!below) return above;
+		return top - above.bottom <= below.top - bottom ? above : below;
 	}
 
 	/**

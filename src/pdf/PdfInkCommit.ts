@@ -9,6 +9,7 @@ import { stripPenUp } from "../inline/StripPenChrome";
 import { toPagePoint } from "./PageMap";
 import { ProbedViewer, probeViewer } from "./PdfViewerProbe";
 import { installMethods } from "../inline/InstallMethods";
+import { isOwnLayerRecord } from "./PdfInkBand";
 import { type Attached, INK_OVER_CLASS, type OpMode, OWN_CLASSES, OWN_TOOLBAR_SELECTOR, type PenFrame, PROBE_MAX_AGE_MS, removedByHistory, SYNC_MIN_GAP_MS, type PdfInkController } from "./PdfInkController";
 
 declare module "./PdfInkController" {
@@ -231,7 +232,17 @@ declare module "./PdfInkController" {
 	 * ours up cannot.
 	 */
 	function dressWet(this: PdfInkController, attached: Attached | undefined): void {
-		const alpha = this.wetHighlighter ? String(HIGHLIGHTER_ALPHA) : "1";
+		// Where highlights have a layer of their own (`highlightLayered`), a
+		// live highlighter draws inside the page's highlight group, which
+		// carries the wash once: the pair stays at full opacity and moves into
+		// the group while a highlighter is down, and back over the saved pen
+		// ink for everything else.
+		const layered = this.highlightLayered(this.wetHostPage);
+		const alpha = this.wetHighlighter && !layered ? String(HIGHLIGHTER_ALPHA) : "1";
+		const pageEl = attached?.canvas.parentElement;
+		if (this.pair && layered && pageEl && this.wetHostPage > 0 && this.overlays.get(this.wetHostPage) === attached) {
+			this.seatPair(pageEl, this.wetHostPage);
+		}
 		if (this.pair) {
 			this.pair.wetCanvas.setCssProps({ opacity: alpha });
 			// The head is the same stroke, one segment further on - it wears
@@ -468,7 +479,10 @@ declare module "./PdfInkController" {
 		) {
 			return true;
 		}
-		return false;
+		// A page's highlight layer appearing or going, and the pair moving
+		// between that page and its layer: the page div is the target, so the
+		// class test above cannot see these as ours.
+		return isOwnLayerRecord(this, record);
 	}
 
 	/**
@@ -485,7 +499,10 @@ declare module "./PdfInkController" {
 
 	/** Forget every page overlay, removing the canvases we can still reach. */
 	function dropOverlays(this: PdfInkController): void {
-		for (const { canvas } of this.overlays.values()) canvas.remove();
+		for (const attached of this.overlays.values()) {
+			this.dropHighlightLayer(attached);
+			attached.canvas.remove();
+		}
 		this.overlays.clear();
 		// The pair goes with them. Both callers - unmount and a viewer that
 		// was rebuilt under us - mean every element we were holding is gone or

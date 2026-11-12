@@ -391,7 +391,10 @@ const DEBOUNCE_MS = 700;
 		return !this.pending.has(pageId) && !this.timers.has(pageId);
 	}
 
-	/** Write everything queued right now: page switch, view close, plugin unload. */
+	/**
+	 * Write everything queued right now: quit, plugin unload, the ink-folder move. On return every page still queued
+	 * has a live quiet or bound timer, except one whose retries are spent and whose user has been told.
+	 */
 	async function flush(this: PageStore): Promise<void> {
 		const end = this.beginFlush(null);
 		try {
@@ -404,8 +407,17 @@ const DEBOUNCE_MS = 700;
 			const ids = [...this.pending.keys()];
 			await Promise.all(ids.map((id) => this.writePending(id)));
 			await Promise.all([...this.tails.values()]);
-			// Everything held for a pen is written above; the next `schedule` watches again.
+			// The pen watch, every hold and every cap go; the next `schedule` watches again.
 			this.unwatchPens();
+			// A batch scheduled while the writes above were awaited is not in `ids`. Its quiet timer may have fired into a
+			// pen hold and its bound timer into a cap, and both just went, which left it queued with no timer at all. A
+			// fresh quiet period for each such page, once: it writes it with the pen watch gone, and a user who is still
+			// drawing schedules again at the lift. A page whose retries are spent waits, as it did, for the next schedule
+			// or flush.
+			for (const pageId of this.pending.keys()) {
+				if (this.timers.has(pageId) || this.maxTimers.has(pageId) || this.errorNotified.has(pageId)) continue;
+				this.armQuiet(pageId);
+			}
 		} finally {
 			end();
 		}

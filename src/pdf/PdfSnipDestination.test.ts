@@ -223,6 +223,8 @@ async function rig(raw: Record<string, unknown>, pageColour: string, strokes: In
 	};
 	const win = {
 		devicePixelRatio: 2,
+		// The setting change asks each open PDF for a repaint frame; this rig paints nothing, so the frame never runs.
+		requestAnimationFrame: () => 0,
 		getComputedStyle: (el: unknown) => ({
 			position: "relative",
 			getPropertyValue: (p: string) => (p === "--scale-factor" && el === page ? String(SCALE) : ""),

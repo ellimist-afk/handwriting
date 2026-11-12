@@ -2877,6 +2877,47 @@ async function runTopBoundary(readable: boolean, infiniteCanvas: boolean, tiny =
 }
 
 /**
+ * THE EASE FROM PAST THE FAR END, read only. The note is scrolled to its bottom (and, with Infinite Canvas on, to its far
+ * right), then two fingers near the pane's top (or top-left) pinch out to `toScale` and lift with no drag frame between, so
+ * the preview leaves the page's far end inside the pane and the settle owns the whole correction. Read at the first frame of
+ * the ease, as runTopBoundary reads it: the start offset against the rest (painted px; negative is left of or above it), the
+ * ink layer's css scale, the band margin for the pane at that scale, the scroll room right of and below the scroll, and the
+ * ink raster's box against the pane's. Nothing here asserts; the cell that calls it reports.
+ */
+async function runFarEndEase(o: { readable: boolean; infiniteCanvas: boolean; external: number; corner: boolean; toScale: number; paneSize?: { w: number; h: number } }) {
+	const { pane, view, overlay } = await mount(`farend-${o.readable}-${o.infiniteCanvas}-${o.external}-${o.corner}-${o.toScale}`, o.readable, o.infiniteCanvas, undefined, false, 400, o.paneSize);
+	pane.style.transform = `scale(${o.external})`; pane.style.transformOrigin = '0 0'; overlay.handleResize();
+	await settle(8);
+	try {
+		const sd = view.scrollDOM, router = overlay.router;
+		sd.scrollTop = sd.scrollHeight; if (o.infiniteCanvas && o.corner) sd.scrollLeft = sd.scrollWidth; view.requestMeasure();
+		await settle(12);
+		const before = { scrollLeft: sd.scrollLeft, scrollTop: sd.scrollTop, rangeX: sd.scrollWidth - sd.clientWidth, rangeY: sd.scrollHeight - sd.clientHeight, clientW: sd.clientWidth, clientH: sd.clientHeight };
+		const pr = sd.getBoundingClientRect();
+		const focal = { x: pr.left + (o.corner ? 40 : pr.width / 2), y: pr.top + 40 };
+		const event = (type: string) => new PointerEvent(type, { pointerId: 832, pointerType: 'touch' });
+		const touch = (spread: number) => { router.touchPos.set(831, { x: focal.x - spread / 2, y: focal.y }); router.touchPos.set(832, { x: focal.x + spread / 2, y: focal.y }); };
+		touch(400); router.beginPinch(event('pointerdown'));
+		const steps = 12;
+		for (let i = 1; i <= steps; i++) { touch(400 * (1 + (o.toScale - 1) * i / steps)); router.updatePinch(event('pointermove')); await frame(); }
+		const content = view.contentDOM.getBoundingClientRect(), paneBox = sd.getBoundingClientRect();
+		const atLift = { k: overlay.pinchScaleNow, blankRight: paneBox.right - content.right, blankBottom: paneBox.bottom - content.bottom, drag: !!overlay.boundReadout?.dragFrame };
+		router.endPinch(event('pointerup'), focal);
+		const cover: any = { frames: 0, from: null };
+		const readCover = (): boolean => { const b = overlay.overscrollBounceReadout?.(); if (!b || !b.active) return false;
+			const ink = overlay.committedCanvas?.getBoundingClientRect?.(), p = sd.getBoundingClientRect(), cs = overlay.cssScale;
+			Object.assign(cover, { from: [b.fromX, b.fromY], offset: [b.x, b.y], rest: [b.restX, b.restY], ink: ink ? [ink.left, ink.top, ink.right, ink.bottom] : null, pane: [p.left, p.top, p.right, p.bottom],
+				cssScale: cs, margin: bandMargin(sd.clientHeight, cs), room: [sd.scrollWidth - sd.scrollLeft - sd.clientWidth, sd.scrollHeight - sd.scrollTop - sd.clientHeight] }); return true; };
+		if (!readCover()) for (; cover.frames < 30; cover.frames++) { await frame(); if (readCover()) break; }
+		router.touchPos.clear();
+		for (let w = 0; w < 120 && overlay.overscrollBounceReadout?.().active; w++) await frame();
+		await settle(4);
+		const after = { k: overlay.pinchScaleNow, scrollLeft: sd.scrollLeft, scrollTop: sd.scrollTop };
+		return { ...o, before, atLift, cover, after };
+	} finally { view.destroy(); pane.remove(); }
+}
+
+/**
  * A COMMIT THAT CHANGES THE MARGIN LAW MUST PAY FOR IT IN THE SAME FRAME.
  *
  * `columnRestCentred` centres a page that fits the pane by writing the sizer's margin. When the page stops fitting -
@@ -5498,3 +5539,4 @@ function runTearHighlightProbe() {
 	return (["highlightCanvas", "highlightWetCanvas"] as const).map(n => { const c = o[n] as HTMLCanvasElement; return { name: n, index: els.indexOf(c), blankHash: blank(c) }; });
 }
 Object.assign((window as any).scrollColumnAnchor, { runTearSetTool, runTearHighlightProbe });
+Object.assign((window as any).scrollColumnAnchor, { runFarEndEase });

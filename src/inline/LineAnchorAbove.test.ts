@@ -176,7 +176,7 @@ describe("a page write between a sync capture and its re-check", () => {
 		const a = surface(doc, ROW + 10);
 		a.tracks(PATH, [s]);
 		expect(a.dyOf(s)).toBe(10);
-		a.retake(PATH, [s]);
+		a.retake(PATH, [s], undefined, [s]);
 		const before = capture([s]);
 		const page = emptyPage("above");
 		page.strokes = [s];

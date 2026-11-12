@@ -708,7 +708,10 @@ window.bounce = {
 			const e = overlay.pinchScaleNow * (overlay.viewportLayout ? overlay.viewportLayout.externalScale : 1);
 			return { x: +((p.x + b.x) - rest - sd.scrollLeft * e).toFixed(3), y: +((p.y + b.y) - sd.scrollTop * e).toFixed(3) };
 		};
-		const band = () => { const q = overlay.boundReadout; return { rawX: +(+q.rawX).toFixed(2), cx: +(+q.cx).toFixed(2), rawY: +(+q.rawY).toFixed(2), cy: +(+q.cy).toFixed(2), drag: !!q.dragFrame }; };
+		// rest and e beside the band: the column's rest pan this frame's ceiling was taken from, and the scale the live scroll
+		// is multiplied by (pinch scale times the outer scale), so a cell can rebuild the ceiling from its own terms.
+		const band = () => { const q = overlay.boundReadout; return { rawX: +(+q.rawX).toFixed(2), cx: +(+q.cx).toFixed(2), rawY: +(+q.rawY).toFixed(2), cy: +(+q.cy).toFixed(2), drag: !!q.dragFrame,
+			rest: +(+q.restCeilX).toFixed(3), e: +(overlay.pinchScaleNow * (overlay.viewportLayout ? overlay.viewportLayout.externalScale : 1)).toFixed(6) }; };
 		put(x0, y0); router.beginPinch(ev("pointerdown"));
 		put(x0, y0, 312); router.updatePinch(ev("pointermove")); await rendered();
 		put(x0, y0); router.updatePinch(ev("pointermove")); await rendered();
@@ -1451,6 +1454,22 @@ it("INFINITE CANVAS ON, READABLE LINE LENGTH ON, A FITTING COLUMN, SCROLLED DOWN
 	expect(Math.abs(r.rows.at(-1).past.x - r.allowance), `held one allowance past the column's rest (${s})`).toBeLessThanOrEqual(1);
 	expect(Math.abs(r.rest.past.x), `x eases back onto the column's rest (${s})`).toBeLessThanOrEqual(0.5);
 	expect(Math.abs(r.rest.pageY - r.rows.at(-1).pageY), `y stays where the fingers left it (${s})`).toBeLessThanOrEqual(1);
+}, 120_000);
+
+// A FITTING COLUMN, SCROLLED SIDEWAYS. The readable column fits the pane with room beside it and the note is scrolled
+// sideways, on one drag at 100 percent. The column's rest term is 0 on every frame here (no fixture gives it a pan), so
+// the ceiling is the scroll times the scale, plus the give; this cell holds that the rest term adds nothing to it.
+it("INFINITE CANVAS ON, READABLE LINE LENGTH ON, A FITTING COLUMN, SCROLLED SIDEWAYS: a drag right past the page's left edge stops at the scroll times the scale, plus the give", async () => {
+	const r = await dragCell("drag-rll-fitting-scrolled-x", { sl: 300, st: 0, dx: 700, dy: 0, steps: 20, rll: true });
+	const last = r.rows.at(-1);
+	const s = show({ scrolled: r.scrolled, start: r.start, last, rest: r.rest, allowance: r.allowance });
+	expect(r.scrolled.columnW, `premise: the readable column fits the pane with room beside it (${s})`).toBeLessThan(r.scrolled.paneW - 50);
+	expect(r.rows.every((w: any) => w.drag), `premise: every frame is a drag frame (${show(r.rows.map((w: any) => w.drag))})`).toBe(true);
+	expect(last.scrollLeft, `premise: the note is scrolled sideways at the last frame (${s})`).toBeGreaterThan(0);
+	expect(r.rows.map((w: any) => w.rest).filter((v: number) => v !== 0), `premise: the column's rest term is 0 on every frame (${s})`).toEqual([]);
+	const stop = last.scrollLeft * last.e + r.allowance;
+	expect(last.rawX, `premise: the fingers ask past the stop (stop ${stop.toFixed(2)}, ${s})`).toBeGreaterThan(stop + 50);
+	expect(Math.abs(last.cx - stop), `the page stops at scroll ${last.scrollLeft} x scale ${last.e} + give ${r.allowance} = ${stop.toFixed(2)} (${s})`).toBeLessThanOrEqual(0.5);
 }, 120_000);
 
 it("INFINITE CANVAS ON, SCROLLED 600, 600: a drag after a zoom in the same gesture follows the fingers within 1 px on every frame once the spread holds, and the page rests where the last preview frame painted it", async () => {

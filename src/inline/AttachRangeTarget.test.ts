@@ -515,14 +515,16 @@ describe("an underline on the blank line under a paragraph", () => {
 		expect([r.target.kind, r.target.text]).toEqual(["range", "fox"]);
 	});
 
-	it("control: a quarter line and 2 px below gives no text", async () => {
-		const { tryAttach } = rig("blank-under-low.md", [under("u", LH + LH / 4 + 2)], { lines: [L1, "", "third line here"] });
-		expect(tryAttach(["u"])).toBe(false);
+	it("control: a quarter line and 2 px below, inside the two-line reach, takes the paragraph above, not the word", async () => {
+		const { attach } = rig("blank-under-low.md", [under("u", LH + LH / 4 + 2)], { lines: [L1, "", "third line here"] });
+		const r = await attach(["u"]);
+		expect([r.target.kind, r.target.text]).toEqual(["paragraph", L1]);
 	});
 
-	it("control: below the note's last line, a quarter line and 2 px below gives no text", async () => {
-		const { tryAttach } = rig("blank-under-last-low.md", [under("u", 2 * LH + LH / 4 + 2)], { lines: ["a second plain line", L1] });
-		expect(tryAttach(["u"])).toBe(false);
+	it("control: below the note's last line, a quarter line and 2 px below, inside the reach, takes that paragraph, not the word", async () => {
+		const { attach } = rig("blank-under-last-low.md", [under("u", 2 * LH + LH / 4 + 2)], { lines: ["a second plain line", L1] });
+		const r = await attach(["u"]);
+		expect([r.target.kind, r.target.text]).toEqual(["paragraph", L1]);
 	});
 
 	it("control: under no word's middle gives the paragraph", async () => {
@@ -532,9 +534,10 @@ describe("an underline on the blank line under a paragraph", () => {
 		expect([r.target.kind, r.target.text]).toEqual(["paragraph", L1]);
 	});
 
-	it("control: under Properties, a widget block, gives no text", async () => {
-		const { tryAttach } = rig("blank-under-props.md", [under("u", TALL + LH / 8, X(0), X(4))], { lines: ["tags: one two", "", L1], widget: [1] });
-		expect(tryAttach(["u"])).toBe(false);
+	it("control: under Properties, a widget block, the line below in reach: takes that paragraph, not Properties", async () => {
+		const { attach } = rig("blank-under-props.md", [under("u", TALL + LH / 8, X(0), X(4))], { lines: ["tags: one two", "", L1], widget: [1] });
+		const r = await attach(["u"]);
+		expect([r.target.kind, r.target.text]).toEqual(["paragraph", L1]);
 	});
 });
 

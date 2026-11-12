@@ -24,8 +24,9 @@
  * and phrase patterns stay unbounded, because they cannot occur inside an
  * innocent identifier.
  *
- * `docs/demo.js` is excluded: a build artefact, checked byte-for-byte by
- * `check:site`, never hand-edited.
+ * `docs/demo.js` is excluded: a build artefact that scripts/build-site.mjs
+ * writes when run. It is no longer committed, and no check compares it with
+ * its sources since the landing page removed `check:site`.
  */
 
 import { describe, expect, it } from "vitest";
@@ -80,8 +81,8 @@ const patternFor = (text: string): RegExp => (isBinary(text) ? PHRASE_PATTERN : 
  * against what they contain.
  */
 const CARVE_OUTS: Record<string, string> = {
-	// A generated bundle, reproduced byte-for-byte by check:site from sources
-	// that ARE scanned; a hand edit is already a gate failure.
+	// A generated bundle, built by scripts/build-site.mjs from sources that ARE
+	// scanned. No longer committed, and no longer checked against them.
 	"docs/demo.js": "generated bundle, its sources are scanned",
 	// Generated dependency graph. Third-party package names are not ours to
 	// reword, and one of them containing a banned substring would stop the gate

@@ -36,7 +36,8 @@ function rig(path: string, box: { x: number; y: number; width: number; height: n
 		const line = doc.line(n);
 		return { from: line.from, to: line.to, top: (n - 1) * LH, bottom: n * LH };
 	};
-	const view = { scaleY: 1, state: { doc }, lineBlockAtHeight, requestMeasure() {} };
+	const lineBlockAt = (pos: number) => lineBlockAtHeight(LH * (doc.lineAt(pos).number - 1));
+	const view = { scaleY: 1, defaultLineHeight: LH, state: { doc }, lineBlockAtHeight, lineBlockAt, requestMeasure() {} };
 	const overlay = Object.create(InkOverlayPlugin.prototype) as InkOverlayPlugin;
 	const anchors = new LineAnchors(() => null, () => false);
 	anchors.sig = { width: 600, fontPx: 16, charWidth: 8 };
@@ -53,14 +54,16 @@ describe("attach with the selection below the last text line", () => {
 	it("a selection whose centre is below the last block does not attach", () => {
 		// Defect: the layout clamps the height to the last line, and the attach takes that line as the target.
 		const path = "attach-below-last-block.md";
-		const overlay = rig(path, { x: 10, y: 120, width: 40, height: 20 });
+		// The box runs 160..180: 70 under the last line, past the two-line reach (60).
+		const overlay = rig(path, { x: 10, y: 160, width: 40, height: 20 });
 		expect(overlay.attachSelected()).toBe(false);
 	});
 
 	it("a selection whose centre is above the first block does not attach", () => {
 		// The layout clamps a height above the first line to that line, as it clamps one below the last.
 		const path = "attach-above-first-block.md";
-		const overlay = rig(path, { x: 10, y: -30, width: 40, height: 20 });
+		// The box runs -100..-80: 80 over the first line, past the two-line reach (60).
+		const overlay = rig(path, { x: 10, y: -100, width: 40, height: 20 });
 		expect(overlay.attachSelected()).toBe(false);
 	});
 

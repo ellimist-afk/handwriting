@@ -54,26 +54,50 @@ import { bumpCopyRev, inkListRevision, inkRevision, strokeRev, markCopy } from "
 import { AttachFollow, type FollowSnapshot } from "./AttachFollow";
 import type { AttachmentData } from "./InkAttachments";
 
+/** A store list's id to place map, with the stroke-list revision and the length it was built at. */
+interface IdPlaces {
+	readonly at: Map<string, number>;
+	readonly rev: number;
+	readonly len: number;
+}
+
 /**
  * A store stroke by id: an id to place map, built once per store list object and kept on it. The store
  * refills its list in place, so each answer is checked against the list at its place, and a miss builds the map again.
  */
-const byIdOfList = new WeakMap<readonly InkStroke[], Map<string, number>>();
+const byIdOfList = new WeakMap<readonly InkStroke[], IdPlaces>();
 export function strokeById(list: readonly InkStroke[], id: string, counts?: { hits: number; builds: number }): InkStroke | undefined {
-	let at = byIdOfList.get(list);
-	if (at) {
-		const i = at.get(id), s = i === undefined ? undefined : list[i];
+	const p = byIdOfList.get(list);
+	if (p) {
+		const i = p.at.get(id), s = i === undefined ? undefined : list[i];
 		if (s && s.id === id) {
 			if (counts) counts.hits++;
 			return s;
 		}
 	}
 	if (counts) counts.builds++;
-	at = new Map();
-	for (let i = 0; i < list.length; i++) at.set(list[i]!.id, i);
-	byIdOfList.set(list, at);
-	const i = at.get(id);
+	const i = idPlaces(list).at.get(id);
 	return i === undefined ? undefined : list[i];
+}
+
+/** The list's id to place map built again, one read per stroke, and kept on the list. */
+function idPlaces(list: readonly InkStroke[]): IdPlaces {
+	const at = new Map<string, number>();
+	for (let i = 0; i < list.length; i++) at.set(list[i]!.id, i);
+	const p = { at, rev: inkListRevision(), len: list.length };
+	byIdOfList.set(list, p);
+	return p;
+}
+
+/**
+ * The list's id to place map as it stands: the kept one while the list has not changed in place since it was built (the
+ * stroke-list revision and the length it was built at), else built again. Null when the list holds an id twice: a map
+ * keeps one place per id, so it cannot answer for every stroke there.
+ */
+function freshIdPlaces(list: readonly InkStroke[]): IdPlaces | null {
+	let p = byIdOfList.get(list);
+	if (!p || p.rev !== inkListRevision() || p.len !== list.length) p = idPlaces(list);
+	return p.at.size === list.length ? p : null;
 }
 
 /** CodeMirror's line geometry, as the anchors read it. Heights are the editor's own px, below the document top. */
@@ -1368,9 +1392,10 @@ export class LineAnchors {
 	 * Strokes a lasso drag (or its undo or redo) has just moved. A move keeps each anchor's line while it runs
 	 * (translatedAnchor); at its end every honoured anchor is re-taken from where its stroke is shown, as a document change
 	 * re-takes it, so the stroke keeps its place on screen and from then on rides the line it was dropped on, not the one it
-	 * left. `dys` (an attach step): each is taken at the correction given, whatever its old anchor read.
+	 * left. `dys` (an attach step): each is taken at the correction given, whatever its old anchor read. `src`: the note's
+	 * store list now, whose panes have their lists marked as this one's peers do.
 	 */
-	retake(path: string, strokes: readonly InkStroke[], dys?: readonly number[]): void {
+	retake(path: string, strokes: readonly InkStroke[], dys: readonly number[] | undefined, src: readonly InkStroke[]): void {
 		this.own(path);
 		const sig = this.sig, layout = this.layout();
 		if (!sig || !layout) return;
@@ -1387,11 +1412,25 @@ export class LineAnchors {
 			this.vouch(s);
 			this.stamp(s);
 			this.setDy(s, this.epoch, dy);
-			if (dys) for (const h of this.peers ?? []) if (h !== this) h.dropDy(s);
+			if (dys) {
+				for (const h of this.peers ?? []) if (h !== this) h.dropDy(s);
+				// A pane listed under the store list handed in, while this one is still under an older one, drops its saved
+				// correction too: its next read takes the one given here, as a pane listed with this one does.
+				const listed = holdersOf.get(src);
+				if (listed && listed !== this.peers) for (const h of listed) if (h !== this) h.dropDy(s);
+			}
 			took = true;
 		}
 		// The dropped strokes may now be the first or last anchored lines.
 		if (took && this.anchored) this.anchored.stale = true;
+		// The strokes are every pane's on the note: another pane's list may lack one anchored here, or name its first or last
+		// line by one that took another line, so it is built again at its next read.
+		const peers = this.peers;
+		if (took && peers && peers.length > 1) for (const h of peers) if (h !== this && h.anchored) h.anchored.stale = true;
+		// A pane may be listed under the store list handed in while this one is still under an older one: its list is built
+		// again too.
+		const held = holdersOf.get(src);
+		if (took && held && held !== peers) for (const h of held) if (h !== this && h.anchored) h.anchored.stale = true;
 	}
 
 	/**
@@ -1456,6 +1495,10 @@ export class LineAnchors {
 		}
 		// The anchored list is read again: these strokes now carry anchors.
 		if (took > 0 && this.anchored) this.anchored.stale = true;
+		// The strokes are every pane's on the note: another pane's list lacks the ones anchored here, so it is built again at
+		// its next read.
+		const peers = this.peers;
+		if (took > 0 && peers && peers.length > 1) for (const h of peers) if (h !== this && h.anchored) h.anchored.stale = true;
 		if (moved) {
 			this.generation++;
 			this.stepBound += most;
@@ -1470,6 +1513,12 @@ export class LineAnchors {
 	 * anchors a member, so a read-only view draws it on its words with the sideways move its record keeps. A member whose
 	 * shown top is past the measured prefix loses its anchor instead, and anchorMeasured takes it once the editor is quiet.
 	 * An anchor this surface does not honour is left as it is. Answers how many lost theirs.
+	 *
+	 * The moved groups' members are reached by id, through the store list's id to place map (strokeById's, built once per
+	 * change to the list): a keystroke reads the members of the groups it moved, never every stroke of the note. A stroke
+	 * is taken only from a place that holds its id; a place that holds another id has the map built again, so free ink is
+	 * never anchored to a group. A list that holds an id twice is walked whole, as each stroke there under a moved group's
+	 * id is one of its members.
 	 */
 	retakeMembers(path: string, src: readonly InkStroke[], before: FollowSnapshot): number {
 		const follow = this.follow, members = follow.memberMap;
@@ -1487,17 +1536,15 @@ export class LineAnchors {
 		const through = this.window ? 0 : Math.min(this.measured, layout.lines), from = layout.bodyFrom ?? 1;
 		const below = through >= from ? this.trueTop(through + 1) : -Infinity;
 		let changed = false, cleared = 0;
-		for (const s of src) {
-			const old = s.lineAnchor, id = old ? members.get(s.id) : undefined;
-			if (!old || id === undefined || !moved.has(id)) continue;
+		const retake = (s: InkStroke, old: LineAnchor, id: string): void => {
 			const gdy = follow.groupOffset(id)!.dy, dy = this.honoured(s, old, layout);
-			if (dy === null || Math.abs(dy - gdy) < SAME_DY) continue;
+			if (dy === null || Math.abs(dy - gdy) < SAME_DY) return;
 			changed = true;
 			const shownY = s.bbox.y + gdy;
 			if (!(shownY < below)) {
 				delete s.lineAnchor;
 				cleared++;
-				continue;
+				return;
 			}
 			const line = lineUnder(shownY, through, (n) => this.trueTop(n), from);
 			const a: LineAnchor = { line, top: this.trueTop(line) - gdy, y: s.bbox.y, key: this.key(line, layout), width: sig.width, fontPx: sig.fontPx };
@@ -1505,8 +1552,61 @@ export class LineAnchors {
 			s.lineAnchor = a;
 			this.vouch(s);
 			this.stamp(s);
+		};
+		// A group's members are the ids its record lists that the member map gives to it (memberMap is built from them), each
+		// with its group's id. Null when a place holds a stroke of another id: that place answers for neither stroke.
+		const movedIds = moved;
+		const byId = (p: IdPlaces): [InkStroke, string][] | null => {
+			const found: [InkStroke, string][] = [];
+			for (const r of follow.groups()) {
+				if (!movedIds.has(r.id)) continue;
+				for (const sid of r.strokeIds) {
+					if (members.get(sid) !== r.id) continue;
+					const i = p.at.get(sid), s = i === undefined ? undefined : src[i];
+					if (!s) continue;
+					if (s.id !== sid) return null;
+					found.push([s, r.id]);
+				}
+			}
+			return found;
+		};
+		let places = freshIdPlaces(src), found = places ? byId(places) : null;
+		// The list changed in place with its revision as it was: the map is built again, once. A list that then holds an id
+		// twice is walked whole.
+		if (places && !found) {
+			places = idPlaces(src);
+			found = places.at.size === src.length ? byId(places) : null;
 		}
-		if (changed && this.anchored) this.anchored.stale = true;
+		if (found) {
+			for (const [s, id] of found) {
+				const old = s.lineAnchor;
+				if (old) retake(s, old, id);
+			}
+		} else {
+			for (const s of src) {
+				const old = s.lineAnchor, id = old ? members.get(s.id) : undefined;
+				if (old && id !== undefined && moved.has(id)) retake(s, old, id);
+			}
+		}
+		// No stroke joins this surface's anchored list here, so a list current for `src` (as anchoredIn keys it) is made again
+		// from itself: the strokes that lost their anchors leave it with their places, and its first and last lines' strokes
+		// are found again by the build's rule. A list that is not current is built again at its next read.
+		const rec = this.anchored;
+		if (changed && rec) {
+			if (!rec.stale && rec.src === src && rec.len === src.length && rec.ink === inkRevision() && this.heldSrc === src) {
+				const list: InkStroke[] = [], at: number[] = [];
+				let top: InkStroke | null = null, bottom: InkStroke | null = null;
+				for (let i = 0; i < rec.list.length; i++) {
+					const s = rec.list[i]!, l = s.lineAnchor;
+					if (!l) continue;
+					list.push(s);
+					at.push(rec.at[i]!);
+					if (!top || l.line < top.lineAnchor!.line) top = s;
+					if (!bottom || l.line > bottom.lineAnchor!.line) bottom = s;
+				}
+				this.anchored = { src, len: rec.len, ink: rec.ink, list, at, top, bottom, stale: false };
+			} else rec.stale = true;
+		}
 		// The strokes are every pane's on the note: another pane's list may hold one whose anchor went or changed here, so it
 		// is built again at its next read, before any of its anchors is read.
 		const peers = this.peers;

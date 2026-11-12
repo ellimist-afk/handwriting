@@ -429,7 +429,11 @@ async function focusReturn(changed:boolean,zoom:number){
  try{
   if(changed){host.style.width="740px";host.style.height="420px";host.style.flex="none";}
   host.style.display="";window.dispatchEvent(new Event("focus"));view.requestMeasure();await settle();
-  return {before,hidden,returns,scheduled,contact,error,after:read(),bytesBefore:bytes,bytesAfter:snapshot().saved};
+  // The old-ink pass's first take may write the pane style on its own timer, after every retry the return makes; the
+  // observer then asks a frame of its own. The read waits for that pass to have run (its timer clear, checked once a frame,
+  // at most 600 frames), then one frame more.
+  const pass=await new Promise<{armed:boolean;frames:number;timer:number;waits:boolean}>(done=>{const armed=!!overlay.lineAnchorPassTimer;let frames=0;const tick=()=>{if(overlay.lineAnchorPassTimer&&frames<600){frames++;requestAnimationFrame(tick);return;}requestAnimationFrame(()=>done({armed,frames,timer:overlay.lineAnchorPassTimer,waits:!!overlay.lineAnchorPassWaits}));};requestAnimationFrame(tick);});
+  return {before,hidden,returns,scheduled,contact,error,pass,after:read(),bytesBefore:bytes,bytesAfter:snapshot().saved};
  }finally{overlay.handleResize=resize;}
 }
 async function editorFocus(zoom:number,locked:boolean,focus:boolean){

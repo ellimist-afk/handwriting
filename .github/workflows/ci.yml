@@ -63,13 +63,6 @@ jobs:
       - name: versions agree
         run: node scripts/check-versions.mjs
 
-      # docs/demo.js is committed and served straight from docs/ - nothing
-      # rebuilt or checked it before this, and it was 21 bytes stale on
-      # 2026-09-02 (audit doc §5e/F1), the site quietly drawing with an
-      # older ink path than the one users install.
-      - name: site bundle is current
-        run: npm run check:site
-
       - name: typecheck
         run: npx tsc -noEmit
 

@@ -21,6 +21,21 @@ export function timingBound(ms: number, env: Record<string, string | undefined> 
 }
 
 /**
+ * The composite-pixels cells of ContinuousPinch.test.ts count the dark ink pixels in either shot with no dark pixel within
+ * one pixel in the other (missingDark). On Alan's Windows machine every cell reads 0. GitHub's Linux runner (software
+ * raster) read 9 in one cell, "zoom=0.4, scaled=true", in CI run 42939142342 and in the two runs before it, while that
+ * cell's other reads held: missing 0, every thin arm present, both mass ratios inside their bound. A lost stroke segment
+ * reads a hundred pixels or more. So on a runner that sets CI the scaled cells allow at most 9; the fixed-scale cells, and
+ * every cell everywhere else, stay at exactly 0.
+ */
+const CI_SCALED_MISSING_DARK = 9;
+
+/** The most dark pixels with no partner a composite-pixels cell allows: 9 for a scaled cell on a CI runner, else 0. */
+export function missingDarkBound(scaled: boolean, env: Record<string, string | undefined> = process.env): number {
+	return scaled && onCi(env) ? CI_SCALED_MISSING_DARK : 0;
+}
+
+/**
  * The render files whose inputs are the machine's clock: how many frames it delivers, when pen and touch events land,
  * how long a main-thread task runs. The hosted runner sets all three by its own load, so CI runs these in a separate
  * step that prints and never blocks (HW_RENDER_SET=timing in vitest.render.mts); the geometry step runs every other
