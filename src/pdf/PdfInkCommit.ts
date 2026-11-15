@@ -2,6 +2,7 @@
  * Pen up and op emit of the PDF ink controller, moved from PdfInkController.ts. Each is a method of PdfInkController, installed on its prototype when PdfInkController.ts loads.
  * Bodies moved unchanged. Frame path: the call lines in PdfInkController.ts and the prototype lookup are unchanged.
  */
+import { bridgeChanged, bridgeTakesContact } from "../bridge/BridgeHub";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
 import { InkOp } from "../inline/InkHistory";
@@ -36,6 +37,7 @@ declare module "./PdfInkController" {
 
 
 	function penUp(this: PdfInkController, ev?: PointerEvent): void {
+		bridgeChanged();
 		this.flushEditFrame(false);
 		const editTarget = this.editTarget;
 		this.editTarget = null;
@@ -151,7 +153,11 @@ declare module "./PdfInkController" {
 			return;
 		}
 		if (!builder || page <= 0 || !id) return;
-		const stroke = builder.finish();
+		// A contact the companion is delivering leaves nothing of its own: the
+		// same line arrives from the companion and is stored once, there.
+		const bridged = this.bridgeContact === "claimed" || (this.bridgeContact === "open" && bridgeTakesContact());
+		this.bridgeContact = null;
+		const stroke = bridged ? undefined : builder.finish();
 		// The committed layer takes over now, so the wet trail comes off. Done
 		// after `emit` below would leave both drawn for a frame; done here, the
 		// repaint that emit triggers puts the committed stroke straight back.

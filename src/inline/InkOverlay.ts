@@ -77,6 +77,7 @@ import { installOverview } from "./InkOverlayOverview";
 import { installBand } from "./InkOverlayBand";
 import { installPenSupport } from "./InkOverlayPenSupport";
 import { installPenPath } from "./InkOverlayPenPath";
+import { installBridge } from "./InkOverlayBridge";
 import { holdKeyboardForEveryPen } from "./InlineFocus";
 import { penInkEnabled } from "./PenInk";
 import { installInkOverlayCamera } from "./InkOverlayCamera";
@@ -1703,6 +1704,7 @@ installExtent(InkOverlayPlugin.prototype);
 installBand(InkOverlayPlugin.prototype);
 installPenSupport(InkOverlayPlugin.prototype);
 installPenPath(InkOverlayPlugin.prototype);
+installBridge(InkOverlayPlugin.prototype);
 installInkOverlayCamera(InkOverlayPlugin.prototype);
 installInkOverlayRepaint(InkOverlayPlugin.prototype);
 

@@ -2,6 +2,7 @@
  * Unload, persistence and slides ink start, moved from main.ts. Each is a method of HandwritingPlugin, installed on its prototype when main.ts loads.
  * Bodies moved unchanged.
  */
+import { applyBridge } from "./bridge/BridgeWiring";
 import { Notice, TFile, type Tasks } from "obsidian";
 import { HANDWRITING_DIAGNOSTICS_VIEW_TYPE } from "./input/PenDiagnosticsView";
 import { finishSlidesGesture, setSlidesInk, settleSlidesInk, slidesParkedInk, SlidesInkHost } from "./slides/SlidesInkSurface";
@@ -63,6 +64,8 @@ declare module "./main" {
 		// on. Unload tests run this on an Object.create instance, where field
 		// initializers never ran and settings may be absent.
 		void stopTraceAtUnload(this.inkTrace, this.settings?.devDiagnostics === true);
+		// The companion link owns a socket, a timer and window listeners.
+		applyBridge(false, "");
 		// The main-thread probe runs on its own while recording; a recording
 		// left on would keep its timer and observer running in this unloaded
 		// copy until Obsidian restarts. Stop the instrument, not the switch.

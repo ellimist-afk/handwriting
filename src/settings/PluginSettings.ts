@@ -4,6 +4,7 @@
  * its prototype when main.ts loads (installPluginSettings at its bottom). Bodies moved unchanged from the class. This
  * file imports only types from main.
  */
+import { applyBridge, bridgeTokenStore } from "../bridge/BridgeWiring";
 import { installMethods } from "../inline/InstallMethods";
 import { Notice, Platform } from "obsidian";
 import { inlineInk, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setEraserRadiusPx, setEraserWholeStrokes, setInkSizeMult, setPenReticle, setPersistEraserMode, setPersistEraserRadius, setPersistInkSize, setPersistToolbarCorner, setScribbleErase, setShapeSnap, setToolbarCorner, setScrollExpansionEnabled } from "../inline/InkOverlay";
@@ -462,6 +463,7 @@ declare module "../main" {
 			mouseInk: raw?.mouseInk === true,
 			strokePrediction: raw?.strokePrediction !== false,
 			booxMode: raw?.booxMode === true,
+			booxCompanion: raw?.booxCompanion === true,
 			einkHintOffered: raw?.einkHintOffered === true,
 			scribbleHintOffered: raw?.scribbleHintOffered === true,
 			paperStyle: normalizePaperStyle(raw?.paperStyle),
@@ -593,6 +595,7 @@ declare module "../main" {
 		// implementation; `refreshInkTheme` is now a no-op.
 		refreshInkTheme(document);
 		this.applyBooxMode();
+		applyBridge(this.settings.booxCompanion, this.manifest?.version ?? "", bridgeTokenStore(this.app));
 		// The palette first: a bad selected colour falls back to the live slot 0.
 		setInkPalette("pen", this.settings.penPalette);
 		setInkPalette("highlighter", this.settings.highlighterPalette);

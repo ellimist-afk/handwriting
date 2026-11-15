@@ -27,6 +27,7 @@ import { adaptiveCaps, buildTail, correctionError, EINK_CAPS } from "../ink/Pred
 import { presentLagMs, recordPresentAge } from "../ink/LatencyEstimate";
 import { predictionEinkOn, predictionEnabled } from "./StrokePrediction";
 import { handoffFinishedStroke } from "./StrokeHandoff";
+import { bridgeAttach, bridgeChanged, bridgeTakesContact } from "../bridge/BridgeHub";
 import { focusClaimedPenEditor } from "./InlineFocus";
 import { normalizeInlinePenPressure } from "./PenPressure";
 import { observeStrokeMax, strokeGain } from "../ink/PressureGain";
@@ -61,6 +62,7 @@ declare module "./InkOverlay" {
 		gainedPressure(raw: number): number;
 		penUp(ev?: PointerEvent): void;
 		endPenGesture(ev?: PointerEvent): void;
+		handoffStrokes(path: string, strokes: InkStroke[], snapReplaced: InkStroke | null, clearTransient: (() => void) | null): void;
 		visibleBandArea(band: HTMLElement): { left: number; top: number; width: number; height: number };
 	}
 }
@@ -68,6 +70,7 @@ declare module "./InkOverlay" {
 	function penDown(this: InkOverlayPlugin, sample: PenSample, ev: PointerEvent): void {
 		// A new owned gesture invalidates any previous camera/reveal continuation.
 		this.viewportGeneration++;
+		if (ev.pointerType === "pen") bridgeAttach(this.bridgeSurface());
 		this.clearSnapPreview();
 		this.snapSealed = false;
 		// The router cancels pointerdown so the pen cannot move CodeMirror's
@@ -235,6 +238,11 @@ declare module "./InkOverlay" {
 			return;
 		}
 		this.mode = "ink";
+		// The e-ink companion may already be drawing this contact in firmware
+		// (src/bridge/). Its word arrives ahead of the webview's own pointerdown
+		// as a rule; pen-up asks once more for the times it does not. The stroke
+		// is still built here either way, so a contact nobody claims is kept.
+		this.bridgeContact = ev.pointerType !== "pen" || inlineTool !== "pen" ? null : bridgeTakesContact() ? "claimed" : "open";
 		metrics.begin("ink", performance.now(), this.tail?.resizeTotal);
 		this.startFrameTicker();
 		// Bind the nib once: the raw loop never asks which tool is active.
@@ -769,6 +777,7 @@ declare module "./InkOverlay" {
 
 	/** Everything a pen lift does before the page may resume: the gesture's branches, each ending in its extent pass. */
 	function endPenGesture(this: InkOverlayPlugin, ev?: PointerEvent): void {
+		bridgeChanged();
 		// Whatever the gesture was, it is over: the frame is live again and
 		// re-reads the editor's current origin.
 		this.frame.end();
@@ -923,6 +932,10 @@ declare module "./InkOverlay" {
 			builder.flushRaw();
 		}
 		let strokes = builder?.finishReleaseFiltered() ?? [];
+		// A contact the companion is delivering leaves nothing of its own: the
+		// same line arrives from the companion and is stored once, there.
+		if (this.bridgeContact === "claimed" || (this.bridgeContact === "open" && bridgeTakesContact())) strokes = [];
+		this.bridgeContact = null;
 		// Issue 37: one row per stroke end, recording only. What ended it (pointerup, pointercancel, a
 		// silent-lift move, or none for a blur), the pen state on that event, and how many strokes the
 		// release filter made of this contact. A line cut short reads here as its end event.
@@ -1046,6 +1059,97 @@ declare module "./InkOverlay" {
 			this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
 			return;
 		}
+		this.handoffStrokes(path, strokes, snapReplaced, () => {
+				// The wet layer clears the stroke's OWN BOX on every device.
+				//
+				// This used to be Boox-only, "until an e-ink user has confirmed
+				// the box on hardware". Nobody on this project has an e-ink
+				// device, so that confirmation was never going to arrive, and
+				// the whole-canvas clearRect stayed on the default path where
+				// it damages the entire canvas once per pen-up. What replaced
+				// the confirmation is a pixel proof: every one of the four
+				// `appendPoint` branches, over four path shapes, at both zooms,
+				// both device pixel ratios and both pens' width laws - 128
+				// cases - drawn in real Chromium and read back EXHAUSTIVELY
+				// (every pixel, no stride) leaves nothing behind, each against
+				// a paired control that does leave a rim. See
+				// `test/measure/WetClearBox.test.ts`. `clearStroke` also falls
+				// back to clearing everything when it has no box or a NaN one,
+				// so the failure mode is the old behaviour, not stale ink.
+				//
+				// The TAIL takes its dirty rect here too, and for the same
+				// reason - leaving it on `clearAll` would have kept a
+				// whole-canvas damage per pen-up on the layer above, which
+				// defeats most of the change below it. It has its own proof
+				// (`test/measure/TailClearBox.test.ts`): the head and the
+				// head-plus-prediction states are erased completely by the
+				// dirty rect at both zooms and both device pixel ratios.
+				//
+				// It is conditional on the FALLBACK. The two classes were not
+				// symmetric: `clear()` was `if (!this.dirty) return;`, and
+				// three paths here paint and then null the box without leaving
+				// one - so against a nulled box it erased nothing at all. It
+				// now falls back to the whole canvas when handed a size, which
+				// is why a size is handed to it here and not on the per-event
+				// callers. See `TailRenderer.clear`.
+				this.activeWet.clearStroke(this.cssWidth, this.cssHeight);
+				this.tail.clear(this.cssWidth, this.cssHeight);
+				this.tail.prepareLive(null, null);
+				// Cleared, so it is safe to be visible again for the next
+				// stroke. Restoring here rather than on the next pen-down
+				// keeps the element's resting state honest.
+				if (this.activeWet === this.highlightWet) {
+					this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
+				}
+		});
+		// The mouse's offer, made only now: the chip replaces a stroke that is
+		// already in the note and already in the history, which is the whole
+		// difference between it and the pen's dwell snap. `stroke` is that
+		// stroke - `strokes` was left exactly as drawn on this branch.
+		if (snapOffered) this.offerSnapChip(path, stroke, snapOffered);
+		// Diagnostics (explicitly enabled only): paint ground truth part 2
+		// (did the commit draw reach the committed backing store?), plus the
+		// frame-desync measure and the COMMIT trace row. Ordinary writing
+		// skips every readback and layout read in this block.
+		if (diagnosticsEnabled()) this.recordCommitDiagnostics(stroke, path, wetPx, sample);
+		this.scrollsDuringStroke = 0;
+		// Presentation-probe target: NOTE-space bbox (pen-width padded) plus
+		// identity, so later probes can re-locate the ink under whatever
+		// camera is current and verify the backing before judging anything.
+		const pad = 4;
+		this.lastCommitNote = {
+			x: stroke.bbox.x - pad,
+			y: stroke.bbox.y - pad,
+			w: stroke.bbox.width + pad * 2,
+			h: stroke.bbox.height + pad * 2,
+		};
+		this.lastCommitPath = path;
+		this.lastCommitId = stroke.id;
+		this.lastCommitColor = stroke.color;
+		this.lastCommitAt = performance.now();
+		// A second pane on the same note shows the new ink too.
+		this.repaintPath(path);
+		this.updateExtent(true);
+	}
+
+	/**
+	 * Finished strokes into the note: stored, painted on the committed layer,
+	 * and recorded as one history step. The pen-up path and a stroke handed in
+	 * by the e-ink companion (InkOverlayBridge.ts) both end here, so ink from
+	 * either is anchored, indexed and undone the same way.
+	 *
+	 * `clearTransient` takes the live layers off once the committed stroke is
+	 * under them; a stroke that never had live layers passes null, and then
+	 * the highlighter's wet element is left alone too.
+	 */
+	function handoffStrokes(
+		this: InkOverlayPlugin,
+		path: string,
+		strokes: InkStroke[],
+		snapReplaced: InkStroke | null,
+		clearTransient: (() => void) | null
+	): void {
+		const wetHandoff = clearTransient !== null;
 		handoffFinishedStroke({
 			store: () => {
 				const extentHeld = this.extentHoldsStore(path);
@@ -1112,7 +1216,7 @@ declare module "./InkOverlay" {
 				// invalidated or re-rastered. The paragraph above describes the
 				// re-base this replaced (2026-09-13: it culled the panned-in ink).
 				const paintCam = this.pinchPreview && this.lastPaintCam ? this.lastPaintCam : this.camera.snapshot;
-				if (this.activeWet === this.highlightWet) {
+				if (wetHandoff && this.activeWet === this.highlightWet) {
 					this.highlightWetCanvas.setCssStyles({ opacity: "0" });
 				}
 				for (const finished of strokes) {
@@ -1128,49 +1232,7 @@ declare module "./InkOverlay" {
 					);
 				}
 			},
-			clearTransient: () => {
-				// The wet layer clears the stroke's OWN BOX on every device.
-				//
-				// This used to be Boox-only, "until an e-ink user has confirmed
-				// the box on hardware". Nobody on this project has an e-ink
-				// device, so that confirmation was never going to arrive, and
-				// the whole-canvas clearRect stayed on the default path where
-				// it damages the entire canvas once per pen-up. What replaced
-				// the confirmation is a pixel proof: every one of the four
-				// `appendPoint` branches, over four path shapes, at both zooms,
-				// both device pixel ratios and both pens' width laws - 128
-				// cases - drawn in real Chromium and read back EXHAUSTIVELY
-				// (every pixel, no stride) leaves nothing behind, each against
-				// a paired control that does leave a rim. See
-				// `test/measure/WetClearBox.test.ts`. `clearStroke` also falls
-				// back to clearing everything when it has no box or a NaN one,
-				// so the failure mode is the old behaviour, not stale ink.
-				//
-				// The TAIL takes its dirty rect here too, and for the same
-				// reason - leaving it on `clearAll` would have kept a
-				// whole-canvas damage per pen-up on the layer above, which
-				// defeats most of the change below it. It has its own proof
-				// (`test/measure/TailClearBox.test.ts`): the head and the
-				// head-plus-prediction states are erased completely by the
-				// dirty rect at both zooms and both device pixel ratios.
-				//
-				// It is conditional on the FALLBACK. The two classes were not
-				// symmetric: `clear()` was `if (!this.dirty) return;`, and
-				// three paths here paint and then null the box without leaving
-				// one - so against a nulled box it erased nothing at all. It
-				// now falls back to the whole canvas when handed a size, which
-				// is why a size is handed to it here and not on the per-event
-				// callers. See `TailRenderer.clear`.
-				this.activeWet.clearStroke(this.cssWidth, this.cssHeight);
-				this.tail.clear(this.cssWidth, this.cssHeight);
-				this.tail.prepareLive(null, null);
-				// Cleared, so it is safe to be visible again for the next
-				// stroke. Restoring here rather than on the next pen-down
-				// keeps the element's resting state honest.
-				if (this.activeWet === this.highlightWet) {
-					this.highlightWetCanvas.setCssStyles({ opacity: String(HIGHLIGHTER_ALPHA) });
-				}
-			},
+			clearTransient: () => clearTransient?.(),
 			publishHistory: () => {
 				if (snapReplaced) {
 					// Two steps, isolated from each other: the stroke landing
@@ -1185,34 +1247,6 @@ declare module "./InkOverlay" {
 				}
 			},
 		});
-		// The mouse's offer, made only now: the chip replaces a stroke that is
-		// already in the note and already in the history, which is the whole
-		// difference between it and the pen's dwell snap. `stroke` is that
-		// stroke - `strokes` was left exactly as drawn on this branch.
-		if (snapOffered) this.offerSnapChip(path, stroke, snapOffered);
-		// Diagnostics (explicitly enabled only): paint ground truth part 2
-		// (did the commit draw reach the committed backing store?), plus the
-		// frame-desync measure and the COMMIT trace row. Ordinary writing
-		// skips every readback and layout read in this block.
-		if (diagnosticsEnabled()) this.recordCommitDiagnostics(stroke, path, wetPx, sample);
-		this.scrollsDuringStroke = 0;
-		// Presentation-probe target: NOTE-space bbox (pen-width padded) plus
-		// identity, so later probes can re-locate the ink under whatever
-		// camera is current and verify the backing before judging anything.
-		const pad = 4;
-		this.lastCommitNote = {
-			x: stroke.bbox.x - pad,
-			y: stroke.bbox.y - pad,
-			w: stroke.bbox.width + pad * 2,
-			h: stroke.bbox.height + pad * 2,
-		};
-		this.lastCommitPath = path;
-		this.lastCommitId = stroke.id;
-		this.lastCommitColor = stroke.color;
-		this.lastCommitAt = performance.now();
-		// A second pane on the same note shows the new ink too.
-		this.repaintPath(path);
-		this.updateExtent(true);
 	}
 
 	/**
@@ -1252,6 +1286,7 @@ export function installPenPath(proto: InkOverlayPlugin): void {
 		gainedPressure,
 		penUp,
 		endPenGesture,
+		handoffStrokes,
 		visibleBandArea,
 	});
 }

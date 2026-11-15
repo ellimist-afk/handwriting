@@ -2,6 +2,7 @@
  * The pdf surface's pen tools strip and its pane lifecycle: building and destroying the strip, the strip's command dispatch, and
  * mount, unmount and the in-place document switch. They are methods of PdfInkController, installed on its prototype when PdfInkController.ts loads.
  */
+import { bridgeDetach } from "../bridge/BridgeHub";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { InkTool } from "../ink/Stroke";
 import { Platform } from "obsidian";
@@ -416,6 +417,7 @@ declare module "./PdfInkController" {
 		// per closed pdf.
 		for (const d of this.disposers) d();
 		this.disposers = [];
+		if (this.bridgeFace) bridgeDetach(this.bridgeFace);
 		this.router = null;
 		this.resetGestureState();
 		this.tools?.destroy();

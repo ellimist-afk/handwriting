@@ -5,6 +5,7 @@
  * back and re-exports HandwritingSettingTab, gatedCommandGroups, GatedCommandGroup and SYNC_ALL_TYPES_HINT, so
  * every import from main still resolves. This file imports only types from main, so there is no runtime cycle.
  */
+import { applyBridge, bridgeTokenStore } from "../bridge/BridgeWiring";
 import { App, ButtonComponent, ColorComponent, ExtraButtonComponent, Notice, Platform, PluginSettingTab, Setting, SettingDefinitionItem, type SettingGroup } from "obsidian";
 import { gatedCommands, type PaletteCommand } from "../CommandPaletteSplit";
 import { applyToolbarPlacement, refreshPenToolsAll, refreshAllStrips, repaintAllInkOverlays, setScribbleErase, setShapeSnap } from "../inline/InkOverlay";
@@ -593,6 +594,12 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						control: { type: "toggle", key: "booxMode" },
 					},
 					{
+						name: "Boox companion",
+						desc: "Write with the tablet's own fast ink through the companion app. Android only. Default off.",
+						aliases: ["e-ink", "onyx", "latency"],
+						control: { type: "toggle", key: "booxCompanion" },
+					},
+					{
 						// What is left of the Pen group's "Pressure sensitivity" row
 						// (1.4.20, Alan: A3). The switch is gone - pressure is always
 						// on, see `loadSettings` - but the button is a different
@@ -706,6 +713,10 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				this.plugin.applyBooxMode();
 				repaintAllInkOverlays();
 				embedInkRepaintAll();
+				break;
+			case "booxCompanion":
+				s.booxCompanion = on;
+				applyBridge(on, this.plugin.manifest?.version ?? "", bridgeTokenStore(this.plugin.app));
 				break;
 			case "booxMode":
 				s.booxMode = on;

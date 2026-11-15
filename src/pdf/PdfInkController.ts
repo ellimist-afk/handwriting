@@ -59,6 +59,7 @@ import { installPdfBand, OVERLAY_CLASS } from "./PdfInkBand";
 import { installPdfInkBind } from "./PdfInkBind";
 import { installPdfInkPenPath } from "./PdfInkPenPath";
 import { installPdfInkCommit } from "./PdfInkCommit";
+import { installPdfInkBridge } from "./PdfInkBridge";
 
 /**
  * Which strokes an undo's `remove` actually took, keyed by the op's stroke
@@ -1057,3 +1058,4 @@ installPdfBand(PdfInkController.prototype);
 installPdfInkBind(PdfInkController.prototype);
 installPdfInkPenPath(PdfInkController.prototype);
 installPdfInkCommit(PdfInkController.prototype);
+installPdfInkBridge(PdfInkController.prototype);

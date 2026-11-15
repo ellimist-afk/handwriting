@@ -20,6 +20,7 @@
  * and PenToolsMode.ts are shaped this way.
  */
 
+import { bridgeChanged } from "../bridge/BridgeHub";
 import { markToolPicked } from "./MouseInk";
 
 export type TipMode = "nib" | "eraser" | "lasso" | "space" | "pan";
@@ -154,6 +155,7 @@ export function tipModeHeld(): boolean {
 export function setTipMode(next: TipMode): void {
 	if (mode === next) return;
 	mode = next;
+	bridgeChanged();
 	// THE TIP HALF of "a tool has been picked" (MouseInk.ts, `toolPicked`);
 	// `setInlineTool` (InkOverlay.ts) is the nib half. Between them they are
 	// the whole of the tool state, which is why the flag is set from the two

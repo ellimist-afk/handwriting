@@ -139,6 +139,8 @@ export interface HandwritingSettings {
 	mouseInk: boolean;
 	strokePrediction: boolean;
 	booxMode: boolean;
+	/** Take pen strokes from the e-ink companion app (src/bridge/). Android only; inert everywhere else. */
+	booxCompanion: boolean;
 	/**
 	 * Latch: has this vault already been told once that its ink is arriving
 	 * late and Boox mode might help? Not a settings-UI row - it exists only
@@ -276,6 +278,7 @@ export const DEFAULT_SETTINGS: HandwritingSettings = {
 	// everyone else.
 	strokePrediction: true,
 	booxMode: false,
+	booxCompanion: false,
 	einkHintOffered: false,
 	scribbleHintOffered: false,
 	paperStyle: "none",
