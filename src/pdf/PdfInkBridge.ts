@@ -11,6 +11,7 @@
 import { DEFAULT_PEN } from "../ink/PenStyle";
 import { getInkColorHex } from "../ink/InkColor";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
+import { bridgePreviewWidth } from "../bridge/BridgePreviewWidth";
 import type { BridgeGeometry, BridgePen, BridgePoint, BridgeRect } from "../bridge/BridgeProtocol";
 import type { BridgeSurface } from "../bridge/BridgeSession";
 import { getInkSizeMult, getInlineTool } from "../inline/InkOverlay";
@@ -98,7 +99,9 @@ function visibleRect(el: Element, vw: number, vh: number): BridgeRect | null {
 		if (!probed || probed.scaleFactor === null || !box) return null;
 		// Stored widths are in page units; on screen they are that times the page's scale.
 		const scale = this.scaleFor(box, probed.scaleFactor);
-		return { color: getInkColorHex("pen"), width: Math.round(pdfPenWidth(DEFAULT_PEN.baseWidth, getInkSizeMult("pen")) * scale * 100) / 100 };
+		// And the width a stroke ordinarily comes out at, not the nib as selected (BridgePreviewWidth.ts).
+		const width = bridgePreviewWidth(pdfPenWidth(DEFAULT_PEN.baseWidth, getInkSizeMult("pen"))) * scale;
+		return { color: getInkColorHex("pen"), width: Math.round(width * 100) / 100 };
 	}
 
 	function bridgeSnapshot(this: PdfInkController): PdfBridgeSnapshot | null {

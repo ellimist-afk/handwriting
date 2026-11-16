@@ -4,6 +4,7 @@
  * its prototype when main.ts loads (installPluginSettings at its bottom). Bodies moved unchanged from the class. This
  * file imports only types from main.
  */
+import { bridgeChanged } from "../bridge/BridgeHub";
 import { applyBridge, bridgeTokenStore } from "../bridge/BridgeWiring";
 import { installMethods } from "../inline/InstallMethods";
 import { Notice, Platform } from "obsidian";
@@ -653,6 +654,8 @@ declare module "../main" {
 		this.legacyInkPressure = lockOnSwitch(on);
 		setPressureSensitivity(on);
 		setLegacyInkPressure(this.legacyInkPressure);
+		// The companion's line is drawn at the width this switch decides.
+		bridgeChanged();
 		if (this.inkShapingKey() !== before) {
 			repaintAllInkOverlays();
 			embedInkRepaintAll();

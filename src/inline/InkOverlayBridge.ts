@@ -16,6 +16,7 @@ import { getInkColorHex } from "../ink/InkColor";
 import { strokeGain } from "../ink/PressureGain";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { strokeWidthPolicy } from "../ink/StrokeWidth";
+import { bridgePreviewWidth } from "../bridge/BridgePreviewWidth";
 import type { BridgeGeometry, BridgePen, BridgePoint, BridgeRect } from "../bridge/BridgeProtocol";
 import type { BridgeSurface } from "../bridge/BridgeSession";
 import { getInkSizeMult, inlineTool } from "./InkOverlayToolState";
@@ -97,7 +98,10 @@ function visibleRect(el: Element, vw: number, vh: number): BridgeRect | null {
 		// the tip - highlighter, eraser, lasso, space, pan, or the pen switched
 		// off - stays with the webview.
 		if (inlineTool !== "pen" || tipMode() !== "nib" || (this.router?.penOff() ?? true)) return null;
-		return { color: getInkColorHex("pen"), width: Math.round(DEFAULT_PEN.baseWidth * getInkSizeMult("pen") * this.scale * 100) / 100 };
+		// Not the nib as selected but the width a stroke ordinarily comes out at
+		// (BridgePreviewWidth.ts), so the line does not change weight at pen-up.
+		const width = bridgePreviewWidth(DEFAULT_PEN.baseWidth * getInkSizeMult("pen")) * this.scale;
+		return { color: getInkColorHex("pen"), width: Math.round(width * 100) / 100 };
 	}
 
 	function bridgeSnapshot(this: InkOverlayPlugin): NoteBridgeSnapshot | null {
