@@ -2,6 +2,7 @@
  * The pen path of the PDF ink controller (pen down, raw samples, predicted tail, wet draw, erase), moved from PdfInkController.ts. Each is a method of PdfInkController, installed on its prototype when PdfInkController.ts loads.
  * Bodies moved unchanged. Frame path: the call lines in PdfInkController.ts and the prototype lookup are unchanged.
  */
+import { bridgeAttach, bridgeTakesContact } from "../bridge/BridgeHub";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { CameraState } from "../camera/coordinates";
 import { InkPoint, InkStroke } from "../ink/Stroke";
@@ -67,6 +68,7 @@ declare module "./PdfInkController" {
 	 * pen-down for exactly this reason.
 	 */
 	function penDown(this: PdfInkController, sample: PenSample, ev?: PointerEvent): void {
+		if (ev?.pointerType === "pen") bridgeAttach(this.bridgeSurface());
 		// A fresh gesture starts here, whichever one it turns out to be -
 		// so its trace bookkeeping resets here too, before any early return
 		// below can leave a later `penRaw`/`penUp` reading a stale count
@@ -389,6 +391,9 @@ declare module "./PdfInkController" {
 		// worked out at pen-down and then never reached the stroke, so a mouse
 		// drawn over a pdf was shaped while the same gesture on a note was not
 		// (InkOverlay.ts passes it; 1.4.7-design.md C6).
+		// The e-ink companion may already be drawing this contact in firmware
+		// (src/bridge/); see the note surface's pen-down for the whole of it.
+		this.bridgeContact = ev?.pointerType !== "pen" || tool !== "pen" ? null : bridgeTakesContact() ? "claimed" : "open";
 		this.builder = new StrokeBuilder(
 			tool,
 			this.strokeStyle.color,

@@ -1,0 +1,9 @@
+[
+  {"type": "hello", "protocol": 1, "client": "handwriting", "version": "1.5.1", "token": "k3Jw9QmZ7xT2vB8nR4pL6sD1fH5gY0aC"},
+  {"type": "surface", "rev": 1, "kind": "note", "rect": {"x": 0, "y": 112.5, "w": 768, "h": 560}, "exclude": [{"x": 182, "y": 159, "w": 560, "h": 44}], "viewport": {"w": 768, "h": 1024}, "dpr": 2},
+  {"type": "pen", "color": "#1f5fd6", "width": 2.4},
+  {"type": "pause", "reason": "tool"},
+  {"type": "resume"},
+  {"type": "landed", "ids": [1, 2]},
+  {"type": "close"}
+]

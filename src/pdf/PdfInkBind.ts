@@ -2,6 +2,7 @@
  * Binding and lifecycle of the PDF ink controller, moved from PdfInkController.ts. Each is a method of PdfInkController, installed on its prototype when PdfInkController.ts loads.
  * Bodies moved unchanged.
  */
+import { bridgeAttach, bridgeChanged, bridgeOffer } from "../bridge/BridgeHub";
 import { emptyPageNoticeText, inkChangeRearmsNotice } from "../inline/EmptyPageNotice";
 import { isAppleTouchPlatform, palmRadiusTrustworthy } from "../input/PalmShield";
 import { InlinePenRouter } from "../inline/InlinePenRouter";
@@ -140,6 +141,8 @@ declare module "./PdfInkController" {
 	}
 
 	function bindTo(this: PdfInkController, scroller: HTMLElement): void {
+		bridgeOffer(this.bridgeSurface());
+		bridgeChanged();
 		if (this.focusBinding?.scroller !== scroller) {
 			this.releaseFocusBinding();
 			const hadTabindex = scroller.hasAttribute?.("tabindex") ?? true;
@@ -243,7 +246,11 @@ declare module "./PdfInkController" {
 			scroller,
 			{
 				onPenDown: (s, ev) => this.penDown(s, ev),
-				onPenHover: (s, pointerType) => this.showCursor(s, pointerType),
+				onPenHover: (s, pointerType) => {
+					// A pen in range over this viewer: it is the one the companion draws on, at the place it is now.
+					if (pointerType === "pen") { bridgeAttach(this.bridgeSurface()); bridgeChanged(); }
+					this.showCursor(s, pointerType);
+				},
 				onPenLeave: () => this.hideCursor(),
 				onPinch: () => {},
 				onPenRaw: (samples, ev) => this.penRaw(samples, ev),

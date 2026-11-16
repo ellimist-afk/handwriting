@@ -32,6 +32,16 @@ keeps one message on screen per topic. `CodeOnly.ts` is a helper for tests that
 read source text. The many `*.test.ts` files at this level check that the pieces
 above are wired together and that user-facing wording stays fixed.
 
+### `src/bridge/`
+
+The link to the e-ink companion app, an Android app that draws the pen line in the
+tablet's firmware and hands over each finished stroke. `BridgeProtocol.ts` is the
+wire format, `BridgeClient.ts` finds the companion on a loopback WebSocket and keeps
+trying quietly when it is absent, and `BridgeSession.ts` tracks which ink surface
+the companion draws over and which pen contacts are the companion's to deliver.
+`BridgeHub.ts` is the only file an ink surface imports, and `BridgeWiring.ts` turns
+the link on and off with the setting. Off, or anywhere but Android, none of it runs.
+
 ### `src/camera/`
 
 The camera: the pure coordinate maths between the page and the screen, and a small

@@ -206,6 +206,8 @@ if you're having latency issues on a Boox device, try turning on Boox mode in Ha
 
 every redraw costs on e-ink, so it turns off smoothing, the pen reticle and animations, and sizes prediction for e-ink delay. your old settings come back when you turn it off.
 
+there's also an experimental Boox companion setting, right under Boox mode. with a separate android app called [Ink Bridge](https://github.com/jdkruzr/boox-ink-bridge) running on the tablet, the pen line is drawn by the tablet's own fast ink while you write, and Handwriting takes each stroke over when you lift the pen. it's off by default, pen tool only, and so far only tried on a Note Mini C. the manual has the details, including what the two apps say to each other.
+
 ### pdfs and exporting
 
 you can annotate pdfs. same toolbar. same tools

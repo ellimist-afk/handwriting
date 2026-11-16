@@ -11,6 +11,7 @@
  * cycle. Every read of them is inside a function body or the tip-mode listener;
  * none runs while either module loads.
  */
+import { bridgeChanged } from "../bridge/BridgeHub";
 import { Notice } from "obsidian";
 import { routineNoticesVisible } from "../diag/RoutineNotices";
 import { DEFAULT_ERASER_RADIUS_PX, clampEraserRadius } from "../ink/EraserSize";
@@ -56,6 +57,7 @@ export function setInkSizeMult(tool: InkTool, mult: number): void {
 	const size = clampInkSize(mult);
 	if (inkSizeMult[tool] === size) return;
 	inkSizeMult[tool] = size;
+	bridgeChanged();
 	// A held snap shows the shape at the old size; it goes. A size applied again
 	// unchanged (a settings sync applies both) leaves it.
 	for (const overlay of instances) overlay.clearSnapPreview();
@@ -69,6 +71,7 @@ export function setInlineTool(tool: InkTool): void {
 	// The tool already in use picked again changes nothing a held snap would commit, so the snap stays.
 	const changed = inlineTool !== tool;
 	inlineTool = tool;
+	if (changed) bridgeChanged();
 	if (changed) for (const overlay of instances) overlay.clearSnapPreview();
 	// THE NIB HALF OF "a tool has been picked" (MouseInk.ts, `toolPicked`).
 	// Here rather than in the two tool commands, the strip's two nib buttons,

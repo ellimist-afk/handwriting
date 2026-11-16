@@ -258,6 +258,42 @@ it is outside the plugin.
 If it still lags, run the bug report command. It records a short pen trace,
 and that trace is how Boox mode got its numbers.
 
+### the Boox companion
+
+Boox mode trims what the webview costs; it cannot make the webview hear the
+pen sooner. The tablet's own fast ink can, but only a native app may use it.
+**Boox companion**, under Developer in the plugin settings next to Boox mode,
+lets one do that for Handwriting. It is experimental, off by default, Android
+only, and has been tried on one device, a Note Mini C.
+
+It needs a separate app on the tablet,
+[Ink Bridge](https://github.com/jdkruzr/boox-ink-bridge). That app is not part
+of Handwriting and is not installed with it; at the time of writing you build
+and sideload it yourself. With the setting on and the app running:
+
+- While the pen is down, the tablet's firmware draws the line, with no wait
+  for the webview. It is an even line in the pen colour you have selected,
+  about as heavy as the stroke will be.
+- When the pen lifts, the app hands the stroke to Handwriting, which stores
+  and draws it as its own ink: same file, same undo, same erasing. A moment
+  after you stop writing, the firmware's line gives way to that stroke.
+- Only the pen tool goes this way. The highlighter, the eraser, the lasso and
+  the rest work as they always have, and so does the pen whenever the app is
+  not running. Nothing is lost if it is missing or stops.
+- It works in notes and on PDFs.
+
+The first time, Ink Bridge asks on the tablet whether Handwriting may receive
+your pen strokes. Allow it once. A web page open on the tablet cannot
+connect at all, and any other app would have to be allowed by you in the same
+way, so allow a request only when you have just turned this setting on.
+
+What passes between the two: Handwriting opens a connection to the app on the
+tablet itself (`127.0.0.1`, port 47810 or 47811) and nowhere else, and only
+while this setting is on. It tells the app where on the screen ink may be
+drawn, the pen's colour and width, and a random secret made on that device so
+the app can recognise it again. The app sends back the points of each stroke.
+Your note's text is never part of it, and none of it leaves the tablet.
+
 ## where the ink is
 
 One JSON file per note, in `.handwriting/` at the vault root, named by the
@@ -434,9 +470,11 @@ were active) if you want to look at it.
 
 Upload sends the trace to the developer's server; the id it returns appears
 in the modal with a Copy ID button, so you can put it in your issue instead of the
-whole trace. It's the only thing Handwriting sends over the network, and
+whole trace. It's the only thing Handwriting sends off your device, and
 only on that press - Copy and Save to vault stay offline. The trace is pen
-coordinates, timing and device info, never your note's text.
+coordinates, timing and device info, never your note's text. (The Boox
+companion setting, if you turn it on, talks to an app on the same tablet and
+to nothing beyond it; see "the Boox companion" above.)
 
 Running `Bug report: send` or `Bug report: show as text` stops the
 recording the moment it opens - what you see is what you deliver. Getting

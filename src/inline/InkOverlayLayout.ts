@@ -6,6 +6,7 @@
  * float32 exactness test for the zoom host. They are methods of
  * InkOverlayPlugin, installed on its prototype when InkOverlay.ts loads.
  */
+import { bridgeChanged, bridgeOffer } from "../bridge/BridgeHub";
 import { Platform } from "obsidian";
 import { contentOriginLeft } from "./ContentOrigin";
 import { anchorTop } from "./DocumentTop";
@@ -79,6 +80,7 @@ declare module "./InkOverlay" {
 		this.restorePinchLayers();
   this.mobileTools?.refresh();
   this.noteZoomControls?.refresh();
+  bridgeOffer(this.bridgeSurface()); bridgeChanged();
   // A mechanical band resize must retain forward demand admitted by scroll.
   this.scrollExpansion?.rebase(this.view.scrollDOM.scrollLeft,this.view.scrollDOM.scrollTop,true);
   const layout=this.viewportLayout;

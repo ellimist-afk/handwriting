@@ -1,0 +1,7 @@
+[
+  {"type": "welcome", "protocol": 1, "app": "boox-ink-bridge", "version": "0.1.0", "device": {"model": "NoteMiniC", "widthPx": 1536, "heightPx": 2048}},
+  {"type": "stroke-begin", "id": 1, "rev": 1},
+  {"type": "stroke", "id": 1, "rev": 1, "points": [[313.6, 490.5, 0.12, 0], [314.1, 489.9, 0.31, 4], [316.8, 486.2, 0.44, 9], [322.0, 481.0, 0.2, 15]]},
+  {"type": "stroke-cancel", "id": 2},
+  {"type": "denied", "reason": "pairing"}
+]

@@ -21,6 +21,7 @@ const contract = [
 	{"name": "Extra commands for hotkeys", "key": "colorSizeCommands", "descriptions": ["Add tool, color, size, and quick pen commands for hotkeys. Default off.", "Add tool, color, size, and quick pen commands for hotkeys. Default off. Turning it off takes effect after the plugin reloads."]},
 	{"name": "Developer diagnostics", "key": "devDiagnostics", "descriptions": ["Show diagnostic commands after reloading the plugin. Default off."]},
 	{"name": "Boox mode", "key": "booxMode", "descriptions": ["Adjust pen input and animations for e-ink screens. Default off."]},
+	{"name": "Boox companion", "key": "booxCompanion", "descriptions": ["Write with the tablet's own fast ink through the companion app. Android only. Default off."]},
 	{"name": "Recalibrate pen pressure", "key": null, "descriptions": ["Forget the pressure range learned on this device and relearn it from your next strokes. This device only."]},
 ];
 
@@ -69,14 +70,14 @@ describe.each([true, false])("settings descriptions with command removal %s", (c
 		expect(definitions(canRemove).available).toBe(canRemove);
 	});
 
-	it("has exactly 17 unique controls and the device recalibration action", () => {
+	it("has exactly 18 unique controls and the device recalibration action", () => {
 		const rows = targets(definitions(canRemove).rows);
-		expect(rows).toHaveLength(18);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(18);
+		expect(rows).toHaveLength(19);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(19);
 		expect(rows.map((row) => row.name).sort()).toEqual(contract.map((row) => row.name).sort());
 		const controls = rows.filter((row) => row.control);
-		expect(controls).toHaveLength(17);
-		expect(new Set(controls.map((row) => row.control!.key)).size).toBe(17);
+		expect(controls).toHaveLength(18);
+		expect(new Set(controls.map((row) => row.control!.key)).size).toBe(18);
 		for (const expected of contract) {
 			const actual = uniqueRow(rows, expected.name);
 			expect(actual.control?.key ?? null, expected.name).toBe(expected.key);

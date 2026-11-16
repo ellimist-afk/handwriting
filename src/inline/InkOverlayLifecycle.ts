@@ -3,6 +3,7 @@
  * loading a note's ink and its font reference, the page class, the remembered camera, and destroy. They are
  * methods of InkOverlayPlugin, installed on its prototype when InkOverlay.ts loads.
  */
+import { bridgeAttach, bridgeChanged, bridgeDetach } from "../bridge/BridgeHub";
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { Notice, Platform, editorInfoField } from "obsidian";
 import { runGatedCommand } from "../CommandPaletteSplit";
@@ -271,6 +272,8 @@ declare module "./InkOverlay" {
 				// one of the two writers that made nibIsLit's flag a constant
 				// for a mouse-only user (alan, 2026-09-02).
 				onPenHover: (s, pt) => {
+					// A pen in range over this note: it is the one the companion draws on, at the place it is now.
+					if (pt === "pen") { bridgeAttach(this.bridgeSurface()); bridgeChanged(); }
 					this.showPenCursor(s, pt);
 					this.attachHover(s, pt);
 				},
@@ -1111,6 +1114,7 @@ declare module "./InkOverlay" {
 	}
 
 	function destroy(this: InkOverlayPlugin): void {
+		if (this.bridgeFace) bridgeDetach(this.bridgeFace);
 		if (!instances.delete(this)) return;
 		this.destroyed = true;
 		this.releasePenHold();
