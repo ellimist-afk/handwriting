@@ -15,6 +15,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preload" href="fonts/instrument-serif.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/instrument-sans.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/dancing-script-600.woff2" as="font" type="font/woff2" crossorigin>
 <script>window.HANDWRITING_STATS = { umamiId: "1b78ca22-cb78-4a9e-a1e3-696e763ac660" };</script>
 <script>window.HANDWRITING_SIGNUP = { kitFormUrl: "https://app.kit.com/forms/10172647/subscriptions" };</script>
 <script>
@@ -41,6 +42,9 @@
 @font-face { font-family: "Instrument Sans"; font-style: normal;
   font-weight: 400 700; font-display: swap;
   src: url(fonts/instrument-sans.woff2) format("woff2"); }
+@font-face { font-family: "Dancing Script"; font-style: normal;
+  font-weight: 600; font-display: swap;
+  src: url(fonts/dancing-script-600.woff2) format("woff2"); }
 
 /* Arctic slate: cold blue-grey ground, pale ice text, one electric blue for
    the download buttons. Heads in Instrument Serif, the rest in Instrument
@@ -62,6 +66,7 @@
   --ice: #8fc1e3;
   --shade: #05080c;
   --pen: #f472a6;
+  --lasso: #7f9cf5;
   --no: #ff5549;
   --serif: "Instrument Serif", Georgia, serif;
   --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -180,16 +185,26 @@ nav.top .btn { min-height: 44px; font-size: 15px; margin-left: auto;
 .opening { position: relative; display: grid; justify-items: center;
   gap: 20px; text-align: center; width: min(1180px, 100% - 48px);
   margin: 0 auto; }
-.hero h1 { position: relative; padding-bottom: .16em; }
+.hero h1 { font-family: var(--sans); font-weight: 600;
+  font-size: clamp(32px, 7vw, 90px); line-height: 1.05; letter-spacing: -.03em; }
 .penline { position: absolute; left: 3%; bottom: 0; width: 94%;
   height: .2em; overflow: visible; }
 .penline path { fill: none; stroke: var(--pen); stroke-width: 5;
   stroke-linecap: round; vector-effect: non-scaling-stroke; }
+/* the name right under the headline (-20px takes back the grid gap): Dancing Script 600,
+   with the pen stroke under it */
+.hero .name { position: relative; margin-top: -20px; padding-bottom: .12em;
+  font-family: "Dancing Script", cursive; font-weight: 600;
+  font-size: clamp(30px, 5.7vw, 76px); line-height: normal; color: var(--ink); }
+.hero .name .penline { height: .16em; }
+/* the same pen stroke under the word Handwriting in "Why Handwriting?" */
+.inked { position: relative; }
+.inked .penline { bottom: .01em; }
+/* it draws when the heading fades in, not at page load far above it */
+.moves .inked .penline { animation: none; }
+.moves .seen .inked .penline { animation: draw 1.1s .35s var(--glide) both; }
 .hero .sub { font-size: clamp(19px, 1.6vw, 23px); line-height: 1.4;
   color: var(--ink-soft); max-width: 26em; text-wrap: balance; }
-/* the short line sits close under the tagline (8px, not the grid gap) */
-.hero .keeps { margin-top: -12px; font-size: 16px; line-height: 1.4;
-  color: var(--ink); }
 .cta { display: flex; flex-wrap: wrap; justify-content: center;
   gap: 12px; }
 .cta .btn { min-height: 58px; font-size: 17px; }
@@ -381,27 +396,44 @@ nav.top .btn { min-height: 44px; font-size: 15px; margin-left: auto;
   .moves details[open]::details-content { block-size: auto; }
 }
 
-/* where ink attaches: five small diagrams. Grey bars for text rows, one
-   ink mark each, a blue band two lines deep for the attach range. The
-   last one has a red X over it: that ink does not attach. */
-.range { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+/* where ink attaches: five diagrams, three a row from 1024 px with the
+   last two centred under them, two a row from 600 with the last one
+   centred, one below. Text rows are
+   quiet bars; the row the ink sticks to is lit. Pink ink, a blue band two
+   lines deep for the attach range, a dashed line only on empty card. The
+   last one has a red X over all of it: that ink does not attach. Round
+   the ink in all five, the app's own dotted lasso. */
+.range { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 24px; padding-top: 28px; }
+.rp { grid-column: span 2; }
+.rp:nth-child(4) { grid-column: 2 / span 2; }
+.rp:nth-child(5) { grid-column: 4 / span 2; }
 .rp svg { width: 100%; height: auto; display: block; border-radius: 12px;
   background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
-.rp .row { fill: #5b6f82; }
-.rp .band { fill: var(--blue); fill-opacity: .5; stroke: var(--blue);
-  stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.rp .row { fill: #3d4c5b; }
+.rp .row.on { fill: #9aabba; }
+.rp .band { fill: var(--blue); fill-opacity: .35; }
 .rp .ink { fill: none; stroke: var(--pen); stroke-width: 3.2;
   stroke-linecap: round; stroke-linejoin: round; }
-.rp .no-edge { fill: none; stroke: var(--card); stroke-width: 9;
-  stroke-linecap: round; }
 .rp .no { fill: none; stroke: var(--no); stroke-width: 5;
   stroke-linecap: round; }
-.rp .mid { fill: none; stroke: var(--dim); stroke-width: 1.2;
-  stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.rp .mid { fill: none; stroke: var(--dim); stroke-width: 1.5;
+  stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
+.rp .lasso { fill: none; stroke: var(--lasso); stroke-width: 1.5;
+  stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
 .rp figcaption { margin-top: 14px; font-size: 15px; line-height: 1.5;
   color: var(--dim); }
 .rp figcaption b { color: var(--ink); font-weight: 600; }
+@media (max-width: 1023px) {
+  .range { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .rp, .rp:nth-child(n) { grid-column: span 2; }
+  .rp:nth-child(5) { grid-column: 2 / span 2; }
+}
+@media (max-width: 599px) {
+  .range { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+  .rp, .rp:nth-child(n) { grid-column: auto; }
+  .rp { width: 100%; max-width: 420px; }
+}
 
 /* the clip strip: its own sideways scroller. Without the script it scrolls
    and snaps; with it, it loops, drifts slowly and drags. */
@@ -685,7 +717,6 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   .step:nth-child(n + 3) { border-top: 1px solid var(--line); }
   .mosaic { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mosaic > .more > summary { margin-left: calc((100% + var(--gap-x)) / 2); }
-  .range { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 899px) {
   .links { display: none; }
@@ -713,7 +744,6 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   .step, .step + .step { padding: 22px 0 18px; border-left: 0; }
   .step + .step { border-top: 1px solid var(--line); }
   .step .num { font-size: 54px; }
-  .range { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cta .btn { flex: 1 1 auto; min-height: 54px; font-size: 16px; }
   .facts { flex-direction: column; align-items: center; }
   .facts li + li { border-left: 0; }
@@ -724,7 +754,6 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   .wrap, nav.top .wrap, .opening { width: calc(100% - 32px); }
   .strip { --gut: 16px; }
   nav.top .btn { padding: 0 14px; font-size: 14px; }
-  .range { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
   /* No motion anywhere. Every clip keeps its poster and gets its own
@@ -758,12 +787,12 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
 <header class="hero" id="hero" data-section="hero">
   <div class="aurora" aria-hidden="true"></div>
   <div class="opening">
-    <h1>Write on your notes<svg class="penline" viewBox="0 0 400 12"
+    <h1>Write on your notes</h1>
+    <p class="name">Handwriting<svg class="penline" viewBox="0 0 400 12"
       preserveAspectRatio="none" aria-hidden="true"><path
-      d="M3 8C52 3 96 10 148 6s104-4 152 0 68 3 97-1"/></svg></h1>
+      d="M3 8C52 3 96 10 148 6s104-4 152 0 68 3 97-1"/></svg></p>
     <p class="sub">Handwrite, draw, highlight, and erase directly on your
       notes and PDFs.</p>
-    <p class="keeps">Your notes stay Markdown.</p>
     <div class="cta">
         <a class="btn primary"
           href="https://community.obsidian.md/plugins/handwriting"
@@ -846,7 +875,9 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
 <section id="why" class="why" data-section="why">
   <div class="wrap">
     <div class="head-row">
-      <h2 data-fade>Why Handwriting?</h2>
+      <h2 data-fade>Why <span class="inked">Handwriting<svg class="penline"
+        viewBox="0 0 400 12" preserveAspectRatio="none" aria-hidden="true"><path
+        d="M3 8C52 3 96 10 148 6s104-4 152 0 68 3 97-1"/></svg></span>?</h2>
     </div>
     <ul class="whys" data-fade>
       <li>Open any note you already have and start writing on it.</li>
@@ -939,38 +970,37 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
         <summary>Where ink attaches</summary>
         <div class="range" role="group" aria-label="Where ink has to sit to attach">
           <figure class="rp">
-            <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-word">
+            <svg viewBox="0 0 280 170" role="img" aria-labelledby="rp-word">
               <title id="rp-word">On a line. Circle a word and the ink sticks to it.</title>
-              <rect class="row" x="30" y="40" width="200" height="10" rx="5"/><rect class="row" x="30" y="70" width="230" height="10" rx="5"/><rect class="row" x="30" y="100" width="160" height="10" rx="5"/><path class="ink" d="M118 62 C104 60 96 70 100 80 C106 92 158 92 166 80 C172 68 160 58 140 58 C130 58 122 60 118 62 Z"/>
+              <rect class="row" x="30" y="50" width="200" height="10" rx="5"/><rect class="row" x="30" y="80" width="54" height="10" rx="5"/><rect class="row on" x="104" y="80" width="56" height="10" rx="5"/><rect class="row" x="180" y="80" width="80" height="10" rx="5"/><rect class="row" x="30" y="110" width="160" height="10" rx="5"/><path class="lasso" d="M129.3 62.5 C159.2 62.5 177.5 70.2 177.5 82.8 C177.5 97.6 160.8 107.5 135.6 107.5 C104.7 107.5 86.5 100.2 86.5 87.7 C86.5 72.3 103.2 62.5 129.3 62.5 Z"/><path class="ink" d="M122 69 C104 69 94 76 94 85 C94 95 108 102 132 102 C156 102 170 95 170 85 C170 75 156 68 136 68 C130 68 125 68.5 122 69 Z"/>
             </svg>
             <figcaption><b>On a line.</b> Circle a word and the ink sticks to it.</figcaption>
           </figure>
           <figure class="rp">
-            <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-under">
+            <svg viewBox="0 0 280 170" role="img" aria-labelledby="rp-under">
               <title id="rp-under">Under a line. Underlines work too. The blue band shows attach range.</title>
-              <rect class="row" x="30" y="10" width="200" height="10" rx="5"/><rect class="row" x="30" y="40" width="230" height="10" rx="5"/><rect class="row" x="30" y="70" width="160" height="10" rx="5"/><rect class="band" x="30" y="80" width="160" height="60"/><path class="ink" d="M34 92 C60 88 80 96 104 91 C128 86 150 96 186 90"/>
+              <rect class="row" x="30" y="35" width="200" height="10" rx="5"/><rect class="row on" x="30" y="65" width="160" height="10" rx="5"/><rect class="band" x="30" y="75" width="160" height="60"/><path class="lasso" d="M103.8 78.5 C160.4 78.5 187 81.4 187 87.6 C187 99.7 163.4 106 117.7 106 C58.4 106 33 102.7 33 95 C33 84.1 57.1 78.5 103.8 78.5 Z"/><path class="ink" d="M44 95 C64.8 73.8 85.7 108.2 106.5 91 C127.4 73.8 149.9 108.2 176 87"/>
             </svg>
             <figcaption><b>Under a line.</b> Underlines work too. The blue band shows attach range.</figcaption>
           </figure>
           <figure class="rp">
-            <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-block">
+            <svg viewBox="0 0 280 170" role="img" aria-labelledby="rp-block">
               <title id="rp-block">Over a few lines. Ink taller than a line and a half sticks to the line its middle lands on (the dashed line).</title>
-              <rect class="row" x="30" y="40" width="200" height="10" rx="5"/><rect class="row" x="30" y="70" width="230" height="10" rx="5"/><rect class="row" x="30" y="100" width="160" height="10" rx="5"/><path class="mid" d="M26 75 H272"/><path class="ink" d="M22 32 C14 50 14 100 22 118 M22 32 C30 30 240 30 248 32 M22 118 C30 120 170 120 178 118"/>
+              <rect class="row" x="70" y="50" width="140" height="10" rx="5"/><rect class="row on" x="70" y="80" width="140" height="10" rx="5"/><rect class="row" x="70" y="110" width="110" height="10" rx="5"/><path class="mid" d="M12 85 H62"/><path class="mid" d="M218 85 H268"/><path class="lasso" d="M135.8 23 C236.3 23 245 27.7 245 81.3 C245 141.7 237.1 147 146.3 147 C43.9 147 35 142.3 35 88.7 C35 28.3 43.1 23 135.8 23 Z"/><path class="ink" d="M60 35 C110 33 180 35 222 35 C232 36 234 48 234 85 C234 122 232 134 222 135 C170 137 104 136 60 135 C49 134 46 122 46 85 C46 48 49 36 60 35 Z"/>
             </svg>
             <figcaption><b>Over a few lines.</b> Ink taller than a line and a half sticks to the line its middle lands on (the dashed line).</figcaption>
           </figure>
           <figure class="rp">
-            <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-margin">
+            <svg viewBox="0 0 280 170" role="img" aria-labelledby="rp-margin">
               <title id="rp-margin">In the margin. Ink beside a paragraph will stick to the middle line (the dashed line).</title>
-              <rect class="row" x="30" y="40" width="140" height="10" rx="5"/><rect class="row" x="30" y="70" width="140" height="10" rx="5"/><rect class="row" x="30" y="100" width="110" height="10" rx="5"/>
-              <path class="mid" d="M8 75 H190"/><path class="ink" d="M196 57 C210 49 226 63 240 55 M196 77 C212 69 230 85 248 75 M196 97 C206 91 220 101 232 95"/>
+              <rect class="row" x="30" y="50" width="120" height="10" rx="5"/><rect class="row on" x="30" y="80" width="120" height="10" rx="5"/><rect class="row" x="30" y="110" width="90" height="10" rx="5"/><path class="mid" d="M158 85 H192"/><path class="lasso" d="M224.6 52 C253.7 52 261 57.8 261 81.2 C261 110.6 255.1 117 228.1 117 C198.4 117 191 111.3 191 88.4 C191 58.6 197 52 224.6 52 Z"/><path class="ink" d="M200 66 C214 58 232 72 252 63 M200 87 C214 79 232 93 252 84 M200 106 C212 100 228 112 244 105"/>
             </svg>
             <figcaption><b>In the margin.</b> Ink beside a paragraph will stick to the middle line (the dashed line).</figcaption>
           </figure>
           <figure class="rp">
-            <svg viewBox="0 0 280 150" role="img" aria-labelledby="rp-gap">
+            <svg viewBox="0 0 280 170" role="img" aria-labelledby="rp-gap">
               <title id="rp-gap">Too far down. Ink won't attach if it's too far away. The blue band shows attach range.</title>
-              <rect class="row" x="30" y="10" width="200" height="10" rx="5"/><rect class="row" x="30" y="40" width="150" height="10" rx="5"/><rect class="band" x="30" y="50" width="150" height="60"/><path class="ink" d="M60 136 C80 122 100 150 120 134 C140 120 160 146 180 132"/><path class="no-edge" d="M40 20 L240 130 M240 20 L40 130"/><path class="no" d="M40 20 L240 130 M240 20 L40 130"/>
+              <rect class="row" x="30" y="12" width="200" height="10" rx="5"/><rect class="row" x="30" y="42" width="150" height="10" rx="5"/><rect class="band" x="30" y="52" width="150" height="60"/><path class="lasso" d="M130 135 C170.8 135 198 139.6 198 146.4 C198 154.9 174.2 161 141.3 161 C98.3 161 72 156.8 72 149.8 C72 141.2 96.3 135 130 135 Z"/><path class="ink" d="M80 151 C98 139 114 157 134 147 C154 137 170 155 190 145"/><path class="no" d="M42 25 L238 145 M238 25 L42 145"/>
             </svg>
             <figcaption><b>Too far down.</b> Ink won't attach if it's too far away. The blue band shows attach range.</figcaption>
           </figure>
@@ -1139,8 +1169,8 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   <div class="wrap files">
     <div class="words">
       <h2 data-fade>Your notes stay plain Markdown</h2>
-      <p data-fade>Ink never goes into the note. It lives in its own file,
-        in a <code>.handwriting</code> folder in your vault.</p>
+      <p data-fade>Ink is never stored in the note. Your ink lives as a JSON
+        file in a <code>.handwriting</code> folder in your vault.</p>
     </div>
     <figure class="frame" data-clip="explorer" data-wipe><video data-clip
       autoplay muted loop playsinline width="1200" height="674"
@@ -1284,12 +1314,6 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
         </a>
       </li>
       <li class="say" data-fade>
-        <a href="https://github.com/ellimist-afk/handwriting/issues/34#issuecomment-5985073022">
-          <blockquote><p>Alan - really appreciate the work you put into this plugin, it's completely elevated my productivity workflow.</p></blockquote>
-          <p class="by"><b>desimpkins</b><small>GitHub</small></p>
-        </a>
-      </li>
-      <li class="say" data-fade>
         <a href="https://github.com/ellimist-afk/handwriting/issues/48">
           <blockquote><p>I use it every day for lecture notes on Mac, iPad and a Galaxy Tab.</p></blockquote>
           <p class="by"><b>woominKO</b><small>GitHub</small></p>
@@ -1320,9 +1344,27 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
         </a>
       </li>
       <li class="say" data-fade>
+        <a href="https://forum.obsidian.md/t/which-plugin-is-the-best-for-freehand-stylus-annotations-within-a-note/118217/3">
+          <blockquote><p>If you want the OneNote feel, try Handwriting first.</p></blockquote>
+          <p class="by"><b>inventdev</b><small>Obsidian forum</small></p>
+        </a>
+      </li>
+      <li class="say" data-fade>
+        <a href="https://github.com/ellimist-afk/handwriting/issues/34#issuecomment-5985073022">
+          <blockquote><p>Alan - really appreciate the work you put into this plugin, it's completely elevated my productivity workflow.</p></blockquote>
+          <p class="by"><b>desimpkins</b><small>GitHub</small></p>
+        </a>
+      </li>
+      <li class="say" data-fade>
         <a href="https://www.youtube.com/watch?v=uWcOWixkxEk&amp;lc=Ugw5PTcA950rnYKAmnJ4AaABAg">
           <blockquote><p>This is just incredible, hands down the best method to seamlessly merge handwriting and typing in obsidian. I'm just at a loss for words, thank you very much. You're just incredible!</p></blockquote>
           <p class="by"><b>@baonguyen1416</b><small>YouTube</small></p>
+        </a>
+      </li>
+      <li class="say" data-fade>
+        <a href="https://github.com/ellimist-afk/handwriting/issues/45">
+          <blockquote><p>… I wanted to thank you for making such an amazing plugin!! I hope this becomes way more popular; it deserves it :)</p></blockquote>
+          <p class="by"><b>5thConsecutiveC</b><small>GitHub</small></p>
         </a>
       </li>
     </ul>
