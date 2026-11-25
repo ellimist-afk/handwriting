@@ -20,7 +20,7 @@ declare module "./SlidesInkSurface" {
 		onPresentClassChanged(): void;
 		endStrokeForSlideChange(): void;
 		dispose(): void;
-		drainParkedWrite(parked: Promise<unknown>, initialLoad?: boolean): Promise<void>;
+		drainParkedWrite(parked: Promise<unknown>, initialLoad?: boolean, liftRead?: boolean): Promise<void>;
 	}
 }
 
@@ -354,6 +354,14 @@ declare module "./SlidesInkSurface" {
 			this.draining = true;
 			parked = this.startInitialLoad();
 		}
+		let liftRead = false;
+		if (!parked && this.liftHeld()) {
+			// The same for a lift whose read failed with ink drawn while locked held: one more read, then the write or
+			// the word.
+			this.draining = true;
+			parked = this.readOwedLift();
+			liftRead = true;
+		}
 		if (parked) this.dirty = true;
 		if (this.dirty && parked) {
 			// The deck's state is kept alive until the parked work lands: the
@@ -367,21 +375,21 @@ declare module "./SlidesInkSurface" {
 					`${this.loaded ? "" : " (load never finished)"}`
 			);
 			this.draining = true;
-			const drain = this.drainParkedWrite(parked, !this.loaded && !this.sidecarId && !this.claimInFlight);
+			const drain = this.drainParkedWrite(parked, !this.loaded && !this.sidecarId && !this.claimInFlight, liftRead);
 			this.teardownDrain = drain;
 			drains.add(drain);
 			void drain.finally(() => drains.delete(drain));
 		} else if (this.dirty) {
 			const page = this.snapshot();
-			if (page && this.sidecarId) {
-				const id = this.sidecarId;
+			const id = page ? this.sidecarId : null;
+			if (page && id) {
 				void this.host.saveSidecarNow(id, page).catch((err) => {
 					log(`save failed at teardown: ${id}: ${String(err)}`);
 				});
 			}
 			log(
 				`teardown: ${this.strokes.size} slide(s) inked, ${this.totalStrokes()} stroke(s), ` +
-					`${this.sidecarId ? `flushed to ${this.sidecarId}` : "nothing to save"}` +
+					`${id ? `flushed to ${id}` : this.sidecarId ? "writes are held, nothing written" : "nothing to save"}` +
 					`${this.loaded ? "" : " (load never finished)"}`
 			);
 		} else {
@@ -421,7 +429,7 @@ declare module "./SlidesInkSurface" {
 	 * is merged. `save()` refuses once `disposed` is set, so nothing else can
 	 * have written in the meantime and this is the single flush.
 	 */
-	async function drainParkedWrite(this: SlidesDeck, parked: Promise<unknown>, initialLoad = false): Promise<void> {
+	async function drainParkedWrite(this: SlidesDeck, parked: Promise<unknown>, initialLoad = false, liftRead = false): Promise<void> {
 		try {
 			await parked;
 			// A claim can end by parking a load (the merge), and a load can end
@@ -434,14 +442,32 @@ declare module "./SlidesInkSurface" {
 				if (this.initialLoadFailed) this.noticeSaveFailure();
 				return;
 			}
+			// The lift's read was still open at the close and did not land: the close reads once more, as it would
+			// have had that read already failed.
+			if (!liftRead && this.liftHeld()) await this.readOwedLift();
+			// The close's read did not land either: the ink drawn while locked is not written over a file not read,
+			// and the reader hears that it was not saved.
+			if (this.liftHeld()) {
+				log(`teardown: parked write dropped - ${this.sidecarId ?? "?"} could not be read again after the duplicate lock lifted`);
+				this.noticeSaveFailure();
+				return;
+			}
 			const page = this.snapshot();
 			const id = this.sidecarId;
 			if (page && id) {
-				await this.host.saveSidecarNow(id, page);
+				try {
+					await this.host.saveSidecarNow(id, page);
+				} catch (err) {
+					// The ink is not in the file: the live deck on this sidecar keeps it as its own.
+					this.handOverInk(id, false);
+					throw err;
+				}
 				log(
 					`teardown: parked write flushed to ${id}, ${page.strokes.length} stroke(s) ` +
 						`(the claim/load landed after the deck was gone)`
 				);
+				// A deck opened on this sidecar meanwhile read the file before this write.
+				this.handOverInk(id, true);
 			} else {
 				log(
 					`teardown: parked write dropped - ${id ? "the deck is read-only" : "no page id was claimed"}`

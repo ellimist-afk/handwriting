@@ -12,6 +12,7 @@ import {
 	boxContains,
 	fromPagePoint,
 	livePages,
+	noteSnipViewport,
 	pageAt,
 	pageSizePt,
 	snipViewport,
@@ -216,5 +217,62 @@ describe("snipViewport", () => {
 		expect(snipViewport(b, 8, 0, H, 2, CAP)).toBeNull();
 		expect(snipViewport(b, 8, W, H, 0, CAP)).toBeNull();
 		expect(snipViewport(b, 8, W, H, 2, 0)).toBeNull();
+	});
+
+	it("on a page, a box left of and above the page's corner is clamped to the corner", () => {
+		const vp = snipViewport({ x: -9.38, y: -4, width: 100, height: 50 }, 8, W, H, 1, CAP);
+		expect(vp).not.toBeNull();
+		expect(vp!.x0).toBe(0);
+		expect(vp!.y0).toBe(0);
+		expect(vp!.x1).toBeCloseTo(98.62, 9);
+		expect(vp!.y1).toBeCloseTo(54, 9);
+	});
+});
+
+// A note has no page, and its ink can sit left of or above the note's origin. The note snip's crop keeps that ink and
+// the pad round it, as it does on the far sides.
+describe("noteSnipViewport", () => {
+	const CAP = 4_000_000;
+	/** How the note snip framed its crop before it had its own: the page crop with the far edges out of reach. */
+	const asBefore = (b: { x: number; y: number; width: number; height: number }, pxPerPt: number) =>
+		snipViewport(b, 8, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, pxPerPt, CAP);
+
+	it("keeps ink left of and above the origin, and the pad round it", () => {
+		const vp = noteSnipViewport({ x: -9.38, y: -4, width: 100, height: 50 }, 8, 1, CAP);
+		expect(vp, "a box below the origin is still a crop").not.toBeNull();
+		expect.soft(vp!.x0, "left edge: the box's own x less the pad").toBeCloseTo(-17.38, 9);
+		expect.soft(vp!.y0, "top edge: the box's own y less the pad").toBeCloseTo(-12, 9);
+		expect(vp!.x1).toBeCloseTo(98.62, 9);
+		expect(vp!.y1).toBeCloseTo(54, 9);
+		expect(vp!.scale).toBe(1);
+	});
+
+	it("frames a box 8 or more from the origin exactly as before", () => {
+		expect(noteSnipViewport({ x: 8, y: 8, width: 100, height: 50 }, 8, 1, CAP)).toEqual({ x0: 0, y0: 0, x1: 116, y1: 66, scale: 1 });
+		const boxes: Array<[{ x: number; y: number; width: number; height: number }, number]> = [
+			[{ x: 8, y: 8, width: 100, height: 50 }, 1],
+			[{ x: 120.5, y: 3000.25, width: 640, height: 220 }, 2],
+			[{ x: 33.3, y: 8.01, width: 17.7, height: 401.9 }, 1.25],
+			// Past the area cap: the capped scale is the same too.
+			[{ x: 10, y: 20, width: 3000, height: 2000 }, 2],
+		];
+		for (const [b, s] of boxes) expect(noteSnipViewport(b, 8, s, CAP), JSON.stringify(b) + " at " + s).toEqual(asBefore(b, s));
+	});
+
+	it("holds the grown crop to the same area cap", () => {
+		const vp = noteSnipViewport({ x: -1500, y: -700, width: 2000, height: 1600 }, 8, 2, CAP)!;
+		expect(vp.x0).toBe(-1508);
+		expect(vp.y0).toBe(-708);
+		expect(vp.scale).toBeLessThan(2);
+		const width = Math.max(1, Math.round((vp.x1 - vp.x0) * vp.scale));
+		const height = Math.max(1, Math.round((vp.y1 - vp.y0) * vp.scale));
+		expect(width * height).toBeLessThanOrEqual(CAP);
+	});
+
+	it("degenerate inputs are null", () => {
+		const b = { x: -10, y: -10, width: 20, height: 20 };
+		expect(noteSnipViewport(b, 8, 0, CAP)).toBeNull();
+		expect(noteSnipViewport(b, 8, 2, 0)).toBeNull();
+		expect(noteSnipViewport({ ...b, width: Number.NaN }, 8, 2, CAP)).toBeNull();
 	});
 });

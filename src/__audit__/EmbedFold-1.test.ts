@@ -36,6 +36,7 @@ import {
 	disarmPrintSwaps,
 	embedInkChanged,
 	embedInkLayerCount,
+	onEmbedInkLinesMoved,
 	teardownEmbedInk,
 } from "../inline/EmbedInk";
 import { InlineInkStore, InlineInkHost } from "../inline/InlineInkStore";
@@ -65,13 +66,15 @@ const makeProcessorRaw = new Function(
 	"embedInkIsLiveEditorBlock",
 	"isMarkdownPath",
 	"overlayForPath",
+	"onEmbedInkLinesMoved",
 	transformSync(`return (el: any, ctx: any) => {\n${ppBody}\n};`, {
 		loader: "ts",
 		target: "es2022",
 	}).code
 );
 // 1.4.22 lane R: the post-processor also calls embedInkIsLiveEditorBlock (issue 22 fix).
-const makeProcessor = (...deps: unknown[]) => makeProcessorRaw(...deps, embedInkIsLiveEditorBlock, isMarkdownPath, () => null);
+// The post-processor also hands each rendered section's text drop to onEmbedInkLinesMoved.
+const makeProcessor = (...deps: unknown[]) => makeProcessorRaw(...deps, embedInkIsLiveEditorBlock, isMarkdownPath, () => null, onEmbedInkLinesMoved);
 
 // ---- Obsidian Component / MarkdownRenderChild semantics --------------------
 class Component {

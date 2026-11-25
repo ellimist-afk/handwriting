@@ -1,6 +1,6 @@
 # Handwriting
 
-Pen ink on ordinary Markdown notes and PDFs in Obsidian.
+Handwrite, draw, highlight, and erase directly on your notes and PDFs.
 
 ![picking a pen color, writing, highlighting, then underlining on a note in Obsidian](docs/assets/write.gif)
 
@@ -71,6 +71,10 @@ iphone
 >
 > **iPad Settings → Apple Pencil → Scribble → Off**
 
+### android notes
+
+> android's side button lacks the functionality required for hold to erase - so android's side button works a little bit differently. you have to hover and click the side button to switch to eraser mode, hover and click again to toggle it off.
+
 ---
 
 ## installing
@@ -121,7 +125,7 @@ tap the pen, highlighter, or eraser again while it is selected to open its contr
 
 the keyboard button disables pen input so a tap can place the caret and open the on-screen keyboard. this may be useful for viewing pdfs. tap it again to get the pen back. `Handwriting: Pen on / off` does the same from the command palette.
 
-![keyboard button on, selecting text in a pdf](docs/assets/keyboard.png)
+![keyboard button on](docs/assets/keyboard.gif)
 
 ### pen side button
 
@@ -182,17 +186,19 @@ you can lasso ink to move or copy and paste it anywhere in the note, or across d
 
 on a note you can also resize and rotate what you lassoed: drag a corner to resize it, or the knob above it to rotate it.
 
-![lassoing two rings and dragging them somewhere else](docs/assets/lasso.gif)
+![lassoing a drawing, dragging it, and snipping it](docs/assets/lasso.gif)
 
 ### attach ink to text
 
-lasso some ink next to your text, then tap the link button on the selection. the ink now moves with that text when you type above it. when you hook it initially, the hooked text lights up. if your ink hooked the wrong text, drag the pin to the correct text.
+lasso some ink next to your text, then tap the link button on the selection. the ink now moves with that text when that text moves. when you attach it initially, the hooked text will highlight itself. if your ink hooked the wrong text, drag the pin to the correct text.
 
-tap attached ink with your finger to select it. attached ink shows a small grey link icon at its top-left.
+tap attached ink with your finger to select it. attached ink shows a small grey link icon at its top-left. 'group attach' will work when lassoing together different attached ink groups. 
 
-if attached text gets deleted or can't be found, orphaned ink shows "Drag the pin to the text". tap the link button again to detach the ink.
+you can undo and redo attaching.
 
 both are also commands: `Handwriting: Lasso: attach ink to text` and `Handwriting: Lasso: detach ink from text`.
+
+![attaching ink to text](docs/assets/attach.gif)
 
 ### insert space
 
@@ -294,23 +300,19 @@ however if you resize Obsidian, resize a window pane, change the font size, pinc
 
 ### how attached ink works
 
-when you attach ink to text, the plugin saves that text (plus 32 characters on each side) and its position. i tried using line numbers first but Obsidian line numbers are so fragile instead i just used spatial position. when the note opens, the plugin searches for the text part, reads where it is now, and moves the ink by the difference. 
+when you attach ink to text, the plugin saves that text's position in the document. i tried using line numbers first but Obsidian line numbers are so fragile instead i just used spatial position in the document again. to place the ink, Handwriting searches for the text, reads its new position, and moves the ink by the difference. 
 
-this method is extremely cheap: each drawing costs the same, bc typing doesnt rewrite the strokes. it's O(n); type above twenty drawings and the plugin updates twenty numbers.
+this method is extremely cheap: each move or redrawing costs the same, bc typing doesnt rewrite the strokes. it's O(n); type above twenty drawings and the plugin updates twenty numbers.
 
-this feature is intended to fix sync between devices. your desktop might wrap a paragraph into 3 lines and your phone into 7, so everything below shifts and ink ends up next to the wrong paragraph. attached ink just looks for its words and sits beside them, on any screen.
-
-if the paragraph gets deleted, or can’t be found after a sync, the ink stays where it was last shown and gets a “Drag the pin to the text” tag.
+the attach to ink feature is intended as a workaround to fix ink sync between devices; if your desktop with a large screen doesn't wrap a paragraph, and your phone with its smaller screen does, ink might end up next to different text on your different devices. on the other hand if you use the attach ink feature, attached ink will just stay at a constant distance from its attached text, whatever screen you are on. granted, you still must manually lasso and attach. still working on something for this.
 
 the attachment info lives as JSON in your vault’s .handwriting folder with everything else
 
 ### undo/redo
 
-if you draw, type, then erase, ctrl+z should undo those things in the order you did them
+if you draw, type, then erase, ctrl+z will undo those things in the order you did them. insert space, highlighter, shape snap; almost all ink actions in Handwriting are built to be undo/redo-able.
 
-this meant Obsidian, not just Handwriting, needed to know what an ink action is and in what order
-
-each ink action had to be translated to be able to be recorded in obsidian's undo history. adding a stroke. moving a lasso selection. which strokes moved and by how much. erasing. what was removed and how much of it
+each ink action has to be translated to be recorded in obsidian's undo history.
 
 teaching these operations to participate in the editor's history alongside text gives seamless undo/redo for text and ink
 

@@ -983,7 +983,7 @@ window.bounce = {
 		await new Promise(resolve => {
 			const tick = ts => {
 				const b = overlay.overscrollBounceReadout();
-				frames.push({ ts, active: b.active, x: b.x, fromX: b.fromX, startedAt: b.startedAt });
+				frames.push({ ts, active: b.active, x: b.x, fromX: b.fromX, y: b.y, fromY: b.fromY, startedAt: b.startedAt });
 				if (frames.length >= 120 || (!b.active && frames.some(f => f.active))) resolve(); else requestAnimationFrame(tick);
 			};
 			requestAnimationFrame(tick);
@@ -1073,6 +1073,67 @@ const BOUNCE_MS = 500;
 const FRAME_MS = 1000 / 60;
 const show = (v: unknown) => JSON.stringify(v);
 
+/** A frame moves the page when it carries a pixel or more of the correction. */
+const MOVES_PX = 1;
+/** The frames a glide moves the page on, at the least: a jump moves it on one, a jump split in two on two. */
+const GLIDE_FRAMES = 3;
+/**
+ * THE BOUNCE, ON THE ORIGIN EDGE's "no frame jumps", pure so a recorded glide can be fed to it: `steps` are the page's
+ * per-frame moves, px, and `correction` the whole travel. Returns why the steps read as a jump, or null for a glide.
+ *
+ * COUNTED, NOT SIZED. A jump carries the whole correction on one frame. The glide moves the page on every frame until its
+ * tail is under a pixel, and how much of it each frame carries is the runner's clock: a runner that delivers fewer frames,
+ * later, puts more of the glide on each. GitHub's Linux runner put 14.5 of the 26.67 px on one frame (CI_GLIDE), over the
+ * half the old bound allowed, and still moved the page on four; a run on Alan's machine moved it on twelve, none over 2.5 px.
+ */
+function frameJump(steps: number[], correction: number): string | null {
+	const moving = steps.filter(s => Math.abs(s) >= MOVES_PX).length;
+	return moving >= GLIDE_FRAMES ? null : `the page moves ${MOVES_PX} px or more on ${moving} of ${steps.length} frames, under ${GLIDE_FRAMES}, for a ${Math.abs(correction).toFixed(2)} px correction`;
+}
+/** Forty-eight frames, as the cell reads after the lift: the moves given, then a page that stands still. */
+const afterLift = (...moves: number[]) => [...moves, ...Array.from({ length: 48 - moves.length }, () => 0)];
+// The glide GitHub's Linux runner recorded in that cell: master run 43253771759, 1.5.1 at bb10babe, check (22). The steps
+// as the cell printed them, to 0.1 px, with the largest one exact as the assertion printed it; the correction is twice the
+// bound it printed, 13.333335876464844 px. That runner delivers fewer frames, later, each carrying more of the glide.
+const CI_GLIDE = { correction: -2 * 13.333335876464844, steps: afterLift(0, -0.4, -14.495111465454102, -7.1, -2.6, -1.6, -0.4, -0.1) };
+
+/** The share of the correction the product's ease, (1 - t)^3 over BOUNCE_MS, carries on its first 60 fps frame: 0.0967. */
+const EASE_FIRST_FRAME_SHARE = 1 - (1 - FRAME_MS / BOUNCE_MS) ** 3;
+/**
+ * The margin over it, as a share of the correction: 0.02. The ease's own slope at its start, read over a gap much shorter
+ * than a frame, is 3 x FRAME_MS / BOUNCE_MS = 0.100, which is 0.0033 over the first frame's share; the rest is room for
+ * float and a small retune. The eases the counted check lets through, half the correction or more on one frame, are far
+ * outside it.
+ */
+const EASE_SHARE_MARGIN = 0.02;
+/**
+ * EASED OUT, ON THE FRAME CLOCK: the most of the correction any one 60 fps frame of the glide carries, read from the glide's
+ * own samples. A sample is the offset the bounce wrote in a frame and that frame's timestamp, which is the same `now` the
+ * bounce's step read (every frame callback in a frame gets one timestamp). The time is held to the glide's half second, as
+ * the step holds t. Between two samples the offset falls by a share of the correction over some time, and that share is
+ * scaled to one 60 fps frame, so a runner that delivers fewer frames, later, reads the same curve as one that delivers all
+ * of them: the size of one runner frame is never bounded here. For an ease out, the scaled share over any gap is at most
+ * the curve's slope at the gap's start, so the product's ease reads at most 0.100 on any runner.
+ * A sample whose offset grew is not read here (TIMED's monotonic check owns that); one that fell with no time passing is
+ * Infinity.
+ */
+function easeFrameShare(samples: { ts: number; off: number }[], from: number, startedAt: number): number {
+	let most = 0, prevAt = 0, prevLeft = 1;
+	for (const s of samples) {
+		const at = Math.min(BOUNCE_MS, Math.max(0, s.ts - startedAt)), left = Math.abs(s.off) / Math.abs(from);
+		const fell = prevLeft - left;
+		if (fell > 1e-12) most = Math.max(most, at > prevAt ? fell * FRAME_MS / (at - prevAt) : Infinity);
+		prevAt = at; prevLeft = left;
+	}
+	return most;
+}
+/** An ease (1 - t)^power of a 26.67 px correction, sampled at the given ms after its start, as easeFrameShare reads it. */
+const easeSamples = (power: number, at: number[]) => at.map(ms => ({ ts: 1000 + ms, off: -26.67 * (ms >= BOUNCE_MS ? 0 : (1 - ms / BOUNCE_MS) ** power) }));
+/** Every 60 fps frame of the half second, the last at its end. */
+const AT_60 = Array.from({ length: 30 }, (_, i) => (i + 1) * FRAME_MS);
+/** The bound: the ease's first frame's share plus the margin. */
+const EASE_SHARE_BOUND = EASE_FIRST_FRAME_SHARE + EASE_SHARE_MARGIN;
+
 it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own top edge, eased, within the bound, onto the settle's own rest", async () => {
 	// class A: MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
 	// router.beginPinch, the canvas-ON pinch since then; mounted canvas off it pinched nothing at all and
@@ -1120,12 +1181,11 @@ it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own
 		// own from-offset, and `boundMaxPx` (1 px) is the pan bound, which is not what moved the page. The two
 		// sources were required to agree within a pixel in the premise above, so this compares against the pair.
 		expect(Math.abs(Math.abs(correction) - eased), `the page rests where the settle put it: moved ${correction} px against the ${eased.toFixed(2)} px the ease was given (pan bound ${end.fitReadout.boundMaxPx} px, which is not what corrects under the canvas)`).toBeLessThanOrEqual(0.05);
-		// It animates: no single frame carries more than half of the correction (a jump carries all of it in one frame).
+		// It animates: the page moves on several frames, not one (a jump carries all of the correction in one frame).
 		const steps = rows.map((r, i) => r.contentTop - (i === 0 ? last.contentTop : rows[i - 1].contentTop));
-		// HALF THE CORRECTION'S SIZE. `correction` is negative under the new bound (the page
-		// travels left to close blank), so the old `correction / 2` was a negative ceiling on a positive
-		// maximum and could never hold.
-		expect(Math.max(...steps.map(Math.abs)), `no frame jumps: per-frame steps ${show(steps.map(s => Math.round(s * 10) / 10))}`).toBeLessThanOrEqual(Math.abs(correction) / 2);
+		// COUNTED, NOT SIZED (frameJump): how much of the glide one frame carries is the runner's frame rate, so no
+		// mid-glide frame is given a size bound; the count of frames that move the page is the glide's own.
+		expect(frameJump(steps, correction), `no frame jumps: per-frame steps ${show(steps.map(s => Math.round(s * 10) / 10))}`).toBeNull();
 		const bouncing = rows.filter(r => r.bounce && r.bounce.active);
 		expect(bouncing.length, "the bounce played over several frames").toBeGreaterThanOrEqual(4);
 		const first = bouncing[0];
@@ -1183,6 +1243,32 @@ it("THE BOUNCE, ON THE ORIGIN EDGE: the settle springs the page back off its own
 		expect(bouncing.filter(r => r.inkLeft !== null).length, "premise: the ink is on screen on the bounce frames").toBeGreaterThanOrEqual(2);
 	} finally { await page.close(); }
 }, 240_000);
+
+it("NO FRAME JUMPS, FED THE GLIDE THE CI RUNNER RECORDED: one frame carrying 14.5 of the 26.67 px correction is a glide, not a jump", () => {
+	expect(frameJump(CI_GLIDE.steps, CI_GLIDE.correction), `steps ${show(CI_GLIDE.steps)}`).toBeNull();
+});
+
+it("NO FRAME JUMPS, FED A JUMP: the whole correction on one frame reads as a jump, and so does the same correction split over two", () => {
+	const c = CI_GLIDE.correction;
+	expect(frameJump(afterLift(0, c), c), "the whole correction on one frame").not.toBeNull();
+	expect(frameJump(afterLift(0, c / 2, c / 2), c), "the correction split over two frames").not.toBeNull();
+});
+
+it("EASED OUT, FED THE PRODUCT'S EASE: on every 60 fps frame it reads its first frame's share, and on a slow, uneven runner no more than the bound", () => {
+	expect(easeFrameShare(easeSamples(3, AT_60), -26.67, 1000), "every 60 fps frame").toBeCloseTo(EASE_FIRST_FRAME_SHARE, 6);
+	// A first frame 1 ms after the start reads the ease's start slope, 0.0998; then gaps of 40 to 175 ms, as a slow runner gives.
+	const slow = [1, 41, 120, 295, 470, 520];
+	expect(easeFrameShare(easeSamples(3, slow), -26.67, 1000), `sampled at ${show(slow)} ms`).toBeLessThanOrEqual(EASE_SHARE_BOUND);
+});
+
+it("EASED OUT, FED A STEEPER EASE OR A JUMP: an ease with half the correction or more on its first frame, and the whole correction on one frame, read over the bound", () => {
+	// (1 - t)^21 and (1 - t)^40 put 51% and 74% of the correction on their first 60 fps frame; the counted check passes both.
+	for (const power of [21, 40]) {
+		expect(frameJump(easeSamples(power, AT_60).map((s, i, all) => s.off - (i === 0 ? -26.67 : all[i - 1]!.off)), -26.67), `premise: the counted check reads (1 - t)^${power} as a glide`).toBeNull();
+		expect(easeFrameShare(easeSamples(power, AT_60), -26.67, 1000), `(1 - t)^${power}`).toBeGreaterThan(EASE_SHARE_BOUND);
+	}
+	expect(easeFrameShare([{ ts: 1000 + FRAME_MS, off: 0 }], -26.67, 1000), "the whole correction on one frame").toBeGreaterThan(EASE_SHARE_BOUND);
+});
 
 it("PEN DOWN MID-BOUNCE: the bounce is cancelled before the contact is read, the stroke lands where the page rests, and a page standing past its bound resumes to it after the lift", async () => {
 	// class A: MOUNTED WITH THE CANVAS ON. This arm drives its gesture through
@@ -1671,6 +1757,27 @@ it("TIMED: the glide lasts half a second on the frame clock, within one frame, a
 		expect(end.x, "the offset ends at exactly zero").toBe(0);
 		for (let i = 1; i < active.length; i++) expect(Math.abs(active[i].x), `frame ${i + 1}: the offset toward the rest does not grow`).toBeLessThanOrEqual(Math.abs(active[i - 1].x) + 1e-9);
 		for (const f of active) expect(Math.sign(f.x) === 0 || Math.sign(f.x) === Math.sign(active[0].fromX), "and never crosses the rest").toBe(true);
+	} finally { await page.close(); }
+}, 240_000);
+
+it("EASED OUT, ON THE FRAME CLOCK: no 60 fps frame of the glide carries more of the correction than the ease's first frame does, plus the margin", async () => {
+	// TIMED's drive, read the same way: one frame callback a frame after the bounce's own, on the frame clock. easeFrameShare
+	// scales each step to one 60 fps frame by the frame timestamps, so the runner's frame rate does not enter the bound.
+	const { page, errors, mounted } = await open("timed", true);
+	try {
+		const frames = await call(page, "timedBounce", mounted.inkMiddleX, mounted.natural.textCy) as any[];
+		expect(errors).toEqual([]);
+		const active = frames.filter(f => f.active), end = frames.find((f, i) => !f.active && frames.slice(0, i).some(g => g.active));
+		expect(active.length, "premise: the bounce played").toBeGreaterThanOrEqual(4);
+		expect(end, "premise: the bounce ended inside the reading").toBeTruthy();
+		const first = active[0], startedAt = first.startedAt as number;
+		// Each axis the glide corrects by a pixel or more is read on its own.
+		const axes = (["x", "y"] as const).filter(a => Math.abs(a === "x" ? first.fromX : first.fromY) >= 1);
+		const shares = Object.fromEntries(axes.map(a => [a, easeFrameShare([...active, end].map(f => ({ ts: f.ts, off: a === "x" ? f.x : f.y })), a === "x" ? first.fromX : first.fromY, startedAt)]));
+		const at = [...active, end].map(f => [Math.round((f.ts - startedAt) * 10) / 10, Math.round(f.x * 100) / 100, Math.round(f.y * 100) / 100]);
+		record.push({ cell: "eased", from: [first.fromX, first.fromY], shares, at });
+		expect(Math.max(Math.abs(first.fromX), Math.abs(first.fromY)), "premise: the glide was given a correction of 5 px or more to run").toBeGreaterThanOrEqual(5);
+		for (const a of axes) expect(shares[a], `${a}: the most of the correction one 60 fps frame carries, against the ease's first frame ${EASE_FIRST_FRAME_SHARE.toFixed(4)} plus ${EASE_SHARE_MARGIN}; [ms, x, y] ${show(at)}`).toBeLessThanOrEqual(EASE_SHARE_BOUND);
 	} finally { await page.close(); }
 }, 240_000);
 

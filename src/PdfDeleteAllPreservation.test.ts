@@ -82,7 +82,7 @@ const CHANGED =
 const DISK_ERROR =
 	"Handwriting: could not copy this PDF's ink to the trash (disk error). Nothing was deleted.";
 const UNREADABLE =
-	"Handwriting: this PDF's ink file could not be read. ink drawn on it is not saved.";
+	"Handwriting: this PDF's ink file could not be read yet. New ink on it is not saved until it loads.";
 const FUTURE =
 	"Handwriting: this PDF's ink was written by a newer version of Handwriting. ink drawn on it is not saved.";
 

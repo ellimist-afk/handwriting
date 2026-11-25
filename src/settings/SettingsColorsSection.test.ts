@@ -133,8 +133,8 @@ describe("the Colors group", () => {
 		const defs = tab().getSettingDefinitions() as Def[];
 		const rows = defs.find((d) => d.heading === "Colors")?.items ?? [];
 		for (const row of rows) expect(row.aliases).toContain("pen");
-		expect(rows[0]?.desc).toBe("Change any of the eight pen colors.");
-		expect(rows[1]?.desc).toBe("Change any of the five highlighter colors.");
+		expect(rows[0]?.desc).toBe("Customize any of your eight pen colors.");
+		expect(rows[1]?.desc).toBe("Customize any of your five highlighter colors.");
 	});
 });
 

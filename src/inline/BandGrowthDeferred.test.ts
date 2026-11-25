@@ -13,7 +13,7 @@
  * without it, as a note arriving. Asserted: after a lift that growth alone returns "none" and
  * writes no band while the band covers the pane; it is taken, with the move it comes with, at the first sync where the
  * pane leaves the band; without a lift, and for every other size change (a narrower range, a narrower or shorter pane),
- * it resizes as before.
+ * it resizes as before. Under an outer CSS scale above 1 with the pinch at 100% the growth waits the same way.
  */
 import { describe, expect, it } from "vitest";
 import { InkOverlayPlugin } from "./InkOverlay";
@@ -158,5 +158,29 @@ describe("a band growth the pane does not need waits for the scroll that needs i
 		r.scroller.clientHeight = CLIENT_H - 40;
 		r.scroller.scrollWidth = CLIENT_W + 400;
 		expect(r.sync()).toBe("resized");
+	});
+
+	it("an outer CSS scale of 1.25 with the pinch at 100%: the growth waits as at scale 1, the margin it is checked against carrying the pinch as the band's does", () => {
+		const r = rig();
+		// The pane's own outer scale rides on the pinch: cssScale is pinch x outer.
+		r.overlay.cssScale = 1.25;
+		r.overlay.pinchScaleNow = 1;
+		// A pane 1200 px tall: a quarter of it, 300, is under the pinch's ceiling (320) and over the scale's (256), so
+		// the two margins differ. At 800 both are 200.
+		r.scroller.clientHeight = 1200;
+		const view = () => ({ ...r.scroller, scale: 1.25, pinch: 1 });
+		const withPinch = bandMargin(1200, 1.25, 1);
+		expect([withPinch, bandMargin(1200, 1.25)], "premise: the margin with the pinch is not the margin with the scale alone").toEqual([300, 256]);
+		expect(r.sync(), "premise: the first sync places the band").toBe("resized");
+		const placed = { ...r.band() };
+		expect(placed.width, "premise: no sideways margin while the range fits the pane").toBe(CLIENT_W);
+		r.lift();
+		r.scroller.scrollWidth = CLIENT_W + 400;
+		const writes = r.writes.length;
+		expect({ out: r.sync(), band: r.band(), writes: r.writes.length - writes }, "the band covers the pane: the growth waits").toEqual({ out: "none", band: placed, writes: 0 });
+		expect(bandCovers(r.band(), view()), "the band still covers every pixel the pane shows").toBe(true);
+		r.scroller.scrollLeft = 1;
+		expect(r.sync(), "the pane left the band").toBe("resized");
+		expect([r.band().width, bandCovers(r.band(), view())], "the grown band, the pinch's margin each side, covering the pane").toEqual([CLIENT_W + 2 * withPinch, true]);
 	});
 });

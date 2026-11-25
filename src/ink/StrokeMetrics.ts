@@ -118,6 +118,14 @@ class BrowserLoafSource implements LoafSource {
 		this.observer.observe({ type: "long-animation-frame", buffered: true });
 	}
 
+	/** Disconnects the observer and lets go of its frames and windows. The next `start` connects a new one. */
+	stop(): void {
+		this.observer?.disconnect();
+		this.observer = null;
+		this.recent = [];
+		this.open = [];
+	}
+
 	framesBetween(from: number, to: number): LoafFrame[] {
 		// The entry for the frame that ended the stroke may still be queued.
 		if (this.observer) this.take(this.observer.takeRecords());
@@ -178,6 +186,14 @@ function loafFrameOf(e: PerformanceEntry): LoafFrame {
 }
 
 const browserLoaf = new BrowserLoafSource();
+
+/**
+ * Stops the long-frame observer every surface's metrics share. Called from the plugin's unload: the observer is
+ * started at the first stroke, and left running it would keep this unloaded copy alive until Obsidian restarts.
+ */
+export function stopLongFrameWatch(): void {
+	browserLoaf.stop();
+}
 
 /**
  * A stroke's long frames. The frame that spans the lift is queued only once it completes, which is after

@@ -219,6 +219,7 @@ describe("PDF highlights: one wash, the page's text stays dark", () => {
 			const s = await page.evaluate(({ b64, points }) => window.pdfHighlight.sample(b64, { x: 0, y: 0 }, points, 1), { b64: shot.b64, points });
 			console.log(`PDF_HIGHLIGHT u7-snip ${JSON.stringify(s)} origin ${shot.x0},${shot.y0} scale ${shot.scale}`);
 			expect(Math.max(...s.glyph!), `snip glyph under the highlight ${s.glyph}`).toBeLessThanOrEqual(20);
+			expect(gap(s.once!, multiplied(white)), `snip once-covered paper ${s.once}`).toBeLessThanOrEqual(3);
 			expect(gap(s.crossing!, s.once!), `snip crossing ${s.crossing} once ${s.once}`).toBeLessThanOrEqual(2);
 			expect(gap(s.crossing!, s.vonce!), `snip crossing ${s.crossing} once ${s.vonce}`).toBeLessThanOrEqual(2);
 		} finally {

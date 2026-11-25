@@ -79,7 +79,7 @@ export interface InkStroke {
  * was laid out. All lengths are world units.
  */
 export interface LineAnchor {
-	/** 1-based editor line under the stroke's bbox top when the anchor was taken. */
+	/** 1-based editor line under the stroke's anchor height (a highlighter's bbox middle, else its bbox top) when the anchor was taken. */
 	line: number;
 	/** That line's top when the anchor was taken. The stroke is shown moved by the line's top now minus this. */
 	top: number;

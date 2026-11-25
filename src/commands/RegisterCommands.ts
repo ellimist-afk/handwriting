@@ -15,6 +15,7 @@ import {
 	setRetiredCommandAction,
 } from "../CommandPaletteSplit";
 import { activeSlidesActions, slidesInkEnabled } from "../slides/SlidesInkSurface";
+import { slidesDeckHolds } from "../slides/SlidesPersistence";
 import { presentationCommands, requestSlidesAction } from "../slides/SlidesTools";
 import { getEraserRadiusPx, getInkSizeMult, getInlineEraserMode, getInlineLassoMode, getInlinePanMode, getInlineSpaceMode, getInlineTool, inkExternallyReloaded, inlineInk, refreshAllStrips, refreshPenToolsAll, setInlineEraserMode, setInlineLassoMode, setInlinePanMode, setInlineSpaceMode, setInlineTool } from "../inline/InkOverlay";
 import { INK_SIZE_STEPS, nextInkSize } from "../ink/InkSize";
@@ -191,6 +192,16 @@ interface RegisterCommandsDeps {
 						}
 						return false;
 					},
+					duplicateLocked: (pageId) => inlineInk.duplicateLockedOn(pageId),
+					// An open presentation keeps the Slides page it holds and writes it back.
+					deckHolds: (pageId) => slidesDeckHolds(pageId),
+					// A PDF the store holds whose ink is not ready: its read in flight, or its file locked as damaged or
+					// newer. Its ink drawn since is in memory only, and its file is kept as it is. Under the damaged lock
+					// alone, a page that holds every stroke the store does, with nothing owed to the file, loses nothing.
+					pdfInkHeld: (pageId, page) =>
+						this.pdfStore.generation(pageId) !== null &&
+						!this.pdfStore.inkReady(pageId) &&
+						!this.pdfStore.damagedLockLosesNothing(pageId, page),
 				});
 				// Every folder a page can be served from: a fork found at load
 				// is preserved beside the served copy, which need not be in the

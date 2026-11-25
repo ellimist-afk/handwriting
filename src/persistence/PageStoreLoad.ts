@@ -56,6 +56,57 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 	return live.data.strokes.every((s) => ids.has(s.id));
 }
 
+/**
+ * Is a background flush's carrier the successor of the live bytes beside it (`liveText`, null when there is no live
+ * file)? Load promotes it when it is, and remove files its page as the newest plain generation, so a note deleted
+ * without being opened restores the ink an open would have shown.
+ *
+ * With no live file, yes, as an interrupted save is. Built on exactly the live bytes, yes. Built on other bytes, it is
+ * still the successor when a save that was already in flight when the carrier was written landed first and moved the
+ * live file on, and the carrier names those bytes' exact stamp among its saves in flight: its page was composed after
+ * that save left the queue, so it is the newer page whatever it erased, split or undid. A carrier that cannot say
+ * which bytes its saves wrote (an older build's carrier, or a save whose bytes were not known yet) is the successor
+ * only when it also holds every stroke the live page has. Stroke ids alone also match bytes another device wrote after
+ * moving a stroke, and promoting those would move the stroke back. Anything else, no.
+ */
+export function carrierSucceeds(
+	carrier: { page: PageData; base: string | null; inFlight: Array<string | null> | null },
+	liveText: string | null,
+	pageId: string
+): boolean {
+	if (liveText === null) return true;
+	const liveStamp = contentStamp(liveText);
+	if (carrier.base === liveStamp) return true;
+	if (carrier.inFlight !== null && carrier.inFlight.includes(liveStamp)) return true;
+	const cannotSay = carrier.inFlight === null || carrier.inFlight.includes(null);
+	return cannotSay && holdsEveryStroke(carrier.page, liveText, pageId);
+}
+
+/**
+ * A second look at a file `exists` answered false for. Obsidian's `exists` answers false on any error (a denied
+ * access, a busy disk), so false alone does not say the file is missing, and a load that took it as missing wrote a
+ * carrier or an older trash generation over the live ink. `stat` is asked once: a file it meets is "present" (one the
+ * process may open but not list), a not-found or a null answer is "absent", and any other error is "unseen": the file
+ * may be there, and the caller must not act as if it were not.
+ *
+ * A not-found error with no code counts as absent: the mobile host sets ENOENT only when its message says "does not
+ * exist", and a page with no ink file must still open blank there. The gap this leaves: a file that IS there, whose
+ * look fails with no code, cannot be told from a missing one and is still taken as missing.
+ */
+async function lookPastExists(
+	adapter: PageStore["app"]["vault"]["adapter"],
+	path: string
+): Promise<{ kind: "present"; mtime: number } | { kind: "absent" } | { kind: "unseen"; err: unknown }> {
+	try {
+		const st = await adapter.stat(path);
+		return st ? { kind: "present", mtime: st.mtime } : { kind: "absent" };
+	} catch (err) {
+		const code = (err as { code?: unknown } | null)?.code;
+		if (typeof code !== "string" || code === "ENOENT") return { kind: "absent" };
+		return { kind: "unseen", err };
+	}
+}
+
 
 	/**
 	 * `restore: false` skips the trash lookup and answers null as if the trash
@@ -69,6 +120,9 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 	 * closed, and the poll keeps watching the page (see observeUnreadable).
 	 */
 	async function load(this: PageStore, pageId: string, options: { restore?: boolean } = {}): Promise<LoadResult | null> {
+		// The page is opened again: a deleted note's move of its live file still to be tried is not this page's now, and
+		// the file stays where the load finds it.
+		this.dropLiveMoveRetry(pageId);
 		// A page with a write queued is live in memory and disk is behind it.
 		// Reading disk here would move the baseline to whatever revision is
 		// there now (another device's, a rename's) and the queued write would
@@ -106,7 +160,12 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 			// try because it builds paths, and path() asserts.
 			const final = await this.resolvePath(pageId);
 			readFrom = final;
-			if (await adapter.exists(final)) {
+			// `exists` answers false on any error, so a false is looked at once more (lookPastExists). A live file
+			// that could not be looked at ends this load as a read that threw (the catch below), not as a page with
+			// no ink file, whose carrier or trash generation would then be written over it.
+			const look = (await adapter.exists(final)) ? null : await lookPastExists(adapter, final);
+			if (look?.kind === "unseen") throw look.err;
+			if (look === null || look.kind === "present") {
 				// Stat BEFORE read, deliberately: if an external writer lands
 				// between the two, the recorded mtime is then OLDER than the
 				// file, and the next write sees a mismatch and preserves the
@@ -114,7 +173,7 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 				// stat) records THEIR mtime against OUR content, and the guard
 				// would then miss the revision and clobber it. A false
 				// conflict is recoverable; a missed one is not.
-				const st = await adapter.stat(final).catch(() => null);
+				const st = look === null ? await adapter.stat(final).catch(() => null) : { mtime: look.mtime };
 				const text = await adapter.read(final);
 				const result = parsePage(text, pageId);
 				if (!result.damaged) {
@@ -345,7 +404,15 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 			try {
 				files = (await list(this.trashDirIn(home))).files;
 			} catch {
-				continue; // no trash there yet, or it cannot be enumerated
+				// Listed once more first: the desktop adapter stats each entry with no catch, so one file gone
+				// between its read and its stat (a sync tool's temporary file) rejects the whole listing once,
+				// and the note opened blank with its ink in the trash. A second rejection is no trash there
+				// yet, or one that cannot be enumerated: skipped, as before.
+				try {
+					files = (await list(this.trashDirIn(home))).files;
+				} catch {
+					continue;
+				}
 			}
 			for (const f of files) {
 				const name = f.split("/").pop() ?? "";
@@ -368,28 +435,56 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 		// first - the same tie-break every other lookup here makes.
 		plain.sort((a, b) => b.gen - a.gen);
 		external.sort((a, b) => b.gen - a.gen);
-		return (await this.restoreFirstOf(pageId, plain)) ?? (await this.restoreFirstOf(pageId, external));
+		// One list, plain first: an `-external` copy is still tried only when no
+		// plain generation restores, and one tried after a plain one failed is
+		// looked past like any older generation (restoreFirstOf).
+		return await this.restoreFirstOf(pageId, [...plain, ...external]);
 	}
 
 	/**
 	 * The first candidate, in the order given, that parses undamaged with this
 	 * page id is renamed back onto the live path in its own folder. Null when
 	 * none does.
+	 *
+	 * The FIRST candidate, the newest (plain, or with no plain one the newest
+	 * `-external` copy), is read a second time, at once, when its read throws
+	 * or its bytes do not parse whole. Passing over it on one failed
+	 * look moved the next older generation back instead, and that became the
+	 * page: every later load finds the live file and never looks in the trash
+	 * again, so the newer strokes stayed there. A second failure ends as before
+	 * (the next candidate is tried), so a file held open past the second read,
+	 * or bytes that stay cut short or carry a newer build's strokes, still lose
+	 * to an older generation; the newest is left in the trash untouched. Older
+	 * candidates are read once, as before.
+	 *
+	 * Before any LATER candidate is moved back, the live paths are looked at
+	 * once more. A newer one that failed may have failed because it is no
+	 * longer in the trash: another device restored the note, sync took the
+	 * generation out and is writing the live file this older one would be
+	 * renamed onto, over the newest ink where the host allows it. A live file
+	 * that has landed is loaded as any live page is, and every generation
+	 * stays in the trash.
 	 */
 	async function restoreFirstOf(this: PageStore,
 		pageId: string,
 		candidates: Array<{ file: string; home: string }>,
 	): Promise<ParseResult | null> {
 		const adapter = this.app.vault.adapter;
-		for (const { file, home } of candidates) {
-			let text: string;
-			try {
-				text = await adapter.read(file);
-			} catch {
-				continue;
+		for (const [index, { file, home }] of candidates.entries()) {
+			let text: string | null = null;
+			let parsed: ParseResult | null = null;
+			for (let attempt = index === 0 ? 2 : 1; attempt > 0; attempt--) {
+				try {
+					text = await adapter.read(file);
+				} catch {
+					text = null;
+					continue;
+				}
+				parsed = parsePage(text, pageId);
+				if (!parsed.damaged) break;
 			}
-			const parsed = parsePage(text, pageId);
-			if (parsed.damaged || parsed.data.pageId !== pageId) continue;
+			if (text === null || parsed === null || parsed.damaged || parsed.data.pageId !== pageId) continue;
+			if (index > 0 && (await this.findSidecar(pageId)).found) return await this.loadFromDisk(pageId, { restore: false });
 			const final = this.pathIn(home, pageId);
 			try {
 				await ensureFolder(adapter, home);
@@ -572,14 +667,18 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 	 * `<name>.flush-conflict-<mtime>.json` and the live file stands. With no
 	 * live file (`liveStamp` null) the carrier is promoted, as an interrupted
 	 * save is. A carrier built on other bytes is promoted too when a save in
-	 * flight when it was written landed first: it holds every stroke of the
-	 * live page AND names the live bytes among its saves in flight, or cannot
-	 * say (an older build's carrier, or a save whose bytes were not known
-	 * yet). Stroke ids alone cannot tell that save from another device's edit
-	 * that moved a stroke. Nothing is deleted except the carrier itself, and only
+	 * flight when it was written landed first and the carrier names the live
+	 * bytes' exact stamp among its saves in flight, whatever strokes it
+	 * erased. One that cannot say (an older build's carrier, or a save whose
+	 * bytes were not known yet) must also hold every stroke of the live page;
+	 * stroke ids alone cannot tell that save from another device's edit that
+	 * moved a stroke. Nothing is deleted except the carrier itself, and only
 	 * once its page is written elsewhere. Null when there is no usable
 	 * carrier, when either file changed under us, or when the carrier was
-	 * kept aside (announced through `onFlushKeptAside`).
+	 * kept aside (announced through `onFlushKeptAside`). A live file `exists`
+	 * misses is looked past (lookPastExists); with `liveStamp` null, one that
+	 * could not be looked at rejects with the look's error, the carrier left
+	 * where it is, so the load ends as a read that threw.
 	 */
 	async function recoverFlushCarrier(this: PageStore,
 		pageId: string,
@@ -593,30 +692,32 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 		type Outcome =
 			| { kind: "promoted"; keptAs: string | null; text: string }
 			| { kind: "aside"; keptAs: string }
-			| { kind: "none" };
+			| { kind: "none" }
+			| { kind: "unseen"; err: unknown };
 		const run = async (): Promise<Outcome> => {
 			if (!(await adapter.exists(carrier))) return { kind: "none" };
 			const carrierText = await adapter.read(carrier);
 			const parsed = this.parseCarrier(carrierText, pageId);
 			if (parsed === null) return { kind: "none" };
-			const liveText = (await adapter.exists(final)) ? await adapter.read(final) : null;
+			// The live file is looked at again here, after the queue: one can have landed since the load's look. A
+			// false from `exists` is looked past as there. One that could not be looked at is not taken as missing:
+			// with live bytes in hand the stamps then differ and nothing moves; with none, the load ends as a read
+			// that threw.
+			let liveText: string | null = null;
+			if (await adapter.exists(final)) {
+				liveText = await adapter.read(final);
+			} else {
+				const look = await lookPastExists(adapter, final);
+				if (look.kind === "present") liveText = await adapter.read(final);
+				else if (look.kind === "unseen" && liveStamp === null) return { kind: "unseen", err: look.err };
+			}
 			const liveNow = liveText === null ? null : contentStamp(liveText);
 			if (liveNow !== liveStamp) return { kind: "none" };
 			const pageText = serializePage(parsed.page);
-			// Built on other bytes, it is still the successor when a save that was
-			// already in flight when the carrier was written landed first and moved
-			// the live file on: it holds every stroke the live page has, and it
-			// names the live bytes among its saves in flight or cannot say. Stroke
-			// ids alone also match bytes another device wrote after moving a stroke,
-			// and promoting those would move the stroke back. Anything else stays
+			// Not the live bytes' successor (carrierSucceeds, which `liveText`
+			// feeds: the bytes `liveStamp` names, checked just above): it stays
 			// aside, and is named to the user.
-			const accounted =
-				parsed.inFlight === null || parsed.inFlight.includes(null) || parsed.inFlight.includes(liveStamp);
-			if (
-				liveStamp !== null &&
-				parsed.base !== liveStamp &&
-				!(accounted && holdsEveryStroke(parsed.page, liveText, pageId))
-			) {
+			if (!carrierSucceeds(parsed, liveText, pageId)) {
 				const mtime = (await adapter.stat(carrier).catch(() => null))?.mtime ?? 0;
 				const aside = await this.freeKeptPath(final, "flush-conflict", mtime);
 				await adapter.write(aside, pageText);
@@ -645,6 +746,9 @@ function holdsEveryStroke(page: PageData, liveText: string | null, pageId: strin
 			console.error("[handwriting] background flush recovery failed", pageId, err);
 			return null;
 		}
+		// Only a load with no live bytes in hand (`liveStamp` null) gets this, inside its own try: it ends as a read
+		// that threw, and the carrier stays.
+		if (outcome.kind === "unseen") throw outcome.err;
 		if (outcome.kind === "aside") this.onFlushKeptAside?.(pageId, outcome.keptAs);
 		if (outcome.kind !== "promoted") return null;
 		if (outcome.keptAs !== null) this.onFlushPromoted?.(pageId, outcome.keptAs);

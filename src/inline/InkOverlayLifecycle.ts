@@ -17,6 +17,8 @@ import { clipboardSize } from "./InkClipboard";
 import { getPenToolsMode, penSeenThisSession, penToolsVisible } from "./PenToolsMode";
 import { deviceHasTouch } from "./DeviceInput";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
+import { traceCameraRestore, traceNoteOpen, type CameraRestoreOutcome } from "../diag/NoteTraceRows";
+import { noteHandInput, scrollJumpCheck } from "../diag/ScrollJumpTrace";
 import { routineNoticesVisible } from "../diag/RoutineNotices";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
 import { colorsFor, getInkColorHex } from "../ink/InkColor";
@@ -33,7 +35,7 @@ import { onInkChanged } from "./InkEvents";
 import { discardUndoTrace } from "../diag/UndoHistoryTrace";
 import { MIN_PINCH_SCALE } from "./PinchScale";
 import { canvasForNote, onCanvasOverrideChanged } from "./CanvasNoteOverride";
-import { visualToNote } from "./ZoomScale";
+import { fontZoomFactor, visualToNote } from "./ZoomScale";
 import { InlinePenRouter, bandEraserIntent } from "./InlinePenRouter";
 import { mouseInkEnabled, toolPickedHere } from "./MouseInk";
 import { penInkEnabled } from "./PenInk";
@@ -56,7 +58,24 @@ declare module "./InkOverlay" {
 		prepareFingerInk(): void;
 		ensurePenToolsInner(): void;
 		releaseBackings(): void;
+		watchBackingRestore(): void;
+		askRestorePass(): void;
+		unwatchBackingRestore(): void;
+		dropRestoredPictures(): void;
+		/** A canvas the overlay paints was given back blank (`contextrestored`): the next resize pass runs its arm at the same size. */
+		backingRestored?: boolean;
+		/** The `contextrestored` handler and the canvases it is on, while mounted. */
+		backingRestoreWatch?: { fn: () => void; canvases: HTMLCanvasElement[] } | null;
+		/** The restore's own frame while one is owed (askRestorePass), else 0. */
+		backingRestoreRaf?: number;
 		unmount(): void;
+		/**
+		 * The note was moved to another window (the host's window-move call, watched from mount to unmount): the
+		 * router's window listeners follow it and the hover dot goes to that window's body.
+		 */
+		windowMoved(win: Window): void;
+		/** Ends the watch for a window move, while mounted on an editor whose scroller has the host's call. */
+		windowMoveWatchOff?: (() => void) | null;
 		destroy(): void;
 		saveNoteCamera(): void;
 		noteCameraMoved(): void;
@@ -65,7 +84,7 @@ declare module "./InkOverlay" {
 		/** Date.now() at the camera's last move. */
 		noteCameraMovedAt?: number;
 		armNoteCameraRestore(path: string | null): void;
-		restoreNoteCamera(path: string): void;
+		restoreNoteCamera(path: string): CameraRestoreOutcome;
 	}
 }
 
@@ -229,6 +248,13 @@ declare module "./InkOverlay" {
 		this.penCursorEl.setCssStyles({ position: "fixed", left: "0", top: "0", zIndex: "10000", display: "block", opacity: "0" });
 		this.penCursorPinned = true;
 		this.penCursorEl.setAttribute("aria-hidden", "true");
+		// Move to new window, or a tab dragged to or from a pop-out, keeps this editor and moves its elements into the
+		// other window's document. The host then calls back with the new window; the dot and the router's window
+		// listeners follow (windowMoved). An element without the call (an older host, a test rig) is not watched.
+		const scrollDOM = this.view.scrollDOM;
+		if ("onWindowMigrated" in scrollDOM) {
+			this.windowMoveWatchOff = scrollDOM.onWindowMigrated((win) => this.windowMoved(win));
+		}
 		this.eraserEl = container.createDiv({ cls: "handwriting-eraser-cursor" });
 		this.eraserEl.setAttribute("aria-hidden", "true");
 
@@ -274,20 +300,49 @@ declare module "./InkOverlay" {
 					this.showPenCursor(s, pt);
 					this.attachHover(s, pt);
 				},
-				onPenLeave: () => this.hidePenCursor(),
+				// A pen's leave hides the RING ALONE (GitHub issue 53): the hover
+				// class stays on the scroller, so a pen that leaves and comes back
+				// costs the note no restyle. A mouse that leaves keeps it too, and
+				// that is safe: it is outside the pane, and a pointer coming back
+				// in gets a ring or its pointer by its first row
+				// (`onForeignPointer` below, the refusals in `showPenCursor`).
+				onPenLeave: () => this.hidePenRing(),
+				// A pointer over the note that this surface paints no ring for:
+				// a plain mouse moving (not the move a pen sends for a mouse), a
+				// pen with the tool off. Ring and class both go, so the pointer
+				// is not left under `cursor: none` - the full teardown a pen's
+				// leave was before.
+				onForeignPointer: () => this.hidePenCursor(),
 				// A finger just landed with nothing else on the glass, so a
-				// mouse's hover ring is the only thing that can be lit - and
-				// it is not wanted while the hand writes (alan, 1.4.12: "hide
-				// the mouse reticle when a finger or pen is active"). The
-				// router asks only on that edge, so this cannot blink a pen's
-				// ring; `InlinePenRouter.onHandOnGlass` carries the whole rule.
+				// mouse's hover ring is the one it means - and it is not wanted
+				// while the hand writes (alan, 1.4.12: "hide the mouse reticle
+				// when a finger or pen is active"). The router asks only on
+				// that edge; `InlinePenRouter.onHandOnGlass` carries the whole
+				// rule.
 				//
-				// `hidePenCursor` and not a narrower hide, deliberately: it is
-				// the one teardown every abandon path already goes through,
-				// and it takes `PEN_HOVER_CLASS`'s `cursor: none` off with the
-				// ring, so the reader is left with the native cursor rather
-				// than with no pointer at all.
-				onHandOnGlass: () => this.hidePenCursor(),
+				// A MOUSE'S RING goes with the class: `hidePenCursor` takes
+				// `PEN_HOVER_CLASS`'s `cursor: none` off with the ring, so the
+				// reader is left with the native cursor rather than with no
+				// pointer at all. Any other ring - a pen's, or none lit - goes
+				// alone (GitHub issue 53): the class stays, no restyle of the
+				// note, and a mouse that then moves under the hand is refused
+				// and drops the class itself (`showPenCursor`).
+				//
+				// NOT WHILE THIS PANE HOLDS A CONTACT (GitHub issue 53). The
+				// edge is fanned out to every pane, so a palm resting in the
+				// next pane reached here in the middle of this pane's stroke,
+				// and taking PEN_HOVER_CLASS off restyled the whole note
+				// mid-stroke: on a note with equations, a hitch. A pane with
+				// its own contact has no mouse ring up to stand down (pen-down
+				// concealed the dot; a lasso or space drag's ring is the pen's
+				// own), and its watchdog hides a pen gone from range after the
+				// lift. This pane's contact, not any pane's: a parked mouse's
+				// ring in another pane is still stood down by a palm there.
+				onHandOnGlass: () => {
+					if (this.router?.isStroking) return;
+					if (this.mouseRingLit()) this.hidePenCursor();
+					else this.hidePenRing();
+				},
 				onPinch: (phase, ratio, centroid) => this.pinch(phase, ratio, centroid),
 				// THE GIVE BELONGS TO INFINITE CANVAS (Alan: the bounce shows you cannot
 				// go further, and the lack of it shows the direction is infinite). With the canvas
@@ -372,6 +427,7 @@ declare module "./InkOverlay" {
 		);
 
 		this.router.setCanvasMomentumDisabled(this.canvasMode);
+		this.watchBackingRestore();
 		this.resizeObserver = new ResizeObserver(() => this.handleResize());
 		this.resizeObserver.observe(host);
 		this.contentResizeObserver = new ResizeObserver((entries) => this.onContentResize(entries?.at(-1)?.contentRect.width));
@@ -456,6 +512,7 @@ declare module "./InkOverlay" {
 			if (!during) this.router?.refreshRect();
 			if (diagnosticsEnabled()) {
 				scrollProbeScroll(scrollLeft, scrollTop, during);
+				scrollJumpCheck(scroller, scrollTop, during);
 			}
 			// A live pinch writes the scroll itself, every frame, and any
 			// camera motion makes repaint() re-raster every visible stroke.
@@ -500,6 +557,7 @@ declare module "./InkOverlay" {
 			// scroll can leave the canvas's left or top edge inside the pane (read on the device, 1.4.20).
 			this.retirePanSettle("wheel");
 			if (!diagnosticsEnabled()) return;
+			noteHandInput(this.view.scrollDOM, "wheel");
 			scrollProbeWheel(
 				e,
 				this.view.scrollDOM.scrollLeft,
@@ -555,6 +613,7 @@ declare module "./InkOverlay" {
 		this.lastPath = this.filePath();
 		this.lastFile = this.currentFile();
 		this.armNoteCameraRestore(this.lastPath);
+		if (diagnosticsEnabled()) traceNoteOpen("mount", this.noteCameraRestore !== null, this.view.hasFocus);
 		this.updateHandwritingPageClass();
 		this.loadInk(this.lastPath);
 		// The layout the line anchors are taken and honoured under, read in the first measure.
@@ -577,11 +636,14 @@ declare module "./InkOverlay" {
 				// A read that finishes after unmount must not revive the page-class
 				// observer on a torn-down editor (audit 110).
 				if (this.filePath() === path && !this.retiring && this.container) {
+					// The arrived ink's first paint is the queued one below, after the editor's measure (scheduleRepaint): a
+					// resize the font reference or the column hold makes here paints nothing before it.
+					if (changed) this.inkPaintAwaitsMeasure = true;
 					this.adoptStoredFontRef(path);
 					// Before the repaint below: the ink is first painted under its own column width.
 					this.applyColumnHold();
 					// A restore the measure could not commit gets one more try, with the font reference and ink in.
-					this.restoreNoteCamera(path);
+					traceCameraRestore("ink read", this.restoreNoteCamera(path));
 					this.mobileTools?.refresh();
 					this.noteZoomControls?.refresh();
 					this.updateHandwritingPageClass();
@@ -623,6 +685,11 @@ declare module "./InkOverlay" {
 		if (this.container) this.handleResize();
 	}
 
+	/** A size or a ratio of sizes that can be divided by and scaled with: finite and above 0. */
+	function usableSize(n: number): boolean {
+		return Number.isFinite(n) && n > 0;
+	}
+
 	/**
 	 * Run an adoption held while a contact owned the frame, now that it is
 	 * over. Returns the factor that takes ink drawn in the frame before into
@@ -632,8 +699,21 @@ declare module "./InkOverlay" {
 		const path = this.heldFontRef;
 		this.heldFontRef = null;
 		// `!path`, not `=== null`: a unit rig built with Object.create never runs the initialiser.
-		// An overlay on its way out (unmount) drops the hold and re-measures nothing.
-		if (!path || this.retiring || path !== this.filePath()) return 1;
+		if (!path || path !== this.filePath()) return 1;
+		// An overlay on its way out (unmount) re-measures nothing: no DOM read, no resize, nothing scheduled. The stroke it
+		// commits still goes into the note's stored frame, as a lift puts it, from numbers the overlay already holds. The
+		// font zoom is frozen through a contact, so the font zoom times the reference is the size the stroke was drawn at.
+		// The factor and the zoom of the stored frame go together: when either cannot be had, neither is written.
+		if (this.retiring) {
+			const stored = inlineInk.fontRefPx(path);
+			const before = this.refFontPx;
+			const drawnPx = this.fontZoom * before;
+			if (stored === null || !usableSize(stored) || !usableSize(before) || !usableSize(drawnPx)) return 1;
+			const k = stored / before;
+			if (!usableSize(k) || k === 1 || !usableSize(drawnPx / stored)) return 1;
+			this.fontZoom = fontZoomFactor(drawnPx, stored);
+			return k;
+		}
 		const before = this.refFontPx;
 		this.adoptStoredFontRef(path);
 		const after = this.refFontPx;
@@ -919,6 +999,88 @@ declare module "./InkOverlay" {
 		this.attachedLayer?.release();
 	}
 
+	/**
+	 * After a GPU reset on desktop and Android the browser gives each canvas back blank (`contextrestored`), its context at the
+	 * identity transform. One handler on every canvas the overlay paints: it marks the backings lost and asks one resize pass in
+	 * the next frame (several canvases given back in one task make one pass), whose arm runs at the same size, the one place the
+	 * layers get their scale (handleResize). `contextlost` gets no handler: cancelling it would stop the browser restoring.
+	 */
+	function watchBackingRestore(this: InkOverlayPlugin): void {
+		this.unwatchBackingRestore();
+		const fn = (): void => {
+			this.backingRestored = true;
+			this.askRestorePass();
+		};
+		const layer = this.attachedLayer;
+		const canvases = [
+			this.highlightCanvas,
+			this.highlightWetCanvas,
+			this.committedCanvas,
+			this.wetCanvas,
+			this.wetTileCanvas,
+			this.tailCanvas,
+			layer?.pen,
+			layer?.hl,
+		].filter((c): c is HTMLCanvasElement => !!c);
+		for (const c of canvases) c.addEventListener("contextrestored", fn);
+		this.backingRestoreWatch = { fn, canvases };
+	}
+
+	/**
+	 * The restore's own frame, one at a time. Not the resize frame (resizeOutOfUpdate): that one is dropped when the viewport
+	 * generation moves, and a pen-down, a pinch or a zoom moves it, so a pen landing in the frame after a restore left the ink
+	 * blank with nothing owed. Nor a check on the note: the blank canvases are the overlay's, so a note switch still owes the
+	 * pass. Only an overlay retiring or taken down runs none.
+	 */
+	function askRestorePass(this: InkOverlayPlugin): void {
+		if (this.backingRestoreRaf) return;
+		this.backingRestoreRaf = this.winRef.requestAnimationFrame(() => {
+			this.backingRestoreRaf = 0;
+			if (this.retiring || !this.container) return;
+			this.handleResize();
+		});
+	}
+
+	function unwatchBackingRestore(this: InkOverlayPlugin): void {
+		const watch = this.backingRestoreWatch;
+		this.backingRestoreWatch = null;
+		this.backingRestored = false;
+		if (this.backingRestoreRaf) {
+			this.winRef.cancelAnimationFrame(this.backingRestoreRaf);
+			this.backingRestoreRaf = 0;
+		}
+		if (!watch) return;
+		for (const c of watch.canvases) c.removeEventListener("contextrestored", watch.fn);
+	}
+
+	/**
+	 * A GPU reset blanks the detached canvases too, so after a restore every picture kept on one is let go, as releaseBackings
+	 * lets them go: the stand-in, the extent raster and its build, the overview and its build, and the picture an insert space or
+	 * lasso drag shows (its snapshot stays, and the next frame rasters the picture again). A zoom preview showing one of them takes
+	 * it down first. The next whole paint draws by path, and the next landing builds again.
+	 */
+	function dropRestoredPictures(this: InkOverlayPlugin): void {
+		this.dropStandIn();
+		this.dropExtentBuild();
+		const ext = this.extentRaster;
+		this.extentRaster = null;
+		if (ext) {
+			if (this.heldRaster?.src.pen === ext.pen) this.takeDownHeldRaster();
+			for (const c of [ext.pen, ext.hl]) {
+				if (!c) continue;
+				c.width = 0;
+				c.height = 0;
+			}
+		}
+		this.dropOverview();
+		const snap = this.spaceSnapshot;
+		if (snap?.canvas) {
+			snap.canvas.width = 0;
+			snap.canvas.height = 0;
+			snap.canvas = null;
+		}
+	}
+
 	function unmount(this: InkOverlayPlugin): void {
 		// Before anything below moves the camera: the zoom and scroll the note leaves with come back when it reopens.
 		this.saveNoteCamera();
@@ -935,6 +1097,8 @@ declare module "./InkOverlay" {
 		// exists: an insert space, an erase or a selection drag cut off by the close is rolled
 		// back by resetGestureState below, as a file switch rolls it back.
 		if (this.builder) this.router?.finishActiveStroke();
+		this.windowMoveWatchOff?.();
+		this.windowMoveWatchOff = null;
 		this.router?.dispose();
 		this.router = null;
 		this.resizeObserver?.disconnect();
@@ -944,6 +1108,7 @@ declare module "./InkOverlay" {
 		this.originLineObserver?.disconnect();
 		this.originLineObserver = null;
 		this.originLine = null;
+		this.unwatchBackingRestore();
 		this.attachedLayer?.release();
 		this.attachedLayer?.clearSprites();
 		if (this.scrollFn) {
@@ -1110,6 +1275,12 @@ declare module "./InkOverlay" {
 		}
 	}
 
+	/** See the declaration above. A stroke live at the move stays live: the router's blur in the new window ends it. */
+	function windowMoved(this: InkOverlayPlugin, win: Window): void {
+		this.router?.followWindow();
+		if (this.penCursorPinned && this.penCursorEl) win.document.body.appendChild(this.penCursorEl);
+	}
+
 	function destroy(this: InkOverlayPlugin): void {
 		if (!instances.delete(this)) return;
 		this.destroyed = true;
@@ -1162,7 +1333,7 @@ declare module "./InkOverlay" {
 		this.noteCameraRestore = path !== null && noteCameras.get(path) !== null ? path : null;
 		if (this.noteCameraRestore === null) return;
 		const armed = this.noteCameraRestore;
-		this.view.requestMeasure({ key: this.noteCameraMeasure, read: () => null, write: () => this.restoreNoteCamera(armed) });
+		this.view.requestMeasure({ key: this.noteCameraMeasure, read: () => null, write: () => traceCameraRestore("measure", this.restoreNoteCamera(armed)) });
 	}
 
 	/**
@@ -1173,21 +1344,23 @@ declare module "./InkOverlay" {
 	 * camera refuses (geometry not valid yet) stays armed, and the ink read's continuation tries once more. Never on
 	 * the pen path.
 	 */
-	function restoreNoteCamera(this: InkOverlayPlugin, path: string): void {
-		if (this.noteCameraRestore !== path || this.filePath() !== path || !this.container || this.retiring) return;
+	function restoreNoteCamera(this: InkOverlayPlugin, path: string): CameraRestoreOutcome {
+		if (this.noteCameraRestore !== path || this.filePath() !== path || !this.container || this.retiring) return "skipped";
 		const camera = noteCameras.get(path);
 		const scroller = this.view.scrollDOM;
 		if (!camera || this.pinchScaleNow !== 1 || scroller.scrollLeft !== 0 || scroller.scrollTop !== 0) {
 			this.noteCameraRestore = null;
-			return;
+			return !camera ? "dropped: no camera" : this.pinchScaleNow !== 1 ? "dropped: zoomed already" : "dropped: scrolled already";
 		}
 		// Canvas off is stock Obsidian, with no zoom: a camera kept at 100 percent gives its scroll back; a zoomed one,
 		// kept while the canvas was on, gives nothing, since its scroll was taken at another zoom. Never left armed.
 		if (!this.canvasMode && camera.zoom !== 1) {
 			this.noteCameraRestore = null;
-			return;
+			return "dropped: canvas off, zoomed camera";
 		}
-		if (this.commitCameraScale(camera.zoom, { left: camera.left, top: camera.top }, undefined, false, true, true)) this.noteCameraRestore = null;
+		if (!this.commitCameraScale(camera.zoom, { left: camera.left, top: camera.top }, undefined, false, true, true)) return "refused";
+		this.noteCameraRestore = null;
+		return "restored";
 	}
 
 export function installLifecycle(proto: InkOverlayPlugin): void {
@@ -1201,7 +1374,12 @@ export function installLifecycle(proto: InkOverlayPlugin): void {
 		prepareFingerInk,
 		ensurePenToolsInner,
 		releaseBackings,
+		watchBackingRestore,
+		askRestorePass,
+		unwatchBackingRestore,
+		dropRestoredPictures,
 		unmount,
+		windowMoved,
 		destroy,
 		saveNoteCamera,
 		noteCameraMoved,

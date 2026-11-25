@@ -249,8 +249,9 @@ describe("a deleted PDF's retirement while a file with the same bytes opens", ()
 		r.store.remove = (async (id: string) => {
 			removing = true;
 			await gate;
-			await remove(id);
+			const gone = await remove(id);
 			removed = true;
+			return gone;
 		}) as typeof r.store.remove;
 
 		const wired = r.plugin.pdfDeleteContext();

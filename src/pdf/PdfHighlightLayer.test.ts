@@ -789,27 +789,30 @@ describe("U6: a turned page paints the highlight canvas through the same turn ma
 	}
 });
 
-describe("control: where the reader declares dark pages, the plain wash stays", () => {
-	it("no layer; the saved highlight is filled at 0.35 on the pen canvas and the live one is dressed at 0.35 on the page", () => {
+describe("control: where the reader declares dark pages, the highlights have the layer, blending normal", () => {
+	it("the group blends normal; the saved highlight is opaque in it, nothing at 0.35 on the pen canvas, and the live one sits in the group at full opacity", () => {
 		const r = rig([penAt("a", 300, 200), highlightAt("h", 300, 200)], "lighten");
 		r.sync();
-		expect(layerOf(r.page)).toBeNull();
+		const layer = layerOf(r.page);
+		expect(layer, "no highlight group on the page").not.toBeNull();
+		expect(layer!.group.css["mixBlendMode"], "the group does not blend normal").toBe("normal");
+		expect(layer!.canvas.ctx!.paints.some((p) => p.op === "fill" && p.alpha === 1), "the highlight is not painted opaque in the group").toBe(true);
 		const fills = penCanvasOf(r).ctx!.paints.filter((p) => p.op === "fill");
-		expect(fills.some((p) => p.alpha === 0.35)).toBe(true);
-		expect(fills.some((p) => p.alpha === 1)).toBe(true);
+		expect(fills.some((p) => p.alpha === 0.35), "a highlight is at the wash on the pen canvas").toBe(false);
+		expect(fills.some((p) => p.alpha === 1), "the pen ink was not painted").toBe(true);
 		strokeDown(r, "highlighter");
 		const pair = r.priv.pair!;
-		expect(pair.wetCanvas.parentElement).toBe(r.page);
-		expect(pair.wetCanvas.css.opacity).toBe("0.35");
-		expect(pair.headCanvas.css.opacity).toBe("0.35");
+		expect(pair.wetCanvas.parentElement, "the live highlighter is not in the group").toBe(layer!.group);
+		expect(pair.wetCanvas.css.opacity, "the live highlighter is not at full opacity in the group").toBe("1");
+		expect(pair.headCanvas.css.opacity, "the live head is not at full opacity in the group").toBe("1");
 		r.priv.penUp();
 		expect(pair.wetCanvas.css.opacity).toBe("1");
-		expect(layerOf(r.page)).toBeNull();
+		expect(layerOf(r.page)?.group.css["mixBlendMode"], "the group does not blend normal after the lift").toBe("normal");
 	});
 });
 
 describe("H1: changing \"Ink color on PDFs\" repaints an open PDF at once", () => {
-	it("to \"Lighten for dark pages\": the group goes and the pen canvas holds the plain wash; back: the group returns", () => {
+	it("to \"Lighten for dark pages\": the group blends normal and the pen canvas holds no wash; back: the group keeps the stylesheet's multiply", () => {
 		const settings = { inkPdfColorMode: "darken" as PdfPageAssumption };
 		const r = rig([penAt("a", 300, 200), highlightAt("h", 300, 200)], () => settings.inkPdfColorMode);
 		r.sync();
@@ -823,15 +826,17 @@ describe("H1: changing \"Ink color on PDFs\" repaints an open PDF at once", () =
 		tab.setControlValue("inkPdfColorMode", "lighten");
 		expect(settings.inkPdfColorMode).toBe("lighten");
 		expect(r.frames(), "H1 the setting change asked the open PDF for no repaint").toBeGreaterThan(0);
-		expect(layerOf(r.page), "H1 the group stayed after the change to the plain wash").toBeNull();
+		const dark = layerOf(r.page);
+		expect(dark, "H1 the group went after the change to Lighten for dark pages").not.toBeNull();
+		expect(dark!.group.css["mixBlendMode"], "H1 the group does not blend normal after the change").toBe("normal");
 		const washed = pen.ctx!.paints.filter((p) => p.op === "fill");
-		expect(washed.some((p) => p.alpha === HIGHLIGHTER_ALPHA), "H1 the pen canvas does not hold the highlight's plain wash").toBe(true);
-		expect(washed.some((p) => p.alpha === 1), "H1 the pen ink was not painted again").toBe(true);
+		expect(washed.some((p) => p.alpha === HIGHLIGHTER_ALPHA), "H1 a highlight went onto the pen canvas at the wash").toBe(false);
 		pen.ctx!.paints = [];
 		tab.setControlValue("inkPdfColorMode", "darken");
 		expect(r.frames(), "H1 changing back asked for no repaint").toBeGreaterThan(0);
 		const back = layerOf(r.page);
 		expect(back, "H1 the group did not come back").not.toBeNull();
+		expect(back!.group.css["mixBlendMode"] ?? "", "H1 the group does not keep the stylesheet's multiply after changing back").toBe("");
 		expect(back!.canvas.ctx!.paints.some((p) => p.op === "fill" && p.alpha === 1), "H1 the highlight is not painted in the group").toBe(true);
 		expect(pen.ctx!.paints.filter((p) => p.op === "fill").every((p) => p.alpha === 1), "H1 the plain wash stayed on the pen canvas").toBe(true);
 	});

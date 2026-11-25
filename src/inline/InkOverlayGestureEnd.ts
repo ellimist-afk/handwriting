@@ -5,10 +5,12 @@
  */
 import { stripPenUp } from "./StripPenChrome";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
+import type { InkStroke } from "../ink/Stroke";
 import { eraseRemovalIndices } from "./InkHistory";
 import { installMethods } from "./InstallMethods";
 import { surfaceExtents } from "./SurfaceExtent";
-import { inlineInk, metrics, type InkOverlayPlugin } from "./InkOverlay";
+import { cutSource } from "./InlineInkStoreCommit";
+import { inlineInk, instances, metrics, type InkOverlayPlugin } from "./InkOverlay";
 
 declare module "./InkOverlay" {
 	interface InkOverlayPlugin {
@@ -136,6 +138,18 @@ declare module "./InkOverlay" {
 	 * change stayed on screen, reached the disk with the next save, and no undo
 	 * could take it back. Put the note back as the gesture found it, as
 	 * rollbackSpaceMove does for insert space, in the note the gesture began in.
+	 *
+	 * Only what nobody else took since the pen-down. Another pane on the note
+	 * can take this erase's pieces off it while the pen is down (a lasso
+	 * delete or a cut), and a read of the file can too. A stroke with any of
+	 * its pieces gone stays as the rest of its pieces: putting it back whole
+	 * would bring back ink somebody deleted. A read of the file that puts a
+	 * stroke back whole drops the pieces this erase cut from it (the file never
+	 * held them), so that stroke counts as one with pieces gone and stays; one
+	 * put back with nothing cut from it is skipped by the store, which holds
+	 * its id already. Which piece came from which stroke is the store's record
+	 * of the cut (cutSource). Delete all ink ends this gesture before it wipes
+	 * (endLiveGesturesOn), so a wipe never meets this teardown.
 	 */
 	function rollbackLiveGesture(this: InkOverlayPlugin): void {
 		const eraseIdentity = this.eraseHistoryIdentity, dragIdentity = this.dragHistoryIdentity;
@@ -143,13 +157,24 @@ declare module "./InkOverlay" {
 		this.dragHistoryIdentity = null;
 		const erasePath = eraseIdentity && this.erased.length ? inlineInk.pathForHistoryIdentity(eraseIdentity) : null;
 		if (erasePath) {
-			// The pieces this gesture cut come out; the originals go back where
-			// the pre-gesture list had them.
-			inlineInk.takeLive(erasePath, [...this.erasePieces]);
+			const rec = inlineInk.record(erasePath);
+			const on = new Set(inlineInk.strokes(erasePath).map((s) => s.id));
+			const pieces = [...this.erasePieces];
+			const back: Array<{ stroke: InkStroke; index: number }> = [];
+			const out: string[] = [];
+			for (const e of this.erased) {
+				const own = pieces.filter((id) => cutSource(rec, id) === e.stroke.id);
+				if (own.some((id) => !on.has(id))) continue;
+				out.push(...own);
+				back.push(e);
+			}
+			// The pieces of each stroke going back come out; those strokes go back
+			// where the pre-gesture list had them.
+			inlineInk.takeLive(erasePath, out);
 			inlineInk.applyAddLive(
 				erasePath,
-				this.erased.map((e) => e.stroke),
-				eraseRemovalIndices(this.eraseFrom, this.erased)
+				back.map((e) => e.stroke),
+				eraseRemovalIndices(this.eraseFrom, back)
 			);
 			this.restoredByRollback(erasePath);
 		}
@@ -279,9 +304,11 @@ declare module "./InkOverlay" {
 	 */
 	function clearAllInk(this: InkOverlayPlugin, path: string): number | null {
 		if (this.filePath() !== path) return null;
-		// An erase, selection drag or insert-space drag in flight records its step at the lift, after this one, and
-		// its teardown would put erased ink back: end it first, put back as undo does, so the wipe is the last step.
+		// An erase, selection drag or insert-space drag in flight, in this pane or another on the note, records its
+		// step at the lift, after this one, and its teardown would put erased ink back: end each first, put back as
+		// undo does, so the wipe is the last step.
 		this.endLiveGestureForHistory();
+		endLiveGesturesOn(path);
 		const strokes = [...inlineInk.strokes(path)];
 		if (strokes.length === 0) return 0;
 		const indices = strokes.map((_, i) => i);
@@ -297,6 +324,16 @@ declare module "./InkOverlay" {
 		this.repaintPath(path);
 		return strokes.length;
 	}
+
+/**
+ * Every pane on the note ends its erase, selection drag or insert-space drag in flight, put back as undo does
+ * (endLiveGestureForHistory). Delete all ink runs it before it reads what to keep a copy of, and again before it
+ * wipes: a gesture held in another pane would otherwise put wiped ink back at its teardown. An ink stroke in flight
+ * and a pan are left as they are.
+ */
+export function endLiveGesturesOn(path: string): void {
+	for (const p of instances) if (p.filePath() === path) p.endLiveGestureForHistory();
+}
 
 export function installGestureEnd(proto: InkOverlayPlugin): void {
 	installMethods(proto, {

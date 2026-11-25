@@ -32,7 +32,8 @@ import { setPenToolsMode, resetPenToolsForTest } from "../inline/PenToolsMode";
 import { setEraserWholeStrokes } from "../inline/InkOverlayToolState";
 import { type InkPoint, type InkStroke, computeBBox } from "../ink/Stroke";
 import { emptyPage, parsePage, serializePage } from "../model/PageData";
-import { forkHostFor, listForks, refreshForks, resetForks } from "../persistence/ForkResolution";
+import { applyForkDecision, forkHostFor, listForks, refreshForks, resetForks } from "../persistence/ForkResolution";
+import * as slidesPersistence from "./SlidesPersistence";
 
 // Every notice the production Slides host gives (it calls blockNotice).
 const noticeLog = vi.hoisted(() => [] as string[]);
@@ -1041,5 +1042,219 @@ describe("a note's edited id is followed by its Slides ink", () => {
 		expect(snapshotIds(deck), "the deck's snapshot holds the cut stroke whole").toEqual(want);
 		await v.closeAndFlush();
 		expect(onDisk(v.adapter, slidesSidecarId(EDITED))?.sort() ?? [], "the cut stroke was saved whole under the new id").toEqual(want);
+	});
+});
+
+// ---- fix ink de-sync on a page an open presentation holds ----
+
+describe("fix ink de-sync with the presentation open", () => {
+	const OWN = "own-deck-id";
+
+	/** The ink folder's listing, which FakeAdapter does not give. */
+	function listing(fake: FakeAdapter): FakeAdapter {
+		return Object.assign(Object.create(fake) as FakeAdapter, {
+			async list(dir: string): Promise<{ files: string[]; folders: string[] }> {
+				const prefix = dir.endsWith("/") ? dir : dir + "/";
+				return { files: [...fake.files.keys()].filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes("/")), folders: [] };
+			},
+		});
+	}
+
+	/** The Slides surface's answer to "does an open presentation hold this page?", which RegisterCommands.ts passes; none before it is given. */
+	const deckHolds = (slidesPersistence as unknown as { slidesDeckHolds?: (pageId: string) => boolean }).slidesDeckHolds;
+
+	/** The fork host as RegisterCommands.ts builds it (ForkDuplicateLocked.test.ts runs that wiring itself); no PDF leg. */
+	function hostFor(v: ReturnType<typeof vault>) {
+		return forkHostFor({
+			adapter: listing(v.adapter),
+			store: v.store,
+			restoreOpen: async (pageId: string, data: never) => (await inlineInk.restoreRevision(pageId, data)) !== null,
+			duplicateLocked: (pageId: string) => inlineInk.duplicateLockedOn(pageId),
+			...(deckHolds ? { deckHolds: (pageId: string) => deckHolds(pageId) } : {}),
+		} as never);
+	}
+
+	/** One note under its own id with inline ink and Slides ink holding "drawn-here", its presentation open. */
+	async function openDeck() {
+		const v = vault({ [ORIG]: OWN });
+		v.seedSlides(OWN, "drawn-here");
+		giveInlineInk(v, OWN);
+		v.plugin.buildPageIdIndex();
+		await inlineInk.ensureLoaded(ORIG);
+		await drainMicrotasks();
+		const { deck, show } = await v.present(ORIG);
+		expect(deckModel(deck).map((s) => s.id), "precondition: the deck shows the saved Slides ink").toEqual(["drawn-here"]);
+		return { v, deck, show, host: hostFor(v) };
+	}
+
+	/** The save guard's kept copy of the other device's Slides page, holding "t-other", listed by fix ink de-sync. */
+	async function keptSlidesCopy(v: ReturnType<typeof vault>, host: ReturnType<typeof hostFor>) {
+		const sid = slidesSidecarId(OWN);
+		const keptPath = sidecarPath(`${sid}.conflict-1757700000000`);
+		const theirs = serializePage({
+			...emptyPage(sid), surface: "slides", coordSpace: "slide-logical", deck: { width: 960, height: 700 },
+			slides: sectionHashes(DECK_SOURCE).map((hash, index) => ({ index, hash })),
+			strokes: [stroke("t-other", 100, 100, pageOfSlide(0))],
+		});
+		v.adapter.externalWrite(keptPath, theirs);
+		resetForks();
+		await refreshForks(host, ".handwriting");
+		const rec = listForks().find((f) => f.pageId === sid);
+		expect(rec, "precondition: fix ink de-sync lists the kept copy").toBeDefined();
+		expect(rec!.kept, "precondition: the listed fork is the save guard's kept copy").toBeTruthy();
+		return { sid, keptPath, theirs, rec: rec! };
+	}
+
+	afterEach(() => resetForks());
+
+	it("take the other on the deck's kept copy: refused, nothing copied or written, the deck's next save lands; with the deck closed the same choice applies", async () => {
+		const { v, deck, show, host } = await openDeck();
+		const { sid, keptPath, theirs, rec } = await keptSlidesCopy(v, host);
+		const live = v.adapter.files.get(sidecarPath(sid));
+		const files = [...v.adapter.files.keys()].sort();
+
+		const refused = await applyForkDecision(host, rec, "take-theirs");
+		await drainMicrotasks();
+		expect(refused, "the choice applied while the open deck holds the page it would replace").toMatchObject({ kind: "refused", wrote: false, stillListed: true });
+		expect(v.adapter.files.get(sidecarPath(sid)), "the live Slides file was written").toBe(live);
+		expect(v.adapter.files.get(keptPath), "the kept copy was changed or moved").toBe(theirs);
+		expect([...v.adapter.files.keys()].sort(), "a file was copied, renamed or removed").toEqual(files);
+		expect(listForks().some((f) => f.pageId === sid), "the fork left the list").toBe(true);
+
+		show.draw(300, 300);
+		const drawn = deckModel(deck).find((s) => s.id !== "drawn-here");
+		expect(drawn, "precondition: the new stroke is on the deck").toBeDefined();
+		for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(2_000);
+		await v.store.flush();
+		expect(onDisk(v.adapter, sid), "the deck's next save did not land").toEqual(["drawn-here", drawn!.id]);
+
+		await v.closeAndFlush();
+		const applied = await applyForkDecision(host, rec, "take-theirs");
+		await drainMicrotasks();
+		expect(applied, "the same choice did not apply once the deck was closed").toMatchObject({ kind: "applied", wrote: true, stillListed: false });
+		expect(onDisk(v.adapter, sid), "the live Slides file does not hold the chosen side").toEqual(["t-other"]);
+	});
+
+	it("take the other with no deck open, and the presentation opens while the current page is copied aside: refused with the file left to the deck, or the file keeps the chosen side after the deck draws", async () => {
+		const v = vault({ [ORIG]: OWN });
+		v.seedSlides(OWN, "drawn-here");
+		giveInlineInk(v, OWN);
+		v.plugin.buildPageIdIndex();
+		await inlineInk.ensureLoaded(ORIG);
+		await drainMicrotasks();
+		const host = hostFor(v);
+		const { sid, keptPath, theirs, rec } = await keptSlidesCopy(v, host);
+		// The copy aside of the current page waits until the presentation has opened.
+		let held = false;
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		const write = v.adapter.write.bind(v.adapter);
+		vi.spyOn(v.adapter, "write").mockImplementation(async (p: string, d: string) => {
+			if (p.includes(sid) && p.endsWith("-wipe.json")) {
+				held = true;
+				await gate;
+			}
+			await write(p, d);
+		});
+
+		const deciding = applyForkDecision(host, rec, "take-theirs");
+		await drainMicrotasks();
+		expect(held, "precondition: the choice is copying the current page aside").toBe(true);
+		const { deck, show } = await v.present(ORIG);
+		await drainMicrotasks();
+		expect(deckModel(deck).map((s) => s.id), "precondition: the deck opened on the page the choice would replace").toEqual(["drawn-here"]);
+		release();
+		const out = await deciding;
+		await drainMicrotasks();
+		show.draw(300, 300);
+		const drawn = deckModel(deck).find((s) => s.id !== "drawn-here");
+		expect(drawn, "precondition: the new stroke is on the deck").toBeDefined();
+		for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(2_000);
+		await v.store.flush();
+		await drainMicrotasks();
+
+		if (out.kind === "refused") {
+			expect(out, "a refused choice claimed a write or left the list").toMatchObject({ wrote: false, stillListed: true });
+			expect(v.adapter.files.get(keptPath), "a refused choice changed or moved the kept copy").toBe(theirs);
+			expect(onDisk(v.adapter, sid), "the deck's next save did not land after the refused choice").toEqual(["drawn-here", drawn!.id]);
+		} else {
+			expect(onDisk(v.adapter, sid), "the choice applied, and the deck opened meanwhile saved the page it replaced back over it").toContain("t-other");
+		}
+	});
+
+	it("take the other while the opening presentation is still reading the page: refused, nothing copied or written, and the deck's load and next save land", async () => {
+		const v = vault({ [ORIG]: OWN });
+		v.seedSlides(OWN, "drawn-here");
+		giveInlineInk(v, OWN);
+		v.plugin.buildPageIdIndex();
+		await inlineInk.ensureLoaded(ORIG);
+		await drainMicrotasks();
+		const host = hostFor(v);
+		const { sid, keptPath, theirs, rec } = await keptSlidesCopy(v, host);
+		// The deck's first read of its Slides file waits until the choice has been asked.
+		let reading = false;
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		const read = v.adapter.read.bind(v.adapter);
+		vi.spyOn(v.adapter, "read").mockImplementation(async (p: string) => {
+			if (p === sidecarPath(sid) && !reading) {
+				reading = true;
+				await gate;
+			}
+			return read(p);
+		});
+		const { deck, show } = await v.present(ORIG);
+		expect(reading, "precondition: the opening deck is reading its Slides file").toBe(true);
+		expect(deckModel(deck), "precondition: the deck has not loaded yet").toEqual([]);
+		const live = v.adapter.files.get(sidecarPath(sid));
+		const files = [...v.adapter.files.keys()].sort();
+
+		const out = await applyForkDecision(host, rec, "take-theirs");
+		await drainMicrotasks();
+		release();
+		await drainMicrotasks();
+		expect(out, "the choice applied while the opening deck was reading the page it would replace").toMatchObject({ kind: "refused", wrote: false, stillListed: true });
+		expect(v.adapter.files.get(sidecarPath(sid)), "the live Slides file was written").toBe(live);
+		expect(v.adapter.files.get(keptPath), "the kept copy was changed or moved").toBe(theirs);
+		expect([...v.adapter.files.keys()].sort(), "a file was copied, renamed or removed").toEqual(files);
+		expect(deckModel(deck).map((s) => s.id), "the deck's load did not land").toEqual(["drawn-here"]);
+
+		show.draw(300, 300);
+		const drawn = deckModel(deck).find((s) => s.id !== "drawn-here");
+		expect(drawn, "precondition: the new stroke is on the deck").toBeDefined();
+		for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(2_000);
+		await v.store.flush();
+		expect(onDisk(v.adapter, sid), "the deck's next save did not land").toEqual(["drawn-here", drawn!.id]);
+	});
+
+	it("pin: keep mine on the deck's kept copy writes nothing and applies with the deck open", async () => {
+		const { v, host } = await openDeck();
+		const { sid, keptPath, rec } = await keptSlidesCopy(v, host);
+		const live = v.adapter.files.get(sidecarPath(sid));
+
+		const out = await applyForkDecision(host, rec, "keep-mine");
+		await drainMicrotasks();
+		expect(out, "keep mine did not apply").toMatchObject({ kind: "applied", wrote: false, stillListed: false });
+		expect(v.adapter.files.get(sidecarPath(sid)), "keep mine wrote the live Slides file").toBe(live);
+		expect(v.adapter.files.has(keptPath), "the kept copy was not retired").toBe(false);
+	});
+
+	it("pin: a fork of the note's own ink applies with the note's presentation open", async () => {
+		const { v, host } = await openDeck();
+		const keptPath = sidecarPath(`${OWN}.conflict-1757700000001`);
+		const page = emptyPage(OWN);
+		page.surface = "inline";
+		const { page: _page, ...s } = stroke("t-inline", 20, 20, 0);
+		page.strokes = [s as InkStroke];
+		v.adapter.externalWrite(keptPath, serializePage(page));
+		resetForks();
+		await refreshForks(host, ".handwriting");
+		const rec = listForks().find((f) => f.pageId === OWN);
+		expect(rec, "precondition: fix ink de-sync lists the note's kept copy").toBeDefined();
+
+		const out = await applyForkDecision(host, rec!, "take-theirs");
+		await drainMicrotasks();
+		expect(out, "the note's own fork did not apply with its presentation open").toMatchObject({ kind: "applied", wrote: true, stillListed: false });
+		expect(onDisk(v.adapter, OWN), "the note's live ink file does not hold the chosen side").toEqual(["t-inline"]);
 	});
 });

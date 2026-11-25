@@ -40,6 +40,7 @@ import {
 	embedInkChanged,
 	embedInkLayerCount,
 	initEmbedInkRefresh,
+	onEmbedInkLinesMoved,
 	teardownEmbedInk,
 } from "../inline/EmbedInk";
 import { InlineInkStore, InlineInkHost } from "../inline/InlineInkStore";
@@ -69,6 +70,7 @@ const makeProcessorRaw = new Function(
 	"embedInkIsLiveEditorBlock",
 	"isMarkdownPath",
 	"overlayForPath",
+	"onEmbedInkLinesMoved",
 	transformSync(`return (el: any, ctx: any) => {\n${body}\n};`, { loader: "ts", target: "es2022" }).code
 ) as (
 	mrc: unknown,
@@ -77,15 +79,17 @@ const makeProcessorRaw = new Function(
 	detached: typeof runDetached,
 	liveBlock: typeof embedInkIsLiveEditorBlock,
 	isMd: typeof isMarkdownPath,
-	overlay: () => null
+	overlay: () => null,
+	linesMoved: typeof onEmbedInkLinesMoved
 ) => (el: unknown, ctx: unknown) => void;
 // 1.4.22 lane R: the post-processor also calls embedInkIsLiveEditorBlock (issue 22 fix).
+// The post-processor also hands each rendered section's text drop to onEmbedInkLinesMoved.
 const makeProcessor = (
 	mrc: unknown,
 	attach: typeof attachEmbedInkOnceReady,
 	store: InlineInkStore,
 	detached: typeof runDetached
-) => makeProcessorRaw(mrc, attach, store, detached, embedInkIsLiveEditorBlock, isMarkdownPath, () => null);
+) => makeProcessorRaw(mrc, attach, store, detached, embedInkIsLiveEditorBlock, isMarkdownPath, () => null, onEmbedInkLinesMoved);
 
 // ---- host Component semantics (app.js 1.13.7) ------------------------------
 class Component {

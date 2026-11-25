@@ -177,6 +177,8 @@ declare module "./InkOverlay" {
   // Read through `?.` and `??`: a unit rig built with Object.create never runs the initialisers.
   if(this.wheelZoomRun?.isLive){this.endWheelZoomRun();return;}
   if((this.pinchRefScale??null)===null&&!this.pinchGive) return;
+  // An ease, paused for a pen or not, ends here: pinch ignores an end on a paused one, and with the canvas off nothing would land it.
+  if(this.pinchGive){this.finishPinchGive();return;}
   const anchor=this.pinchAnchor,constraint=anchor?.constraint;
   const at={x:constraint?.clientX??anchor?.targetX??anchor?.focalX??Number.NaN,y:constraint?.clientY??anchor?.targetY??anchor?.focalY??Number.NaN};
   this.pinch("end",1,at);
@@ -185,6 +187,11 @@ declare module "./InkOverlay" {
  function retryCanvasOffReset(this: InkOverlayPlugin):boolean {
   if(!this.canvasOffResetPending) return false;
   if(this.canvasMode||this.pinchScaleNow===1){this.canvasOffResetPending=false;return false;}
+  // NEVER INSIDE CODEMIRROR'S OWN UPDATE. A font reflow's resize runs inside it (updateInner) when the tab shows again
+  // before the pane's observer has delivered. The reset's zoom-button hold reads the editor's layout and its settle
+  // dispatches a scroll request; the editor throws on both during an update, which crashes the plugin. Nothing starts
+  // here: no pan cleared, no hold, no commit. It stays pending, and the pane's resize, outside the update, lands it.
+  if(this.inUpdate) return false;
   if(!this.container||this.frame.locked||this.builder!==null) return false;
   // Lands at 100 percent: the same left rest as a zoom step that lands there.
   if(!this.zoomAroundCenter(1,true)) return false;

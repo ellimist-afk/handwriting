@@ -4,9 +4,9 @@
  * down, and focus is on a button outside the editor, so the pen-down is the
  * contact that brings focus back to the editor.
  *
- * `plant` adds one focusin listener on the editor that scrolls the caret into
- * view, the way the report's "snaps back to the first available place to
- * write" reads. It proves the cell sees a scroll when one happens.
+ * `plant` adds one focusin listener on the editor that sets the scroller's top
+ * to the caret's line, the way the report's "snaps back to the first available
+ * place to write" reads. It proves the cell sees a scroll when one happens.
  */
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -53,7 +53,7 @@ async function setupNote(plant: boolean) {
 	});
 	view.contentDOM.addEventListener("focusin", () => {
 		focusins.push(view.scrollDOM.scrollTop);
-		if (plant) view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head) });
+		if (plant) view.scrollDOM.scrollTop = view.lineBlockAt(view.state.selection.main.head).top;
 	});
 	await frames(6);
 	setPenInk(true);

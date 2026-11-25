@@ -5,9 +5,11 @@
  */
 import { InkStroke } from "../ink/Stroke";
 import { emptyPage, PageData, parsePage, serializePage } from "../model/PageData";
-import { scaleStroke } from "../objects/Selection";
 import { notifyInkChanged } from "./InkEvents";
 import { installMethods } from "./InstallMethods";
+import { changeSaved, cutSource, handedBefore, handedIds, landedVersions, scaleKept, takeLandedChanges, unsavedChanges } from "./InlineInkStoreCommit";
+import { firstReadMerge, groupChangedHere, healOwedMerge } from "./InlineInkStorePersist";
+import { isOpaqueAttachment } from "./InkAttachments";
 import { takeColumnRef } from "../ink/ColumnRef";
 import { choicesKeyOf, inkFingerprint, type InlineDeleteCapture, type InlineDeleteReadiness, type InlineDeleteTarget, type NoteRecord, PARSER_INVENTED_STROKE_FIELDS, type InlineInkStore } from "./InlineInkStore";
 
@@ -37,6 +39,75 @@ declare module "./InlineInkStore" {
 
 /** How long a note whose file keeps failing to read stays silent. */
 const TRANSIENT_SILENCE_MS = 60_000;
+
+/** Saved points are kept to 0.01 (PageData), so a piece and its source agree to within that. */
+const NEAR = 0.02;
+
+/**
+ * Is `piece` a piece the eraser cut from `f` (splitStrokeByCircle), or a piece of such a piece? A piece keeps every
+ * field of its source but the id, points and box, and its points are a run of the source's samples with at most one
+ * point on the ring at each end, which lies on the source's segment there. So: the same time, tool, colour and width;
+ * the inner points are consecutive samples of `f`; each end lies on the segment beside that run. A stroke that is all of
+ * `f` (a paste of it) is not a piece of it. Ink drawn along `f` later has its own time; a sibling cut earlier from the
+ * same stroke shares the time but holds none of `f`'s samples. A box test cannot tell either apart. The Slides store
+ * tells its pieces the same way (SlidesPersistence.ts).
+ */
+function pieceOf(piece: InkStroke, f: InkStroke): boolean {
+	if (piece.createdAt !== f.createdAt || piece.tool !== f.tool || piece.color !== f.color || piece.width !== f.width) return false;
+	const p = piece.points, q = f.points;
+	if (p.length < 2 || q.length < 2) return false;
+	if (p.length === q.length && p.every((pt, i) => near(pt, q[i]!))) return false;
+	const inner = p.slice(1, -1);
+	if (inner.length === 0) {
+		// Both ends on the ring, or a lone survivor: on one segment of f.
+		for (let i = 0; i < q.length - 1; i++) if (onSegment(p[0]!, q[i]!, q[i + 1]!) && onSegment(p[1]!, q[i]!, q[i + 1]!)) return true;
+		return false;
+	}
+	for (let k = 1; k + inner.length < q.length; k++) {
+		if (!inner.every((pt, j) => near(pt, q[k + j]!))) continue;
+		if (onSegment(p[0]!, q[k - 1]!, q[k]!) && onSegment(p[p.length - 1]!, q[k + inner.length - 1]!, q[k + inner.length]!)) return true;
+	}
+	return false;
+}
+
+/**
+ * Is `piece` a piece the eraser cut from `f` that was then moved: every test pieceOf makes, with every point of it
+ * shifted back by one offset, read from its first inner point. All of `f` moved (a paste of it) is not. A piece with no
+ * inner point is not: no sample of `f` fixes its offset, and any offset that lays both its ends on a segment of `f` would
+ * pass. An evenly drawn run is itself again under a shift along it, so a sibling's piece can pass too: the merge asks this
+ * only of a stroke that is no piece, unmoved, of any stroke the note holds. A paste of a piece passes too: the merge asks
+ * this only on the walk, where a yes drops the note's own version and leaves the file's stroke.
+ */
+function movedPieceOf(piece: InkStroke, f: InkStroke): boolean {
+	if (piece.createdAt !== f.createdAt || piece.tool !== f.tool || piece.color !== f.color || piece.width !== f.width) return false;
+	const p = piece.points, q = f.points;
+	const inner = p.slice(1, -1);
+	if (inner.length === 0 || q.length < 2) return false;
+	const whole = { x: p[0]!.x - q[0]!.x, y: p[0]!.y - q[0]!.y };
+	if (p.length === q.length && p.every((pt, i) => near(pt, shifted(q[i]!, whole)))) return false;
+	for (let k = 1; k + inner.length < q.length; k++) {
+		const by = { x: inner[0]!.x - q[k]!.x, y: inner[0]!.y - q[k]!.y };
+		if (!inner.every((pt, j) => near(pt, shifted(q[k + j]!, by)))) continue;
+		const n = inner.length;
+		if (onSegment(p[0]!, shifted(q[k - 1]!, by), shifted(q[k]!, by)) && onSegment(p[p.length - 1]!, shifted(q[k + n - 1]!, by), shifted(q[k + n]!, by))) return true;
+	}
+	return false;
+}
+
+function shifted(a: { x: number; y: number }, by: { x: number; y: number }): { x: number; y: number } {
+	return { x: a.x + by.x, y: a.y + by.y };
+}
+
+function near(a: { x: number; y: number }, b: { x: number; y: number }): boolean {
+	return Math.abs(a.x - b.x) <= NEAR && Math.abs(a.y - b.y) <= NEAR;
+}
+
+function onSegment(p: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }): boolean {
+	const dx = b.x - a.x, dy = b.y - a.y;
+	const len = dx * dx + dy * dy;
+	const t = len === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len));
+	return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)) <= NEAR;
+}
 
 /** `freezePage`'s copy, for anything that is not a whole page. */
 function deepCopy<T>(value: T): T {
@@ -228,7 +299,8 @@ function withoutFields(entry: unknown, drop: Set<string> | undefined): unknown {
 	 * instead of trusting a verdict from earlier in the session. Heal path:
 	 * the lock lifts, the saved ink merges back in ahead of anything drawn
 	 * while locked, and that locked-era ink is scheduled so it finally
-	 * becomes durable. Still damaged: the lock re-arms, silently (the one
+	 * becomes durable; with no page loaded before, the file's attached groups
+	 * stand beside the ones made while locked. Still damaged: the lock re-arms, silently (the one
 	 * notice already stands). Removed entirely: the lock lifts and session
 	 * ink starts a fresh file, which is exactly what "or removed" offered.
 	 */
@@ -237,7 +309,11 @@ function withoutFields(entry: unknown, drop: Set<string> | undefined): unknown {
 		rec.load = "loading";
 		rec.damagedLocked = false; // adoptSidecar re-arms it if still damaged
 		const id = rec.pageId;
-		const changed = await this.trackLoad(rec, async () => {
+		// No page loaded before this read (the file could not be read when the note opened): the groups the panes show are the
+		// session's list alone, or none.
+		const unloaded = rec.basePage === null;
+		const shownBefore = unloaded ? JSON.stringify(rec.attachments ?? []) : null;
+		let changed = await this.trackLoad(rec, async () => {
 			const before = inkFingerprint(rec.strokes);
 			const c = await this.adoptSidecar(rec, id);
 			rec.load = "yes";
@@ -262,7 +338,15 @@ function withoutFields(entry: unknown, drop: Set<string> | undefined): unknown {
 					? "Handwriting: this note's ink file is readable again. The saved ink is restored and saving is back on."
 					: "Handwriting: this note's damaged ink file is gone. The note starts fresh, and saving is back on."
 			);
-			if (rec.strokes.length > 0 || rec.localStrokeIds.size > 0) this.schedule(rec);
+			// A duplicate lock's clear that could not read the file owes its merge and its write rule to this read. With no page
+			// loaded before, the read merged the groups already: only the write rule is owed.
+			const owed = healOwedMerge(rec, unloaded);
+			// Else, with no page loaded before, the read set the file's groups beside the ones made here (firstReadMerge). The
+			// panes find the groups again when what they show changed, by content: the merge makes a new list each time.
+			if (owed === null && unloaded && rec.lastAdoptFound && rec.basePage !== null) {
+				if (JSON.stringify(rec.attachments ?? rec.basePage.attachments ?? []) !== shownBefore) changed = true;
+			}
+			if (owed === null ? rec.strokes.length > 0 || rec.localStrokeIds.size > 0 : owed) this.schedule(rec);
 		}
 		return changed;
 	}
@@ -344,6 +428,7 @@ function withoutFields(entry: unknown, drop: Set<string> | undefined): unknown {
 			if (result.data.strokes.length === 0) return false;
 		}
 		const choicesBefore = choicesKeyOf(rec);
+		const loadedPage = rec.basePage;
 		rec.basePage = result.data;
 		takeColumnRef(rec, result.data);
 		if (choicesKeyOf(rec) !== choicesBefore) this.emitChoicesOf(rec);
@@ -359,11 +444,9 @@ function withoutFields(entry: unknown, drop: Set<string> | undefined): unknown {
 		let reframed = false;
 		if (stored !== undefined && latched !== undefined && stored > 0 && latched > 0 && stored !== latched) {
 			const savedIds = new Set(result.data.strokes.map((stroke) => stroke.id));
-			for (const stroke of rec.strokes) {
-				if (!rec.localStrokeIds.has(stroke.id) || savedIds.has(stroke.id)) continue;
-				scaleStroke(stroke, stored / latched);
-				reframed = true;
-			}
+			const scaled = rec.strokes.filter((stroke) => rec.localStrokeIds.has(stroke.id) && !savedIds.has(stroke.id));
+			scaleKept(rec, scaled, stored / latched);
+			if (scaled.length > 0) reframed = true;
 			rec.fontRefPx = stored;
 		}
 		// The remote page owns saved order and unchanged cached IDs. Only an
@@ -371,21 +454,141 @@ function withoutFields(entry: unknown, drop: Set<string> | undefined): unknown {
 		// locally changed ID is a deletion. Cached strokes absent remotely do
 		// not resurrect. New local ink follows the remote ink in session order.
 		const local = new Map(rec.strokes.map((stroke) => [stroke.id, stroke]));
+		// Except a piece this session's eraser cut: it stands where the stroke it was cut from stands in the file's order,
+		// under the strokes drawn across that stroke, the pieces of one stroke in the order the cut left them. A piece cut
+		// again follows the nearest stroke it came from that the file holds; with none there it follows the remote ink.
+		const fileIds = new Set(result.data.strokes.map((stroke) => stroke.id));
+		// This note's version wins over the file's for a stroke it changed and no save seen landed holds (cut, erased,
+		// moved or reshaped, an undone cut included), and for a member of an attached group it changed so: when the file
+		// no longer holds that stroke, the other side cut or erased it too, and the file's pieces of it are not taken, or
+		// its line would be drawn twice. This note's version stands where the first of those pieces stood.
+		// A stroke this note drew or changed whose change a landed save put in the file is the file's again: present, the
+		// file's version stands. A change whose save is queued, failed or replaced in the queue stays this note's, with the
+		// version it changed: "saved" is one line, the save seen landed. Asked first, so a save seen landed at this read is.
+		takeLandedChanges(rec, this.host.sidecarLanded?.bind(this.host));
+		const inFile = (id: string): boolean => changeSaved(rec, id);
+		const pending = unsavedChanges(rec);
+		const handed = handedIds(rec);
+		const notSaved = (id: string): boolean => (pending?.has(id) ?? false) || handed.has(id);
+		// Every version the other side may hold of a stroke this note changed: before each change not yet handed or handed
+		// to a save not seen landed, and before each change a landed save put in the file.
+		const mine = new Map<string, InkStroke[]>();
+		const addMine = (id: string, was: InkStroke): void => {
+			const list = mine.get(id);
+			if (list) list.push(was);
+			else mine.set(id, [was]);
+		};
+		for (const [id, was] of pending ?? []) if (was && !fileIds.has(id)) addMine(id, was);
+		for (const [id, was] of handedBefore(rec)) if (rec.localStrokeIds.has(id) && !fileIds.has(id)) addMine(id, was);
+		// And each version a landed save put in the file, of every stroke this note changed and holds as its own that the file
+		// lacks: one an undo brought back has no before-copy, the undo under the lock or handed to a save replaced in the queue.
+		const landedOf = new Set([...(pending?.keys() ?? []), ...handed, ...mine.keys()]);
+		for (const id of landedOf) if (rec.localStrokeIds.has(id) && !fileIds.has(id)) for (const was of landedVersions(rec, id)) addMine(id, was);
+		if (loadedPage && rec.attachments !== undefined) {
+			const changed = groupChangedHere(rec);
+			for (const g of [...(loadedPage.attachments ?? []), ...rec.attachments]) {
+				if (isOpaqueAttachment(g) || !changed(g.id)) continue;
+				for (const id of g.strokeIds) {
+					const held = local.get(id);
+					if (held && !fileIds.has(id) && !notSaved(id) && !inFile(id)) addMine(id, held);
+				}
+			}
+		}
+		const own = (id: string): boolean => local.has(id) || notSaved(id) || rec.localStrokeIds.has(id);
+		// The other side may have moved its pieces of a stroke after its cut: a moved piece is that stroke's too. Asked only
+		// on the walk below, where a yes drops this note's own version and the file's ink stays; never where this note's
+		// version wins, since there a yes takes the file's stroke away, and a paste of a piece is shaped as a moved piece.
+		// Not a stroke that is a piece, unmoved, of a stroke this note holds or of a version of it a landed save put in the
+		// file: that stroke's piece it is, never a moved piece of another (an evenly drawn run shifted along itself still fits).
+		const cutOfHeld = new Map<string, boolean>();
+		const movedFrom = (s: InkStroke, was: InkStroke): boolean => {
+			if (!movedPieceOf(s, was)) return false;
+			let held = cutOfHeld.get(s.id);
+			if (held === undefined) {
+				held = [...local.values()].some((h) => pieceOf(s, h) || landedVersions(rec, h.id).some((v) => pieceOf(s, v)));
+				cutOfHeld.set(s.id, held);
+			}
+			return !held;
+		};
+		const remainOf = new Map<string, string>();
+		if (mine.size > 0) {
+			for (const saved of result.data.strokes) {
+				if (own(saved.id)) continue;
+				const source = [...mine].find(([, versions]) => versions.some((was) => pieceOf(saved, was)));
+				if (source) remainOf.set(saved.id, source[0]);
+			}
+		}
+		// A stroke whose change a landed save put in the file, and which the file no longer holds, is dropped only where the
+		// file shows the other side's act on it: a piece of a version of it, or of the stroke a cut here took it from, or
+		// that stroke whole. With none the other side's page never held it, or erased it whole, and the two cannot be told
+		// apart: it stays this note's, once.
+		const others = result.data.strokes.filter((s) => !own(s.id));
+		const actedOn = new Map<string, boolean>();
+		const dropped = (id: string): boolean => {
+			if (!inFile(id) || fileIds.has(id)) return false;
+			let hit = actedOn.get(id);
+			if (hit !== undefined) return hit;
+			hit = false;
+			const walked = new Set<string>();
+			for (let x: string | undefined = id; x !== undefined && !walked.has(x) && !hit; x = cutSource(rec, x)) {
+				walked.add(x);
+				if (x !== id && fileIds.has(x)) hit = true;
+				for (const was of [local.get(x), ...landedVersions(rec, x)]) if (was && others.some((s) => pieceOf(s, was) || movedFrom(s, was))) hit = true;
+			}
+			actedOn.set(id, hit);
+			return hit;
+		};
+		const anchored = new Set(remainOf.values());
+		const cutPieces = new Map<string, InkStroke[]>();
+		for (const stroke of rec.strokes) {
+			if (fileIds.has(stroke.id) || !rec.localStrokeIds.has(stroke.id) || dropped(stroke.id)) continue;
+			let source = cutSource(rec, stroke.id);
+			if (source === undefined) continue;
+			const walked = new Set<string>();
+			while (source !== undefined && !fileIds.has(source) && !anchored.has(source) && !walked.has(source)) {
+				walked.add(source);
+				source = cutSource(rec, source);
+			}
+			if (source === undefined || !(fileIds.has(source) || anchored.has(source))) continue;
+			const list = cutPieces.get(source);
+			if (list) list.push(stroke);
+			else cutPieces.set(source, [stroke]);
+		}
 		const merged: InkStroke[] = [];
 		const seen = new Set<string>();
 		for (const saved of result.data.strokes) {
 			if (seen.has(saved.id)) continue;
 			seen.add(saved.id);
-			const stroke = rec.localStrokeIds.has(saved.id) ? local.get(saved.id) : saved;
+			const source = remainOf.get(saved.id);
+			if (source !== undefined) {
+				// The other side's piece of a stroke this note changed: this note's version goes here, once.
+				if (seen.has(source)) continue;
+				seen.add(source);
+				const held = local.get(source);
+				if (held) merged.push(held);
+				for (const piece of cutPieces.get(source) ?? []) {
+					merged.push(piece);
+					seen.add(piece.id);
+				}
+				continue;
+			}
+			const stroke = rec.localStrokeIds.has(saved.id) && !inFile(saved.id) ? local.get(saved.id) : saved;
 			if (stroke) merged.push(stroke);
+			for (const piece of cutPieces.get(saved.id) ?? []) {
+				merged.push(piece);
+				seen.add(piece.id);
+			}
 		}
 		for (const stroke of rec.strokes) {
-			if (!seen.has(stroke.id) && rec.localStrokeIds.has(stroke.id)) {
+			if (!seen.has(stroke.id) && ((rec.localStrokeIds.has(stroke.id) && !dropped(stroke.id)) || mine.has(stroke.id))) {
 				merged.push(stroke);
 				seen.add(stroke.id);
 			}
 		}
 		rec.strokes = merged;
+		// The note's file read for the first time under this record: a list set while the read was out stands beside the
+		// file's groups, never over them.
+		if (loadedPage === null) firstReadMerge(rec);
 		return result.data.strokes.length > 0 || reframed;
 	}
 

@@ -64,6 +64,8 @@ class RecCtx {
 							if (s) self.state = s;
 						};
 					case "fill":
+						// An erase (destination-out, the cut out of the strip's end disc) takes alpha away and paints nothing.
+						if (self.state.globalCompositeOperation === "destination-out") return () => undefined;
 						return () =>
 							void self.paints.push({
 								op: "fill",

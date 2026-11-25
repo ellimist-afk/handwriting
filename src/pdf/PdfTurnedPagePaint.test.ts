@@ -187,6 +187,8 @@ interface Rig {
 	turn(deg: 0 | 90 | 180 | 270): void;
 	/** The committed canvas's paints, newest last. */
 	paints(): Paint[];
+	/** The highlight layer's canvas's paints, newest last, or null when the page has no layer. */
+	layerPaints(): Paint[] | null;
 	/** Where the ink of the newest paint landed, as the centre of its points in the page's css px. */
 	inkCentre(): [number, number];
 	isRotated(): boolean;
@@ -197,10 +199,13 @@ interface Rig {
  * `openTurn` is the turn the viewer is at before the first paint.
  *
  * `assumption` is the "Ink color on PDFs" setting. The call-log cells pass its
- * dark choice ("lighten"): there a page's highlights are still filled on the
- * saved-ink canvas at the wash, the paint the golden recorded, unchanged. On
- * the other choices highlights have a layer of their own; its turn is held by
- * PdfHighlightLayer.test.ts (U6).
+ * dark choice ("lighten"). The golden was recorded when that page's
+ * highlights were filled on the saved-ink canvas at the wash. Since 1.5.2 F1
+ * every page's highlights have a layer of their own (blending normal on a
+ * page read as dark): the saved-ink canvas paints the golden without its wash
+ * calls ([3, 25)), and the layer's canvas paints those calls, opaque. The
+ * layer's turn on the other choices is held by PdfHighlightLayer.test.ts (U6);
+ * on a page read as dark, by test/render/PdfDarkCrossing.test.ts (T1).
  */
 function rig(
 	strokes: InkStroke[],
@@ -215,6 +220,7 @@ function rig(
 	let reported: number | null | undefined = undefined;
 	const box = () => (deg % 180 === 0 ? { w: PAGE_W * SCALE, h: PAGE_H * SCALE } : { w: PAGE_H * SCALE, h: PAGE_W * SCALE });
 	const canvases: Array<{ width: number; height: number; parentElement: unknown; paints: Paint[] }> = [];
+	const layerCanvases: Array<{ parentElement: { parentElement: unknown } | null; paints: Paint[] }> = [];
 	// pdf.js writes the page's total rotation on the layers it lays over the
 	// canvas; the page div itself carries none.
 	const layer = { getAttribute: (n: string) => (n === "data-main-rotation" ? String(deg) : null) };
@@ -239,6 +245,7 @@ function rig(
 				setCssProps: () => {},
 				toggleClass: () => {},
 				classList: { add: () => {}, remove: () => {} },
+				addEventListener: () => {},
 			};
 			const t = trackingCtx(c);
 			c.paints = t.paints;
@@ -247,6 +254,45 @@ function rig(
 			return c;
 		},
 		appendChild: () => {},
+		insertBefore: () => {},
+		// The highlight layer's group: a div on the page holding one canvas,
+		// tracked as the saved-ink canvas is.
+		createDiv: () => {
+			const g: Record<string, unknown> & { parentElement: unknown } = {
+				parentElement: pageEl,
+				nextElementSibling: null,
+				setAttribute: () => {},
+				setCssProps: () => {},
+				setCssStyles: () => {},
+				appendChild: () => {},
+				remove() {
+					g.parentElement = null;
+				},
+				createEl: () => {
+					const c: Record<string, unknown> & { width: number; height: number; parentElement: typeof g | null; paints: Paint[] } = {
+						width: 300,
+						height: 150,
+						parentElement: g,
+						paints: [],
+						setAttribute: () => {},
+						remove() {
+							c.parentElement = null;
+						},
+						setCssStyles: () => {},
+						setCssProps: () => {},
+						toggleClass: () => {},
+						classList: { add: () => {}, remove: () => {} },
+						addEventListener: () => {},
+					};
+					const t = trackingCtx(c);
+					c.paints = t.paints;
+					c.getContext = () => t.ctx;
+					layerCanvases.push(c);
+					return c;
+				},
+			};
+			return g;
+		},
 		setCssStyles: () => {},
 		querySelectorAll: () => [],
 		querySelector: (sel: string) => (/main-rotation|textLayer|annotationLayer/.test(sel) ? layer : null),
@@ -334,6 +380,7 @@ function rig(
 			reported = d;
 		},
 		paints: () => committed().paints,
+		layerPaints: () => layerCanvases.find((c) => c.parentElement !== null && c.parentElement.parentElement !== null)?.paints ?? null,
 		inkCentre: () => {
 			const ps = committed().paints;
 			const p = ps[ps.length - 1];
@@ -388,6 +435,20 @@ function goldenUpright(): string[] | null {
 	if (process.env.UPDATE_UPRIGHT_GOLDEN === "1") return null;
 	return JSON.parse(readFileSync(GOLDEN, "utf8")) as string[];
 }
+/**
+ * The golden split as an upright paint makes it since F1: the saved-ink canvas
+ * paints every call but the wash's, [3, 25); the layer's canvas opens as the
+ * golden does (transform, clear), sets full alpha, and paints the wash's calls.
+ */
+function expectUpright(canvas: string[], layer: string[] | null, golden: string[], what: string): void {
+	expect(canvas, `${what}: the saved-ink canvas`).toEqual([...golden.slice(0, 3), ...golden.slice(25)]);
+	expect(layer, `${what}: no highlight layer`).not.toBeNull();
+	expect(layer!.slice(0, 2), `${what}: the layer's transform and clear`).toEqual(golden.slice(0, 2));
+	expect(layer![2], `${what}: the layer's highlight is not opaque`).toBe("set globalAlpha(1)");
+	expect(layer!.slice(3), `${what}: the layer's wash calls`).toEqual(golden.slice(3, 25));
+}
+const newest = (ps: Paint[] | null) => (ps ? ps[ps.length - 1]!.calls : null);
+
 /** A pen stroke, a highlighter wash and a second pen stroke, spread over the page. */
 function uprightSet(): InkStroke[] {
 	const hl = { ...inkNear("h", 300, 400), tool: "highlighter" as const, color: "#ffff00", width: 12 };
@@ -447,21 +508,23 @@ describe("saved ink on a PDF page turned in the viewer", () => {
 		expect(r.isRotated()).toBe(true);
 	});
 
-	it("upright: every paint call is the same as before turned pages were painted (byte-for-byte control)", () => {
+	it("upright: every paint call is the same as before turned pages were painted, the wash's calls on the highlight layer (byte-for-byte control)", () => {
 		const r = rig(uprightSet(), 0, "viewer", "lighten");
 		r.sync();
 		const first = r.paints()[r.paints().length - 1]!.calls;
+		const firstLayer = newest(r.layerPaints());
 		r.turn(90);
 		r.turn(0);
 		const back = r.paints()[r.paints().length - 1]!.calls;
+		const backLayer = newest(r.layerPaints());
 		const golden = goldenUpright();
 		if (golden === null) {
 			writeFileSync(GOLDEN, JSON.stringify(first, null, "\t") + "\n");
 			throw new Error(`wrote ${GOLDEN}; rerun without UPDATE_UPRIGHT_GOLDEN`);
 		}
 		expect(first.length).toBeGreaterThan(20);
-		expect(first).toEqual(golden);
-		expect(back).toEqual(golden);
+		expectUpright(first, firstLayer, golden, "first");
+		expectUpright(back, backLayer, golden, "back");
 	});
 
 	it("a page that opens already turned 180 degrees: ink refused, saved ink painted turned", () => {
@@ -487,14 +550,14 @@ describe("saved ink on a PDF page turned in the viewer", () => {
 });
 
 describe("a turn that cannot be read, or that the box does not show yet", () => {
-	it("a source that answers null paints an upright page byte-for-byte as before", () => {
+	it("a source that answers null paints an upright page byte-for-byte as before, the wash's calls on the highlight layer", () => {
 		const r = rig(uprightSet(), 0, "viewer", "lighten");
 		r.report(null);
 		r.sync();
 		const calls = r.paints()[r.paints().length - 1]!.calls;
 		const golden = goldenUpright();
 		if (golden === null) return;
-		expect(calls).toEqual(golden);
+		expectUpright(calls, newest(r.layerPaints()), golden, "null");
 		expect(r.isRotated()).toBe(false);
 	});
 
@@ -510,12 +573,17 @@ describe("a turn that cannot be read, or that the box does not show yet", () => 
 		const b = none.paints()[none.paints().length - 1]!.calls;
 		expect(a.length).toBeGreaterThan(20);
 		expect(a).toEqual(b);
+		// And the highlight layer, where the wash is painted since F1.
+		const la = newest(withNull.layerPaints());
+		const lb = newest(none.layerPaints());
+		expect(la, "no highlight layer with the null source").not.toBeNull();
+		expect(la, "the highlight layer with the null source against no source").toEqual(lb);
 		// Today's aspect check still refuses ink on it.
 		expect(withNull.isRotated()).toBe(true);
 		expect(none.isRotated()).toBe(true);
 	});
 
-	it("a source that answers something other than a turn reads as null: upright paints as before", () => {
+	it("a source that answers something other than a turn reads as null: upright paints as before, the wash's calls on the highlight layer", () => {
 		for (const bad of [Number.NaN, 45, Number.POSITIVE_INFINITY]) {
 			const r = rig(uprightSet(), 0, "viewer", "lighten");
 			r.report(bad);
@@ -523,12 +591,12 @@ describe("a turn that cannot be read, or that the box does not show yet", () => 
 			const calls = r.paints()[r.paints().length - 1]!.calls;
 			const golden = goldenUpright();
 			if (golden === null) return;
-			expect(calls, `source answered ${bad}`).toEqual(golden);
+			expectUpright(calls, newest(r.layerPaints()), golden, `source answered ${bad}`);
 			expect(r.isRotated()).toBe(false);
 		}
 	});
 
-	it("a source that throws reads as null: upright paints as before", () => {
+	it("a source that throws reads as null: upright paints as before, the wash's calls on the highlight layer", () => {
 		const r = rig(uprightSet(), 0, "viewer", "lighten");
 		setViewTurnSource(r.controller, () => {
 			throw new Error("the view is gone");
@@ -537,7 +605,7 @@ describe("a turn that cannot be read, or that the box does not show yet", () => 
 		const calls = r.paints()[r.paints().length - 1]!.calls;
 		const golden = goldenUpright();
 		if (golden === null) return;
-		expect(calls).toEqual(golden);
+		expectUpright(calls, newest(r.layerPaints()), golden, "throws");
 		expect(r.isRotated()).toBe(false);
 	});
 

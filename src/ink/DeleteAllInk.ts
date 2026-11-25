@@ -9,6 +9,7 @@ import { installMethods } from "../inline/InstallMethods";
 import { App, Modal, Notice, TFile } from "obsidian";
 import { SLIDES_SIDECAR_SUFFIX } from "../slides/SlidesInkSurface";
 import { deleteAllInkOn, inlineInk, InkOverlayPlugin, overlayForActiveEditor } from "../inline/InkOverlay";
+import { endLiveGesturesOn } from "../inline/InkOverlayGestureEnd";
 import { deleteAllBackupFailureText } from "../util/DeleteAllBackupNotice";
 import { type InkStroke } from "./Stroke";
 import { emptyPage, parsePage, serializePage } from "../model/PageData";
@@ -19,7 +20,7 @@ import type { HandwritingPlugin } from "../main";
 
 declare module "../main" {
 	interface HandwritingPlugin {
-		deleteAllPdfInk(id: string): Promise<void>;
+		deleteAllPdfInk(id: string, path?: string): Promise<void>;
 		deleteAllInkOrSaySo(path: string, overlay?: InkOverlayPlugin | null): void;
 		captureDeleteAllTarget(path: string, overlay?: InkOverlayPlugin | null): DeleteAllTarget;
 		sameDeleteAllTarget(target: DeleteAllTarget): boolean;
@@ -87,7 +88,7 @@ declare module "../main" {
  * note surface it has an approved sentence, and whether that sentence should
  * be extended to this surface is his to rule.
  */
-const PDF_INK_NOT_READY = "Handwriting: this PDF's ink storage is not ready. nothing was deleted.";
+export const PDF_INK_NOT_READY = "Handwriting: this PDF's ink storage is not ready. nothing was deleted.";
 /** The note path's two backup refusals, worded for a PDF. */
 const PDF_INK_NO_BACKUP = "Handwriting: this PDF's ink cannot be deleted.";
 const PDF_INK_BACKUP_UNVERIFIED =
@@ -501,9 +502,22 @@ export function bindRecoveryNotices(
 	 * copy was cleared from the live file and absent from the copy, while the
 	 * notice named the copy as the recovery path. The two guards below close
 	 * that: the store must be able to write at all, and the ink must be the
-	 * same ink, both immediately before anything is cleared.
+	 * same ink, both immediately before anything is cleared. And no pane on
+	 * the PDF may be mid-gesture then: a stroke still being drawn is in
+	 * neither copy, and the clear would drop it.
+	 *
+	 * `path`, the PDF the command ran on: while ink found for it owes its leave of it (pdfInkOwedWith), the other ink
+	 * the path's next open shows goes too, and so does what the leave's run would carry into it, or the delete was undone
+	 * at that open. Each such ink is read in first (a closed pane's record is let go), and goes through the same guards as
+	 * `id`'s, each with its own copy, all of them made and checked before anything is cleared: one that fails clears
+	 * nothing. An ink reached only if its claims say so (`reachedIf`: a leave owed off another name, which its run may
+	 * move here) is read in before anything else and the inks asked again; one that still cannot be read clears nothing
+	 * and says the ink is not ready. No other ink is read in whose file does not read sound (otherInkUnreadable): nothing
+	 * cleared, the not-ready words alone. The inks reached are asked again after the last await, nothing reached at the first
+	 * look included, and must be the same. A record read in here is let go again at the end, once what it holds is on
+	 * disk, as releasePdfId lets a closed pane's go. Nothing owed (or no path): `id` alone, as before.
 	 */
-	async function deleteAllPdfInk(this: HandwritingPlugin, id: string): Promise<void> {
+	async function deleteAllPdfInk(this: HandwritingPlugin, id: string, path?: string): Promise<void> {
 		// The trash copy is only a safety net if the store can actually write.
 		// In session-memory mode, mid-read, or under either lock, `persist`
 		// drops every scheduled write: this session's ink has never reached
@@ -529,57 +543,230 @@ export function bindRecoveryNotices(
 			new Notice(PDF_INK_NOT_READY);
 			return;
 		}
-		let kept: string | null = null;
+		// The other inks the path's next open would show the ink of, while a leave of it is owed, and what each keeps.
+		let owed = path === undefined ? [] : this.pdfInkOwedWith(path, id);
+		// The records read in here, none held before: each is let go again at the end, however the delete ends.
+		const readIn: string[] = [];
 		try {
-			kept = await this.store.preserve(id);
-		} catch (err) {
-			console.error("[handwriting] delete-all-pdf-ink backup failed", err);
-			new Notice(deleteAllBackupFailureText(err, "PDF"));
-			return;
-		}
-		// Read the copy back NOW, the one await after the copy, and judge it
-		// below once the two guards have had their say: a copy that does not
-		// exist, or does not hold the ink that was on screen, is not a copy.
-		const kept0 = kept;
-		const copyOk =
-			(JSON.parse(before) as InkStroke[]).length === 0 ||
-			(kept0 !== null &&
-				kept0.trim() !== "" &&
-				(await backupHoldsStrokes(id, JSON.parse(before) as InkStroke[], kept0, (p) => this.store.readText(p))));
-		// Both guards again, and NOTHING may await between here and the clear.
-		// Readiness is rechecked because the wait is long enough to lose it: a
-		// poll that finds the sidecar half-written by a sync client locks the
-		// record while the backup is in flight, and a copy taken before that
-		// lock is not a copy of what is on screen now.
-		if (!this.pdfStore.canPersist(id)) {
-			new Notice(PDF_INK_NOT_READY);
-			return;
-		}
-		// The copy that did complete is left where it is - it is a real
-		// generation of real ink and deleting it would be its own small loss -
-		// but nothing here claims it holds the strokes drawn since.
-		if (this.pdfInkSnapshot(id) !== before) {
-			new Notice(PDF_INK_CHANGED_DURING_BACKUP);
-			return;
-		}
-		if (!copyOk) {
-			new Notice(kept === null || kept.trim() === "" ? PDF_INK_NO_BACKUP : PDF_INK_BACKUP_UNVERIFIED);
-			return;
-		}
-		const n = this.pdfStore.strokes(id).length;
-		this.pdfStore.replaceAll(id, []);
-		for (const [root, controller] of this.pdfInk) {
-			if (this.pdfIds.get(root) === id) {
-				controller.forgetHistory();
-				controller.refresh();
+			// An ink reached only if its claims say so (a leave owed off another name its run may move here) is read in
+			// first, and the inks asked again. One whose claims still cannot be read: not known whether it goes, so
+			// nothing is cleared.
+			if (path !== undefined && owed.some((other) => other.reachedIf !== undefined)) {
+				for (const other of owed) {
+					if (other.reachedIf === undefined) continue;
+					if (await otherInkUnreadable(this, other.id)) {
+						new Notice(PDF_INK_NOT_READY);
+						return;
+					}
+					if (this.pdfStore.generation(other.id) === null) readIn.push(other.id);
+					await this.pdfStore.ensureLoaded(other.id);
+					if (!this.pdfStore.inkReady(other.id)) await this.pdfStore.settle();
+				}
+				owed = this.pdfInkOwedWith(path, id);
+				if (owed.some((other) => other.reachedIf !== undefined)) {
+					new Notice(PDF_INK_NOT_READY);
+					return;
+				}
+			}
+			// `id` first, as before; then each other ink that has strokes to lose, read in and frozen as `id` is above.
+			const inks: { id: string; keep: ReadonlySet<string> | null; before: string }[] = [{ id, keep: null, before }];
+			for (const other of owed) {
+				if (await otherInkUnreadable(this, other.id)) {
+					new Notice(PDF_INK_NOT_READY);
+					return;
+				}
+				if (this.pdfStore.generation(other.id) === null) readIn.push(other.id);
+				await this.pdfStore.ensureLoaded(other.id);
+				if (!this.pdfStore.inkReady(other.id)) await this.pdfStore.settle();
+				if (!this.pdfStore.canPersist(other.id)) {
+					new Notice(PDF_INK_NOT_READY);
+					return;
+				}
+				const was = this.pdfInkSnapshot(other.id);
+				if (was === null) {
+					new Notice(PDF_INK_NOT_READY);
+					return;
+				}
+				const keep = other.keep === null ? null : new Set(other.keep);
+				if (this.pdfStore.strokes(other.id).every((s) => keep?.has(s.id) === true)) continue;
+				inks.push({ id: other.id, keep, before: was });
+			}
+			// One copy per ink, each read back and checked before the next is made, all before anything is cleared.
+			const copies: { kept: string | null; ok: boolean }[] = [];
+			for (const ink of inks) {
+				let kept: string | null = null;
+				try {
+					kept = await this.store.preserve(ink.id);
+				} catch (err) {
+					console.error("[handwriting] delete-all-pdf-ink backup failed", err);
+					new Notice(deleteAllBackupFailureText(err, "PDF"));
+					return;
+				}
+				// Read the copy back NOW, the one await after the copy, and judge it
+				// below once the two guards have had their say: a copy that does not
+				// exist, or does not hold the ink that was on screen, is not a copy.
+				const kept0 = kept;
+				const copyOk =
+					(JSON.parse(ink.before) as InkStroke[]).length === 0 ||
+					(kept0 !== null &&
+						kept0.trim() !== "" &&
+						(await backupHoldsStrokes(ink.id, JSON.parse(ink.before) as InkStroke[], kept0, (p) => this.store.readText(p))));
+				copies.push({ kept, ok: copyOk });
+			}
+			// Both guards again, and NOTHING may await between here and the clear.
+			// Readiness is rechecked because the wait is long enough to lose it: a
+			// poll that finds the sidecar half-written by a sync client locks the
+			// record while the backup is in flight, and a copy taken before that
+			// lock is not a copy of what is on screen now.
+			//
+			// The inks reached first: a leave owed, run, renamed, moved or let go meanwhile reaches others, and the copies
+			// made are not of them. Asked with none reached at the first look too: a leave moved here meanwhile (a run
+			// let go during the copy, a delete and a create moving it back) reaches the other ink now. An ink whose claims
+			// are not read now (reachedIf) is not the ink it was.
+			const asked = (list: readonly unknown[]): string => JSON.stringify(list, (_, v: unknown) => (typeof v === "function" ? "unread" : v));
+			if (path !== undefined && asked(this.pdfInkOwedWith(path, id)) !== asked(owed)) {
+				new Notice(PDF_INK_CHANGED_DURING_BACKUP);
+				return;
+			}
+			for (const ink of inks) {
+				// A record read in here and let go meanwhile (no pane shows it): clearing it would make a new one.
+				if (ink.id !== id && this.pdfStore.generation(ink.id) === null) {
+					new Notice(PDF_INK_CHANGED_DURING_BACKUP);
+					return;
+				}
+				if (!this.pdfStore.canPersist(ink.id)) {
+					new Notice(PDF_INK_NOT_READY);
+					return;
+				}
+				// The copy that did complete is left where it is - it is a real
+				// generation of real ink and deleting it would be its own small loss -
+				// but nothing here claims it holds the strokes drawn since.
+				if (this.pdfInkSnapshot(ink.id) !== ink.before) {
+					new Notice(PDF_INK_CHANGED_DURING_BACKUP);
+					return;
+				}
+			}
+			// A pen still on this PDF, in any pane on it. A stroke begun during the
+			// copy is not in the store until its lift, so the check above cannot see
+			// it, and the clear below would drop it: forgetHistory abandons a live
+			// contact first, and an abandoned stroke is never saved. Refused in the
+			// same words, with nothing deleted, so the lift saves the stroke beside
+			// the ink still here. The reload of a PDF changed on disk keeps the same
+			// gate for a pane that is not idle. Every pane on every ink cleared.
+			const cleared = new Set(inks.map((ink) => ink.id));
+			for (const [root, controller] of this.pdfInk) {
+				const on = this.pdfIds.get(root);
+				if (on !== undefined && cleared.has(on) && !controller.idle) {
+					new Notice(PDF_INK_CHANGED_DURING_BACKUP);
+					return;
+				}
+			}
+			const bad = copies.find((copy) => !copy.ok);
+			if (bad !== undefined) {
+				new Notice(bad.kept === null || bad.kept.trim() === "" ? PDF_INK_NO_BACKUP : PDF_INK_BACKUP_UNVERIFIED);
+				return;
+			}
+			const removed: number[] = [];
+			for (const ink of inks) {
+				const strokes = this.pdfStore.strokes(ink.id);
+				const left = ink.keep === null ? [] : strokes.filter((s) => ink.keep!.has(s.id));
+				removed.push(strokes.length - left.length);
+				this.pdfStore.replaceAll(ink.id, left);
+			}
+			for (const [root, controller] of this.pdfInk) {
+				const on = this.pdfIds.get(root);
+				if (on !== undefined && cleared.has(on)) {
+					controller.forgetHistory();
+					controller.refresh();
+				}
+			}
+			// One notice per ink file cleared, each true for its own file and its own copy.
+			for (const [i, copy] of copies.entries()) {
+				const n = removed[i]!;
+				const what = n === 1 ? "1 stroke" : `${n} strokes`;
+				new Notice(
+					copy.kept
+						? `Handwriting: removed ${what}. A copy is kept in ${copy.kept}.`
+						: `Handwriting: removed ${what}.`
+				);
+			}
+		} finally {
+			// Each record read in here let go once what it holds is on disk, as a closed pane's is (releasePdfId): not
+			// while a pane shows it or its leave runs, nor once it changed since. Kept, the next open wore this session's
+			// copy over a file another device may have written since.
+			for (const other of readIn) {
+				if ([...this.pdfIds.values()].includes(other) || this.pdfLeaving?.(other) === true) continue;
+				const generation = this.pdfStore.generation(other);
+				if (generation === null) continue;
+				await this.pdfStore.settle();
+				if (!(await this.store.flushPage(other))) continue;
+				if ([...this.pdfIds.values()].includes(other)) continue;
+				this.pdfStore.forgetIfUnchanged(other, generation);
 			}
 		}
-		const what = n === 1 ? "1 stroke" : `${n} strokes`;
-		new Notice(
-			kept
-				? `Handwriting: removed ${what}. A copy is kept in ${kept}.`
-				: `Handwriting: removed ${what}.`
-		);
+	}
+
+	/**
+	 * Whether the delete must not read in `id`, another ink it reaches: no record of it is held, and its file, read as
+	 * pdfDeleteAllStrokes reads one (nothing loaded), does not parse, is newer, or cannot be read. Loading it would lock
+	 * its record and show the store's line that new ink on the PDF is not saved until it loads, which the pane's own ink
+	 * makes untrue; the delete says the not-ready words alone instead, before any load. No file: nothing to load, false.
+	 * A record held is read as today. A file that goes bad between this read and the load is not seen here.
+	 */
+	async function otherInkUnreadable(plugin: HandwritingPlugin, id: string): Promise<boolean> {
+		if (plugin.pdfStore.generation(id) !== null) return false;
+		try {
+			const adapter = plugin.app.vault.adapter;
+			const at = await plugin.store.resolvePath(id);
+			if (!(await adapter.exists(at))) return false;
+			const page = parsePage(await adapter.read(at), id);
+			return page.damaged === true || page.futureVersion !== undefined;
+		} catch {
+			return true;
+		}
+	}
+
+	/**
+	 * The strokes a Delete all on a PDF from a pane on `id` takes, `others` being the other inks it reaches
+	 * (pdfInkOwedWith): `id`'s, and each other's not kept, each stroke once. An ink this session holds read is counted
+	 * from its record. One it does not hold is read from its file, as hadOnDisk reads one: nothing loaded, recovered,
+	 * written or shown, so a dialog closed with Cancel leaves no record behind. No file: nothing of it goes. An ink
+	 * reached only if its claims say so (`reachedIf`) is counted when the claims read with its strokes, its record's or
+	 * its file's, pass it. Null when one cannot be counted: a record whose read does not land sound, a file that does not
+	 * parse or is newer.
+	 */
+	export async function pdfDeleteAllStrokes(
+		plugin: HandwritingPlugin,
+		id: string,
+		others: readonly { id: string; keep: readonly string[] | null; reachedIf?: (claims: readonly string[]) => boolean }[]
+	): Promise<number | null> {
+		const going = new Set(plugin.pdfStore.strokes(id).map((s) => s.id));
+		for (const other of others) {
+			if (plugin.pdfStore.generation(other.id) !== null && !plugin.pdfStore.inkReady(other.id)) await plugin.pdfStore.settle();
+			let strokes: readonly InkStroke[];
+			let claims: readonly string[];
+			if (plugin.pdfStore.inkReady(other.id)) {
+				strokes = plugin.pdfStore.strokes(other.id);
+				claims = plugin.pdfStore.claimedInstances((i) => i === other.id)[0]?.paths ?? [];
+			} else if (plugin.pdfStore.generation(other.id) !== null) return null;
+			else {
+				try {
+					const adapter = plugin.app.vault.adapter;
+					const at = await plugin.store.resolvePath(other.id);
+					if (!(await adapter.exists(at))) continue;
+					const page = parsePage(await adapter.read(at), other.id);
+					if (page.damaged || page.futureVersion !== undefined) return null;
+					strokes = page.data.strokes.filter((s) => typeof s.page === "number");
+					claims = page.data.pdfPaths ?? [];
+				} catch {
+					return null;
+				}
+			}
+			if (other.reachedIf !== undefined && !other.reachedIf(claims)) continue;
+			const keep = other.keep === null ? null : new Set(other.keep);
+			for (const s of strokes) if (keep === null || !keep.has(s.id)) going.add(s.id);
+		}
+		return going.size;
 	}
 
 	/**
@@ -881,6 +1068,12 @@ export function bindRecoveryNotices(
 		// but "no valid capture" and "safe to destroy" must not be the same
 		// branch: the ruling names a valid capture as one of the things an
 		// unproven state does not establish.
+		//
+		// An erase, drag or insert-space move held in any pane on the note ends
+		// first, put back as undo does, so the copy holds the ink the wipe takes
+		// and the wipe's undo brings back. Ended after the copy, its strokes
+		// would go back in after the copy was read: wiped, and in no copy.
+		endLiveGesturesOn(path);
 		const capture = inlineInk.captureDeleteAll(path);
 		if (capture === null) {
 			reportDeleteAllRefusal("no-capture");

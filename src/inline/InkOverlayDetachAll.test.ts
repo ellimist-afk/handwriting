@@ -126,11 +126,11 @@ function tapUndoRedo(r: ReturnType<typeof rig>) {
 }
 
 describe("Detach on a lasso over two groups or more", () => {
-	it("is on for two groups, loose ink in the lasso or not; Attach stays off; one group plus loose ink as before", () => {
+	it("is on for two groups, loose ink in the lasso or not, beside Attach; one group plus loose ink as before", () => {
 		// Defect: two groups turn Detach off, or one loose stroke in the lasso hides it.
 		const { records } = rig("detach-all-chips.md", 2);
-		expect(attachmentSelection(records, ["g1a", "g1b", "g2a", "g2b"])).toMatchObject({ attach: false, detach: true, groupIds: ["g1", "g2"] });
-		expect(attachmentSelection(records, ["g1a", "g2a", "free"])).toMatchObject({ attach: false, detach: true, groupIds: ["g1", "g2"] });
+		expect(attachmentSelection(records, ["g1a", "g1b", "g2a", "g2b"])).toMatchObject({ attach: true, detach: true, groupIds: ["g1", "g2"] });
+		expect(attachmentSelection(records, ["g1a", "g2a", "free"])).toMatchObject({ attach: true, detach: true, groupIds: ["g1", "g2"] });
 		expect(attachmentSelection(records, ["g1a", "free"])).toMatchObject({ attach: true, detach: false, groupIds: ["g1"] });
 	});
 

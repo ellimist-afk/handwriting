@@ -1,4 +1,6 @@
 import { DIAG_OFF_NOTE, diagnosticsEnabled, setDiagnosticsRecordingHook } from "../diag/DiagSwitch";
+import { scrollWriterTrace } from "../diag/ScrollWriterTrace";
+import { handInputTrace } from "../diag/ScrollJumpTrace";
 import { timerHost } from "../util/RuntimeScheduler";
 /**
  * Scroll/wheel probe: instrumentation for the touchpad-scroll dead zone.
@@ -486,6 +488,8 @@ function gapTick(): void {
 }
 
 function mainThreadProbe(on: boolean): void {
+	scrollWriterTrace(on);
+	handInputTrace(on);
 	if (!on) {
 		if (gapTimer !== null) timerHost().clearTimeout(gapTimer);
 		gapTimer = null;

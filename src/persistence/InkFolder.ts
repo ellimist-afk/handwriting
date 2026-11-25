@@ -29,6 +29,19 @@ export const DEFAULT_INK_FOLDER = ".handwriting";
 export const SYNCED_INK_FOLDER = "handwriting";
 
 /**
+ * An ink folder that is there and would not list, twice in a row (PageStore.listIds). Obsidian's desktop adapter
+ * reads the folder and then stats each entry with no catch, so one entry gone between the two (a sync tool's
+ * temporary file) rejects the whole listing. A partial list is never answered in its place: each reader that gets
+ * this decides what waiting costs it.
+ */
+export class InkFolderListingFailed extends Error {
+	constructor(readonly folder: string, cause: unknown) {
+		super(`could not list the ink folder ${folder}: ${cause instanceof Error ? cause.message : String(cause)}`);
+		this.name = "InkFolderListingFailed";
+	}
+}
+
+/**
  * A settings field is a text box, and a text box eventually contains
  * anything. This is the only thing standing between a typo and the plugin
  * writing ink outside the vault, so it is deliberately strict: no absolute

@@ -78,6 +78,7 @@ import { attachedDx, shownStrokes } from "./EmbedInkLines";
 import type { AttachmentData } from "./InkAttachments";
 import type { LineSignature } from "./LineAnchor";
 import { growPrintContainer, isPrintContainer, printing, printSpans, printVectorFor, releasePrintStrips } from "./EmbedInkPrint";
+import { exportDivOf } from "./EmbedInkMobileExport";
 import { embedInkAnchor, embedInkRootHidden, embedInkRootIsEmbed, type EmbedInkVia } from "./EmbedInkRoot";
 import { type HeldTops, lineMemos, lineSources, measureSpans } from "./EmbedInkMeasure";
 import { embedInkTile, embedInkTileHolds, embedInkUsesTile, type InkRect, type InkTile, TILE_PX, TILE_PX_MOBILE } from "./EmbedInkTile";
@@ -267,7 +268,15 @@ export function columnInset(root: HTMLElement, scope: HTMLElement | null, base: 
 	// A null scope is an embed's: its blocks sit in the first sizer under it,
 	// or are its own children. That lookup walks the embed, so it is made
 	// here, after the memory, and a paint with a memory makes none.
-	const box = scope ?? root.querySelector<HTMLElement>(".markdown-preview-sizer") ?? root;
+	// In an export (desktop and mobile alike) an embed has no sizer: its only
+	// child is its view, at the content box's left, and the text sits inside
+	// the view's padding (24 px). So there the view's children, the note's
+	// blocks, are read. On screen an embed with no sizer keeps its own box.
+	const box =
+		scope ??
+		root.querySelector<HTMLElement>(".markdown-preview-sizer") ??
+		(exportDivOf(root) ? root.querySelector<HTMLElement>(":scope > .markdown-preview-view") : null) ??
+		root;
 	const children = box.children as ArrayLike<Element> | undefined;
 	if (!children || typeof base.getBoundingClientRect !== "function") return held ?? null;
 	let best = -Infinity;
@@ -366,15 +375,20 @@ export function sizerHeaderHeight(sizer: HTMLElement): number {
 /** The header height last measured on each sizer (see `sizerHeaderHeight`). */
 const lastHeaderHeight = new WeakMap<HTMLElement, number>();
 
-export function anchorLayer(root: HTMLElement, el: { style: CSSStyleDeclaration }, remeasure = false): void {
-	const origin = layerOrigins.get(root) ?? { x: 0, y: 0 };
+/** Where the ink layer's world 0, 0 is drawn in `root`, px from its padding edge, before the layer's own origin (anchorLayer). */
+export function layerAt(root: HTMLElement, remeasure = false): { left: number; top: number } {
 	const sizer = embedInkAnchor(root, remeasure);
 	// `offsetLeft` does not include the sizer's `translate`, so the scroll reserve is added back here.
-	const at = sizer
+	return sizer
 		? anchorSizer(root)
 			? { left: sizer.left + scrollReserveHeld(root), top: sizer.top }
 			: { left: sizer.left + reserveHeld(root), top: sizer.top } // an embed's column; print: the first block's column and top
 		: { left: reserveHeld(root), top: 0 };
+}
+
+export function anchorLayer(root: HTMLElement, el: { style: CSSStyleDeclaration }, remeasure = false): void {
+	const origin = layerOrigins.get(root) ?? { x: 0, y: 0 };
+	const at = layerAt(root, remeasure);
 	// A Reading view tile sits at its own place inside the ink box; the box's place and the view's size are kept for
 	// the scroll listener, which reads no layout of its own.
 	const watch = tiles.get(root);
@@ -783,6 +797,36 @@ export function embedInkChanged(path: string): void {
 	}
 }
 
+/** Per note, each rendered section's drop of the note's text it read for its lines (a render with no section info). */
+const lineTextDrops = new Map<string, Set<() => void>>();
+
+/** A rendered section of `path` keeps the note's text it read: `drop` lets that text go. The return value unregisters it. */
+export function onEmbedInkLinesMoved(path: string, drop: () => void): () => void {
+	let drops = lineTextDrops.get(path);
+	if (!drops) lineTextDrops.set(path, (drops = new Set()));
+	drops.add(drop);
+	return () => {
+		const now = lineTextDrops.get(path);
+		if (now?.delete(drop) && now.size === 0) lineTextDrops.delete(path);
+	};
+}
+
+/**
+ * The note's line source moved: the metadata cache parsed its saved text. Every rendered section lets go of the text it
+ * read, so its next paint reads the new one. Answers whether the note's views paint again (the caller tells them with
+ * embedInkChanged, once): yes for a note with an attached group that a view shows, as a view painted while lines were
+ * typed above drew the group against the old lines and would keep that paint at rest. A note no view shows, or with no
+ * group: no. A hidden root waits for its size watch, as for any repaint.
+ */
+export function embedInkLinesMoved(path: string): boolean {
+	const drops = lineTextDrops.get(path);
+	if (drops) for (const drop of [...drops]) drop();
+	if (!attachmentsFor || attachmentsFor(path).length === 0) return false;
+	sweepDisconnected();
+	for (const p of layers.values()) if (p === path) return true;
+	return false;
+}
+
 /**
  * Repaint every connected root from the current settings (audit 25). Pressure
  * sensitivity, Ink smoothing and Boox mode change how saved ink is SHAPED, not
@@ -944,12 +988,14 @@ export function placeStrokes(
 ): { strokes: readonly InkStroke[]; key: string } {
 	const at = zoom === 1 ? "" : `@${zoom};`;
 	const records = path !== undefined && attachmentsFor ? attachmentsFor(path) : null;
+	// A table link is placed by the view's table only for a member with an anchor (shownStrokes), so with no anchor and
+	// no kept move nothing here moves: every stroke is drawn at its stored place, as before tables were read.
 	if (!strokes.some((s) => s.lineAnchor) && !attachedDx(records)) return { strokes, key: at };
 	// The editor brings its anchors up to date with typing when they are read or written. Reading them here is such a
 	// read: a reading view beside an editor of the same note folds the editor's anchors at each of its renders.
 	settleLineAnchors();
 	const live = path !== undefined && lineSignatureFor ? lineSignatureFor(path) : null;
-	const shown = shownStrokes(strokes, measureSpans(root, held), zoom, live, records);
+	const shown = shownStrokes(strokes, measureSpans(root, held, () => layerAt(root).left), zoom, live, records);
 	if (shown === strokes) return { strokes, key: at };
 	let key = at;
 	for (let k = 0; k < strokes.length; k++) {

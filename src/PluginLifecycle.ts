@@ -11,6 +11,7 @@ import { destroyProbeMarkers } from "./inline/PenProbe";
 import { captureInlinePenTrace, finishLiveStrokesOnHide } from "./inline/InlinePenRouter";
 import { setHitProbeEnabled } from "./inline/PenHitProbe";
 import { stopMainThreadProbe } from "./inline/ScrollProbe";
+import { stopLongFrameWatch } from "./ink/StrokeMetrics";
 import { noteCameras } from "./inline/NoteCamera";
 import { DEFAULT_PEN, HIGHLIGHTER_PEN } from "./ink/PenStyle";
 import { getInkColorHex } from "./ink/InkColor";
@@ -36,6 +37,7 @@ declare module "./main" {
 		syncRecordingBadge(): void;
 		guardEmptyTrace(): boolean;
 		flushOnHide(): void;
+		flushOnWindowHide(win: Window): void;
 		flushOnQuit(tasks: Tasks): void;
 		finishPersistence(): Promise<void>;
 		openPenDiagnostics(): Promise<void>;
@@ -58,6 +60,9 @@ declare module "./main" {
 	function onunload(this: HandwritingPlugin): void {
 		// First, so that anything still waiting on onLayoutReady finds it set.
 		this.unloaded = true;
+		// A deleted note's ink file whose move into the trash was still to be tried again: dropped, never run after the
+		// plugin is gone. The file stays live, as when every try failed.
+		this.store?.dropLiveMoveRetries();
 		// A live trace would outlive this instance; stop it, saved nowhere in
 		// the vault, but only when this recorder started one or diagnostics is
 		// on. Unload tests run this on an Object.create instance, where field
@@ -67,6 +72,8 @@ declare module "./main" {
 		// left on would keep its timer and observer running in this unloaded
 		// copy until Obsidian restarts. Stop the instrument, not the switch.
 		stopMainThreadProbe();
+		// The long-frame observer the first pen stroke started: the same reason, for every user, not only while recording.
+		stopLongFrameWatch();
 		this.pdfPathById?.clear();
 		// Each note's zoom and scroll is kept in local storage: a pending change is written now, then memory is emptied
 		// and the store let go, so an editor torn down after this cannot rewrite the key.
@@ -232,8 +239,12 @@ declare module "./main" {
 	function flushOnHide(this: HandwritingPlugin): void {
 		// A hide can come with no blur, so a stroke still on the glass is ended
 		// here, committed as a blur commits it, before the dispatch writes it.
-		finishLiveStrokesOnHide();
-		finishSlidesGesture();
+		// This is the main window's hide: a stroke or a deck in a pop-out keeps
+		// going, since that window may still be in front; its own hide ends it
+		// (flushOnWindowHide). The main document is read through `window`, as a
+		// rig with no global document still has a window.
+		finishLiveStrokesOnHide(window);
+		finishSlidesGesture((window as { document?: Document }).document);
 		this.store.flushDispatch();
 		// flushSettings clears its timer and reaches saveData synchronously;
 		// detached because its completion cannot be awaited under a freeze.
@@ -242,6 +253,17 @@ declare module "./main" {
 		// that lands, and then waits out the quiet period. If JS still runs, write
 		// it the moment it lands; a freeze before then is the known limit.
 		runDetached(settleParkedThenDispatch(this), "flush parked ink on hide");
+	}
+
+	/**
+	 * A pop-out window's own hide (its document went hidden: minimized or covered): the strokes in that window and
+	 * the gesture of a deck presenting there end, committed, before the writes are dispatched. The main window's
+	 * strokes keep drawing. Listened for on each pop-out from its window-open to its window-close (PluginOnload.ts).
+	 */
+	function flushOnWindowHide(this: HandwritingPlugin, win: Window): void {
+		finishLiveStrokesOnHide(win);
+		finishSlidesGesture(win.document);
+		this.store.flushDispatch();
 	}
 
 	/** How long a close waits on unsaved ink before the window goes anyway. */
@@ -262,7 +284,11 @@ declare module "./main" {
 			console.error("[handwriting] dispatch at quit failed", err);
 		}
 		const pending =
-			inlineInk.parkedInk() || slidesParkedInk() || this.pdfStore.parkedInk() || this.store.hasAnyQueuedWrite();
+			inlineInk.parkedInk() ||
+			slidesParkedInk() ||
+			this.pdfStore.parkedInk() ||
+			this.store.hasAnyQueuedWrite() ||
+			pdfOwed(this);
 		if (!pending) return;
 		tasks.add(() => {
 			let timer = 0;
@@ -274,8 +300,37 @@ declare module "./main" {
 		});
 	}
 
-	/** The three settles together, then every queued page, then settings. A flush that throws still lets settings go. */
+	/**
+	 * PDF ink owed to disk: drawn or moved while its file could not be read and not yet handed to a save, under either
+	 * lock, or a save parked behind a read. A rig's stand-in store without the method owes nothing.
+	 */
+	function pdfOwed(plugin: HandwritingPlugin): boolean {
+		return plugin.pdfStore?.owedAtExit?.() ?? false;
+	}
+
+	/**
+	 * Read once more every PDF ink file whose ink is owed under the unreadable lock: a sound read saves the merged page
+	 * through the store's own save. Each read starts here, before any settle, so the PDF settle waits on it; each is
+	 * its own detached promise, so one that throws stops no other. A read already out returns at once, and the settle
+	 * waits on that one.
+	 */
+	function rereadOwedPdfInk(plugin: HandwritingPlugin): void {
+		const store = plugin.pdfStore;
+		for (const id of store?.lockedWithUnsavedInk?.() ?? []) {
+			runDetached(store.reloadExternal(id), `read owed pdf ink again at exit ${id}`);
+		}
+	}
+
+	/**
+	 * The owed PDF reads, then the three settles together, then every queued page, then settings. A flush that throws
+	 * still lets settings go.
+	 */
 	async function saveAtQuit(plugin: HandwritingPlugin): Promise<void> {
+		try {
+			rereadOwedPdfInk(plugin);
+		} catch (err) {
+			console.error("[handwriting] pdf reread at quit failed", err);
+		}
 		await Promise.allSettled([inlineInk.settle(), settleSlidesInk(), plugin.pdfStore.settle()]);
 		try {
 			await plugin.store.flush();
@@ -298,6 +353,12 @@ declare module "./main" {
 		// counts toward the notice; an open read with no ink behind it does not,
 		// or a slow read at quit warns about ink that was never at risk.
 		let gaveUp = false;
+		// PDF ink owed under the unreadable lock is read once more first, so the read has every settle's time below.
+		try {
+			rereadOwedPdfInk(this);
+		} catch (err) {
+			console.error("[handwriting] pdf reread on unload failed", err);
+		}
 		try {
 			if ((await inlineInk.settle()) === false && inlineInk.parkedInk()) gaveUp = true;
 		} catch (err) {
@@ -326,8 +387,9 @@ declare module "./main" {
 		}
 		// A failed write goes back in the queue and `flush` still resolves, and
 		// at unload no retry timer will ever run it: say so while the user can
-		// still act.
-		if (gaveUp || this.store.hasAnyQueuedWrite()) {
+		// still act. PDF ink still owed after its reread (the file damaged again,
+		// the read hung, or the file newer) is unsaved the same way.
+		if (gaveUp || this.store.hasAnyQueuedWrite() || pdfOwed(this)) {
 			new Notice(
 				"Handwriting: the newest ink may not have been saved. Open the note and check it before you close Obsidian."
 			);
@@ -451,6 +513,7 @@ export function installPluginLifecycle(proto: HandwritingPlugin): void {
 		syncRecordingBadge,
 		guardEmptyTrace,
 		flushOnHide,
+		flushOnWindowHide,
 		flushOnQuit,
 		finishPersistence,
 		openPenDiagnostics,

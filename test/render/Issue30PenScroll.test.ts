@@ -11,8 +11,8 @@
  * back after the pen-down and after the lift. Green: our pen focus does not
  * move the view, and the snap comes from outside the repo. Red: ours.
  *
- * The plant row adds a focusin listener that scrolls the caret into view, and
- * must see the scroll: it proves the cell reads the snap when one happens.
+ * The plant row adds a focusin listener that sets the scroller's top to the
+ * caret's line, and must see the scroll: it proves the cell reads the snap when one happens.
  *
  * I30_OUT=<dir> writes one JSON row per case there.
  */

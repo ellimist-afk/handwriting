@@ -35,7 +35,7 @@ describe("zoom bar step grid", () => {
 		expect(ZOOM_STEP_RATIO).toBe(1.25);
 		expect(ZOOM_GRID_TOLERANCE).toBe(0.005);
 		expect(MIN_PINCH_SCALE, "the floor this file is written against").toBe(0.1);
-		expect(MAX_PINCH_SCALE, "the ceiling this file is written against").toBe(6);
+		expect(MAX_PINCH_SCALE, "the ceiling this file is written against").toBe(8);
 	});
 
 	it("eleven minus taps from 100% walk the grid down to the 10% floor, then stop", () => {
@@ -45,10 +45,10 @@ describe("zoom bar step grid", () => {
 		], "minus from 100%");
 	});
 
-	it("plus taps from 100% walk the grid up to the 600% ceiling, then stop", () => {
-		expectScales(taps(plus, 1, 10), [
+	it("plus taps from 100% walk the grid up to the 800% ceiling, then stop", () => {
+		expectScales(taps(plus, 1, 11), [
 			1.25, 1.5625, 1.953125, 2.44140625, 3.0517578125, 3.814697265625, 4.76837158203125, 5.9604644775390625,
-			6, 6,
+			7.450580596923828, 8, 8,
 		], "plus from 100%");
 	});
 
@@ -80,15 +80,15 @@ describe("zoom bar step grid", () => {
 	});
 
 	it("plus never passes the ceiling; the last tap lands on it", () => {
-		expect(plus(5.5)).toBeCloseTo(5.9604644775390625, 10);
-		expect(plus(5.9604644775390625)).toBe(MAX_PINCH_SCALE);
-		expect(plus(6)).toBe(6);
-		expect(minus(6), "600% is off the grid, so minus lands on 596%").toBeCloseTo(5.9604644775390625, 10);
+		expect(plus(7)).toBeCloseTo(7.450580596923828, 10);
+		expect(plus(7.450580596923828)).toBe(MAX_PINCH_SCALE);
+		expect(plus(8)).toBe(8);
+		expect(minus(8), "800% is off the grid, so minus lands on 745%").toBeCloseTo(7.450580596923828, 10);
 	});
 
 	it("no tap from anywhere on the bar's range ever doubles, halves, or moves the wrong way", () => {
 		const most = ZOOM_STEP_RATIO * (1 + ZOOM_GRID_TOLERANCE) / (1 - ZOOM_GRID_TOLERANCE);
-		for (let z = 0.05; z <= 6.2; z *= 1.0137) {
+		for (let z = 0.05; z <= 8.3; z *= 1.0137) {
 			const up = plus(z);
 			const down = minus(z);
 			expect(up, `plus from ${z}`).toBeGreaterThanOrEqual(z);
@@ -149,8 +149,8 @@ describe("zoom bar buttons on the grid", () => {
 	it("the readout walks the grid both ways, as today's three-digit rounding shows it", () => {
 		const bar = mountBar();
 		try {
-			const up = Array.from({ length: 10 }, () => bar.tapPlus());
-			expect(up).toEqual(["125%", "156%", "195%", "244%", "305%", "381%", "477%", "596%", "600%", "600%"]);
+			const up = Array.from({ length: 11 }, () => bar.tapPlus());
+			expect(up).toEqual(["125%", "156%", "195%", "244%", "305%", "381%", "477%", "596%", "745%", "800%", "800%"]);
 			bar.fake.viewport.resetNoteZoom();
 			const down = Array.from({ length: 12 }, () => bar.tapMinus());
 			expect(down).toEqual(["80%", "64%", "51.2%", "41%", "32.8%", "26.2%", "21%", "16.8%", "13.4%", "10.7%", "10%", "10%"]);

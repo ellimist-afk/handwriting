@@ -425,6 +425,12 @@ export class PdfInkController {
 	 */
 	pair: WetPair | null = null;
 	/**
+	 * The pair dressWet last put the highlighter's wash on itself, null when it put none (a pen, a page where highlights
+	 * have a layer of their own, or after undressWet). drawHead's tip cut reads this, never a fresh read of the page's
+	 * answer, which can change mid-stroke with nothing dressing the pair again.
+	 */
+	washedPair: WetPair | null = null;
+	/**
 	 * The page the pair is parented into right now, 0 when it is nowhere.
 	 *
 	 * Read by `wetOn`, which is what every wet/head site asks instead of the
@@ -549,6 +555,7 @@ export class PdfInkController {
 	probedCache: ProbedViewer | null = null;
 	probedAt = 0;
 	probedValid = false;
+	/** performance.now() of the last sync that ran: the steady clock, never the wall clock (see scheduleThrottled). */
 	lastSyncAt = 0;
 	trailingSync: ReturnType<Window["setTimeout"]> | null = null;
 	/**
@@ -740,7 +747,7 @@ export class PdfInkController {
 
 	constructor(
 		readonly root: HTMLElement,
-		readonly win: Window,
+		public win: Window,
 		readonly strokes: StrokeSource,
 		readonly documentId: () => string | null = () => null,
 		/**
@@ -810,7 +817,14 @@ export class PdfInkController {
 		 */
 		readonly pageAssumption: () => PdfPageAssumption = () => "darken",
 		/** The sidecar has finished a trustworthy read; destructive tools may start. */
-		readonly inkReady: () => boolean = () => true
+		readonly inkReady: () => boolean = () => true,
+		/**
+		 * An opening on this PDF's path chose a fresh id and has not ended: it
+		 * may still carry an older version's ink into that id, so the tools that
+		 * take ink out (eraser, lasso, insert space) wait. Pen ink does not.
+		 */
+		readonly openingCarries: () => boolean = () => false,
+		readonly documentFile: () => string | null = () => null
 	) {}
 
 	/**
@@ -936,7 +950,10 @@ export class PdfInkController {
 		// stroke(s)" the note command uses, and already notify every refusal,
 		// so nothing here needs to.
 		if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && this.hasSelection && !this.textSelectionLive()) {
-			const key = ev.key.toLowerCase();
+			// The same key rule as undo below: a layout that types another script reports its own
+			// letter in `key`, so only then does the physical key decide.
+			const typed = ev.key.toLowerCase();
+			const key = /^[a-z]$/.test(typed) ? typed : /^Key[A-Z]$/.test(ev.code ?? "") ? ev.code.slice(3).toLowerCase() : typed;
 			if (key === "c" || key === "x") {
 				ev.preventDefault();
 				if (key === "c") this.copySelection();

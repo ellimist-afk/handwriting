@@ -18,6 +18,21 @@ import { canvasLayerBox } from "../inline/ZoomScale";
  */
 const WET_TILE_CSS_PX = 256;
 
+/**
+ * The note zoom above which the tile stops growing on screen. Past it the
+ * tile keeps its 200% size in device px, so a strip at 800% still fits a
+ * tile smaller than the band instead of the tile clamping to the band.
+ */
+const WET_TILE_MAX_ZOOM = 2;
+
+/** Tile side in backing px before the grid round: 256 css px up to 200%, then the 200% size. */
+function wetTileSidePx(backing: number, dpr: number): number {
+	// The tolerance keeps exactly 200% on the first branch when backing and dpr come from a float ratio.
+	return backing <= WET_TILE_MAX_ZOOM * dpr * (1 + 1e-9)
+		? WET_TILE_CSS_PX * backing
+		: WET_TILE_CSS_PX * WET_TILE_MAX_ZOOM * dpr;
+}
+
 /** A joint backing, CSS-layout and displayed-device grid, in backing px (same rule as the compact tail). */
 function wetTileGrid(backing: number, cssScale: number, dpr: number, hostZoom: boolean): number | null {
 	if (!(backing > 0) || !(cssScale > 0) || !(dpr > 0) ||
@@ -125,7 +140,7 @@ export class WetInkRenderer {
 		const fullW = Math.round(cssWidth * backing), fullH = Math.round(cssHeight * backing);
 		let tileW = 0, tileH = 0;
 		if (grid && this.tileTranslate) {
-			const side = Math.ceil(WET_TILE_CSS_PX * backing / grid) * grid;
+			const side = Math.ceil(wetTileSidePx(backing, dpr) / grid) * grid;
 			tileW = Math.min(side, Math.floor(fullW / grid) * grid);
 			tileH = Math.min(side, Math.floor(fullH / grid) * grid);
 			if (!(tileW > 0 && tileH > 0 && tileW * tileH < fullW * fullH)) tileW = tileH = 0;
@@ -503,6 +518,14 @@ export class WetInkRenderer {
 	 */
 	head(): { from: Point2; to: Point2; pressure: number } | undefined {
 		return this.smooth && this.smoothThisStroke ? this.smoother.head() : undefined;
+	}
+
+	/**
+	 * The live strip's last point as painted: the centre and half-width of the round disc each strip piece ends in.
+	 * Read only; undefined until a strip is painted.
+	 */
+	stripEnd(): Readonly<RibbonPt> | undefined {
+		return this.lastRibbon;
 	}
 
 	/**

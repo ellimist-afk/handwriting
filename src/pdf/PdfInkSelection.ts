@@ -3,7 +3,7 @@
  * paste. They are methods of PdfInkController, installed on its prototype when PdfInkController.ts loads.
  */
 import { padBBox, pointInBBox, polygonBounds, strokeInLasso, unionBounds } from "../objects/Selection";
-import { copyInk, inkClipboardMarker, pasteInk } from "../inline/InkClipboard";
+import { copyInk, inkClipboardMarker, inkCopiedFrom, keepCutOnDevice, pasteInk } from "../inline/InkClipboard";
 import { withInkDestination } from "../ink/InkTheme";
 import { pdfPageDestination } from "../ink/InkPdf";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
@@ -253,9 +253,10 @@ const SELECTION_GRAB_PAD_PX = 8;
 				// The same composite the page shows (`paint`): the highlights
 				// opaque on a layer of their own, laid on the page once at the
 				// wash, multiplied so the page's text stays dark under them; the
-				// pen ink over that. Where the page is dark the plain wash
-				// stays, as on screen: the answer the page already has, with no
-				// read of its pixels here.
+				// pen ink over that. Where the page is read as dark the layer
+				// goes on with the normal blend, as on screen: the plain wash for
+				// one coat, crossings one coat. The answer the page already has,
+				// with no read of its pixels here.
 				if (strokes.some((s) => s.tool === "highlighter") && this.highlightLayered(page)) {
 					hl = createEl("canvas");
 					hl.width = out.width;
@@ -267,7 +268,7 @@ const SELECTION_GRAB_PAD_PX = 8;
 						ctx.save();
 						ctx.setTransform(1, 0, 0, 1, 0, 0);
 						ctx.globalAlpha = HIGHLIGHTER_ALPHA;
-						ctx.globalCompositeOperation = "multiply";
+						ctx.globalCompositeOperation = this.highlightMultiplies(page) ? "multiply" : "source-over";
 						ctx.drawImage(hl, 0, 0);
 						ctx.restore();
 					}
@@ -328,15 +329,24 @@ const SELECTION_GRAB_PAD_PX = 8;
 		this.refreshStrip();
 	}
 
-	/** The loop being drawn, and the box around what it has caught. */
+	/**
+	 * The loop being drawn, and the box around what it has caught.
+	 *
+	 * In the frame the page's saved ink is painted in (`selectionFrame`): on a
+	 * page the viewer turned, the box turns with the ink, or it would be drawn
+	 * where the ink sat upright and not around it.
+	 */
 	function drawLasso(this: PdfInkController, box: PageBox): void {
 		const pair = this.wetOn(box.pageNumber);
-		const cam = this.cameraFor(box);
-		if (!pair || !cam) return;
+		if (!pair) return;
 		const ctx = pair.wetCanvas.getContext("2d");
 		if (!ctx) return;
+		const frame = this.selectionFrame(pair, box);
+		if (!frame) return;
+		const cam = frame.cam;
 		ctx.clearRect(0, 0, box.widthPx, box.heightPx);
 		ctx.save();
+		if (frame.matrix) ctx.transform(...frame.matrix);
 		ctx.strokeStyle = "#4b7bec";
 		ctx.lineWidth = 1;
 		// The LOOP is the conditional part, never the box. Gating both on the
@@ -424,7 +434,8 @@ const SELECTION_GRAB_PAD_PX = 8;
 		// Drain pending movement before copying without ending the live drag.
 		this.flushEditFrame(false);
 		const strokes = this.strokes(this.selectionPage).filter((st) => chosen.has(st.id));
-		const count = copyInk(strokes, id);
+		// Filled from a PDF: the one fill a PDF paste takes (pasteFromClipboard).
+		const count = copyInk(strokes, id, null, "pdf", this.documentFile());
 		const marker = count > 0 ? inkClipboardMarker() : null;
 		if (marker !== null) {
 			try {
@@ -524,7 +535,11 @@ const SELECTION_GRAB_PAD_PX = 8;
 	 */
 	function cutSelection(this: PdfInkController): number {
 		const n = this.copyToClipboard();
-		if (n > 0) this.deleteSelection();
+		if (n > 0) {
+			// Kept on this device before the delete, as a note cut is (InkOverlayClipboard.cutSelectedInk).
+			keepCutOnDevice();
+			this.deleteSelection();
+		}
 		// Its own refresh, audit doc §5k/(b): the strip was only ever correct
 		// here because `deleteSelection` refreshes on the way out, so a cut
 		// that copied nothing - or any future cut that stops short of the
@@ -536,10 +551,12 @@ const SELECTION_GRAB_PAD_PX = 8;
 
 	/**
 	 * Paste, page-true: pdf strokes carry the page they were copied from and
-	 * go back to it. Ink copied from a NOTE has no page and its coordinates
-	 * are note pixels besides - placing it would be a guess at both position
-	 * and scale - so it is refused with the reason instead of appearing tiny
-	 * in a corner nobody chose.
+	 * go back to it. Ink copied from a NOTE is in note pixels - placing it
+	 * would be a guess at both position and scale - so it is refused with the
+	 * reason instead of appearing tiny in a corner nobody chose. That goes by
+	 * where the ink was copied from, not by its page: PDF ink pasted into a
+	 * note keeps its page there, and copied back out of the note it is note
+	 * ink all the same. A refused paste leaves the PDF's lasso as it was.
 	 */
 	function pasteFromClipboard(this: PdfInkController): void {
 		const id = this.documentId();
@@ -553,7 +570,12 @@ const SELECTION_GRAB_PAD_PX = 8;
 			return;
 		}
 		if (clipboardSize() === 0) return;
-		const pasted = pasteInk(id);
+		// Before pasteInk, so a refused paste mints no ids and counts no stagger.
+		if (inkCopiedFrom() !== "pdf") {
+			this.notify("Handwriting: that ink was copied from a note - paste it on a note.");
+			return;
+		}
+		const pasted = pasteInk(id, null, this.documentFile());
 		if (pasted.some((st) => st.page === undefined)) {
 			this.notify("Handwriting: that ink was copied from a note - paste it on a note.");
 			return;

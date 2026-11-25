@@ -75,6 +75,8 @@ async function line(c: Case) {
 		await pen(cdp, "mouseReleased", 600, y0 + 40, 0, 0);
 		await pen(cdp, "mouseMoved", 620, y0 + 46, 0, 0);
 		await page.evaluate(() => (window as any).__tr.frames(4));
+		// Recording on: wait for the focusin row, at most 1.5 s.
+		if (c === "on") await page.waitForFunction(() => (window as any).__tr.read().focusin.length > 0, undefined, { timeout: 1500 }).catch(() => {});
 		const r = await page.evaluate(() => (window as any).__tr.read());
 		const row = { case: c, setup, ...r };
 		const dir = process.env.TR_OUT;

@@ -235,6 +235,17 @@ export const RELEASE_NOTES: Record<string, string[]> = {
 		"save sync fix",
 		"pdf highlight fix + pdf fixes",
 	],
+	"1.5.2": [
+		"zoom to 800%",
+		"page guides fixes",
+		"ink attach now works with tables",
+		"translation work v0.5",
+		"bug report changes",
+		"page color for pdf export setting added",
+		"performance fixes",
+		"pdf ink+highlight + export fixes",
+		"many ink safety fixes",
+	],
 };
 
 /** One release's own notes, kept apart so the toast can label them honestly. */

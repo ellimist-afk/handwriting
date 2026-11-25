@@ -5,7 +5,7 @@
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { palmSizedTouches, stylusOnlyTouches } from "./StylusTouch";
 import { mouseInkEnabled } from "./MouseInk";
-import { penSeenThisSession } from "./PenToolsMode";
+import { penHardwareEverSeen, penSeenThisSession } from "./PenToolsMode";
 import { tr } from "./InlinePenRouterTrace";
 import { installMethods } from "./InstallMethods";
 import { contextMenuSuppressed, type InlinePenRouter } from "./InlinePenRouter";
@@ -17,7 +17,119 @@ declare module "./InlinePenRouter" {
 		bindBandRoot(scrollEl: HTMLElement): void;
 		bindStylusTouches(): void;
 		bindContextMenu(): void;
+		/**
+		 * The note was moved to another window (the host's window-move call reached its overlay): take the router's
+		 * window listeners off the window they are on and add them to the one the scroller is in now. Does nothing
+		 * when that is the same window, and nothing once the router is disposed.
+		 */
+		followWindow(): void;
 	}
+}
+
+/**
+ * One of the router's window listeners (the blur commit, the four capture touch listeners and the bug recorder's
+ * selection change), with the window it is on now. The window is read once, when the listener is added or moved, and never again: `winRef` reads the
+ * scroller's window live, and a note or PDF moved to another window reports the new one, so a teardown that read
+ * it took the listener off the new window and left it on the old one for the session. Back in that old window the
+ * scroller is the same element, so a router left there matched the pane's touches again.
+ */
+interface WindowListener {
+	type: string;
+	fn: (ev: Event) => void;
+	/** The add's options; the remove names the same capture. */
+	capture: boolean;
+	passive?: boolean;
+	win: Window;
+}
+
+/** Each router's window listeners, in the order they were added. Emptied as the router's disposers run. */
+const windowListeners = new WeakMap<InlinePenRouter, WindowListener[]>();
+
+function addOptions(l: WindowListener): AddEventListenerOptions | undefined {
+	return l.passive === undefined ? undefined : { capture: l.capture, passive: l.passive };
+}
+
+function removeOptions(l: WindowListener): EventListenerOptions | undefined {
+	return l.capture ? { capture: true } : undefined;
+}
+
+/**
+ * Add a window listener on the window the scroller is in now, and a disposer that takes it off the window it is on
+ * when the router is disposed: the one it was added to, or the one followWindow last moved it to.
+ */
+function onWindow(router: InlinePenRouter, l: Omit<WindowListener, "win">): void {
+	const listener: WindowListener = { ...l, win: router.winRef };
+	let list = windowListeners.get(router);
+	if (!list) {
+		list = [];
+		windowListeners.set(router, list);
+	}
+	list.push(listener);
+	listener.win.addEventListener(listener.type, listener.fn, addOptions(listener));
+	const own = list;
+	router.disposers.push(() => {
+		listener.win.removeEventListener(listener.type, listener.fn, removeOptions(listener));
+		const at = own.indexOf(listener);
+		if (at >= 0) own.splice(at, 1);
+	});
+}
+
+/**
+ * The router's state for a bug-recorder row: is a stroke live, is a pen near, how many fingers are down, and how long
+ * since the last finger, the last hover of any pointer, the last pen hover and the last claimed pen down. Read only
+ * while recording.
+ */
+function recorderState(r: InlinePenRouter, now: number): string {
+	const ago = (at: number) => (at === Number.NEGATIVE_INFINITY ? "never" : `${(now - at).toFixed(0)}ms`);
+	return (
+		`stroke ${r.activePenId !== null ? "live" : "none"}, pen near ${r.gate.isPenNear(now) ? "yes" : "no"}, ` +
+		`touches ${r.liveTouchIds.size}, last finger ${ago(r.lastTouchAt)}, last hover ${ago(r.lastPenHoverAt)}, ` +
+		// strokeDownAt starts at 0, the others at -Infinity.
+		`last pen hover ${ago(r.penHoverAt)}, last pen down ${r.strokeDownAt === 0 ? "never" : ago(r.strokeDownAt)}`
+	);
+}
+
+/** The bug recorder's row for a context menu on the surface, with what became of it. Nothing runs while not recording. */
+function menuRow(r: InlinePenRouter, ev: Event, outcome: string): void {
+	if (!diagnosticsEnabled()) return;
+	tr("contextmenu", ev as PointerEvent, `${outcome} | ${recorderState(r, performance.now())}`);
+}
+
+/**
+ * A key, as a bug report may carry it. Bug reports are posted where anyone can read them, so a key that types text
+ * writes only that it did: its key, code and key code are written only for a named key (F13, Unidentified,
+ * ArrowLeft), never for a character, a dead key or a keystroke an input method is composing. The modifier flags are
+ * written for every key.
+ *
+ * The key code is read through a plain shape: the field is deprecated, and it is the one an Android input method
+ * fills (229) while composing, and the one a key with no name of its own may still carry.
+ */
+function keyFields(ev: KeyboardEvent): string {
+	const keyCode = (ev as { keyCode?: number }).keyCode;
+	const mods = [ev.ctrlKey && "ctrl", ev.altKey && "alt", ev.shiftKey && "shift", ev.metaKey && "meta"].filter(Boolean).join("+") || "none";
+	if (ev.isComposing || keyCode === 229 || ev.key === "Process") return `composing mods=${mods}`;
+	if (typeof ev.key !== "string" || ev.key === "Dead" || !/^[A-Z][A-Za-z0-9]+$/.test(ev.key)) return `printable mods=${mods}`;
+	return `key=${ev.key} code=${ev.code} keyCode=${keyCode} repeat=${ev.repeat} mods=${mods}`;
+}
+
+/**
+ * Where a key lands, as far as a bug report may say. In the PDF's password box (Obsidian builds it inside the PDF's
+ * scroller) or any password input, no key writes a row: even Shift, Backspace or Caps Lock there would carry the
+ * password's length, its corrections and its timing. In any other field - an input, a text area, a select, or
+ * anything editable, which a note's editor is - only a named key writes a row, so the count and timing of typed text
+ * stay out of the report. Anywhere else, the ink surface, every key writes its row.
+ *
+ * Duck-typed rather than `instanceof`: a popout window's elements belong to another realm.
+ */
+function keyPlace(target: EventTarget | null): "password" | "field" | "surface" {
+	const el = target as { tagName?: unknown; type?: unknown; isContentEditable?: unknown; closest?: unknown } | null;
+	if (!el || typeof el !== "object") return "surface";
+	const tag = typeof el.tagName === "string" ? el.tagName.toLowerCase() : "";
+	if (tag === "input" && typeof el.type === "string" && el.type.toLowerCase() === "password") return "password";
+	if (typeof el.closest === "function" && (el as { closest: (s: string) => unknown }).closest(".pdf-password-dialog") !== null)
+		return "password";
+	if (tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable === true) return "field";
+	return "surface";
 }
 
 	/** The scroller's pointer listeners, the window blur commit and the pointerleave handler. */
@@ -113,8 +225,7 @@ declare module "./InlinePenRouter" {
 				if (this.finishActiveStroke()) return;
 				if (this.abandonActiveStroke()) this.cb.onStrokeAbandoned?.();
 			};
-			this.winRef.addEventListener("blur", onBlur);
-			this.disposers.push(() => this.winRef.removeEventListener("blur", onBlur));
+			onWindow(this, { type: "blur", fn: onBlur, capture: false });
 		}
 		// A pen leaving takes the surface's reticle with it. So does an ARMED
 		// MOUSE, and that half was missing: this handler tested `pointerType
@@ -129,9 +240,11 @@ declare module "./InlinePenRouter" {
 		// exemption and the event have to be the same rule, and they were not.
 		//
 		// `onPenLeave` is safe for a mouse on both surfaces and does nothing
-		// else: the note's `hidePenCursor` clears the hover watchdog, drops
-		// PEN_HOVER_CLASS and hides the reticle element; the pdf's
-		// `hideCursor` does the same three things with its own names. Neither
+		// else: the note's `hidePenRing` clears the hover watchdog and hides
+		// the reticle element, and keeps PEN_HOVER_CLASS on (GitHub issue 53:
+		// each add or remove restyles the whole note; a pointer coming back in
+		// gets a ring or its pointer by its first row); the pdf's `hideCursor`
+		// clears its watchdog, drops its hover class and hides its reticle. Neither
 		// touches stroke state - and the `activePenId === null` guard below,
 		// which is kept for both pointers, means a button held while the
 		// pointer leaves the pane delivers nothing at all.
@@ -391,13 +504,7 @@ declare module "./InlinePenRouter" {
 			// touch made every later stroke believe a finger had been down
 			// since before it started, and stopped eating it.
 			for (const type of ["touchstart", "touchmove", "touchend", "touchcancel"]) {
-				this.winRef.addEventListener(type, eatStylus, {
-					capture: true,
-					passive: false,
-				});
-				this.disposers.push(() =>
-					this.winRef.removeEventListener(type, eatStylus, { capture: true })
-				);
+				onWindow(this, { type, fn: eatStylus, capture: true, passive: false });
 			}
 		}
 	}
@@ -429,15 +536,21 @@ declare module "./InlinePenRouter" {
 				// blanket return would have handed back mid-stroke. Touch
 				// keeps `stabilizingHand` because that is a rule about the
 				// hand steadying the glass, not about who owns the pen.
-				if (pt === "pen" && this.penOff()) return;
+				if (pt === "pen" && this.penOff()) {
+					menuRow(this, ev, "pen off, passed");
+					return;
+				}
 				// A finger planted to stabilize the hand BEFORE the pen
 				// arrives long-presses into a right-click on windows (orion
 				// 2026-08-26: switch note, plant finger, menu). Chromium
 				// stamps that contextmenu pointerType "touch". Once a pen
 				// has been seen this session, a touch long-press on the
 				// writing surface is a stabilizing hand; sessions that never
-				// see a pen keep their long-press menu.
-				const stabilizingHand = pt === "touch" && penSeenThisSession();
+				// see a pen keep their long-press menu. The strip flag alone
+				// is not a pen (any tool pick sets it), so the device latch
+				// must agree: a device that has never held a pen keeps its
+				// menu whatever is picked.
+				const stabilizingHand = pt === "touch" && penSeenThisSession() && penHardwareEverSeen();
 				const suppress =
 					stabilizingHand ||
 					contextMenuSuppressed({
@@ -454,11 +567,65 @@ declare module "./InlinePenRouter" {
 					ev.preventDefault();
 					ev.stopPropagation();
 				}
+				// After the menu is decided and eaten, so the row can never stand between a menu and its suppression.
+				menuRow(this, ev, suppress ? "suppressed" : "passed");
 			};
 			this.scrollEl.addEventListener("contextmenu", h, { capture: true });
 			this.disposers.push(() =>
 				this.scrollEl.removeEventListener("contextmenu", h, { capture: true })
 			);
+		}
+		// The bug recorder's row for each key while the surface has focus (the note's editor is inside the scroller;
+		// the PDF's scroller is focusable itself). Whether a pen's button reaches the page as a key is not known on a
+		// pen with no hover, and this is where it would show. Nothing is prevented or stopped. A key in a field writes
+		// a row only when it is a named key, and a key in a password box writes none (keyPlace).
+		{
+			const k = (ev: Event) => {
+				if (!diagnosticsEnabled()) return;
+				const place = keyPlace(ev.target);
+				if (place === "password") return;
+				const fields = keyFields(ev as KeyboardEvent);
+				if (place === "field" && !fields.startsWith("key=")) return;
+				tr("keydown", null, `${fields} | ${recorderState(this, performance.now())}`);
+			};
+			this.scrollEl.addEventListener("keydown", k, { capture: true });
+			this.disposers.push(() => this.scrollEl.removeEventListener("keydown", k, { capture: true }));
+		}
+		// The bug recorder's row for each selection change inside the surface: a held pen drag the browser keeps may
+		// leave a text selection behind. The event is fired at the document and does not bubble, so only a capture
+		// listener on the window hears it; passive, so the add and the remove name the same capture (addOptions).
+		// Only a selection with extent writes a row: typing moves a collapsed caret once per character, and a row per
+		// caret move would carry the count and timing of typed text, which the key rows keep out. While a password box
+		// has focus none writes a row (keyPlace): Shift+Arrow there makes a selection with extent, one per step.
+		{
+			const s = () => {
+				if (!diagnosticsEnabled()) return;
+				const doc = this.scrollEl.ownerDocument;
+				const sel = doc?.getSelection?.() ?? null;
+				if (!sel || sel.type !== "Range") return;
+				if (keyPlace(doc?.activeElement ?? null) === "password") return;
+				const inside = (n: Node | null) => n !== null && this.scrollEl.contains(n);
+				if (!inside(sel.anchorNode) && !inside(sel.focusNode)) return;
+				tr(
+					"selectionchange",
+					null,
+					`type=${sel.type} collapsed=${sel.isCollapsed} ranges=${sel.rangeCount} | ${recorderState(this, performance.now())}`
+				);
+			};
+			onWindow(this, { type: "selectionchange", fn: s, capture: true, passive: true });
+		}
+	}
+
+	/** See the declaration above. The listeners move in the order they were added, each with its own options. */
+	function followWindow(this: InlinePenRouter): void {
+		const list = windowListeners.get(this);
+		if (!list || list.length === 0) return;
+		const to = this.winRef;
+		for (const l of list) {
+			if (l.win === to) continue;
+			l.win.removeEventListener(l.type, l.fn, removeOptions(l));
+			l.win = to;
+			to.addEventListener(l.type, l.fn, addOptions(l));
 		}
 	}
 
@@ -468,5 +635,6 @@ export function installInlinePenRouterBind(proto: InlinePenRouter): void {
 		bindBandRoot,
 		bindStylusTouches,
 		bindContextMenu,
+		followWindow,
 	});
 }

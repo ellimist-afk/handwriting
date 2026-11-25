@@ -7,6 +7,8 @@ import {
 	bandCovers,
 	bandFor,
 	bandMargin,
+	bandMarginMax,
+	bandMarginMin,
 	bandNeedsMove,
 } from "./ScrollBand";
 import { MAX_BACKING_AREA, backingScale } from "./ZoomScale";
@@ -49,16 +51,18 @@ describe("bandMargin", () => {
 	});
 
 	/**
-	 * THE GUARD, stated as a test rather than as a comment. Nothing at or above
-	 * 1.0 moves, and neither does a caller that reports no scale at all - which
-	 * is every caller outside the inline overlay, the PDF surface included.
+	 * THE GUARD, stated as a test rather than as a comment. Nothing at 1.0 moves,
+	 * and neither does a caller that reports no scale at all - which is every
+	 * caller outside the inline overlay, the PDF surface included. Above 1.0 the
+	 * floor and the ceiling are in the reader's px too (the cells below).
 	 */
-	it("changes nothing at 1.0, above it, or without a scale", () => {
+	it("changes nothing at 1.0 or without a scale", () => {
 		for (const h of [200, 900, 4000]) {
 			expect(bandMargin(h, 1)).toBe(bandMargin(h));
-			expect(bandMargin(h, 2)).toBe(bandMargin(h));
-			expect(bandMargin(h, 4)).toBe(bandMargin(h));
 		}
+		expect(bandMargin(200)).toBe(BAND_MARGIN_MIN);
+		expect(bandMargin(900)).toBe(225);
+		expect(bandMargin(4000)).toBe(BAND_MARGIN_MAX);
 		// A nonsense scale cannot shrink the margin either: the band is the
 		// thing ink is drawn on, and starving it is worse than ignoring a bad
 		// number.
@@ -335,5 +339,125 @@ describe("band cost below the zoom floor", () => {
 		// than 320 of the scroller's.
 		expect(bandMargin(2000, 1)).toBe(BAND_MARGIN_MAX);
 		expect(bandMargin(2000 / 0.019176, 0.019176)).toBeCloseTo(BAND_MARGIN_MAX / 0.019176, 0);
+	});
+});
+
+/**
+ * ABOVE 1.0 THE FLOOR AND THE CEILING ARE IN THE READER'S PX TOO. The scroller's client box shrinks by the zoom, so a
+ * floor of 120 scroller px is 960 screen px at 800%: a band that big asks the canvases for far more area than the
+ * same pane at 100%, and the area cap then takes it out of the ink's resolution. Divided by the scale, the margin is
+ * the 100% margin on screen at every zoom, so the backing can follow the zoom and the ink stays sharp.
+ *
+ * Divided and then ROUNDED TO THE NEAREST whole px: a fractional margin makes a fractional band box, and the overlay
+ * measures its scale from that box against a whole offsetWidth. Never a ceil or a floor: those flip at the very
+ * scales the zoom steps land on (120 / 8 against 120 / 7.999999).
+ */
+describe("the band margin above 1.0", () => {
+	/** Screen heights: the floor binds, the fraction binds, the ceiling binds. */
+	const SHORT = 300, MID = 1192, TALL = 2000;
+	const client = (screen: number, scale: number) => Math.round(screen / scale);
+
+	it("is the 100% margin on screen at every zoom, within half a scroller px", () => {
+		for (const screen of [SHORT, MID, TALL]) {
+			const atOne = bandMargin(screen);
+			for (const scale of [1, 2, 4, 6, 8]) {
+				const m = bandMargin(client(screen, scale), scale);
+				expect(Math.abs(m - atOne / scale), `screen ${screen} at ${scale}: margin ${m}, want ${atOne / scale}`).toBeLessThanOrEqual(0.5);
+			}
+		}
+		// The floor and the ceiling themselves.
+		expect(bandMargin(client(SHORT, 8), 8)).toBe(15);
+		expect(bandMargin(client(TALL, 8), 8)).toBe(40);
+	});
+
+	it("does not move at or below 1.0", () => {
+		expect(bandMargin(400, 0.5)).toBe(BAND_MARGIN_MIN);
+		expect(bandMargin(1800, 0.5)).toBe(450);
+		expect(bandMargin(4000, 0.5)).toBe(BAND_MARGIN_MAX / 0.5);
+		for (const h of [200, 900, 4000]) expect(bandMargin(h, 1)).toBe(bandMargin(h));
+	});
+
+	it("keeps the band box on whole px at zooms that do not divide the floor or the ceiling", () => {
+		for (const scale of [1.5625, 3, 5.96, 7]) for (const screen of [SHORT, TALL]) {
+			const cw = client(834, scale), ch = client(screen, scale);
+			const v = viewport({ clientWidth: cw, clientHeight: ch, scrollWidth: cw * 3, scrollHeight: 100000, scrollTop: 1000.37, scrollLeft: 10.5, scale });
+			const band = bandFor(v), m = bandMargin(ch, scale);
+			expect(Number.isInteger(m), `margin ${m} at ${scale}, screen ${screen}`).toBe(true);
+			expect(Number.isInteger(band.width) && Number.isInteger(band.height), `band ${band.width} x ${band.height} at ${scale}, screen ${screen}`).toBe(true);
+		}
+	});
+
+	it("gives the same margin at the zoom steps and a hair either side of them", () => {
+		for (const scale of [2, 4, 6, 8]) for (const screen of [SHORT, TALL]) {
+			const ch = client(screen, scale), m = bandMargin(ch, scale);
+			expect(bandMargin(ch, scale * (1 + 1e-6)), `${scale} + 1e-6, screen ${screen}`).toBe(m);
+			expect(bandMargin(ch, scale * (1 - 1e-6)), `${scale} - 1e-6, screen ${screen}`).toBe(m);
+		}
+	});
+
+	/** Band moves while a 300 screen px fling plays in 30 scroll events, from a band just placed. */
+	function flingMoves(screen: number, scale: number): number {
+		const cw = client(834, scale), ch = client(screen, scale), top = 5000 / scale;
+		let v = viewport({ clientWidth: cw, clientHeight: ch, scrollWidth: cw, scrollHeight: 400000 / scale, scrollTop: top, scale });
+		let band = bandFor(v), moves = 0;
+		for (let i = 1; i <= 30; i++) {
+			v = { ...v, scrollTop: top + (300 / scale) * i / 30 };
+			if (bandNeedsMove(band, v)) { band = bandFor(v); moves++; }
+		}
+		return moves;
+	}
+
+	it("moves the band no more often during a fling at 600% or 800% than at 100%", () => {
+		for (const screen of [SHORT, MID, TALL]) {
+			const one = flingMoves(screen, 1);
+			expect(one, `premise: a 300 px fling moves the band at 100% (screen ${screen})`).toBeGreaterThan(0);
+			for (const scale of [6, 8]) {
+				const n = flingMoves(screen, scale);
+				// eslint-disable-next-line no-console
+				console.log(`BAND FLING screen ${screen} scale ${scale}: ${n} moves, ${one} at 100%`);
+				expect(n, `screen ${screen} at ${scale}`).toBeLessThanOrEqual(one);
+			}
+		}
+	});
+});
+
+/**
+ * AN OUTER CSS SCALE IS NOT A ZOOM THE PERSON SET. The zoom the person sets and reads on the zoom bar is the pinch
+ * (getNoteViewportState reads pinchScaleNow); `scale` is the pinch times the pane's own outer CSS scale, 1.25 on the
+ * rig the band comments cite. At a pinch at or below 100% the margin is the base's whatever the outer scale. Above it
+ * the division is by the pinch when the outer scale is above 1, because the base's 100% band already holds that outer
+ * scale, so the margin at a pinch of 2 is half the 100% margin of the same pane. When the
+ * outer scale is below 1 it is by the whole scale, as before, because the zoomed-out branch already divides by it.
+ *
+ * The base numbers, from before the margin was divided above 1: below a scale of 1 the ceiling is 320 / scale, and at or above it 320 and 120 stand.
+ */
+describe("the band margin under an outer CSS scale", () => {
+	it("at outer 1.25 and a pinch at or below 100%, is the base margin", () => {
+		for (const pinch of [1, 0.9, 0.8]) {
+			const s = 1.25 * pinch;
+			expect([bandMargin(320, s, pinch), bandMargin(1120, s, pinch), bandMargin(4000, s, pinch), bandMarginMax(s, pinch), bandMarginMin(s, pinch)], `pinch ${pinch}`)
+				.toEqual([120, 280, 320, 320, 120]);
+		}
+		// Below a scale of 1 overall, the zoomed-out branch, unchanged by the division above 1.
+		expect(bandMargin(4000, 1.25 * 0.5, 0.5)).toBe(512);
+	});
+
+	it("at outer 1.25 and a pinch of 2, divides by the pinch: half the 100% margin", () => {
+		expect([bandMarginMax(2.5, 2), bandMarginMin(2.5, 2), bandMargin(4000, 2.5, 2), bandMargin(560, 2.5, 2)]).toEqual([160, 60, 160, 140]);
+	});
+
+	it("places and keeps the band by the pinch: bandFor and bandNeedsMove at outer 1.25, pinch 1", () => {
+		const v = viewport({ clientHeight: 1120, scrollTop: 5000, scale: 1.25, pinch: 1 });
+		const band = bandFor(v);
+		expect([band.top, band.height], "a margin of 280 each way, the base's").toEqual([4720, 1680]);
+		// 135 px of band left below the pane: inside the base's half-margin slack of 140, so the band moves.
+		expect(bandNeedsMove(band, { ...v, scrollTop: 5145 })).toBe(true);
+		expect(bandNeedsMove(band, { ...v, scrollTop: 5135 }), "control: 145 px left, outside the slack").toBe(false);
+	});
+
+	it("control: a caller that reports no pinch, or an outer scale at or below 1, gets the margin divided by the whole scale", () => {
+		expect([bandMarginMax(2), bandMarginMax(8), bandMarginMin(8), bandMarginMax(0.5)]).toEqual([160, 40, 15, 640]);
+		for (const [s, p] of [[2, 2], [8, 8], [1.6, 2], [0.88, 1.1], [0.5, 0.5]]) for (const h of [300, 1120, 4000])
+			expect(bandMargin(h, s, p), `scale ${s} pinch ${p}, client ${h}`).toBe(bandMargin(h, s));
 	});
 });

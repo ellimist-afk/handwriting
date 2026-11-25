@@ -352,7 +352,7 @@ declare module "./InkOverlay" {
 		let room = { x: Infinity, y: Infinity };
 		if (travelled && (dx < 0 || dy < 0) && this.cssScale > 0) {
 			const s = this.view.scrollDOM;
-			room = travelledEaseRoom({ scrollLeft: s.scrollLeft, scrollTop: s.scrollTop, clientWidth: s.clientWidth, clientHeight: s.clientHeight, scrollWidth: this.bandFreeScrollWidth ?? s.scrollWidth, scrollHeight: s.scrollHeight, scale: this.cssScale });
+			room = travelledEaseRoom({ scrollLeft: s.scrollLeft, scrollTop: s.scrollTop, clientWidth: s.clientWidth, clientHeight: s.clientHeight, scrollWidth: this.bandFreeScrollWidth ?? s.scrollWidth, scrollHeight: s.scrollHeight, scale: this.cssScale, pinch: this.pinchScaleNow });
 		}
 		return {
 			x: Math.abs(dx) >= OVERSCROLL_BOUNCE_MIN_PX && !(this.canvasMode && dx < 0 && (!travelled || Math.ceil(-dx / this.cssScale) > room.x)) ? dx : 0,

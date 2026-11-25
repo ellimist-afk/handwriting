@@ -58,12 +58,12 @@ describe("Lasso: attach ink to text / detach ink from text", () => {
 		expect(listed(["a", "free"]), "a group and free ink").toEqual([true, false]);
 	});
 
-	it("Detach is listed on a lasso over two groups, loose ink in it or not, and runs the overlay's Detach; Attach is not", () => {
+	it("Attach and Detach are listed on a lasso over two groups, loose ink in it or not, and Detach runs the overlay's Detach", () => {
 		// Defect: the palette hides Detach for two groups while the button shows it.
 		const two: AttachmentRecord[] = [group, { ...group, id: "g2", strokeIds: ["c"], probe: { id: "c", x: 0, y: 0 } }];
 		for (const ids of [["a", "c"], ["a", "c", "free"]]) {
 			const r = rig(ids, "inline", true, two);
-			expect([r.attach.checkCallback(true), r.detach.checkCallback(true)], ids.join(" ")).toEqual([false, true]);
+			expect([r.attach.checkCallback(true), r.detach.checkCallback(true)], ids.join(" ")).toEqual([true, true]);
 			r.detach.checkCallback(false);
 			expect(r.calls, ids.join(" ")).toEqual(["detach"]);
 		}

@@ -194,3 +194,54 @@ describe("a pen landing inside a live selection", () => {
 		expect(rig.pressureState()).toEqual({ gain: 1, observesPen: false });
 	});
 });
+
+/**
+ * ERASER-FINGER: a finger never erases, whatever tool is lit. With the eraser lit a
+ * finger reaches penDown only as the selection's claim (finger ink needs the nib, FingerInk.ts). Inside the box it takes
+ * the selection as with the nib. BR-1: a claimed finger whose contact test at pen-down misses (the claim tested the
+ * landing before the pre-down hook) must not fall through to the erase branch either. A pen and a mouse with the eraser
+ * lit still erase inside the selection and dissolve it (the rule this file's first cell pins).
+ */
+describe("ERASER-FINGER: with the eraser lit a finger never erases", () => {
+	beforeEach(() => resetTipModeForTest());
+	afterEach(() => resetTipModeForTest());
+
+	it("BR-1: a claimed finger that misses the selection at pen-down: nothing erased, the selection kept, no grab, no ink", () => {
+		setTipMode("eraser");
+		const rig = makeRig();
+
+		rig.penDown(OUTSIDE, "touch");
+
+		expect(rig.erased, "BR-1: nothing erased (a stroke at OUTSIDE kept)").not.toHaveBeenCalled();
+		expect(rig.mode(), "BR-1: not the eraser's gesture").not.toBe("erase");
+		expect(rig.selectionEmpty(), "BR-1: the selection kept").toBe(false);
+		expect(rig.grabbed, "BR-1: nothing under it to grab").not.toHaveBeenCalled();
+		expect(rig.wetDown, "BR-1: no ink").not.toHaveBeenCalled();
+	});
+
+	it("a claimed finger inside the box takes the selection as with the nib: a lasso contact, nothing erased, the selection kept", () => {
+		setTipMode("eraser");
+		const rig = makeRig();
+
+		rig.penDown(INSIDE, "touch");
+
+		expect(rig.erased, "nothing erased").not.toHaveBeenCalled();
+		expect(rig.mode()).toBe("lasso");
+		expect(rig.grabbed).toHaveBeenCalledTimes(1);
+		expect(rig.selectionEmpty(), "the selection kept").toBe(false);
+	});
+
+	for (const pointerType of ["pen", "mouse"]) {
+		it(`PIN: a ${pointerType} with the eraser lit inside the box erases and dissolves the selection, as today`, () => {
+			setTipMode("eraser");
+			const rig = makeRig();
+
+			rig.penDown(INSIDE, pointerType);
+
+			expect(rig.mode()).toBe("erase");
+			expect(rig.erased).toHaveBeenCalledTimes(1);
+			expect(rig.grabbed).not.toHaveBeenCalled();
+			expect(rig.selectionEmpty(), "the selection dissolved").toBe(true);
+		});
+	}
+});

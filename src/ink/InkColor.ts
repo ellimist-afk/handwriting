@@ -151,11 +151,21 @@ export function inkColorTitle(tool: InkTool, index: number): string {
 	return live[tool][index]?.title ?? "";
 }
 
-/** Pure, unit-tested: next palette entry; off-palette values restart at 0. */
+/** The slot `nextInkColor` last stepped to, per tool: a colour in two slots cannot say which one it is. */
+const cycledSlot: Record<InkTool, number> = { pen: -1, highlighter: -1 };
+
+/**
+ * Next palette entry; off-palette values restart at 0. The current colour is read as the slot the last step landed
+ * on while that slot still holds it, else as the first slot that holds it, so a colour in two slots is stepped past
+ * from the copy the cycle is on and every slot comes round in order.
+ */
 export function nextInkColor(tool: InkTool, currentHex: string): InkColorChoice {
 	const palette = colorsFor(tool);
-	const i = palette.findIndex((c) => c.hex.toLowerCase() === currentHex.toLowerCase());
-	return palette[(i + 1) % palette.length]!;
+	const hex = currentHex.toLowerCase();
+	const last = cycledSlot[tool];
+	const i = palette[last]?.hex.toLowerCase() === hex ? last : palette.findIndex((c) => c.hex.toLowerCase() === hex);
+	cycledSlot[tool] = (i + 1) % palette.length;
+	return palette[cycledSlot[tool]]!;
 }
 
 // ---- selection state (session; the plugin persists it per tool) ------------

@@ -1,9 +1,9 @@
 /**
  * AN EMBED'S INK IS CUT AT THE EMBED'S BOX IN AN EXPORT, AS IT IS ON SCREEN.
  *
- * A note embeds another whose ink sits on blank lines above its first line of text. A rendered view folds those blank
- * lines, and a stroke anchored on a blank line is drawn the blank lines' height above the block below it
- * (EmbedInkLines.ts lineTopIn), so the embedded note's ink lands above the embed's box. On screen Obsidian's embed box
+ * A note embeds another whose ink sits above the embed's box (until issue 67, a stroke anchored on a blank line was
+ * drawn the blank lines' height above the block below it, EmbedInkLines.ts lineTopIn; the fixture now places its stroke
+ * there by its stored place), so the embedded note's ink lands above the embed's box. On screen Obsidian's embed box
  * clips it (`.inline-embed > .markdown-embed-content`: a max height and `overflow: auto`, app.css:11948-11952) and
  * nothing shows. The export's print rules drop that clip (`.print .markdown-preview-view .markdown-embed-content`: no
  * max height, `overflow: visible`, app.css:3157-3160), so the exported PDF drew the embedded note's ink over the host
@@ -11,8 +11,8 @@
  *
  * The page: a host note's print container (div.print > .markdown-preview-view, no sizer) with four typed lines, then
  * an embed of a note whose text starts on its line 14 after ten blank lines. Two strokes in the embedded note: a magenta
- * one anchored on blank line 6, which the placement puts eight rows above the embed's first block, so above the embed
- * box and over the host's lines; and a blue one anchored on the embed's second line of text, inside the box. The same
+ * one with no anchor stored at y -182, eight rows above the embed's first block, so above the embed box and over the
+ * host's lines; and a blue one anchored on the embed's second line of text, inside the box. The same
  * page is built without the print wrapper as the live embed. Each case counts the magenta rows painted above the embed
  * box and the blue rows inside it, for the canvas (an export that fires no print event) and for the vector layer a
  * print swaps in, and reads the embed root's and the host root's computed overflow.
@@ -144,14 +144,19 @@ const TEXT = NOTE.join("\\n");
 const EDITOR_LINE = 24;
 const editorTop = line => (line - 4) * EDITOR_LINE;
 
-/** One horizontal stroke 120 px long at editor y, anchored to 1-based \`line\`. */
-function stroke(id, color, line) {
-	const y = editorTop(line) + 10, pad = 4;
+/** One horizontal stroke 120 px long at stored y, with no line anchor: drawn at its stored place. */
+function atPlace(id, color, y) {
+	const pad = 4;
 	const points = Array.from({ length: 16 }, (_, j) => ({ x: 40 + j * 8, y, pressure: 0.5, t: j * 9 }));
 	const bbox = { x: 40 - pad, y: y - pad, width: 120 + 2 * pad, height: 2 * pad };
-	return { id, tool: "pen", color, width: 3, createdAt: 0, points, bbox,
-		lineAnchor: { line, top: editorTop(line), y: bbox.y, key: lineKey(NOTE[line - 1]), width: 668, fontPx: 16,
-			above: aboveOf(newAboveRun(), line, k => lineKey(NOTE[k - 1])) } };
+	return { id, tool: "pen", color, width: 3, createdAt: 0, points, bbox };
+}
+/** One horizontal stroke 120 px long at editor y, anchored to 1-based \`line\`. */
+function stroke(id, color, line) {
+	const s = atPlace(id, color, editorTop(line) + 10);
+	s.lineAnchor = { line, top: editorTop(line), y: s.bbox.y, key: lineKey(NOTE[line - 1]), width: 668, fontPx: 16,
+		above: aboveOf(newAboveRun(), line, k => lineKey(NOTE[k - 1])) };
+	return s;
 }
 
 let open = null;
@@ -179,7 +184,10 @@ window.embedClip = async (print, mode) => {
 		sections.push({ el, lineStart: line, lineEnd: line });
 	}
 	await frame();
-	const strokes = [stroke("above", "#ff00ff", 6), stroke("inside", "#0000ff", 15)];
+	// The magenta stroke is placed above the box by its stored place, -182: where the placement drew a stroke anchored on
+	// blank line 6 until issue 67 (eight 24 px rows above the first block). Since issue 67 that anchored stroke keeps its
+	// distance from the first block's top and lands inside the box (the fixture moves, the asserts stay).
+	const strokes = [atPlace("above", "#ff00ff", -182), stroke("inside", "#0000ff", 15)];
 	initEmbedInkRefresh(() => strokes);
 	for (const s of sections) {
 		attachEmbedInkOnceReady(s.el, view, "Organic.md", () => strokes, undefined, false, {

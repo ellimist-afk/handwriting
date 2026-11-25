@@ -42,6 +42,7 @@ import {
 	type AttachmentStatus,
 	type AttachmentTarget,
 	type AttachStep,
+	type LinkSwaps,
 } from "./InkAttachments";
 
 /** The most groups whose reference point one measure reads through the layout. */
@@ -616,10 +617,10 @@ export class AttachFollow {
 	 * same object when no target moved. A target past the end of the text before the change (a stale record kept for
 	 * reattachment) is first brought to that end, as mapping past it throws.
 	 */
-	docChanged(changes: ChangeDesc, blockTop: (pos: number) => number, pxPerWorld: number, below?: number): readonly AttachmentData[] {
+	docChanged(changes: ChangeDesc, blockTop: (pos: number) => number, pxPerWorld: number, below?: number, swaps?: LinkSwaps | null): readonly AttachmentData[] {
 		const end = changes.length, inside = (a: AttachmentData) => isOpaqueAttachment(a) || a.target.to <= end;
 		const list = this.list.every(inside) ? this.list : this.list.map((a) => inside(a) || isOpaqueAttachment(a) ? a : { ...a, target: { ...a.target, from: Math.min(a.target.from, end), to: end } });
-		const mapped = mapAttachments(list as AttachmentData[], changes);
+		const mapped = mapAttachments(list as AttachmentData[], changes, swaps ?? undefined);
 		this.rereadOnChangedLine(mapped, changes, blockTop);
 		if (mapped === this.list) return mapped;
 		// Which groups were read in this layout before the change; one below the changed lines that the
@@ -814,14 +815,15 @@ export class AttachFollow {
 	 * A text change, for the two records each Attach that ended a hold keeps for its undo and redo, and each record let
 	 * go of: all mapped through it as the note's list is, so the step finds them where the change left them. Every pane
 	 * maps its own, writer of the list or not: each pane has its own history. A target past the end of the text before
-	 * the change is first brought to that end, as in docChanged.
+	 * the change is first brought to that end, as in docChanged. `swaps`: picture links the change replaced by a link to
+	 * the same file, kept as the list's are.
 	 */
-	carryLifted(changes: ChangeDesc): void {
+	carryLifted(changes: ChangeDesc, swaps?: LinkSwaps | null): void {
 		if (changes.empty || (this.lifted.size === 0 && this.letGo.size === 0)) return;
 		const end = changes.length;
 		const map = (r: AttachmentRecord): AttachmentRecord => {
 			const t = r.target.to <= end ? r.target : { ...r.target, from: Math.min(r.target.from, end), to: end };
-			const target = mapTarget(t, changes);
+			const target = mapTarget(t, changes, swaps ?? undefined);
 			return target === r.target ? r : { ...r, target };
 		};
 		for (const [id, l] of this.lifted) this.lifted.set(id, { held: map(l.held), attached: map(l.attached) });
@@ -908,7 +910,15 @@ export class AttachFollow {
 			this.place(record, blockTop);
 			const f = this.follows.get(record.id)!;
 			f.epoch = -1;
-			if (carry) f.offset = { dx: carry.dx, dy: carry.dy };
+			// The point the carry puts the group at, and the correction taken from it as every reader takes it (a new list,
+			// a text change): the two agree, and a zero carry is no correction.
+			if (carry) {
+				const ref = { x: record.ref.x + carry.dx, y: record.ref.y + carry.dy }, offset = offsetFrom(record, ref);
+				if (offset) {
+					f.ref = ref;
+					f.offset = offset;
+				}
+			}
 			this.generation++;
 			return true;
 		}

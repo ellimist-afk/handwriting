@@ -33,6 +33,7 @@ import {
 	attachEmbedInkOnceReady,
 	embedInkIsLiveEditorBlock,
 	disarmPrintSwaps,
+	onEmbedInkLinesMoved,
 	teardownEmbedInk,
 } from "../inline/EmbedInk";
 import { InlineInkStore, InlineInkHost } from "../inline/InlineInkStore";
@@ -66,12 +67,14 @@ const makeProcessorRaw = new Function(
 	"hoverWholeNote",
 	"isMarkdownPath",
 	"overlayForPath",
+	"onEmbedInkLinesMoved",
 	transformSync(`return (el: any, ctx: any) => {\n${ppBody}\n};`, {
 		loader: "ts",
 		target: "es2022",
 	}).code
 );
 // 1.4.22 lane R: the post-processor also calls embedInkIsLiveEditorBlock (issue 22 fix).
+// The post-processor also hands each rendered section's text drop to onEmbedInkLinesMoved.
 // The file text a hover preview's rendered text is compared with.
 let noteFileText = "";
 let noteReads = 0;
@@ -84,7 +87,7 @@ const readNoteText = async (): Promise<string | null> => {
 	return noteFileText;
 };
 const makeProcessor = (...deps: unknown[]) =>
-	makeProcessorRaw(...deps, embedInkIsLiveEditorBlock, readNoteText, new WeakMap<object, unknown>(), isMarkdownPath, () => null);
+	makeProcessorRaw(...deps, embedInkIsLiveEditorBlock, readNoteText, new WeakMap<object, unknown>(), isMarkdownPath, () => null, onEmbedInkLinesMoved);
 
 // ---- Obsidian Component / MarkdownRenderChild semantics --------------------
 class Component {

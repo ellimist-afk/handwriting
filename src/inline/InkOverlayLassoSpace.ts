@@ -23,6 +23,7 @@ import { inkApplied, inkEffect, type InkOp } from "./InkHistory";
 import { MAX_BACKING_AREA, noteToVisual, visualToNote } from "./ZoomScale";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
 import { committedFloorFor, inlineInk, instances, SELECTION_GRAB_PAD, type InkOverlayPlugin } from "./InkOverlay";
+import { washedStripEnd } from "./InkOverlayPenSupport";
 import { attachGroup, isOpaqueAttachment } from "./InkAttachments";
 import type { Point2 } from "../ink/Smoothing";
 import {
@@ -46,7 +47,7 @@ import {
 	type TransformHandle,
 	type TransformParams,
 } from "./LassoTransform";
-import { ATTACH_STRINGS, NO_CHROME, attachChromeOf, attachPinsOf, hitPin, narrowedTo, overlayColours, paintAttachChrome, selectionChips, syncWithoutChrome, toggleAttach, PIN_LIFT_PX, type AttachPin } from "./AttachDecoration";
+import { ATTACH_STRINGS, NO_CHROME, attachButtonAttached, attachChromeOf, attachPinsOf, hitPin, narrowedTo, overlayColours, paintAttachChrome, selectionChips, syncWithoutChrome, toggleAttach, draggedPinPoint, type AttachPin } from "./AttachDecoration";
 
 /**
  * An insert space drag's moving ink, pen-down to release. The store does not move until the release; the committed layers
@@ -139,11 +140,12 @@ declare module "./InkOverlay" {
 		attachPinAt(w: Point2, input: HandleInput): AttachPin | null;
 		selectionContactAt(w: Point2, input: HandleInput): "pin" | "button" | "handle" | "box" | null;
 		/**
-		 * A contact that landed on a pin, down to lift: the pin's group, where the contact landed and was last, world units,
-		 * and whether it moved past the grab pad. The lift of a moved press drops the pin there (dropAttachPin); an unmoved
-		 * press does nothing. Null or absent otherwise.
+		 * A contact that landed on a pin, down to lift: the pin's group, where the contact landed and was last, the pin's
+		 * point at the press, world units, and whether it moved past the grab pad. The lift of a moved press drops the pin at
+		 * its point moved as the contact moved (draggedPinPoint, dropAttachPin); an unmoved press does nothing. Null or
+		 * absent otherwise.
 		 */
-		pinPress?: { id: string; from: Point2; last: Point2; moved: boolean } | null;
+		pinPress?: { id: string; from: Point2; last: Point2; moved: boolean; at: Point2 } | null;
 		/**
 		 * A pen or an armed mouse hovering: the Attach button's words ("Attach") show under the button while the hover is on
 		 * it, and hide off it. One element per overlay, made on first need, on the note's document body.
@@ -472,7 +474,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 				this.selection.selectExactly([...a.strokeIds]);
 				this.refreshStrip();
 			}
-			this.pinPress = { id: pin.id, from: w, last: w, moved: false };
+			this.pinPress = { id: pin.id, from: w, last: w, moved: false, at: pin.at };
 			this.redrawSelectionUI();
 			return;
 		}
@@ -693,7 +695,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		if (pinPress) {
 			this.pinPress = null;
 			// A cancelled pin drag puts the pin back, as Escape does: the hook stays on its words and nothing is written.
-			if (pinPress.moved && !cancelled) this.dropAttachPin(pinPress.id, pinPress.last);
+			if (pinPress.moved && !cancelled) this.dropAttachPin(pinPress.id, draggedPinPoint(pinPress));
 			this.redrawSelectionUI();
 			return;
 		}
@@ -1061,7 +1063,7 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 
 	/**
 	 * Make the picture's window: rows down to the pane's bottom plus `spacePictureReach` pane heights (an upward drag pulls ink in
-	 * from there), at least the whole canvas, and up to the box's top within one canvas's pixel budget counted from that bottom.
+	 * from there), at least the whole canvas, and up to the box's top within a pixel budget (10M, or the tail's own pixels when more) counted from that bottom.
 	 * A box whose top is above the canvas's (a tall row crossing the line near the screen's top) then keeps its window while a
 	 * drag down brings those rows in; when the budget does not reach the rows the offset shows now, the window starts at them.
 	 * Row 0 is the tail's backing row `top`, a whole px. Nothing is rastered here: drawSpacePicture rasters the rows it shows
@@ -1083,7 +1085,10 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		const perPx = layer.height > 0 ? this.committedCanvas.height / layer.height : 0;
 		const paneBottom = (pane.bottom - layer.top) * perPx, paneHeight = pane.height * perPx;
 		const reachRows = Number.isFinite(paneBottom) && paneHeight > 0 ? Math.max(tail.height, Math.ceil(paneBottom + reach * paneHeight)) : tail.height;
-		const budget = Math.floor(MAX_BACKING_AREA / w), need = Math.max(boxTop, -shift);
+		// The budget is the larger of 10M and the tail's own pixels. A desktop canvas can be up to 16M (a 4K pane, or an
+		// ordinary pane zoomed in); on 10M alone its rows did not fit, the bottom of the moving ink stayed blank and the picture
+		// was made again every frame. Never more pixels than the tail holds, for a canvas over 10M.
+		const budget = Math.floor(Math.max(MAX_BACKING_AREA, tail.width * tail.height) / w), need = Math.max(boxTop, -shift);
 		let bottom = Math.min(boxBottom, reachRows - shift), top = Math.max(boxTop, bottom - budget);
 		if (top > need) { top = need; bottom = Math.min(bottom, top + budget); }
 		bottom = Math.max(top, bottom);
@@ -1505,18 +1510,19 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		// During a resize or turn the frame is the grab's box under the step, so it and the knob turn with the ink.
 		const frame = bounds ? this.selectionFrame() : null;
 		if (frame) this.tail.drawSelectionBox(cam, frame.box, SELECTION_COLOR, !this.lassoActive && handlesShown(selectedKinds(this)), frame.step);
-		// The Attach button under the box: the selection colour while the selection is one whole attached group, muted while loose.
+		// The Attach button under the box: the selection colour while the selection is one whole attached group (its tap
+		// detaches), muted otherwise, two groups or more included (its tap attaches them as one group).
 		if (bounds && path && this.attachButtonShownHere()) {
-			const c = overlayColours(this), detach = selectionChips(this, inlineInk.attachments(path)).detach;
-			this.tail.drawAttachButton(cam, bounds, detach, { attached: SELECTION_COLOR, loose: c.muted, background: c.background });
+			const c = overlayColours(this), attached = attachButtonAttached(selectionChips(this, inlineInk.attachments(path)));
+			this.tail.drawAttachButton(cam, bounds, attached, { attached: SELECTION_COLOR, loose: c.muted, background: c.background });
 		}
 		// The chrome rides the full tail only: with nothing selected a held group's tag is on the committed layer. A pin being
-		// dragged shows under the contact, its head where the contact is, in place of the selected group's pin on its words.
+		// dragged moves with the contact, held where it was grabbed, in place of the selected group's pin on its words.
 		const dragged = this.pinPress?.moved ? this.pinPress : null;
 		if (fullUI) paintAttachChrome(this, this.tail, cam, dragged && attach.pins ? { ...attach, pins: undefined } : attach, SELECTION_COLOR, this.cssScale);
 		if (fullUI && dragged) {
-			const c = overlayColours(this), k = PIN_LIFT_PX / (cam.zoom * this.cssScale);
-			this.tail.drawAttachPin(cam, { x: dragged.last.x, y: dragged.last.y + k }, SELECTION_COLOR, c.background, this.cssScale);
+			const c = overlayColours(this);
+			this.tail.drawAttachPin(cam, draggedPinPoint(dragged), SELECTION_COLOR, c.background, this.cssScale);
 		}
 		if(on)on("sel.box",performance.now()-th);
 		// A repaint can land mid-stroke - a scroll, an external reload, damage
@@ -1524,14 +1530,12 @@ function samePlan(a: SpaceBoundary, b: SpaceBoundary): boolean {
 		// and the head is the lag-free tip: erasing it until the next pointer
 		// event is a blink at exactly the place the eye is resting.
 		if (head) {
-			this.tail.drawHead(
-				cam,
-				this.activeStyle,
-				head.from,
-				head.to,
-				head.pressure,
-				this.activeWet.liveHalfWidth(this.activeStyle, head.pressure)
-			);
+			// A highlighter's tip keeps out of the strip's end disc (washedStripEnd), by a clip: an erase here would also
+			// take selection chrome painted before it.
+			const stripEnd = washedStripEnd(this);
+			const hw = this.activeWet.liveHalfWidth(this.activeStyle, head.pressure);
+			if (stripEnd) this.tail.drawHeadOutside(cam, this.activeStyle, head.from, head.to, head.pressure, hw, stripEnd);
+			else this.tail.drawHead(cam, this.activeStyle, head.from, head.to, head.pressure, hw);
 		}
 	}
 

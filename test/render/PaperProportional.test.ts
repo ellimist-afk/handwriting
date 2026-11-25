@@ -6,34 +6,32 @@
  * fontZoom entirely (InkOverlay.ts's own comment: "Font size does not scale
  * CSS backgrounds, so the font zoom is not in it").
  *
- * THE RATIO IS paperFontScale = font-size / 16, ABSOLUTE - never line height.
- * Two independent reasons, both real, not just a fixture accident: (1) this
+ * THE PITCH IS ONE PLAIN BODY ROW of the text: the content's computed line
+ * height, read where the font is read. The rule and dot thickness still follow
+ * font-size / 16. So the paper scales with the text when the text's ROWS scale
+ * with it, as they do in Obsidian (line-height 1.5 x the font size). This
  * harness's own theme pins `.cm-content` line-height to a fixed 24px at every
- * font size (noteViewportCameraPage.ts's `setup()`), so a line-height read
- * here would not move at all; (2) even in real Obsidian, text line-height is
- * 1.5 x font-size (24px at 16px) while the paper's 28px pitch is an
- * independent design constant that never matched either number - so "scale
- * with the text" can only mean the font-SIZE ratio, not a height comparison
- * that was never equal to begin with. Measured the same way the overlay
- * itself measures fontZoom: `fontZoomFactor(fontSize, refFontPx)`
- * (InkOverlay.ts:3632) is fontSize-only, so this cell's proxy for "the text
- * grew" - ten monospace characters' own glyph width - is exactly that ratio,
- * not an approximation of it.
+ * font size (noteViewportCameraPage.ts's `setup()`): left that way, a font
+ * change moves no row and the pitch rightly stays put, which says nothing
+ * about following the text. So both cells put Obsidian's own unitless 1.5 back
+ * on the content (ROW_SCALES_WITH_TEXT) and read the row off the page.
+ * The premise for "the text grew" is ten monospace characters' own glyph
+ * width, the same font-size ratio the overlay's fontZoomFactor measures.
  *
  * Reuses the existing camera fixture - `viewportFixture.setup`/`edgeAudit.
  * commit` drive the real overlay; every assertion here is computed style,
  * never an internal field, so the cell does not depend on how the fix is
  * implemented.
  *
- * 1a: a LIVE font-zoom-only change (16px -> 20px, no pinch) scales lined,
- *     grid and dots paper by exactly that font-size ratio (1.25x: pitch 28
- *     -> 35, rule and dot size x1.25) - the premise (the text itself grew by
- *     that ratio) is asserted first, via glyph width, before any paper claim.
- * 1b: MOUNTED directly at font 1.25 (20px, no live change), commit z 0.5 ->
- *     35 x 0.5 = 17.5 screen px, all three styles. Deliberately mount-time,
- *     not built up from a live change: this is the "mounted at an
- *     already-zoomed font" case, which a mount-relative (rather than
- *     absolute font/16) implementation would get wrong.
+ * 1a: a LIVE font-zoom-only change (16px -> 20px, no pinch), the row moving
+ *     with it, scales lined, grid and dots paper by the row's own ratio (the
+ *     same 1.25x the glyphs grew), and the rule by the font-size ratio - the
+ *     premises (the text and its row really grew) are asserted first.
+ * 1b: MOUNTED directly at font 1.25 (20px, no live change), commit z 0.5:
+ *     the screen pitch is the row read off the page x 0.5, all three styles.
+ *     Deliberately mount-time, not built up from a live change: this is the
+ *     "mounted at an already-zoomed font" case, which a mount-relative
+ *     implementation would get wrong.
  */
 import { beforeAll, afterAll, it, expect } from "vitest";
 import { build } from "esbuild";
@@ -63,9 +61,13 @@ afterAll(async () => { await browser?.close(); });
  * takes (its own `.cm-content` fontSize is `16 * font`px). One far ink stroke
  * (the "far" kind) so Fit has something to frame, matching the other paper
  * cells' convention - irrelevant to this cell but harmless. */
+/** Obsidian's own row: line-height 1.5 x the font size, over the fixture theme's fixed 24px, so the row moves with the
+ * text. In place before the mount, so the 1b mount-time read sees it. */
+const ROW_SCALES_WITH_TEXT = ".camera-proof .cm-content { line-height: 1.5 !important; }";
+
 async function mountPaper(p: Page, kind: "lines" | "grid" | "dots", font = 1, id = "paper") {
 	await p.setContent(`<!doctype html><body class="handwriting-paper-${kind}" style="margin:0; background:#ffffff; --background-modifier-border:#777777"></body>`);
-	await p.addStyleTag({ content: css + OBSIDIAN_CAMERA_CSS });
+	await p.addStyleTag({ content: css + OBSIDIAN_CAMERA_CSS + ROW_SCALES_WITH_TEXT });
 	await p.addScriptTag({ content: script });
 	await p.evaluate(({ id, font }) => (window as any).viewportFixture.setup(id, "far", font), { id, font });
 }
@@ -74,12 +76,9 @@ async function mountPaper(p: Page, kind: "lines" | "grid" | "dots", font = 1, id
  * call (no caching, so a live font change is reflected).
  *
  * NOT the `.cm-line` element's own box, and NOT line HEIGHT:
- *  - the fixture's own theme pins `.cm-content`'s line-height to a fixed
- *    24px regardless of fontSize (noteViewportCameraPage.ts's `setup()`,
- *    `lineHeight:"24px"`, never `${font}`-scaled) - that pin exists for this
- *    fixture's own layout stability and is orthogonal to the paper question,
- *    so asserting on it would fail the premise for a reason that has
- *    nothing to do with the code under test.
+ *  - line height is the paper's pitch here, the thing under test, and this
+ *    cell sets it itself (ROW_SCALES_WITH_TEXT); it cannot also be the
+ *    independent proof that the text grew. It is read separately (rowPx).
  *  - the fixture wraps text at a fixed 640 LAYOUT px content width
  *    (`EditorView.lineWrapping` + the theme's `width:"640px"`), so the
  *    rendered `.cm-line` BOX width stays clamped to that container - a
@@ -111,20 +110,30 @@ const readPitchRuleLayout = (p: Page): Promise<{ pitchLayout: number; ruleLayout
 	p.evaluate(() => {
 		const host = document.querySelector(".cm-editor") as HTMLElement;
 		return {
-			pitchLayout: Number.parseFloat(host.style.getPropertyValue("--handwriting-paper-pitch")) || 28,
-			ruleLayout: Number.parseFloat(host.style.getPropertyValue("--handwriting-paper-rule")) || 1,
+			// NaN when unwritten, never a stand-in number: a default would hide a paper the overlay never planned.
+			pitchLayout: Number.parseFloat(host.style.getPropertyValue("--handwriting-paper-pitch")),
+			ruleLayout: Number.parseFloat(host.style.getPropertyValue("--handwriting-paper-rule")),
 		};
 	});
 
-/** Dots carry no custom property today (styles.css: `background-size: 28px
- * 28px`, fixed) - the rendering claim is the computed `background-size`
- * itself, in the scroller's own layout px (the zoomed ancestor scales the
- * whole visual result, exactly as it does for the gradient-based styles). */
+/** Dots: the rendering claim is the computed `background-size` itself (one
+ * pitch square), in the scroller's own layout px (the zoomed ancestor scales
+ * the whole visual result, exactly as it does for the gradient-based styles). */
 const readDotsSizeLayout = (p: Page): Promise<{ w: number; h: number }> =>
 	p.evaluate(() => {
 		const s = getComputedStyle(document.querySelector(".cm-scroller")!).backgroundSize;
 		const [w, h] = s.split(" ").map(v => Number.parseFloat(v));
-		return { w: w ?? 28, h: h ?? 28 };
+		return { w: w ?? Number.NaN, h: h ?? Number.NaN };
+	});
+
+/** One plain body row in layout px, read the way the overlay plans the pitch: the content's px line height, else a
+ * plain line box's height, to 1/64 px. */
+const rowPx = (p: Page): Promise<number> =>
+	p.evaluate(() => {
+		const c = document.querySelector(".camera-proof .cm-content") as HTMLElement, lh = getComputedStyle(c).lineHeight;
+		const line = c.querySelector(".cm-line") as HTMLElement | null;
+		const row = /px$/.test(lh.trim()) ? Number.parseFloat(lh) : line ? line.offsetHeight : Number.NaN;
+		return Math.round(row * 64) / 64;
 	});
 
 const setFontSizePx = (p: Page, px: number): Promise<void> =>
@@ -140,30 +149,32 @@ it("1a: a live font-zoom-only change scales lined, grid and dots paper by the te
 			await mountPaper(p, kind, 1);
 			await p.evaluate(() => (window as any).edgeAudit.commit("paper", 1));
 			const before = kind === "dots" ? await readDotsSizeLayout(p) : await readPitchRuleLayout(p);
-			const lineBefore = await glyphSpanWidthPx(p);
+			const lineBefore = await glyphSpanWidthPx(p), rowBefore = await rowPx(p);
 
 			// LIVE font-zoom change, no pinch: 16px -> 20px (1.25x), a plain
 			// style write plus a settle - the same shape a real ctrl+wheel
 			// takes (it resizes `.cm-content`, which fires contentResizeObserver
-			// into `fontZoomFactor`, InkOverlay.ts:3632).
+			// into `fontZoomFactor`). The row follows through the cell's 1.5.
 			await setFontSizePx(p, 20);
 
-			const lineAfter = await glyphSpanWidthPx(p);
-			const lineRatio = lineAfter / lineBefore;
-			// PREMISE: the text itself really did grow before any paper claim.
+			const lineAfter = await glyphSpanWidthPx(p), rowAfter = await rowPx(p);
+			const lineRatio = lineAfter / lineBefore, rowRatio = rowAfter / rowBefore;
+			// PREMISES: the text itself really did grow, and its row with it, before any paper claim.
 			expect(lineRatio, `[${kind}] premise failed - line width did not grow (before=${lineBefore}, after=${lineAfter})`).toBeCloseTo(1.25, 1);
+			expect(rowRatio, `[${kind}] premise failed - the row did not grow with the text (before=${rowBefore}, after=${rowAfter}, lineRatio=${lineRatio})`).toBeCloseTo(lineRatio, 1);
 
 			if (kind === "dots") {
 				const after = await readDotsSizeLayout(p);
 				const wRatio = after.w / (before as { w: number; h: number }).w;
 				const hRatio = after.h / (before as { w: number; h: number }).h;
-				expect(wRatio, `[dots] background-size width did not scale with the text (before=${(before as any).w} after=${after.w} lineRatio=${lineRatio})`).toBeCloseTo(lineRatio, 1);
-				expect(hRatio, `[dots] background-size height did not scale with the text (before=${(before as any).h} after=${after.h} lineRatio=${lineRatio})`).toBeCloseTo(lineRatio, 1);
+				expect(wRatio, `[dots] background-size width did not scale with the text's row (before=${(before as any).w} after=${after.w} rowRatio=${rowRatio})`).toBeCloseTo(rowRatio, 1);
+				expect(hRatio, `[dots] background-size height did not scale with the text's row (before=${(before as any).h} after=${after.h} rowRatio=${rowRatio})`).toBeCloseTo(rowRatio, 1);
 			} else {
 				const after = await readPitchRuleLayout(p);
 				const pitchRatio = after.pitchLayout / (before as { pitchLayout: number; ruleLayout: number }).pitchLayout;
 				const ruleRatio = after.ruleLayout / (before as { pitchLayout: number; ruleLayout: number }).ruleLayout;
-				expect(pitchRatio, `[${kind}] pitch did not scale with the text (before=${(before as any).pitchLayout} after=${after.pitchLayout} lineRatio=${lineRatio})`).toBeCloseTo(lineRatio, 1);
+				expect(pitchRatio, `[${kind}] pitch did not scale with the text's row (before=${(before as any).pitchLayout} after=${after.pitchLayout} rowRatio=${rowRatio})`).toBeCloseTo(rowRatio, 1);
+				// The rule's thickness follows the font size, not the row.
 				expect(ruleRatio, `[${kind}] rule did not scale with the text (before=${(before as any).ruleLayout} after=${after.ruleLayout} lineRatio=${lineRatio})`).toBeCloseTo(lineRatio, 1);
 			}
 		} finally {
@@ -172,8 +183,8 @@ it("1a: a live font-zoom-only change scales lined, grid and dots paper by the te
 	}
 });
 
-it("1b: combined pinch x font at rest - commit z 0.5 with font already at 1.25x gives 17.5 screen px spacing, all three styles", async () => {
-	const z = 0.5, expectedScreen = 17.5; // 28 * 0.5 * 1.25
+it("1b: combined pinch x font at rest - commit z 0.5 with font already at 1.25x gives the text's row x 0.5 screen px spacing, all three styles", async () => {
+	const z = 0.5;
 	for (const kind of ["lines", "grid", "dots"] as const) {
 		const p = await browser.newPage();
 		try {
@@ -184,6 +195,9 @@ it("1b: combined pinch x font at rest - commit z 0.5 with font already at 1.25x 
 			expect(fontSizePx, `[${kind}] mount-time font did not reach 1.25x (16px base): got ${fontSizePx}px`).toBeCloseTo(20, 0);
 
 			await p.evaluate(z => (window as any).edgeAudit.commit("paper", z), z);
+			// The row at the mounted text size, read off the page: the screen pitch is that row at the committed zoom.
+			const row = await rowPx(p), expectedScreen = row * z;
+			expect(Number.isFinite(row) && row > 0, `[${kind}] premise: a row height was read off the page (${row})`).toBe(true);
 
 			if (kind === "dots") {
 				const { w, h } = await readDotsSizeLayout(p);
@@ -192,7 +206,7 @@ it("1b: combined pinch x font at rest - commit z 0.5 with font already at 1.25x 
 			} else {
 				const { pitchLayout } = await readPitchRuleLayout(p);
 				const screen = pitchLayout * z;
-				expect(screen, `[${kind}] screen pitch: layout=${pitchLayout} z=${z}`).toBeCloseTo(expectedScreen, 0);
+				expect(screen, `[${kind}] screen pitch: layout=${pitchLayout} z=${z}, row ${row}`).toBeCloseTo(expectedScreen, 0);
 			}
 		} finally {
 			await p.close();

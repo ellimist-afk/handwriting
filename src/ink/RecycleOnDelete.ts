@@ -8,7 +8,7 @@ import { TFile, type TAbstractFile } from "obsidian";
 import { installMethods } from "../inline/InstallMethods";
 import { inlineInk } from "../inline/InkOverlay";
 import { isPdfInkId } from "../pdf/PdfIdentity";
-import { slidesNoteIdChanged } from "../slides/SlidesPersistence";
+import { slidesLockLifted, slidesNoteIdChanged } from "../slides/SlidesPersistence";
 import { runDetached } from "../util/Detached";
 import { isMarkdownPath, stripMarkdownExtension } from "../util/MarkdownPath";
 import type { HandwritingPlugin } from "../main";
@@ -39,34 +39,121 @@ export const RECYCLE_GRACE_MS = 10_000;
 			return;
 		}
 		if (!(file instanceof TFile) || file.extension !== "md") return;
-		// The metadata cache is already gone by now, so read the id we stored
-		// in settings-free fashion: scan our camera map is not enough, so we
-		// simply leave unknown sidecars alone rather than risk deleting data.
+		// At app start the plugin hears the delete before Obsidian's cache, so
+		// the cache still names the note's id. A plugin turned on or updated
+		// while Obsidian runs hears it after: the cache answers nothing, and the
+		// id is known only if the note owned it in the ledger.
 		const freed = this.pageIds.handleDelete(file.path);
 		const pageId = this.recentPageIdFor(file) ?? freed[0];
-		if (!pageId) return;
+		if (!pageId) {
+			// The id is not proven, so its ink file stays. A note locked as a
+			// duplicate of the deleted one may be alone on its id now.
+			liftLocksLeftAlone(this, file);
+			return;
+		}
 		// A note's frontmatter is free text and can name ANY id. One naming a
 		// PDF's - a copied property, a hand edit, a template - meant deleting
 		// that NOTE recycled the PDF's ink, taking a document's annotations
 		// with a note that never owned them. A note never legitimately holds
 		// a pdf id, so this is a refusal, not a heuristic.
-		if (isPdfInkId(pageId)) return;
+		if (isPdfInkId(pageId.toLowerCase())) return; // case-blind: a disk that ignores case finds the PDF's file by a capital name
 		// Duplicate guard: if ANOTHER note still carries this id (an
 		// unresolved duplicate pair), the sidecar still belongs to a living
 		// note. Recycling it now would take that note's ink with this one.
-		const survivor = this.findOtherCarrier(pageId, file.path);
-		if (survivor) {
-			this.pageIds.claimOwnership(pageId, survivor);
-			this.ambiguousIds.delete(pageId);
-			inlineInk.clearDuplicateLock(survivor);
-			slidesNoteIdChanged(survivor);
-			// Before the census the ledger holds only this session's claims;
-			// saving it then would drop every remembered original.
-			if (this.pageIdWatchReady) this.persistOwners();
+		const carriers = carriersOf(this, pageId, file);
+		if (carriers.length === 1) {
+			liftSoleCarrier(this, pageId, carriers[0]!);
+			return;
+		}
+		// Two or more notes still carry it: none is the note, so every lock
+		// stands and none gets the id. An id nobody owns now is listed as
+		// shared, as the census lists its pairs: a note's id line deleted or
+		// edited then counts the notes left on it, and one left owns it and
+		// is unlocked. Before the census those doors are off and the census
+		// lists the id itself; an entry made here would outlive it.
+		if (carriers.length > 1) {
+			if (this.pageIdWatchReady && this.pageIds.owner(pageId) === undefined) this.ambiguousIds.set(pageId, carriers);
 			return;
 		}
 		this.ambiguousIds.delete(pageId);
 		this.scheduleRecycle(pageId, file.path);
+	}
+
+	/**
+	 * The notes carrying `id` now, read from what each note's frontmatter says.
+	 * The deleted file is out of the vault's listing by the time its delete is
+	 * heard; it is skipped as a file, not by its path, because a sync's create
+	 * at the same path is the note come back and does carry the id.
+	 */
+	function carriersOf(plugin: HandwritingPlugin, id: string, deleted: TFile): string[] {
+		const out: string[] = [];
+		for (const f of plugin.app.vault.getMarkdownFiles()) {
+			if (f !== deleted && plugin.recentPageIdFor(f) === id) out.push(f.path);
+		}
+		return out;
+	}
+
+	/** The only note left on `id`: it owns the id, and its duplicate lock lifts. */
+	function liftSoleCarrier(plugin: HandwritingPlugin, id: string, path: string): void {
+		// Not while the id's owner is still in the vault and does not carry the
+		// id now: its id line was edited, or emptied on the way to a new value,
+		// and that edit's grace has not ended (or a sync batch brought this
+		// delete before the edit was heard). The edit decides where the id goes:
+		// the owner lets it go once its files have moved, and the notes left on
+		// it are counted then (or declaimed, if the line stays empty). Giving
+		// this note the id now would leave the owner's files where they are, so
+		// the owner opens blank and this note takes its ink. The owner's grace
+		// starts here if its change was not heard yet.
+		const owner = plugin.pageIds.owner(id);
+		if (owner !== undefined && owner !== path) {
+			const ownerFile = plugin.app.vault.getFileByPath(owner);
+			if (ownerFile && plugin.recentPageIdFor(ownerFile) !== id) {
+				plugin.declaimLater(owner);
+				return;
+			}
+		}
+		plugin.pageIds.claimOwnership(id, path);
+		plugin.ambiguousIds.delete(id);
+		// Returns at once while a clear of this note is already reading its
+		// file, so a second lift of the same note tells nothing twice.
+		// A presentation open on the note is told a lock stood, so its next read is the lift's.
+		const wasLocked = inlineInk.isDuplicateLocked(path);
+		inlineInk.clearDuplicateLock(path);
+		if (wasLocked) slidesLockLifted(path);
+		slidesNoteIdChanged(path);
+		// Before the census the ledger holds only this session's claims;
+		// saving it then would drop every remembered original.
+		if (plugin.pageIdWatchReady) plugin.persistOwners();
+	}
+
+	/**
+	 * A note was deleted whose id cannot be read any more. Whatever it shared
+	 * is read from the notes left: no path or id was stored for it, since a
+	 * rename, an id edit or a census naming one of three would make that stale.
+	 */
+	function liftLocksLeftAlone(plugin: HandwritingPlugin, deleted: TFile): void {
+		// A pair the census found. The notes left are counted in the vault, not
+		// on the census's list: a copy made since carries the id too. One left
+		// owns the id; none left, the entry goes, or it blocks later id follows;
+		// two or more, every lock stands.
+		for (const [aid, paths] of [...plugin.ambiguousIds]) {
+			if (!paths.includes(deleted.path)) continue;
+			const carriers = carriersOf(plugin, aid, deleted);
+			if (carriers.length === 1) liftSoleCarrier(plugin, aid, carriers[0]!);
+			else if (carriers.length === 0) plugin.ambiguousIds.delete(aid);
+		}
+		// A note locked as the copy of an owned note, or the owner locked:
+		// it lifts only if no other note carries its id now.
+		for (const f of plugin.app.vault.getMarkdownFiles()) {
+			if (f === deleted || !inlineInk.isDuplicateLocked(f.path)) continue;
+			const id = plugin.recentPageIdFor(f);
+			if (id === undefined || isPdfInkId(id.toLowerCase())) continue; // case-blind, as at the delete above
+			// The note's id line was edited since its ink was read: following
+			// that edit is the declaim's move, not this one's.
+			const held = inlineInk.pageIdOf(f.path);
+			if (held !== null && held !== id) continue;
+			if (carriersOf(plugin, id, deleted).length === 1) liftSoleCarrier(plugin, id, f.path);
+		}
 	}
 
 	/**
@@ -112,6 +199,10 @@ export const RECYCLE_GRACE_MS = 10_000;
 		// name with another extension is that note, so its ink stays.
 		if (this.stemTwinExists(deletedPath)) return;
 		await this.store.remove(pageId);
+		// A slow sync can put the note back while its ink file is being
+		// moved; it registers, and its owner entry is saved. Ask again: its
+		// load takes the ink back from the trash, and it keeps the rest.
+		if (this.findOtherCarrier(pageId, "") !== null) return;
 		delete this.settings.cameras[pageId];
 		delete this.settings.pageOwners[pageId];
 		this.settingsDirty = true;

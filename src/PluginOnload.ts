@@ -2,15 +2,17 @@
  * The phases of HandwritingPlugin.onload, moved from main.ts. Each is a method of HandwritingPlugin, installed on its prototype when main.ts loads and called by onload in the order the statements had.
  * Bodies moved unchanged.
  */
-import { Notice, Platform, TFile, View } from "obsidian";
+import { Notice, Platform, TFile, View, type TAbstractFile } from "obsidian";
 import { HANDWRITING_DIAGNOSTICS_VIEW_TYPE, PenDiagnosticsView } from "./input/PenDiagnosticsView";
 import { HANDWRITING_PEN_LAB_VIEW_TYPE, PenLabView } from "./view/PenLabView";
 import { onSlidesCssChange, scanForSlides, setSlidesInk } from "./slides/SlidesInkSurface";
-import { addStripSurface, inkOverlayExtension, inlineInk, inlineReloadBindings, refreshAllStrips, repaintAllInkOverlays } from "./inline/InkOverlay";
+import { slidesNoteLeft, slidesNoteRenamed } from "./slides/SlidesPersistence";
+import { addStripSurface, inkOverlayExtension, inlineInk, inlineReloadBindings, paperCssChangeAll, refreshAllStrips, repaintAllInkOverlays } from "./inline/InkOverlay";
 import { armForegroundRepaint } from "./inline/ForegroundRepaint";
 import { syncUndoTraceForDiagnostics } from "./diag/UndoHistoryTrace";
 import { surfaceExtents } from "./inline/SurfaceExtent";
 import { noteCameras, setNoteCameraStore } from "./inline/NoteCamera";
+import { setInkClipboardStore } from "./inline/InkClipboard";
 import { refreshInkTheme } from "./ink/InkTheme";
 import { setDiagnosticsChangedListener } from "./diag/DiagSwitch";
 import { isMarkdownPath } from "./util/MarkdownPath";
@@ -28,7 +30,20 @@ import { HandwritingSettingTab } from "./settings/HandwritingSettingTab";
 import { blockNotice } from "./view/Notices";
 import { bindRecoveryNotices } from "./ink/DeleteAllInk";
 import { installMethods } from "./inline/InstallMethods";
+import { PdfSeenPaths, seenPdf } from "./pdf/PdfSeenPaths";
 import type { HandwritingPlugin } from "./main";
+
+declare module "./main" {
+	interface HandwritingPlugin {
+		/** The PDF paths this device saw in the vault, and when (PdfSeenPaths); absent until onloadVaultEvents builds it. */
+		pdfSeen?: PdfSeenPaths;
+	}
+}
+
+/** The per-vault local store key for the PDF paths this device saw in the vault, and when. */
+const PDF_SEEN_PATHS_KEY = "handwriting-pdf-seen-paths";
+/** The per-vault local store key for the events since that record was last written whole. */
+const PDF_SEEN_PATHS_EVENTS_KEY = "handwriting-pdf-seen-paths-events";
 
 declare module "./main" {
 	interface HandwritingPlugin {
@@ -37,6 +52,8 @@ declare module "./main" {
 		onloadViews(): void;
 		onloadNoteChrome(): void;
 		onloadVaultEvents(): void;
+		onPdfCreated(file: TAbstractFile): void;
+		notePdfPathsListed(): void;
 		onloadWorkspace(): void;
 		onloadFlushAndForeground(): void;
 		onloadPageIdWatch(): void;
@@ -86,6 +103,11 @@ declare module "./main" {
 		// reach a desktop. The paths the vault no longer has go at layout-ready, once the vault is indexed; at onload a
 		// note not yet indexed would read as gone.
 		setNoteCameraStore({
+			load: (key) => this.app.loadLocalStorage(key) as unknown,
+			save: (key, value) => this.app.saveLocalStorage(key, value),
+		});
+		// A lasso cut is kept on this device until the next copy, so it still pastes after a restart. Never synced.
+		setInkClipboardStore({
 			load: (key) => this.app.loadLocalStorage(key) as unknown,
 			save: (key, value) => this.app.saveLocalStorage(key, value),
 		});
@@ -160,6 +182,7 @@ declare module "./main" {
 			acceptExternalAdoption: (prepared) => this.store.acceptExternalAdoption(prepared),
 			sidecarChanged: (pageId) => this.store.externallyChanged(pageId),
 			hasQueuedWrite: (pageId) => this.store.hasQueuedWrite(pageId),
+			sidecarLanded: (page) => this.store.hasLanded(page),
 			panesQuiet: (path) => inlineReloadBindings().every(binding => binding.path !== path || binding.quiet),
 			notify: (message) => blockNotice(message),
 		});
@@ -222,15 +245,35 @@ declare module "./main" {
 		}));
 		this.addSettingTab(new HandwritingSettingTab(this.app, this));
 		const escapeWindows = this.installEscapeWindows();
+		// Each pop-out gets its own hide, as the main window has one: minimized or covered mid-stroke, its strokes and
+		// its deck's gesture are committed and the writes start. The main window's hide leaves them alone. Raw
+		// listeners, not registerDomEvent, so the window's close takes its one off, and unload the rest.
+		const popoutHides = new Map<Window, () => void>();
+		const unwatchPopoutHide = (win: Window) => {
+			popoutHides.get(win)?.();
+			popoutHides.delete(win);
+		};
+		this.register(() => {
+			for (const win of [...popoutHides.keys()]) unwatchPopoutHide(win);
+		});
 		// A popout is born without the paper class; stamp it as it opens.
 		this.registerEvent(
 			this.app.workspace.on("window-open", (_ww, win) => {
 				escapeWindows.open(win);
 				this.applyPaperTo(win.document, this.settings.paperStyle);
+				if (!popoutHides.has(win)) {
+					const doc = win.document;
+					const onHide = () => {
+						if (doc.visibilityState === "hidden") this.flushOnWindowHide(win);
+					};
+					doc.addEventListener("visibilitychange", onHide);
+					popoutHides.set(win, () => doc.removeEventListener("visibilitychange", onHide));
+				}
 				window.setTimeout(() => this.app.workspace.trigger("handwriting-slides-documents-change"), 0);
 			})
 		);
 		this.registerEvent(this.app.workspace.on("window-close", (_ww, win) => {
+			unwatchPopoutHide(win);
 			escapeWindows.close(win);
 			window.setTimeout(() => this.app.workspace.trigger("handwriting-slides-documents-change"), 0);
 		}));
@@ -267,6 +310,21 @@ declare module "./main" {
 		// that path inherits state that was never its own.
 		//
 		// K4, audit-fixes-design.md 5k.
+		//
+		// This device's record of the PDF paths it saw (PdfSeenPaths), built before any vault event is heard: in the
+		// app's local store, which is per vault and never syncs. The vault's PDFs are listed into it once the layout is
+		// ready (notePdfPathsListed, onloadFlushAndForeground); a change still waiting on its timer is written at unload.
+		this.pdfSeen = new PdfSeenPaths(
+			{
+				load: () => this.app.loadLocalStorage(PDF_SEEN_PATHS_KEY) as unknown,
+				save: (saved) => this.app.saveLocalStorage(PDF_SEEN_PATHS_KEY, saved),
+			},
+			{
+				load: () => this.app.loadLocalStorage(PDF_SEEN_PATHS_EVENTS_KEY) as unknown,
+				save: (saved) => this.app.saveLocalStorage(PDF_SEEN_PATHS_EVENTS_KEY, saved),
+			}
+		);
+		this.register(() => this.pdfSeen?.flush());
 		this.registerEvent(
 			this.app.vault.on("delete", (file) =>
 				runDetached(this.onFileDeleted(file), "preserve ink for a deleted note")
@@ -281,14 +339,21 @@ declare module "./main" {
 				if (file instanceof TFile && file.extension === "md") {
 					inlineInk.handleRename(oldPath, file.path);
 					embedInkRenamed(oldPath, file.path);
+					slidesNoteRenamed(oldPath, file.path);
 					surfaceExtents.handleRename(oldPath, file.path);
 					noteCameras.handleRename(oldPath, file.path);
 				} else if (file instanceof TFile && isMarkdownPath(oldPath)) {
 					// Renamed away from Markdown (note.md -> note.mdenc): nothing at
 					// the old path is this note any more, so the next file there starts clean.
+					slidesNoteLeft(oldPath);
 					inlineInk.handleDelete(oldPath);
 					surfaceExtents.handleDelete(oldPath);
 					noteCameras.handleDelete(oldPath);
+				}
+				// First, before any claim moves: a file that existed at a delete in its grace still exists.
+				if (file instanceof TFile && file.extension === "pdf") {
+					this.pdfStore.notePdfRenamed(oldPath, file.path);
+					this.pdfSeen?.renamed(oldPath, seenPdf(file));
 				}
 				// A pdf renamed while OPEN: the pane keeps its id, and the
 				// sidecar's path claim moves with the file - left stale, the
@@ -296,21 +361,31 @@ declare module "./main" {
 				// open it blank. Renamed while closed, chooseInstance sees
 				// the dead path and adopts; this is the live-pane mirror.
 				if (file instanceof TFile && file.extension === "pdf") {
+					// The deletion waiting at the old name as the rename is heard, before any claim moves: a pane still being
+					// identified moves its own claim at the end, and tells a later deletion there from this one.
+					const atRename = this.pdfStore.deletionAt(oldPath);
 					for (const [root, p] of this.pdfFiles) {
 						if (p !== oldPath) continue;
 						this.pdfFiles.set(root, file.path);
 						const id = this.pdfIds.get(root);
 						if (id) this.pdfStore.renamePath(id, oldPath, file.path);
+						this.notePdfPaneRenamed(root, oldPath, atRename, id || undefined);
 					}
+					// A change still settling follows the file, for the panes it was waiting on.
+					this.movePdfModifiedOnRename(oldPath, file.path);
 					// The path a closed pane's notices name moves too: a save failure or a
 					// conflict copy reported after the rename must name the file as it is now.
 					const byId = this.pdfPathById;
 					for (const [id, p] of byId ?? []) {
 						if (p === oldPath) byId?.set(id, file.path);
 					}
+					// A pane holds the claim: the file's other inks that claim the old name move too (for a pane still being
+					// identified, once that ends). Left there, a PDF made at the old name opened wearing that ink.
+					if (this.pdfPaneHoldsClaim(file.path)) this.pdfRenamedWithPane(file, oldPath, atRename);
 				}
-				// Renamed while no pane shows it: the claim still has to move.
-				if (file instanceof TFile && file.extension === "pdf" && ![...this.pdfFiles.values()].includes(file.path)) {
+				// Renamed while no pane holds its claim - none shows it, or those that do failed to identify it - the claim
+				// still has to move. A pane with an id had it moved above; one being identified moves its own.
+				if (file instanceof TFile && file.extension === "pdf" && !this.pdfPaneHoldsClaim(file.path)) {
 					runDetached(this.movePdfClaimOnRename(file, oldPath), `move the ink claim of ${oldPath} to ${file.path}`);
 				}
 			})
@@ -326,15 +401,55 @@ declare module "./main" {
 			for (const pending of this.pdfModifyTimers?.values() ?? []) window.clearTimeout(pending.timer);
 			this.pdfModifyTimers?.clear();
 		});
+		// A sync rename can land the new PDF before it deletes the old one; the
+		// delete must know the new file is new. See onPdfCreated.
+		this.registerEvent(this.app.vault.on("create", (file) => this.onPdfCreated(file)));
 		this.registerEvent(
 			this.app.vault.on("delete", (file) => {
+				// A PDF gone while this device watched: its path is held from now on, its file gone.
+				if (file instanceof TFile && file.extension === "pdf") this.pdfSeen?.left(file.path);
 				if (file instanceof TFile && file.extension === "md") {
+					slidesNoteLeft(file.path);
 					inlineInk.handleDelete(file.path);
 					surfaceExtents.handleDelete(file.path);
 					noteCameras.handleDelete(file.path);
 				}
 			})
 		);
+	}
+
+	/**
+	 * A PDF arrived in the vault: note when, so a delete in the next grace
+	 * does not count it as a file that already existed. Obsidian reports
+	 * every file as created while the vault loads; those are not arrivals,
+	 * save a PDF at a path this device's record never held: one renamed or
+	 * moved on another device and synced in as Obsidian starts. That one is
+	 * noted again when the layout is ready, if still there, so its grace
+	 * counts from then.
+	 */
+	function onPdfCreated(this: HandwritingPlugin, file: TAbstractFile): void {
+		if (!(file instanceof TFile) || file.extension !== "pdf") return;
+		if (!this.app.workspace.layoutReady) {
+			if (!this.pdfSeen?.unknownBeforeListing(file.path)) {
+				// After the listing (a workspace load mid-session) the create is recorded only, never marked.
+				this.pdfSeen?.arrived(seenPdf(file));
+				return;
+			}
+			const path = file.path;
+			this.pdfStore.notePdfCreated(path);
+			this.pdfStore.whenLayoutReady(() => {
+				if (this.unloaded) return;
+				if (this.app.vault.getFileByPath(path) !== null) this.pdfStore.notePdfCreated(path);
+			});
+			return;
+		}
+		this.pdfStore.notePdfCreated(file.path);
+		this.pdfSeen?.arrived(seenPdf(file));
+	}
+
+	/** The vault's PDFs, once it is indexed (layout ready), into this device's record of the PDF paths it saw. */
+	function notePdfPathsListed(this: HandwritingPlugin): void {
+		this.pdfSeen?.listed(this.app.vault.getFiles().filter((f) => f.extension === "pdf").map(seenPdf));
 	}
 
 	/** Workspace hooks: status bar class, theme change, PDF and slides ink, recording badge, PDF strips, file open, delete-all-ink. */
@@ -355,6 +470,8 @@ declare module "./main" {
 			this.app.workspace.on("css-change", () => {
 				refreshInkTheme(document);
 				repaintAllInkOverlays();
+				// A paper pitch the old theme's stylesheet refused is tried again under the new one.
+				paperCssChangeAll();
 				// The strip previews ink - the tinted palette button and the
 				// swatch pop - and a preview that disagrees with the stroke
 				// beside it is a swatch lying about which pen it is.
@@ -407,7 +524,14 @@ declare module "./main" {
 		this.register(
 			addStripSurface(
 				() => {
-					for (const c of this.pdfInk.values()) c.refreshStrip();
+					for (const c of this.pdfInk.values()) {
+						c.refreshStrip();
+						// Every tool pick ends in this fan-out. A pick of the
+						// other tool syncs the PDF here, in the pick's own task,
+						// so a page the file draws dark has its answer before the
+						// first highlighter stroke comes down.
+						c.syncForTool();
+					}
 				},
 				// §5o: a tool switch away from lasso dissolves every open PDF's
 				// selection too - Alan's device finding 2026-09-02.
@@ -482,6 +606,8 @@ declare module "./main" {
 			if (this.unloaded) return;
 			this.showWhatsNewIfDue();
 			this.showScribbleHintIfDue();
+			// The vault's PDFs once it is indexed: what this device sees there from now on, beside what it saw before.
+			this.notePdfPathsListed();
 		});
 
 		// ---- background/freeze flush ------------------------------------------
@@ -592,6 +718,8 @@ export function installPluginOnload(proto: HandwritingPlugin): void {
 		onloadViews,
 		onloadNoteChrome,
 		onloadVaultEvents,
+		onPdfCreated,
+		notePdfPathsListed,
 		onloadWorkspace,
 		onloadFlushAndForeground,
 		onloadPageIdWatch,

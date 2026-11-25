@@ -17,9 +17,11 @@
  *    row's offset in it, exact. A flat list's items, a code block's rows, a paragraph's lines after its hard breaks;
  *  - any other later line of a block of several source lines (a nested or loose list, a table, a quote): the block's
  *    top plus the line's share of the block's height, an estimate;
- *  - a blank line (no block): the nearest block by source lines, a tie going down, when every line between is blank
- *    (or frontmatter); the distance to that block's edge is the blank lines between times the block's line height, an
- *    estimate. A line of text whose block is not laid out has no top: the stroke keeps its page position.
+ *  - a blank line (no block), when every line between it and the block is blank (or frontmatter): the block below when
+ *    it is the line right above that block; else the block above, at its distance under it; with no block above, the
+ *    block below's top plus the run's blank lines above it, frontmatter not counted. The distance is the lines between
+ *    times the block's line height, an estimate. A line of text whose block is not laid out has no top: the stroke keeps
+ *    its page position.
  *
  * Guards, each falling back to the page position: an anchor on the stroke; its line inside the text; the stroke's own y
  * where the anchor says (a move by a build that does not know the field breaks the match, as in the editor); the
@@ -28,9 +30,10 @@
  * (an older build's anchor, without the hash, reads as that build read it); the line not a frontmatter line (the
  * Properties block is laid out by its own rules, and a fence read as a blank line rode the first paragraph's top).
  *
- * The signature, as the editor honours anchors (LineAnchor.ts underSignature): an anchor's top is its line's top under
+ * The signature, as the editor honours anchors (LineAnchor.ts underRatio): an anchor's top is its line's top under
  * the width and font it was taken at, so a later line's top carries that width's wrap. The editor leaves a stroke whose
- * anchor was taken under another width where it was drawn; this view does the same. The signature is the editor's
+ * anchor was taken under another width where it was drawn, unless width and font moved by one ratio (another text size
+ * under a column held at the note's width times that ratio); this view does the same. The signature is the editor's
  * when one is open on the note (it keeps its last measured one while hidden in Reading view: a width of 0 is never
  * taken), else the newest anchored stroke's width and font.
  *
@@ -44,8 +47,8 @@
  */
 import type { InkStroke } from "../ink/Stroke";
 import { strokeRev } from "../ink/StrokeRev";
-import { isOpaqueAttachment, type AttachmentData } from "./InkAttachments";
-import { aboveOf, lineKey, newAboveRun, shiftedStroke, underSignature, type AboveRun, type LineSignature } from "./LineAnchor";
+import { alignShown, cellStart, isOpaqueAttachment, resolveTarget, startsUndrawn, tableAround, tableCellIn, type AttachmentData } from "./InkAttachments";
+import { aboveOf, lineKey, newAboveRun, shiftedStroke, underRatio, type AboveRun, type LineSignature } from "./LineAnchor";
 
 /** A rendered block's place, px, in the layer's own frame (the frame the ink is drawn in). */
 export interface BlockBox {
@@ -63,6 +66,21 @@ export interface BlockLines {
 	lineHeight(): number;
 	/** The rows the block's element shows, by its kind, or null for an element of no such kind. Read only for a later line. */
 	rows?(): BlockRows | null;
+	/**
+	 * The block's `index`-th table of the `count` its source lines hold, when the block draws its own tables one to one
+	 * with them (`count` of them, an embed's, a quote's and a callout's left out) and that one shows `rows` rows (the
+	 * header first) of `ncol` cells as its source reads; null otherwise. Read only for a link inside one of its cells
+	 * (`tableMoves`).
+	 */
+	table?(index: number, count: number, rows: number, ncol: number): BlockTable | null;
+}
+
+/** A table a block draws, its cells by shown row (0 the header) and column. */
+export interface BlockTable {
+	/** The cell's drawn text, null for a cell not drawn. */
+	text(row: number, col: number): string | null;
+	/** The top-left of the cell's `k`-th drawn character, px in the layer's frame; null when it is not laid out. */
+	charAt(row: number, col: number, k: number): { left: number; top: number } | null;
 }
 
 /**
@@ -179,14 +197,24 @@ export function lineTopIn(spans: LineSpans, i: number): number | null {
 	const up = above && clear(above.lineEnd + 1, i - 1) ? i - above.lineEnd : Infinity;
 	const down = below && clear(i + 1, below.lineStart - 1) ? below.lineStart - i : Infinity;
 	if (up === Infinity && down === Infinity) return null;
-	// The nearer block, a tie going down. Both are estimates: the editor's distance from the blank line's top to the
-	// block's edge is taken as the blank lines between times the block's rendered line height.
-	if (down <= up) {
+	// Issue 67 (2026-11-22). The line right above a block rides it: ink written on a word pokes its top into that
+	// line (the 10-18 case). Any other blank line keeps its distance under the block above; with no
+	// block above on a clear path, the run of blank lines counts down from the block below's top, frontmatter not counted.
+	// So a view that folds the blank lines never draws ink above where it was drawn under the text above it, nor above
+	// the first block when the note starts blank. All are estimates: the editor's distance is taken as the lines between
+	// times the block's rendered line height.
+	if (down === 1) {
 		const box = below!.box();
-		return box ? box.top - down * below!.lineHeight() : null;
+		return box ? box.top - below!.lineHeight() : null;
 	}
-	const box = above!.box();
-	return box ? box.top + box.height + (up - 1) * above!.lineHeight() : null;
+	if (up !== Infinity) {
+		const box = above!.box();
+		return box ? box.top + box.height + (up - 1) * above!.lineHeight() : null;
+	}
+	let run = 0;
+	for (let j = i - 1; j >= 0 && blankLine(spans, j); j--) if (!spans.skip.some((r) => j >= r.from && j <= r.to)) run++;
+	const box = below!.box();
+	return box ? box.top + run * below!.lineHeight() : null;
 }
 
 /** Each text's lines-above hashes (LineAnchor.ts aboveOf), by its lines array, built as far down as an anchor asks. */
@@ -212,7 +240,7 @@ export function embedInkDy(s: InkStroke, spans: LineSpans | null, zoom = 1, sig?
 function anchoredDy(s: InkStroke, spans: LineSpans | null, zoom: number, sig?: LineSignature | null): number | null {
 	const a = s.lineAnchor;
 	if (!a || !spans) return null;
-	if (sig !== undefined && !underSignature(a, sig)) return null;
+	if (sig !== undefined && !underRatio(a, sig)) return null;
 	if (!Number.isInteger(a.line) || a.line < 1 || a.line > spans.lines.length) return null;
 	if (Math.abs(a.y - s.bbox.y) > Y_SLACK) return null;
 	// The anchor's line is 1-based (the editor's); the view's lines are 0-based (the renderer's).
@@ -247,6 +275,98 @@ export function attachedDx(records: readonly AttachmentData[] | null | undefined
 	return out;
 }
 
+/** Whether any group's target is a range of text: one that may lie inside a table cell (`tableMoves`). */
+export function mayLinkInTable(records: readonly AttachmentData[] | null | undefined): boolean {
+	return !!records?.some((r) => !isOpaqueAttachment(r) && r.target.kind === "range" && r.target.to > r.target.from);
+}
+
+/** Each text's lines joined as the editor's document holds them, by its lines array. */
+const joined = new WeakMap<readonly string[], string>();
+
+/**
+ * The index in the cell's drawn text of the character a link's reference point was read at: the target's first, when
+ * every character of the target is drawn one to one; for a target that is the cell's whole text, its first drawn
+ * character (as the editor reads it). -1 otherwise: the view does not draw the word as the text has it.
+ */
+function drawnAt(map: Int32Array, from: number, to: number, whole: boolean): number {
+	let all = true;
+	for (let i = from; i < to && all; i++) all = map[i]! >= 0;
+	if (all) return map[from]!;
+	if (!whole) return -1;
+	for (let i = from; i < map.length; i++) if (map[i]! >= 0) return map[i]!;
+	return -1;
+}
+
+/**
+ * The tables the source holds in lines `a` to `b` (0-based, inclusive) of `text`, which is `lines` joined: each one's
+ * first offset, in order. A table is read as `tableAround` reads one (none in a code fence's text or a quote).
+ */
+function sourceTables(text: string, lines: readonly string[], a: number, b: number): readonly number[] {
+	const out: number[] = [];
+	let at = 0;
+	for (let i = 0; i < a && i < lines.length; i++) at += lines[i]!.length + 1;
+	for (let i = a; i <= b && i < lines.length; ) {
+		const t = lines[i]!.includes("|") ? tableAround(text, at) : null;
+		if (!t) {
+			at += lines[i]!.length + 1;
+			i++;
+			continue;
+		}
+		if (out[out.length - 1] !== t.from) out.push(t.from);
+		// The table's other lines are its own: step past them.
+		while (i <= b && i < lines.length && at <= t.to) {
+			at += lines[i]!.length + 1;
+			i++;
+		}
+	}
+	return out;
+}
+
+/**
+ * Each member's correction, world units, for a group whose target lies inside one table cell: the word as the table this
+ * view draws places it, less the group's reference point (the word's place when the group last settled, which its
+ * members' stored points settled with). No anchor and no kept move an editor wrote is read. A group is left out (it is
+ * drawn as before) when its layout is one `sig` does not honour, its target is not found in the view's text (it needs
+ * reattachment), it is not inside one cell (a link made before tables were read: the whole table, a pipe), it starts at
+ * a character its cell does not draw (made by 1.5.1: startsUndrawn), the view's block draws its own tables in another
+ * count than its source lines hold (a raw HTML table, text the source reads as a table and the view does not), or the
+ * view does not draw its table, its cell or its word as the text has them. The table is the block's drawn table of the
+ * index the target's table has among the source's tables in the block's lines (two tables in one list block). Null
+ * when no group is placed so.
+ */
+export function tableMoves(records: readonly AttachmentData[] | null | undefined, spans: LineSpans | null, zoom: number, sig: LineSignature | null): ReadonlyMap<string, { dx: number; dy: number }> | null {
+	if (!spans || !mayLinkInTable(records)) return null;
+	let text = joined.get(spans.lines);
+	let out: Map<string, { dx: number; dy: number }> | null = null;
+	const inBlock = new Map<number, readonly number[]>();
+	for (const r of records!) {
+		if (isOpaqueAttachment(r) || r.target.kind !== "range" || r.target.to <= r.target.from) continue;
+		if (!r.layout || !underRatio({ width: r.layout.width, fontPx: r.layout.font }, sig)) continue;
+		if (text === undefined) joined.set(spans.lines, (text = spans.lines.join("\n")));
+		const target = resolveTarget(r.target, text);
+		const t = target && tableAround(text, target.from), cell = t && tableCellIn(t, target.from, target.to);
+		// A target starting at a character its cell does not draw was made before cell targets started at a drawn one
+		// (1.5.1's Source Attach on a word with markup): drawn as before, at its stored place.
+		if (!target || !t || !cell || startsUndrawn(text, cell, target.from)) continue;
+		let line = 0;
+		for (let i = text.indexOf("\n"); i !== -1 && i < target.from; i = text.indexOf("\n", i + 1)) line++;
+		const at = blockAt(spans.blocks, line), b = at >= 0 ? spans.blocks[at]! : null;
+		let own = b ? inBlock.get(at) : undefined;
+		if (b && !own) inBlock.set(at, (own = sourceTables(text, spans.lines, b.lineStart, b.lineEnd)));
+		const index = own ? own.indexOf(t.from) : -1;
+		const table = b && own && index >= 0 ? b.table?.(index, own.length, t.rows.length, t.ncol) ?? null : null;
+		const shown = table?.text(cell.row, cell.col) ?? null;
+		if (!table || shown === null) continue;
+		const k = drawnAt(alignShown(text.slice(cell.from, cell.to), shown), target.from - cell.from, target.to - cell.from, target.from === cellStart(text, cell) && target.to === cell.to);
+		const p = k >= 0 ? table.charAt(cell.row, cell.col, k) : null;
+		if (!p) continue;
+		const dx = p.left / zoom - r.ref.x, dy = p.top / zoom - r.ref.y;
+		if (!Number.isFinite(dx) || !Number.isFinite(dy)) continue;
+		for (const id of r.strokeIds) (out ??= new Map()).set(id, { dx: Math.abs(dx) < SAME_DY ? 0 : dx, dy: Math.abs(dy) < SAME_DY ? 0 : dy });
+	}
+	return out;
+}
+
 /**
  * The signature anchors are honoured under with no editor open on the note: the newest anchored stroke's width and
  * font, the width exact (no character width is known here). Null when no stroke carries an anchor.
@@ -263,18 +383,20 @@ export function newestAnchorSignature(strokes: readonly InkStroke[]): LineSignat
  * each moved stroke (the stored one untouched) and every other stroke as it is. `zoom` as for `embedInkDy`. `live` is
  * the signature of an editor open on the note, or null for none (the newest anchored stroke's is taken). `records` are
  * the note's attached groups: a member is drawn at its anchor's dy plus its group's kept dx (`attachedDx`), the dx only
- * while its anchor passes every guard.
+ * while its anchor passes every guard; a member with an anchor, of a group inside a table cell, by the table this view
+ * draws (`tableMoves`). A member with no anchor is drawn at its stored place, as before tables were read.
  */
 export function shownStrokes(strokes: readonly InkStroke[], spans: LineSpans | null, zoom = 1, live: LineSignature | null = null, records?: readonly AttachmentData[] | null): readonly InkStroke[] {
 	if (!spans) return strokes;
 	const sig = live ?? newestAnchorSignature(strokes);
-	const dxs = attachedDx(records);
+	const dxs = attachedDx(records), cells = tableMoves(records, spans, zoom, sig);
 	let out: InkStroke[] | null = null;
 	for (let k = 0; k < strokes.length; k++) {
-		const s = strokes[k]!;
+		const s = strokes[k]!, cell = s.lineAnchor ? cells?.get(s.id) : undefined;
 		// A member's dx is its group's shown move, which its anchor was taken at: with the anchor failing a guard (an edit
 		// made outside the plugin, another width or font) the member is drawn at its stored place, never moved sideways only.
-		const a = anchoredDy(s, spans, zoom, sig), dy = a ?? 0, dx = a === null ? 0 : dxs?.get(s.id) ?? 0;
+		const a = cell ? null : anchoredDy(s, spans, zoom, sig);
+		const dy = cell ? cell.dy : a ?? 0, dx = cell ? cell.dx : a === null ? 0 : dxs?.get(s.id) ?? 0;
 		if (dy === 0 && dx === 0) {
 			if (out) out.push(s);
 			continue;

@@ -27,7 +27,7 @@
 import { InkStroke } from "./Stroke";
 import { HIGHLIGHTER_ALPHA } from "./PenStyle";
 import { normalizeInkColor } from "./InkColor";
-import { exportInkColor } from "./InkTheme";
+import { exportInkColor, isDarkTheme } from "./InkTheme";
 import { Disc, Pt, strokeOutline } from "./StrokeOutline";
 
 /** CSS pixels to PDF points: 96 dpi to 72 dpi. */
@@ -147,7 +147,8 @@ export function strokePdfOps(stroke: InkStroke): string {
  * took 7 s to draw the page (0.2 s one fill per stroke). Opaque ink paints the
  * same pixels either way, but for the smoothing of an edge where two strokes of
  * one colour overlap. A highlighter run keeps its single fill: filled one by
- * one, two crossing strokes would double the wash.
+ * one, two crossing strokes would double the wash. (A flattened light page
+ * does not come here for its highlights: see `highlightFills`.)
  *
  * `f` is nonzero winding, which is what unions each outline with its discs -
  * see StrokeOutline for why that pairing is the shape.
@@ -202,6 +203,32 @@ export function inkPdfContent(
 	return out + "Q";
 }
 
+/**
+ * The highlights alone, each stroke its own opaque fill, in the order drawn.
+ *
+ * For a layer that applies the wash once - a flattened page's transparency
+ * group, drawn under the highlighter's alpha, multiplied - which is how the
+ * screen and the snip lay highlights on a PDF page. Opaque inside, a crossing
+ * is the later stroke's colour and never a darker seam, and a stroke whose
+ * outline folds over another cannot cancel it the way one shared fill can.
+ * No colour state outside `rg` and no `gs`: a group starts from the default
+ * state, and the alpha and blend belong to the one draw of it.
+ */
+export function highlightFills(strokes: readonly InkStroke[], destination?: string | null): string {
+	let out = "";
+	let color = "";
+	for (const s of strokes) {
+		if (s.tool !== "highlighter") continue;
+		const one = strokePdfOps(s);
+		if (one === "") continue;
+		const next = pdfColor(s.tool, s.color, destination);
+		if (next !== color) out += `${next} rg `;
+		color = next;
+		out += `${one}f `;
+	}
+	return out;
+}
+
 /** Preserve the note origin unless negative ink requires an earlier page edge. */
 function inkPageBounds(strokes: readonly InkStroke[]): { x: number; y: number; w: number; h: number } {
 	let minX = 0, minY = 0;
@@ -241,6 +268,16 @@ function pdfScale(v: number): string {
 }
 
 /**
+ * A page colour as `r g b` to eight places. `pdfColor`'s two places would
+ * write #1e1e1e as 0.12, which a reader paints as #1f1f1f: not the colour the
+ * ink was made readable against.
+ */
+function pdfExactColor(hex: string): string {
+	const n = Number.parseInt(hex.slice(1), 16);
+	return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff].map((c) => pdfScale(c / 255)).join(" ");
+}
+
+/**
  * A one-page PDF around a content stream.
  *
  * Assembled rather than templated because the cross-reference table is a list
@@ -253,7 +290,7 @@ function pdfScale(v: number): string {
  * offset. Nothing user-authored reaches the document: colours are validated
  * hex and every other value is a formatted number.
  */
-export function pdfDocument(widthPx: number, heightPx: number, content: string): string {
+export function pdfDocument(widthPx: number, heightPx: number, content: string, pageFill?: string): string {
 	const unit = pdfUserUnit(widthPx, heightPx);
 	const wPt = pdfNum((widthPx * PX_TO_PT) / unit);
 	const hPt = pdfNum((heightPx * PX_TO_PT) / unit);
@@ -261,7 +298,11 @@ export function pdfDocument(widthPx: number, heightPx: number, content: string):
 	// the px-to-pt scale so the ink never has to know about units. Past the
 	// page-size limit the box and the scale both shrink by the UserUnit.
 	const scale = unit === 1 ? pdfNum(PX_TO_PT) : pdfScale(PX_TO_PT / unit);
-	const body = `q ${scale} 0 0 ${scale} 0 0 cm ${content} Q`;
+	// A painted page is the first thing drawn, and drawn before the scale: in
+	// the MediaBox's own units, from the same two numbers, it is the MediaBox
+	// exactly, past the UserUnit limit and under ink left of the origin alike.
+	const page = pageFill === undefined ? "" : `q ${pdfExactColor(pageFill)} rg 0 0 ${wPt} ${hPt} re f Q `;
+	const body = `${page}q ${scale} 0 0 ${scale} 0 0 cm ${content} Q`;
 	const objects = [
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -286,12 +327,50 @@ export function pdfDocument(widthPx: number, heightPx: number, content: string):
 /**
  * The colour a PDF page is when nothing paints one.
  *
- * This module writes no background - there is no `rg`+`re`+`f` covering the
- * media box anywhere in it - and a PDF page with no painted background is
- * white in every reader. So the destination is not a guess here the way it is
- * for an SVG: it is what the file will look like.
+ * A white page is never painted - there is no `rg`+`re`+`f` covering the
+ * media box unless the user picked a dark export page - and a PDF page with
+ * no painted background is white in every reader. So the destination is not
+ * a guess here the way it is for an SVG: it is what the file will look like.
  */
 export const PDF_PAGE_WHITE = "#ffffff";
+
+/**
+ * The page a note's own exports paint under the ink when the user picks a
+ * dark one, and the colour that ink is made readable against: one constant,
+ * so the page and the destination cannot drift apart.
+ *
+ * Only the exports that paint a page of their own take it - the PDF export
+ * here and the note snip. The SVG has no page, and print and Obsidian's own
+ * PDF export draw on Obsidian's page.
+ */
+export const EXPORT_PAGE_DARK = "#1e1e1e";
+
+/**
+ * The page the user picked for the exports that paint their own: white, dark,
+ * or `"theme"`, which is whichever of the two Obsidian's theme is at the
+ * moment of each export.
+ */
+export type ExportPage = "white" | "dark" | "theme";
+
+/**
+ * Coerce stored or user input to a choice. Anything but `"dark"` or `"theme"`
+ * is white: a missing key, a value from a newer version or a hand-edited
+ * config all get the page every export had before the choice existed.
+ */
+export function normalizeExportPage(raw: unknown): ExportPage {
+	return raw === "dark" || raw === "theme" ? raw : "white";
+}
+
+/**
+ * The page one export paints, from the stored choice. Match theme reads
+ * Obsidian's theme here, once: the export holds this one answer for its page
+ * and for the colour its ink is made readable on, so the two cannot differ.
+ */
+export function exportPageNow(raw: unknown): "white" | "dark" {
+	const page = normalizeExportPage(raw);
+	if (page !== "theme") return page;
+	return isDarkTheme() ? "dark" : "white";
+}
 
 /**
  * The page colour assumed when the user says their PDF pages are DARK.
@@ -350,7 +429,8 @@ export function normalizePdfPageAssumption(raw: unknown): PdfPageAssumption {
  */
 export function inkToPdf(
 	strokes: readonly InkStroke[],
-	destination: string | null = PDF_PAGE_WHITE
+	destination: string | null = PDF_PAGE_WHITE,
+	pageFill?: string
 ): string {
 	const inked = strokes.filter((s) => s.points.length > 0);
 	if (inked.length === 0) return "";
@@ -359,5 +439,19 @@ export function inkToPdf(
 	// Translation is in PDF's y-up space, outside the existing content flip.
 	// Keep positive-only documents byte-identical and appended PDF ink untouched.
 	return pdfDocument(w, h, x === 0 && y === 0 ? content :
-		`q 1 0 0 1 ${pdfNum(-x)} ${pdfNum(y)} cm ${content} Q`);
+		`q 1 0 0 1 ${pdfNum(-x)} ${pdfNum(y)} cm ${content} Q`, pageFill);
+}
+
+/**
+ * A note's ink as a PDF on the export page the user picked.
+ *
+ * White is `inkToPdf` exactly, so its bytes are the ones it always wrote: a
+ * page nothing paints is white in every reader. Dark paints the page first
+ * and makes the ink readable on it. "Keep original colors" still leaves the
+ * ink as drawn on either page, because `exportInkColor` honours that switch.
+ * Match theme is one of the two, decided once here for this export.
+ */
+export function inkToExportPdf(strokes: readonly InkStroke[], page: unknown): string {
+	if (exportPageNow(page) === "white") return inkToPdf(strokes);
+	return inkToPdf(strokes, EXPORT_PAGE_DARK, EXPORT_PAGE_DARK);
 }

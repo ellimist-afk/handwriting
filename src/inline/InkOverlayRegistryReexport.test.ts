@@ -56,6 +56,7 @@ const MOVED = [
 	"bindInkEscapeWindow",
 	"armMouseInkQuietlyEverywhere",
 	"repaintAllInkOverlays",
+	"paperCssChangeAll",
 	"copyInlineInkMetrics",
 	"inkExternallyReloaded",
 	"inlineReloadBindings",
@@ -146,11 +147,11 @@ describe("no declaration is left behind in InkOverlay.ts", () => {
 		}
 	});
 
-	it("re-exports the 41 names from InkOverlay.ts, and the registry takes only the overlay type back", () => {
+	it("re-exports the 42 names from InkOverlay.ts, and the registry takes only the overlay type back", () => {
 		const overlayText = overlayRaw.replace(/\r\n/g, "\n");
 		const registryText = registryRaw.replace(/\r\n/g, "\n");
 		expect(listFrom(overlayText, "export", "./InkOverlayRegistry")?.sort()).toEqual([...MOVED].sort());
-		expect(MOVED.length + MOVED_TYPES.length).toBe(41);
+		expect(MOVED.length + MOVED_TYPES.length).toBe(42);
 		expect(overlayText).toMatch(/^import \{[^}]*\} from "\.\/InkOverlayRegistry";/m);
 		// The one door back: the overlay class as a type, so the registry adds no load-time read of InkOverlay.ts.
 		expect(listFrom(registryText, "import", "./InkOverlay")).toBeUndefined();

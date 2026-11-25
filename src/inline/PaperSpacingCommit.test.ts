@@ -47,6 +47,8 @@ function makeRig(external = 1, dpr = 1) {
 		cancelAnimationFrame: vi.fn((id: number): void => { frames.delete(id); }),
 		setTimeout: vi.fn((): number => 0),
 		clearTimeout: vi.fn(),
+		// The host's computed style is its inline style: no theme sets a paper value from a stylesheet here.
+		getComputedStyle: (): { getPropertyValue(name: string): string } => ({ getPropertyValue: (name: string): string => styles[name] ?? "" }),
 	};
 	const styles: Record<string, string> = {};
 	const priorities: Record<string, string> = {};

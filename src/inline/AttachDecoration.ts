@@ -13,7 +13,7 @@ import { HANDLE_TOUCH_PX, type HandleInput } from "./LassoTransform";
 /**
  * Attached ink on screen: the strip's Attach and Detach states, the outline round a selected group, the "Attached" label
  * and the tag on a group that needs reattachment, the link icon on every group that follows its text and is
- * not selected, the pin that moves a group's hook, the finger tap that selects a group, and the mark on the selected
+ * not selected, the pin that moves a group's hook, the finger tap that selects a group, and the mark on each selected
  * group's text. All of it is chrome on the canvases or
  * a mark in the editor: nothing here moves ink or writes the page. A camera move redraws it from boxes kept per member
  * map and the camera snapshot, never from a layout read.
@@ -43,8 +43,9 @@ export interface ChipState {
 
 /**
  * The chip states for a selection, from the stroke-to-group map the follow already keeps (no map built per call).
- * Attach: something selected and at most one group touched. Detach: one group touched and every selected stroke in
- * it, or two groups or more, loose ink in the lasso or not (one tap detaches each group touched).
+ * Attach: something selected; two groups or more attach as one group (group attach). Detach: one group touched and
+ * every selected stroke in it, or two groups or more, loose ink in the lasso or not (the palette's Detach detaches each
+ * group touched; the button attaches them, attachButtonAttached).
  */
 export function chipState(memberMap: ReadonlyMap<string, string>, ids: readonly string[]): ChipState {
 	const groupIds: string[] = [];
@@ -55,10 +56,18 @@ export function chipState(memberMap: ReadonlyMap<string, string>, ids: readonly 
 		if (!groupIds.includes(g)) groupIds.push(g);
 	}
 	return {
-		attach: ids.length > 0 && groupIds.length <= 1,
+		attach: ids.length > 0,
 		detach: groupIds.length > 1 || (groupIds.length === 1 && allMembers),
 		groupIds,
 	};
+}
+
+/**
+ * Whether the Attach button reads as attached: one group touched and every selected stroke in it. Its tap then
+ * detaches; any other selection wears the loose fill and its tap attaches, two groups or more as one group.
+ */
+export function attachButtonAttached(chips: ChipState): boolean {
+	return chips.detach && chips.groupIds.length < 2;
 }
 
 /** One group's box where this surface shows it, and whether it needs reattachment. */
@@ -227,6 +236,14 @@ export function pinHead(at: Point2, zoom: number, cssScale: number): Point2 {
 	return { x: at.x, y: at.y - PIN_LIFT_PX / (zoom * cssScale) };
 }
 
+/**
+ * A dragged pin's point, world units: its point at the press moved as far as the contact moved, so the pin keeps where
+ * on its head it was grabbed. It is drawn there and hooks the words there.
+ */
+export function draggedPinPoint(press: { at: Point2; from: Point2; last: Point2 }): Point2 {
+	return { x: press.at.x + (press.last.x - press.from.x), y: press.at.y + (press.last.y - press.from.y) };
+}
+
 /** Whether world `w` is on the pin's head: a square of the input's hit size round it. */
 export function hitPin(at: Point2, zoom: number, w: Point2, input: HandleInput, cssScale: number): boolean {
 	const half = (input === "touch" ? HANDLE_TOUCH_PX : PIN_POINTER_PX) / 2 / (zoom * cssScale), h = pinHead(at, zoom, cssScale);
@@ -319,14 +336,26 @@ export function drawAttachChrome(tail: ChromeTail, cam: CameraState, chrome: Att
 	for (const p of chrome.pins ?? []) tail.drawAttachPin(cam, p.at, outline, colours.background, cssScale);
 }
 
-/** The selected group's text, or none. */
-export const setAttachTarget = StateEffect.define<{ from: number; to: number } | null>({
-	map: (v, changes) => (v ? { from: changes.mapPos(v.from, 1), to: changes.mapPos(v.to, -1) } : null),
+/** One text span the mark covers. */
+type TargetSpan = { from: number; to: number };
+
+const mapSpan = (v: TargetSpan, changes: { mapPos(pos: number, assoc?: number): number }): TargetSpan => ({ from: changes.mapPos(v.from, 1), to: changes.mapPos(v.to, -1) });
+
+/** A list of spans rather than one (Array.isArray alone narrows a readonly list to any[]). */
+const isSpanList = (v: TargetSpan | readonly TargetSpan[]): v is readonly TargetSpan[] => Array.isArray(v);
+
+/** The selected groups' texts: one span, a list of them (two groups or more selected), or none. */
+export const setAttachTarget = StateEffect.define<TargetSpan | readonly TargetSpan[] | null>({
+	map: (v, changes) => (v === null ? null : isSpanList(v) ? v.map((s) => mapSpan(s, changes)) : mapSpan(v, changes)),
 });
 
 const targetMark = Decoration.mark({ class: "hw-attach-target" });
 
-/** The mark on the selected group's text: set by setAttachTarget, mapped through edits, none by default. */
+/**
+ * The mark on each selected group's text: set by setAttachTarget, mapped through edits, none by default. A span that is
+ * empty or off the text is dropped; the rest are handed over sorted (a set built unsorted throws on a span that starts
+ * before the last one), so a group lower in the note selected first, or one text inside another, marks as well.
+ */
 export const attachTargetField = StateField.define<DecorationSet>({
 	create: () => Decoration.none,
 	update(deco, tr) {
@@ -334,7 +363,9 @@ export const attachTargetField = StateField.define<DecorationSet>({
 		for (const e of tr.effects) {
 			if (!e.is(setAttachTarget)) continue;
 			const v = e.value, len = tr.state.doc.length;
-			deco = v && v.to > v.from && v.from >= 0 && v.to <= len ? Decoration.set([targetMark.range(v.from, v.to)]) : Decoration.none;
+			const spans: readonly TargetSpan[] = v === null ? [] : isSpanList(v) ? v : [v];
+			const ranges = spans.filter((s) => s.to > s.from && s.from >= 0 && s.to <= len).map((s) => targetMark.range(s.from, s.to));
+			deco = ranges.length > 0 ? Decoration.set(ranges, true) : Decoration.none;
 		}
 		return deco;
 	},
@@ -755,25 +786,42 @@ export function attachedStrokeAtTap(o: ChromeOverlay, list: readonly AttachmentD
 }
 
 /**
+ * The texts of the selected groups that are readable and follow their text, each once, in text order: the read of
+ * the selection's groups alone, no walk of the note's strokes.
+ */
+function selectedTargets(o: ChromeOverlay, list: readonly AttachmentData[], groupIds: readonly string[]): TargetSpan[] {
+	const spans: TargetSpan[] = [];
+	for (const g of groupIds) {
+		const a = list.find((r) => r.id === g);
+		if (!a || isOpaqueAttachment(a) || !o.lineAnchors.follow.followsText(a.id)) continue;
+		const { from, to } = a.target;
+		if (!spans.some((s) => s.from === from && s.to === to)) spans.push({ from, to });
+	}
+	return spans.sort((p, q) => p.from - q.from || p.to - q.to);
+}
+
+/**
  * After the chrome is worked out: the strip refreshed when the chip state changed (an Attach, a Detach or an undo of
- * either changes it under a selection that did not), and the mark moved to the one selected group's text. Both are
- * deferred to a microtask: a redraw can run inside an update, where a dispatch throws.
+ * either changes it under a selection that did not), and the mark moved to every selected group's text. Both are
+ * deferred to a microtask: a redraw can run inside an update, where a dispatch throws. The mark is sent only when its
+ * texts changed, not per redraw.
  */
 function syncAfterRedraw(o: ChromeOverlay, list: readonly AttachmentData[], chips: ChipState): void {
 	let kept = overlayKept.get(o);
 	if (!kept) overlayKept.set(o, (kept = {}));
-	const one = chips.groupIds.length === 1 ? list.find((a) => a.id === chips.groupIds[0]) : undefined;
-	const target = one && !isOpaqueAttachment(one) && o.lineAnchors.follow.followsText(one.id) ? one.target : null;
-	const key = target ? `${target.from}:${target.to}` : "";
+	const spans = chips.groupIds.length > 0 ? selectedTargets(o, list, chips.groupIds) : [];
+	const key = spans.map((s) => `${s.from}:${s.to}`).join(",");
 	const chipsChanged = kept.chips !== undefined && (kept.chips.attach !== chips.attach || kept.chips.detach !== chips.detach);
 	kept.chips = chips;
 	if (key === (kept.target ?? "") && !chipsChanged) return;
 	const markChanged = key !== (kept.target ?? "");
 	kept.target = key;
 	const view = o.view;
+	// One span goes as one, as before group attach; two or more as a list; none clears.
+	const value = spans.length === 0 ? null : spans.length === 1 ? spans[0]! : spans;
 	queueMicrotask(() => {
 		if (chipsChanged) o.refreshStrip();
-		if (markChanged && view.dom.isConnected) view.dispatch({ effects: setAttachTarget.of(target ? { from: target.from, to: target.to } : null) });
+		if (markChanged && view.dom.isConnected) view.dispatch({ effects: setAttachTarget.of(value) });
 	});
 }
 
@@ -816,13 +864,14 @@ export interface AttachToggleSurface extends AttachSurface {
 }
 
 /**
- * The Attach button's tap, one tap and no menu: with one whole attached group selected, or two groups or more, it
- * detaches each group touched; else, while the selection can attach, it attaches (no text under the ink says so and
- * attaches nothing). The same answers the palette commands read. What it did, or null when it did nothing.
+ * The Attach button's tap, one tap and no menu: with one whole attached group selected it detaches that group; else,
+ * while the selection can attach, it attaches (no text under the ink says so and attaches nothing), two groups or more
+ * as one group, so a second tap detaches it. The palette's Detach still detaches each of two groups or more in one.
+ * What it did, or null when it did nothing.
  */
 export function toggleAttach(o: AttachToggleSurface, list: readonly AttachmentData[]): "attached" | "detached" | null {
 	const chips = selectionChips(o, list);
-	if (chips.detach) return o.detachSelected() ? "detached" : null;
+	if (attachButtonAttached(chips)) return o.detachSelected() ? "detached" : null;
 	if (!chips.attach) return null;
 	if (o.attachSelected()) return "attached";
 	new Notice(ATTACH_STRINGS.noText);

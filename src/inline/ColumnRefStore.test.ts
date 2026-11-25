@@ -12,11 +12,11 @@ import type { PageData } from "../model/PageData";
 import { InlineInkStore } from "./InlineInkStore";
 import type { InlineInkHost } from "./InlineInkStore";
 
-function anchor(width: number): LineAnchor {
-	return { line: 4, top: 72, y: 80, key: 1, width, fontPx: 16 };
+function anchor(width: number, fontPx = 16): LineAnchor {
+	return { line: 4, top: 72, y: 80, key: 1, width, fontPx };
 }
 
-function stroke(id: string, width?: number, createdAt = 1): InkStroke {
+function stroke(id: string, width?: number, createdAt = 1, fontPx = 16): InkStroke {
 	return {
 		id,
 		color: "#000",
@@ -28,15 +28,16 @@ function stroke(id: string, width?: number, createdAt = 1): InkStroke {
 		],
 		bbox: { x: 8, y: 80, width: 54, height: 6 },
 		createdAt,
-		...(width === undefined ? {} : { lineAnchor: anchor(width) }),
+		...(width === undefined ? {} : { lineAnchor: anchor(width, fontPx) }),
 	} as InkStroke;
 }
 
-function page(strokes: InkStroke[], columnRefPx?: number): PageData {
+function page(strokes: InkStroke[], columnRefPx?: number, fontRefPx?: number): PageData {
 	const p = emptyPage("pg1");
 	p.surface = "inline";
 	p.strokes = strokes;
 	if (columnRefPx !== undefined) (p as { columnRefPx?: number }).columnRefPx = columnRefPx;
+	if (fontRefPx !== undefined) p.fontRefPx = fontRefPx;
 	return p;
 }
 
@@ -130,6 +131,56 @@ describe("column width a note's ink is held at", () => {
 	it("an unknown note has none", () => {
 		const { store } = rig();
 		expect(held(store, "nowhere.md")).toBeNull();
+	});
+});
+
+describe("column width taken from anchors drawn at more than one text size", () => {
+	/** A stroke whose anchor was taken at this text size. Every file here has no stored width unless one is passed. */
+	const at = (id: string, width: number, fontPx: number) => stroke(id, width, 1, fontPx);
+
+	it("only the anchors at the note's own text size vote when there are any", async () => {
+		// Three anchors at 18 px carry 906, two at 16 px carry 805: the note's text size is 16, so the column is 805.
+		const { store, saves } = rig(page([at("a", 906, 18), at("b", 805, 16), at("c", 906, 18), at("d", 805, 16), at("e", 906, 18)], undefined, 16));
+		await store.ensureLoaded(PATH);
+		expect(held(store)).toBe(805);
+		store.commit(PATH, stroke("f", 805, 2));
+		expect(savedRef(saves[saves.length - 1])).toBe(805);
+	});
+
+	it("a width an older build held at another text size is not scaled when anchors at the note's size exist", async () => {
+		// Two at 16 px and three at 18 px all carry 805 (an older build held 805 at either size): 805, not 716.
+		const { store } = rig(page([at("a", 805, 16), at("b", 805, 18), at("c", 805, 18), at("d", 805, 16), at("e", 805, 18)], undefined, 16));
+		await store.ensureLoaded(PATH);
+		expect(held(store)).toBe(805);
+	});
+
+	it("a tie among the anchors at the note's size goes to the one met first; other sizes do not break it", async () => {
+		const { store } = rig(page([at("a", 700, 18), at("b", 604, 16), at("c", 700, 18), at("d", 529, 16), at("e", 700, 18)], undefined, 16));
+		await store.ensureLoaded(PATH);
+		expect(held(store)).toBe(604);
+	});
+
+	it("with no anchor at the note's size, each width is scaled to it and rounded before the vote", async () => {
+		// 906 at 18 px for a note at 16 px: 906 x 16 / 18 = 805.3, so 805.
+		const { store, saves } = rig(page([at("a", 906, 18)], undefined, 16));
+		await store.ensureLoaded(PATH);
+		expect(held(store)).toBe(805);
+		store.commit(PATH, stroke("b", 805, 2));
+		expect(savedRef(saves[saves.length - 1])).toBe(805);
+	});
+
+	it("with no anchor at the note's size, the vote runs on the scaled widths", async () => {
+		// 900 at 18 and 1000 at 20 both scale to 800 at 16; 720 at 18 scales to 640. Unscaled, each width is met once and
+		// 720 would win as the first met.
+		const { store } = rig(page([at("a", 720, 18), at("b", 900, 18), at("c", 1000, 20)], undefined, 16));
+		await store.ensureLoaded(PATH);
+		expect(held(store)).toBe(800);
+	});
+
+	it("a stored width still wins whatever the anchors carry", async () => {
+		const { store } = rig(page([at("a", 906, 18), at("b", 906, 18)], 805, 16));
+		await store.ensureLoaded(PATH);
+		expect(held(store)).toBe(805);
 	});
 });
 

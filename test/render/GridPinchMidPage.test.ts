@@ -19,7 +19,8 @@
  * zoom, so at 30 percent the rest reading may sit up to half a device px off the text, which the preview carries back out
  * and which reads as 1.67 device px once the zoom is back at 100 percent. The lattice origin comes from what the stylesheet reads (the rig's
  * paperOrigin: the preview element during a preview, the scroller's own background at rest); it is checked against
- * real screenshot pixels at rest and on the last live frame first, so it cannot be a model of something else.
+ * real screenshot pixels at rest and on the last live frame first, so it cannot be a model of something else. Those
+ * shots are taken with the floating toolbar hidden: its face's border is the rule grey in this rig and reads as a band.
  *
  * Plants, each built into the page by an exact source substitution, the count applied asserted:
  *   HW_GRID_PINCH_PLANT_DRIFT=1   the column's re-centring handed to the paper carries a quarter pitch more painted px
@@ -51,7 +52,8 @@ import REAL_OBSIDIAN_CSS from "./obsidianReadableWidth";
 declare const process: { env: Record<string, string | undefined> };
 
 const OBSIDIAN_CAMERA_CSS = readFileSync(fileURLToPath(new URL("./noteViewportCamera.css", import.meta.url)), "utf8");
-const PITCH = 28, TOL_DEV = 1, SCROLL_TOP = 1200;
+/** No pitch constant: the paper's pitch is one plain body row's height, and every reading carries the one the rig read off the page. */
+const TOL_DEV = 1, SCROLL_TOP = 1200;
 const PAGE_GREY = 255, RULE_GREY = 0x77;
 const SETUPS = [
 	{ dsf: 1.8257, outer: 0.913 },
@@ -129,33 +131,56 @@ async function mount(p: Page, outer: number, zoom: number, left = 0) {
 			const line = (document.querySelector(".cm-line") as HTMLElement).getBoundingClientRect(), sc = document.querySelector(".cm-scroller") as HTMLElement;
 			const o = vf.paperOrigin("paper") as { source: string; x: number; y: number; k: number; pitch: number };
 			const mod = (v: number) => ((v % o.pitch) + o.pitch) % o.pitch;
-			return { k: o.k, source: o.source, sx: mod((line.left - o.x) / o.k), sy: mod((line.top - o.y) / o.k), dsf,
+			return { k: o.k, source: o.source, pitch: o.pitch, sx: mod((line.left - o.x) / o.k), sy: mod((line.top - o.y) / o.k), dsf,
 				scrollLeft: sc.scrollLeft, scrollTop: sc.scrollTop, preview: !!vf.preview("paper"), sizer: (document.querySelector(".cm-sizer") as HTMLElement).style.transform };
 		};
 	}, { outer, zoom, top: SCROLL_TOP, left });
 }
 
-type Reading = { k: number; source: string; sx: number; sy: number; dsf: number; scrollLeft: number; scrollTop: number; preview: boolean; sizer: string; at?: string; t?: number };
+/** `pitch`: the paper's pitch the rig read off the page for this reading, layout px; `sx`/`sy` are already modulo it. */
+type Reading = { k: number; source: string; pitch: number; sx: number; sy: number; dsf: number; scrollLeft: number; scrollTop: number; preview: boolean; sizer: string; at?: string; t?: number };
 const model = (p: Page, dsf: number): Promise<Reading> => p.evaluate(d => (window as any).__gridModel(d), dsf);
 
-/** Weighted band centres along one projection: runs above a quarter of the projection's range. */
-function bandCentres(profile: number[]): number[] {
+/** Weighted bands along one projection: runs above a quarter of the projection's range, each with its centre and peak. */
+function bandRuns(profile: number[]): { c: number; peak: number }[] {
 	const lo = Math.min(...profile), hi = Math.max(...profile);
 	if (hi - lo < 0.03) return [];
-	const cut = lo + (hi - lo) / 4, out: number[] = [];
+	const cut = lo + (hi - lo) / 4, out: { c: number; peak: number }[] = [];
 	for (let i = 0; i < profile.length; i++) {
 		if (profile[i]! <= cut) continue;
-		let j = i, w = 0, m = 0;
-		while (j < profile.length && profile[j]! > cut) { const v = profile[j]! - cut; w += v; m += v * (j + 0.5); j++; }
-		out.push(m / w);
+		let j = i, w = 0, m = 0, peak = 0;
+		while (j < profile.length && profile[j]! > cut) { const v = profile[j]! - cut; w += v; m += v * (j + 0.5); peak = Math.max(peak, profile[j]!); j++; }
+		out.push({ c: m / w, peak });
 		i = j;
 	}
 	return out;
+}
+/**
+ * The floating toolbar hidden (true) or back (false), by visibility, for the instrument's shot. The rig sets
+ * --background-modifier-border to the rule grey, so the toolbar face's bottom border reads as a short band of rule grey under
+ * the column's top; a paper rule landing 2 device px from it made the lattice filter keep it as a rule. Two frames pass
+ * after. Returns each toolbar root's and face's computed visibility as it then stands.
+ */
+async function toolbarHidden(p: Page, hidden: boolean): Promise<string[]> {
+	return await p.evaluate(async (hidden) => {
+		document.getElementById("instrument-hide-toolbar")?.remove();
+		if (hidden) {
+			const s = document.createElement("style");
+			s.id = "instrument-hide-toolbar";
+			s.textContent = ".handwriting-mobile-tools { visibility: hidden !important; }";
+			document.head.appendChild(s);
+		}
+		await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+		return Array.from(document.querySelectorAll(".handwriting-mobile-tools, .handwriting-mobile-tools-face")).map(e => getComputedStyle(e).visibility);
+	}, hidden);
 }
 
 /**
  * The instrument: the screenshot's rule positions against the model's lattice origin, device px, modulo the pitch.
  * A rule's centre sits half a rule width before the lattice line (the rule is drawn just before the pitch boundary).
+ * The clip is shot twice: as the page stands (logged only), then with the floating toolbar hidden, which is the shot
+ * the offsets and counts are read from. Right after that shot the model is read again (`atShot`), then the toolbar
+ * comes back and two frames pass, so the caller goes on with the page as it was.
  */
 async function pixelVsModel(p: Page, dsf: number) {
 	const g = await p.evaluate(() => {
@@ -165,23 +190,66 @@ async function pixelVsModel(p: Page, dsf: number) {
 		return { left: sc.left, top: sc.top, width: sc.width, height: sc.height, ox: o.x as number, oy: o.y as number, k: o.k as number, pitch: o.pitch as number, rule };
 	});
 	const clip = { x: Math.round(g.left + 20), y: Math.round(g.top + 20), width: Math.min(220, Math.floor(g.width - 40)), height: Math.min(220, Math.floor(g.height - 40)) };
-	const d = decodePng(await p.screenshot({ clip }));
-	const rows: number[] = new Array(d.height).fill(0), cols: number[] = new Array(d.width).fill(0);
-	for (let y = 0; y < d.height; y++) for (let x = 0; x < d.width; x++) {
-		const i = (y * d.width + x) * d.channels;
-		const f = Math.max(0, Math.min(1, (PAGE_GREY - (d.px[i]! + d.px[i + 1]! + d.px[i + 2]!) / 3) / (PAGE_GREY - RULE_GREY)));
-		rows[y] = rows[y]! + f / d.width; cols[x] = cols[x]! + f / d.height;
-	}
 	const pDev = g.pitch * g.k * dsf, ruleDev = g.rule * g.k * dsf;
 	const lattice = (cs: number[]) => cs.filter(c => cs.some(o => { const dd = Math.abs(o - c); const n = Math.round(dd / pDev); return n >= 1 && Math.abs(dd - n * pDev) <= 2; }));
+	const shot = async () => {
+		const d = decodePng(await p.screenshot({ clip }));
+		const rows: number[] = new Array(d.height).fill(0), cols: number[] = new Array(d.width).fill(0);
+		for (let y = 0; y < d.height; y++) for (let x = 0; x < d.width; x++) {
+			const i = (y * d.width + x) * d.channels;
+			const f = Math.max(0, Math.min(1, (PAGE_GREY - (d.px[i]! + d.px[i + 1]! + d.px[i + 2]!) / 3) / (PAGE_GREY - RULE_GREY)));
+			rows[y] = rows[y]! + f / d.width; cols[x] = cols[x]! + f / d.height;
+		}
+		const runsX = bandRuns(cols), runsY = bandRuns(rows);
+		return { runsX, runsY, cx: lattice(runsX.map(r => r.c)), cy: lattice(runsY.map(r => r.c)) };
+	};
+	const shown = await shot();
+	const toolbarOff = await toolbarHidden(p, true);
+	const { runsX, runsY, cx, cy } = await shot();
+	const atShot = await p.evaluate(d => { const m = (window as any).__gridModel(d); return { preview: m.preview as boolean, k: m.k as number, source: m.source as string }; }, dsf);
+	const toolbarBack = await toolbarHidden(p, false);
 	const circ = (a: number, q: number) => { const r = ((a % q) + q) % q; return Math.min(r, q - r); };
 	const off = (cs: number[], origin: number) => cs.length ? Math.max(...cs.slice(0, 6).map(c => circ(c - (origin - ruleDev / 2), pDev))) : Number.NaN;
-	const cx = lattice(bandCentres(cols)), cy = lattice(bandCentres(rows));
-	return { x: off(cx, (g.ox - clip.x) * dsf), y: off(cy, (g.oy - clip.y) * dsf), counts: [cx.length, cy.length], pDev };
+	// Per rule, signed, device px: a constant offset is a phase the model and the paint disagree on; one that grows
+	// rule by rule is a painted tile that is not the pitch the model reads (logged in every instrument message).
+	const signedOffs = (cs: number[], origin: number) => cs.slice(0, 6).map(c => { const r = (((c - (origin - ruleDev / 2)) % pDev) + pDev) % pDev; return Math.round((r > pDev / 2 ? r - pDev : r) * 100) / 100; });
+	// Log only: every band found before the lattice filter with its peak, device px from the clip's top or left, and the
+	// rules the lattice keeps, with the toolbar hidden (bands, rules) and shown (shown); the two differ by its band only.
+	const tenth = (v: number) => Math.round(v * 10) / 10, hundredth = (v: number) => Math.round(v * 100) / 100;
+	const runs = (rs: { c: number; peak: number }[]) => rs.map(r => [tenth(r.c), hundredth(r.peak)]);
+	return { x: off(cx, (g.ox - clip.x) * dsf), y: off(cy, (g.oy - clip.y) * dsf), counts: [cx.length, cy.length], pDev,
+		perRule: { x: signedOffs(cx, (g.ox - clip.x) * dsf), y: signedOffs(cy, (g.oy - clip.y) * dsf) },
+		bands: { x: runs(runsX), y: runs(runsY) }, rules: { x: cx.map(tenth), y: cy.map(tenth) },
+		shown: { bands: { x: runs(shown.runsX), y: runs(shown.runsY) }, rules: { x: shown.cx.map(tenth), y: shown.cy.map(tenth) } },
+		toolbar: { off: toolbarOff, back: toolbarBack }, atShot, clipTop: clip.y };
+}
+
+/** The toolbar was hidden for the shot (every root and face computed hidden, at least one) and is back after it. */
+const toolbarPremise = (px: Awaited<ReturnType<typeof pixelVsModel>>) => ({ hidden: px.toolbar.off.length > 0 && px.toolbar.off.every(v => v === "hidden"), back: px.toolbar.back.every(v => v !== "hidden") });
+
+/**
+ * Probe, log only, no check: the rest read again with the page guides hidden, beside where the guides' box sits. The
+ * guides come back and two frames pass before the caller goes on, so the arm runs as before.
+ */
+async function probeGuides(p: Page, dsf: number, label: string, shown: Awaited<ReturnType<typeof pixelVsModel>>) {
+	const guides = await p.evaluate(() => {
+		const box = document.querySelector(".handwriting-page-guides") as HTMLElement | null;
+		if (!box) return null;
+		const b = box.getBoundingClientRect();
+		return { top: b.top, left: b.left, height: b.height, pitch: getComputedStyle(box).getPropertyValue("--handwriting-page-guide-pitch"), k: b.height / box.offsetHeight };
+	});
+	const frames = () => p.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+	await p.evaluate(() => { const s = document.createElement("style"); s.id = "probe-hide-guides"; s.textContent = ".handwriting-page-guides { visibility: hidden !important; }"; document.head.appendChild(s); });
+	await frames();
+	const hidden = await pixelVsModel(p, dsf);
+	await p.evaluate(() => document.getElementById("probe-hide-guides")?.remove());
+	await frames();
+	// eslint-disable-next-line no-console
+	console.log(`GRIDMID PROBE ${label} ${JSON.stringify({ guides, shown, hidden })}`);
 }
 
 /** Circular distance in layout px between two places modulo the pitch, converted to device px at zoom k. */
-const offDev = (a: number, b: number, k: number, dsf: number) => { const r = (((a - b) % PITCH) + PITCH) % PITCH; return Math.min(r, PITCH - r) * k * dsf; };
+const offDev = (a: number, b: number, k: number, dsf: number, pitch: number) => { const r = (((a - b) % pitch) + pitch) % pitch; return Math.min(r, pitch - r) * k * dsf; };
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
 for (const setup of SETUPS) for (const arm of ARMS) {
@@ -201,6 +269,8 @@ for (const setup of SETUPS) for (const arm of ARMS) {
 			expect(rest.k / setup.outer, `premise: the committed zoom is ${arm.from}`).toBeCloseTo(arm.from, 3);
 			expect(rest.scrollTop, "premise: mid-page, scrolled well below the top").toBeGreaterThan(300);
 			const restPx = await pixelVsModel(p, setup.dsf);
+			expect(toolbarPremise(restPx), `premise: the toolbar is hidden for the rest shot and back after it ${JSON.stringify(restPx.toolbar)}`).toEqual({ hidden: true, back: true });
+			await probeGuides(p, setup.dsf, `${arm.name} outer ${setup.outer} dpr ${setup.dsf}`, restPx);
 			expect(Math.min(...restPx.counts), `premise: rules found at rest on both axes ${JSON.stringify(restPx)}`).toBeGreaterThanOrEqual(3);
 			expect(Math.max(restPx.x, restPx.y), `instrument: at rest the model's lattice agrees with the pixels within 1.5 device px ${JSON.stringify(restPx)}`).toBeLessThanOrEqual(1.5);
 
@@ -234,6 +304,8 @@ for (const setup of SETUPS) for (const arm of ARMS) {
 			expect(last.preview, "frame identity: the preview is live on the last move frame").toBe(true);
 			expect(last.k / setup.outer, `premise: the preview reached ${arm.to}`).toBeCloseTo(arm.to, 1);
 			const livePx = await pixelVsModel(p, setup.dsf);
+			expect({ toolbar: toolbarPremise(livePx), preview: livePx.atShot.preview, k: livePx.atShot.k }, `frame identity: right after the live shot the preview is still live at the last move frame's zoom, and the toolbar is back before the lift ${JSON.stringify({ atShot: livePx.atShot, toolbar: livePx.toolbar, lastK: last.k })}`)
+				.toEqual({ toolbar: { hidden: true, back: true }, preview: true, k: last.k });
 			expect(Math.max(livePx.x, livePx.y), `instrument: on the last live frame the model's lattice agrees with the pixels within 1.5 device px ${JSON.stringify(livePx)}`).toBeLessThanOrEqual(1.5);
 
 			const after = await p.evaluate(async (dsf) => {
@@ -250,12 +322,12 @@ for (const setup of SETUPS) for (const arm of ARMS) {
 
 			// x, y: the rules against the text, absolute. lx, ly: against the last preview frame (readings after the lift only).
 			const rows = [...live, ...after].map((r, i) => ({ at: r.at, ...(r.t === undefined ? {} : { t: r.t }), source: r.source, k: Math.round(r.k * 1e4) / 1e4,
-				x: r2(offDev(r.sx, 0, r.k, setup.dsf)), y: r2(offDev(r.sy, 0, r.k, setup.dsf)),
-				vsRestX: r2(offDev(r.sx, rest.sx, r.k, setup.dsf)), vsRestY: r2(offDev(r.sy, rest.sy, r.k, setup.dsf)),
-				...(i >= live.length ? { lx: r2(offDev(r.sx, last.sx, r.k, setup.dsf)), ly: r2(offDev(r.sy, last.sy, r.k, setup.dsf)) } : {}),
+				x: r2(offDev(r.sx, 0, r.k, setup.dsf, r.pitch)), y: r2(offDev(r.sy, 0, r.k, setup.dsf, r.pitch)),
+				vsRestX: r2(offDev(r.sx, rest.sx, r.k, setup.dsf, r.pitch)), vsRestY: r2(offDev(r.sy, rest.sy, r.k, setup.dsf, r.pitch)),
+				...(i >= live.length ? { lx: r2(offDev(r.sx, last.sx, r.k, setup.dsf, r.pitch)), ly: r2(offDev(r.sy, last.sy, r.k, setup.dsf, r.pitch)) } : {}),
 				scroll: [Math.round(r.scrollLeft * 10) / 10, Math.round(r.scrollTop * 10) / 10] }));
 			// eslint-disable-next-line no-console
-			console.log(`GRID-PINCH regime=forced-dsf ${setup.dsf} outer ${setup.outer} ${arm.name}`, JSON.stringify({ rest: { sx: rest.sx, sy: rest.sy, k: rest.k, x: r2(offDev(rest.sx, 0, rest.k, setup.dsf)), y: r2(offDev(rest.sy, 0, rest.k, setup.dsf)) }, restPx, livePx, rows }));
+			console.log(`GRID-PINCH regime=forced-dsf ${setup.dsf} outer ${setup.outer} ${arm.name}`, JSON.stringify({ rest: { sx: rest.sx, sy: rest.sy, k: rest.k, x: r2(offDev(rest.sx, 0, rest.k, setup.dsf, rest.pitch)), y: r2(offDev(rest.sy, 0, rest.k, setup.dsf, rest.pitch)) }, restPx, livePx, rows }));
 			const liveRows = rows.slice(0, live.length), liftRows = rows.slice(live.length).filter(r => r.at === "lift task" || r.at === "300 ms");
 			if (process.env.HW_GRID_PINCH_PLANT_SLOW_AFTER || process.env.HW_GRID_PINCH_PLANT_SLOW_MEASURE)
 				expect(after[1]!.t ?? 0, `slow plant: the first read after the lift came at least 100 ms after it ${JSON.stringify(after.map(r => [r.at, r.t]))}`).toBeGreaterThanOrEqual(100);
@@ -311,6 +383,8 @@ for (const setup of ONE_GESTURE) {
 			expect(rest.scrollLeft, "premise: scrolled sideways before the gesture").toBeGreaterThan(SCROLL_LEFT - 50);
 			expect(rest.scrollTop, "premise: mid-page, scrolled well below the top").toBeGreaterThan(300);
 			const restPx = await pixelVsModel(p, setup.dsf);
+			expect(toolbarPremise(restPx), `premise: the toolbar is hidden for the rest shot and back after it ${JSON.stringify(restPx.toolbar)}`).toEqual({ hidden: true, back: true });
+			await probeGuides(p, setup.dsf, `one gesture outer ${setup.outer} dpr ${setup.dsf} nudge ${setup.nudge}`, restPx);
 			expect(Math.max(restPx.x, restPx.y), `instrument: at rest the model's lattice agrees with the pixels within 1.5 device px ${JSON.stringify(restPx)}`).toBeLessThanOrEqual(1.5);
 
 			const steps = 18, cx = Math.round(300 * setup.outer), cy = Math.round(220 * setup.outer), half0 = 120;
@@ -350,6 +424,8 @@ for (const setup of ONE_GESTURE) {
 			expect(last.preview, "frame identity: the preview is live on the last move frame").toBe(true);
 			expect(last.k / setup.outer, "premise: the gesture came back to 100 percent").toBeCloseTo(1, 1);
 			const livePx = await pixelVsModel(p, setup.dsf);
+			expect({ toolbar: toolbarPremise(livePx), preview: livePx.atShot.preview, k: livePx.atShot.k }, `frame identity: right after the live shot the preview is still live at the last move frame's zoom, and the toolbar is back before the lift ${JSON.stringify({ atShot: livePx.atShot, toolbar: livePx.toolbar, lastK: last.k })}`)
+				.toEqual({ toolbar: { hidden: true, back: true }, preview: true, k: last.k });
 			expect(Math.max(livePx.x, livePx.y), `instrument: on the last live frame the model's lattice agrees with the pixels within 1.5 device px ${JSON.stringify(livePx)}`).toBeLessThanOrEqual(1.5);
 
 			const after = await p.evaluate(async (dsf) => {
@@ -364,10 +440,10 @@ for (const setup of ONE_GESTURE) {
 			}, setup.dsf) as Reading[];
 			expect(after.at(-1)!.preview, "frame identity: 300 ms after the lift the preview has ended").toBe(false);
 
-			const signed = (v: number, k: number) => { const m = ((v % PITCH) + PITCH) % PITCH; return (m > PITCH / 2 ? m - PITCH : m) * k * setup.dsf; };
+			const signed = (v: number, k: number, pitch: number) => { const m = ((v % pitch) + pitch) % pitch; return (m > pitch / 2 ? m - pitch : m) * k * setup.dsf; };
 			const rows = [...live, ...after].map((r, i) => ({ at: r.at, ...(r.t === undefined ? {} : { t: r.t }), source: r.source, k: Math.round(r.k * 1e4) / 1e4,
-				x: r2(offDev(r.sx, 0, r.k, setup.dsf)), y: r2(offDev(r.sy, 0, r.k, setup.dsf)), rx: r2(signed(r.sx, r.k)),
-				...(i >= live.length ? { lx: r2(offDev(r.sx, last.sx, r.k, setup.dsf)), ly: r2(offDev(r.sy, last.sy, r.k, setup.dsf)) } : {}),
+				x: r2(offDev(r.sx, 0, r.k, setup.dsf, r.pitch)), y: r2(offDev(r.sy, 0, r.k, setup.dsf, r.pitch)), rx: r2(signed(r.sx, r.k, r.pitch)),
+				...(i >= live.length ? { lx: r2(offDev(r.sx, last.sx, r.k, setup.dsf, r.pitch)), ly: r2(offDev(r.sy, last.sy, r.k, setup.dsf, r.pitch)) } : {}),
 				scroll: [Math.round(r.scrollLeft * 100) / 100, Math.round(r.scrollTop * 100) / 100] }));
 			const liveLeft = live.map(r => r.scrollLeft), moved = Math.max(...liveLeft) - Math.min(...liveLeft);
 			// eslint-disable-next-line no-console

@@ -4525,6 +4525,7 @@ describe("PdfInkController band", () => {
 			setCssProps: () => {},
 			toggleClass: () => {},
 			classList: { add: () => {}, remove: () => {} },
+			addEventListener: () => {},
 		};
 		return c;
 	}

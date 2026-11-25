@@ -10,19 +10,28 @@ beforeAll(async()=>{const b=await build({entryPoints:[fileURLToPath(new URL("./n
 afterAll(async()=>{await browser?.close();});
 // The paper scales with the text, not with the zoom: the host's CSS zoom and an
 // external scale scale the gradient for free, so the overlay plans a pitch of
-// 28 x the text's size over 16 px whatever the zoom. Only the thickness takes
-// the zoom, floored at one device px (a dot's radius at sqrt(2)/2). These cells
-// were written against the previous design's power-of-two levels (pitch * zoom
-// pinned in a screen window) and were revised to that contract.
+// one plain body row of the text (the content's line height) whatever the zoom.
+// Only the thickness takes the zoom, floored at one device px (a dot's radius at
+// sqrt(2)/2). These cells were written against the previous design's
+// power-of-two levels (pitch * zoom pinned in a screen window) and were revised
+// to that contract.
+/** One plain body row's height in layout px, read off the page the way the overlay plans the pitch from it: the content's computed line height when it is a px length, else a plain line box's height, to 1/64 px. */
+const ROW_PX=()=>{const c=document.querySelector(".cm-content") as HTMLElement,lh=getComputedStyle(c).lineHeight,line=c.querySelector(".cm-line") as HTMLElement|null;const row=/px$/.test(lh.trim())?Number.parseFloat(lh):line?line.offsetHeight:Number.NaN;return Math.round(row*64)/64;};
 it("the pitch follows the text size and ignores zoom and external CSS scale; the rule floors at a device px; swatches keep their own pitch",async()=>{
  const p=await browser.newPage({viewport:{width:1400,height:1100}});try{
  await p.setContent('<!doctype html><body class="handwriting-paper-grid" style="--background-modifier-border:#777"></body>');await p.addStyleTag({content:css+readFileSync(fileURLToPath(new URL("./noteViewportCamera.css",import.meta.url)),"utf8")});await p.addScriptTag({content:script});
- // 24 px text under an external scale of 0.8, then Fit, which lands between 10% and 30%.
- await p.evaluate(async()=>{await (window as any).viewportFixture.setup("scaled","paper-scaled",1,.8);await (window as any).viewportFixture.font("scaled");const host=document.querySelector(".cm-editor") as HTMLElement;const swatch=host.appendChild(document.createElement("div"));swatch.className="handwriting-paper-swatch";swatch.dataset.paper="grid";});
+ // 24 px text under an external scale of 0.8, then Fit, which lands between 10% and 30%. The text size is set with its
+ // row (fontPx moves the line height with the font): the fixture's plain `font` keeps the theme's fixed 24 px row, and a
+ // pitch that stays put there would say nothing about following the text.
+ await p.evaluate(async()=>{await (window as any).viewportFixture.setup("scaled","paper-scaled",1,.8);});
+ const rowAtMount=await p.evaluate(ROW_PX);
+ await p.evaluate(async()=>{await (window as any).viewportFixture.fontPx("scaled",24);const host=document.querySelector(".cm-editor") as HTMLElement;const swatch=host.appendChild(document.createElement("div"));swatch.className="handwriting-paper-swatch";swatch.dataset.paper="grid";});
  await p.getByRole("button",{name:"Fit handwriting",exact:true}).click();await p.evaluate(()=>(window as any).viewportFixture.settle());
- const s=await p.evaluate(()=>{const host=document.querySelector(".cm-editor") as HTMLElement;const zoom=(window as any).viewportFixture.snap("scaled").state.zoom;return {zoom,dpr:window.devicePixelRatio,pitch:host.style.getPropertyValue("--handwriting-paper-pitch"),rule:host.style.getPropertyValue("--handwriting-paper-rule"),swatch:getComputedStyle(document.querySelector(".handwriting-paper-swatch")!).backgroundImage};});
+ const row=await p.evaluate(ROW_PX);
+ const s={...await p.evaluate(()=>{const host=document.querySelector(".cm-editor") as HTMLElement;const zoom=(window as any).viewportFixture.snap("scaled").state.zoom;return {zoom,dpr:window.devicePixelRatio,pitch:host.style.getPropertyValue("--handwriting-paper-pitch"),rule:host.style.getPropertyValue("--handwriting-paper-rule"),swatch:getComputedStyle(document.querySelector(".handwriting-paper-swatch")!).backgroundImage};}),row};
  expect(s.zoom,"premise: Fit zoomed out").toBeGreaterThanOrEqual(.1);expect(s.zoom).toBeLessThan(.3);
- expect(s.pitch,`the pitch at 24 px text, whatever the zoom (${s.zoom}) and the external 0.8`).toBe("42px");
+ expect(s.row,`premise: the row grew with the text (${rowAtMount} px at mount, ${s.row} px at 24 px text)`).toBeGreaterThan(rowAtMount);
+ expect(s.pitch,`the pitch at 24 px text is its row height (${s.row} px), whatever the zoom (${s.zoom}) and the external 0.8`).toBe(`${s.row}px`);
  expect(Number.parseFloat(s.rule),`the rule: the 1.5 px literal, floored at 1 + 1/64 device px at zoom ${s.zoom} x 0.8, dpr ${s.dpr}`).toBeCloseTo(1.5*s.zoom*.8*s.dpr>=1?1.5:(1+1/64)/(s.zoom*.8*s.dpr),3);
  expect(s.swatch).toContain("28px");
  }finally{await p.close();}
@@ -42,6 +51,8 @@ it.each(["lines","grid"])("paper %s keeps its planned pitch and rule through zoo
  const p=await browser.newPage({viewport:{width:700,height:540}});try{
  await p.setContent(`<!doctype html><body class="handwriting-paper-${kind}" style="--background-modifier-border:#777; background:white"></body>`);await p.addStyleTag({content:css+readFileSync(fileURLToPath(new URL("./noteViewportCamera.css",import.meta.url)),"utf8")});await p.addScriptTag({content:script});
  const original=await p.evaluate(()=>(window as any).viewportFixture.setup("paper"));
+ // The pitch every read below expects: one plain body row, read off the page. The text size never changes in this cell.
+ const row=await p.evaluate(ROW_PX);
  const sample=()=>p.evaluate(()=>{const sc=document.querySelector(".cm-scroller")!;const s=getComputedStyle(sc);return {image:s.backgroundImage,size:s.backgroundSize,attachment:s.backgroundAttachment,position:s.backgroundPosition,zoom:(window as any).viewportFixture.snap("paper").state.zoom};});
  for(const mode of ["normal","half","quarter","fit","reset"]){
  if(mode==="half"||mode==="quarter")await p.getByRole("button",{name:"Zoom out",exact:true}).click();
@@ -52,14 +63,14 @@ it.each(["lines","grid"])("paper %s keeps its planned pitch and rule through zoo
  // so the pitch is its last stop less its first and the rule its last less the
  // one before. The zoom scales both on screen; in layout px they stay put.
  await p.evaluate(()=>(window as any).viewportFixture.settle());const s=await sample();const bottom=s.image.split("repeating-linear-gradient(")[1]!;const nums=[...bottom.matchAll(/([\d.]+)px/g)].map(m=>Number(m[1]));
- expect(nums.at(-1)!-nums[0]!,`[${mode}] zoom ${s.zoom}: pitch from the to-bottom gradient's stops (serialised to 6 significant digits): ${s.image}`).toBeCloseTo(28,3);
+ expect(nums.at(-1)!-nums[0]!,`[${mode}] zoom ${s.zoom}: pitch from the to-bottom gradient's stops (serialised to 6 significant digits), against the ${row} px row: ${s.image}`).toBeCloseTo(row,3);
  expect(nums.at(-1)!-nums.at(-2)!,`[${mode}] zoom ${s.zoom}: rule from the to-bottom gradient's stops, one px, and 1 + 1/64 device px where one px falls under one`).toBeCloseTo(s.zoom>=1?1:(1+1/64)/s.zoom,3);
  if(mode==="fit"&&process.env.HW_PAPER_SCREENSHOT)await p.screenshot({path:process.env.HW_PAPER_SCREENSHOT.replace(".png",`-${kind}.png`)});
  }
  await p.getByRole("button",{name:"Fit handwriting",exact:true}).click();await p.evaluate(()=>(window as any).viewportFixture.settle());const beforePan=await sample();await p.evaluate(()=>(window as any).viewportFixture.scroll("paper"));expect((await sample()).position).toBe(beforePan.position);expect((await sample()).attachment).toContain("local");
- await p.evaluate(()=>{document.body.className="handwriting-paper-dots";});expect((await sample()).size.split(", ").every(size=>size==="28px 28px"),"dots: every layer is one pitch square").toBe(true);
+ await p.evaluate(()=>{document.body.className="handwriting-paper-dots";});expect((await sample()).size.split(", ").every(size=>size===`${row}px ${row}px`),`dots: every layer is one pitch square, the ${row} px row`).toBe(true);
  const end=await p.evaluate(()=>(window as any).viewportFixture.snap("paper"));expect(end.strokes).toEqual(original.strokes);expect(end.writes).toBe(original.writes);
- await p.evaluate(kind=>{document.body.className=`handwriting-paper-${kind}`;},kind);expect((await sample()).image).toBe(beforePan.image);expect(original.state.zoom,"FIRST OPEN: a note never seen this session opens at 100 percent (issue 9)").toBe(1);await p.evaluate(async()=>{await (window as any).viewportFixture.reopen("paper");await (window as any).viewportFixture.settle();});const reopened=await sample();expect(reopened.zoom,"RETURN: the reopened note comes back at the zoom it was left at, the last Fit").toBeCloseTo(beforePan.zoom,10);const reopenedStops=[...reopened.image.split("repeating-linear-gradient(")[1]!.matchAll(/([\d.]+)px/g)].map(m=>Number(m[1]));expect(reopenedStops.at(-1)!-reopenedStops[0]!,`pitch after reopen, last stop less first of the phased to-bottom gradient: ${reopened.image}`).toBeCloseTo(28,3);
+ await p.evaluate(kind=>{document.body.className=`handwriting-paper-${kind}`;},kind);expect((await sample()).image).toBe(beforePan.image);expect(original.state.zoom,"FIRST OPEN: a note never seen this session opens at 100 percent (issue 9)").toBe(1);await p.evaluate(async()=>{await (window as any).viewportFixture.reopen("paper");await (window as any).viewportFixture.settle();});const reopened=await sample();expect(reopened.zoom,"RETURN: the reopened note comes back at the zoom it was left at, the last Fit").toBeCloseTo(beforePan.zoom,10);const reopenedStops=[...reopened.image.split("repeating-linear-gradient(")[1]!.matchAll(/([\d.]+)px/g)].map(m=>Number(m[1]));expect(reopenedStops.at(-1)!-reopenedStops[0]!,`pitch after reopen, last stop less first of the phased to-bottom gradient, against the ${row} px row: ${reopened.image}`).toBeCloseTo(row,3);
  }finally{await p.close();}
  });
 // Dots: the same pitch and thickness as lines and grid, through a real 1.0 ->
@@ -67,7 +78,8 @@ it.each(["lines","grid"])("paper %s keeps its planned pitch and rule through zoo
 // commit back at 100% and a change of the text size, for global dots and for a
 // note set to dots under global lines. One dot per tile, one gradient layer,
 // centred in the tile; the tile is one pitch square and
-// follows the text (28 px, then 42 px at 24 px text); the dot's radius and soft
+// follows the text's row height (the content's line height, which fontPx moves
+// with the text size); the dot's radius and soft
 // edge come from the dot thickness (floored at sqrt(2)/2 device px at 10
 // percent, then 1.5 px at 24 px text), and the soft edge stays inside half the
 // tile, so no dot is cut at a tile edge. The tile's POSITION is the text's origin
@@ -82,8 +94,10 @@ it.each([["global dots","handwriting-paper-dots",""],["a note set to dots under 
  if(noteKind)await p.evaluate(kind=>{const host=document.querySelector('[data-rig="dots-control"]')!;const note=document.createElement("div");note.dataset.handwritingPaper=kind;host.before(note);note.appendChild(host);},noteKind);
  const r=await p.evaluate(async()=>{
   const fx=(window as any).viewportFixture,scroller=document.querySelector(".cm-scroller")!,host=document.querySelector(".cm-editor") as HTMLElement;
+  // One plain body row in layout px, read the way the overlay plans the pitch: the content's px line height, else a plain line box's height.
+  const rowPx=()=>{const c=host.querySelector(".cm-content") as HTMLElement,lh=getComputedStyle(c).lineHeight,line=c.querySelector(".cm-line") as HTMLElement|null;const row=/px$/.test(lh.trim())?Number.parseFloat(lh):line?line.offsetHeight:Number.NaN;return Math.round(row*64)/64;};
   // During a preview the paper is the preview element: its tile carries the phase alone and its translate the pan.
-  const read=()=>{const el=host.querySelector(":scope > .handwriting-paper-preview"),s=getComputedStyle(el??scroller),pan=(name:string)=>el?"0px":s.getPropertyValue(name);return {source:el?"element":"scroller",image:s.backgroundImage,size:s.backgroundSize,y:s.backgroundPositionY,x:s.backgroundPositionX,phase:host.style.getPropertyValue("--handwriting-paper-phase"),phaseX:host.style.getPropertyValue("--handwriting-paper-phase-x"),panX:pan("--handwriting-paper-pan-x"),panY:pan("--handwriting-paper-pan-y"),rule:host.style.getPropertyValue("--handwriting-paper-rule"),dot:host.style.getPropertyValue("--handwriting-paper-dot"),zoom:fx.snap("dots-control").state.zoom};};
+  const read=()=>{const el=host.querySelector(":scope > .handwriting-paper-preview"),s=getComputedStyle(el??scroller),pan=(name:string)=>el?"0px":s.getPropertyValue(name);return {source:el?"element":"scroller",image:s.backgroundImage,size:s.backgroundSize,y:s.backgroundPositionY,x:s.backgroundPositionX,phase:host.style.getPropertyValue("--handwriting-paper-phase"),phaseX:host.style.getPropertyValue("--handwriting-paper-phase-x"),panX:pan("--handwriting-paper-pan-x"),panY:pan("--handwriting-paper-pan-y"),rule:host.style.getPropertyValue("--handwriting-paper-rule"),dot:host.style.getPropertyValue("--handwriting-paper-dot"),zoom:fx.snap("dots-control").state.zoom,row:rowPx()};};
   // edgeAudit.pinchBy's gesture (ViewportEdgeAudit.test.ts:55, R: 100 -> 10 px lands at the 10% floor), with a read between the move and the lift.
   const send=(type:string,id:number,x:number)=>{const t=document.elementFromPoint(x,250)!;if(!scroller.contains(t))throw Error("pinch outside editor");t.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:"touch",pointerId:id,isPrimary:id===701,clientX:x,clientY:250,buttons:type==="pointerup"?0:1,width:8,height:8}));};
   const before=read();
@@ -102,7 +116,11 @@ it.each([["global dots","handwriting-paper-dots",""],["a note set to dots under 
  const dot=(image:string)=>{const first=image.split("radial-gradient(")[1]!;const head=first.split(",")[0]!.trim();const stops=[...first.matchAll(/\) (-?[\d.]+)px/g)].map(m=>Number(m[1]));return {head,stops};};
  const report=JSON.stringify(r);
  expect(r.before.image,`dots are the paper drawn; ${report}`).toContain("radial-gradient");expect.soft(r.before.image.match(/radial-gradient/g)?.length,`one dot layer; ${report}`).toBe(1);
- for(const [at,s,px] of [["before",r.before,28],["mid-preview",r.live,28],["after commit",r.after,28],["at 100%",r.reset,28],["at 24 px text",r.font,42]] as const){
+ // The tile follows the text's row: the row read in the same task as each stage. fontPx moves the line height with the
+ // font, so the last stage's row is larger than the first's.
+ expect(r.font.row,`premise: the row grew with the text (${r.before.row} px, then ${r.font.row} px at 24 px text)`).toBeGreaterThan(r.before.row);
+ for(const [at,s] of [["before",r.before],["mid-preview",r.live],["after commit",r.after],["at 100%",r.reset],["at 24 px text",r.font]] as const){
+  const px=s.row;
   expect.soft(layers(s.size).every(l=>l===`${px}px ${px}px`),`[${at}] every layer ${px}px square: ${s.size}`).toBe(true);
   // Old rule: background-position-y 0. Now: phase + pan-y, and phase-x + pan-x across.
   const want=(phase:string,pan:string)=>(Number.parseFloat(phase)||0)+(Number.parseFloat(pan)||0);

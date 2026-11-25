@@ -100,7 +100,7 @@ async function launched(raw: unknown, version: string): Promise<Plugin> {
 	plugin.settingsDirty = false;
 	plugin.settingsWriting = null;
 	plugin.settingsWriteAgain = false;
-	plugin.store = { useInkFolder: () => {}, load: () => null, schedule: () => {} };
+	plugin.store = { useInkFolder: () => {}, load: () => null, schedule: () => {}, dropLiveMoveRetries: () => {} };
 	plugin.pdfStore = { attachHost: () => {} };
 	plugin.app = { workspace: { onLayoutReady: () => {} } };
 	plugin.applyPaperTo = (): void => {};

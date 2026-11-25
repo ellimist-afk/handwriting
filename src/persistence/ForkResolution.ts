@@ -2,6 +2,7 @@ import { PageData, parsePage, serializePage } from "../model/PageData";
 import { ADOPTED_BY_KEY, outgoingDiverges, recoverExactPage } from "./PageStore";
 import { isLiveSidecarName } from "./InkFolder";
 import { isSyncToolCopyName, syncToolCopyOf } from "./SyncToolCopies";
+import { isPdfInkId } from "../pdf/PdfIdentity";
 
 /**
  * WHAT THE USER DOES ABOUT A FORK, once the store has preserved both sides.
@@ -140,6 +141,45 @@ export interface ForkHost {
 	 */
 	restore?(pageId: string, data: PageData): Promise<void>;
 	/**
+	 * The file the store reads and writes this page at. A decision judges and
+	 * reads back the page beside the fork, but `restore` and `saveNow` write the
+	 * page this names: when they differ, a decision that writes is refused
+	 * before anything is copied or written. A host without it is taken to serve
+	 * the page beside the fork.
+	 */
+	servedPath?(pageId: string): Promise<string>;
+	/**
+	 * Does a duplicate lock stand on a note carrying this page id, open or not?
+	 * While one does, a note holding the page keeps the page the decision would
+	 * replace and writes it back later (its next stroke, or the lock clearing),
+	 * so the chosen ink would be left only in the fork's files. A decision that
+	 * writes is then refused before anything is copied or written. A host
+	 * without it is taken to have no lock; a question that throws is taken as
+	 * a lock.
+	 */
+	duplicateLocked?(pageId: string): boolean;
+	/**
+	 * Does an open presentation hold this page: the live deck on it, a closed
+	 * deck still writing it, or a deck loading the note that carries it? The
+	 * deck keeps the page the decision would replace and its next save puts it
+	 * back, so a decision that writes is refused before anything is copied or
+	 * written. A host without it is taken to have no deck; a question that
+	 * throws is taken as a deck.
+	 */
+	deckHolds?(pageId: string): boolean;
+	/**
+	 * Is a PDF's ink held back from its file: its read still in flight, or the
+	 * file locked as damaged or as written by a newer version? The PDF store
+	 * then writes nothing to the file and keeps ink drawn since in memory only,
+	 * so a decision that writes is refused before anything is copied or
+	 * written, and the same choice works once the file reads. Under the damaged
+	 * lock alone, writing `page` loses nothing when the store owes the file no
+	 * ink and every stroke it holds is in `page`: not held then. A host without
+	 * it is taken to hold nothing back; a question that throws is taken as
+	 * held.
+	 */
+	pdfInkHeld?(pageId: string, page: PageData): boolean;
+	/**
 	 * Rename a file. Used to mark a decided pair so no later scan lists it
 	 * again; a host without it cannot make a decision stick past the session.
 	 */
@@ -171,6 +211,8 @@ export interface ForkHostSources {
 		saveNow(pageId: string, data: PageData): Promise<void>;
 		/** Copy the current live page aside; throws when it cannot. */
 		preserve(pageId: string): Promise<string | null>;
+		/** The file the page is read and written at; see `ForkHost.servedPath`. */
+		resolvePath?(pageId: string): Promise<string>;
 	};
 	/** The note a page id belongs to, or null. */
 	pathForNote?(pageId: string): string | null;
@@ -178,6 +220,12 @@ export interface ForkHostSources {
 	pathForPdf?(pageId: string): Promise<string | null>;
 	/** Hand a restored page to the open surface holding it; true when it wrote it. */
 	restoreOpen?(pageId: string, data: PageData): Promise<boolean>;
+	/** A duplicate lock stands on a note carrying the page id; see `ForkHost.duplicateLocked`. */
+	duplicateLocked?(pageId: string): boolean;
+	/** An open presentation holds the page id; see `ForkHost.deckHolds`. */
+	deckHolds?(pageId: string): boolean;
+	/** A PDF's ink is held back from its file, for writing `page`; see `ForkHost.pdfInkHeld`. */
+	pdfInkHeld?(pageId: string, page: PageData): boolean;
 	/** This install's id; see `ForkHost.deviceId`. */
 	deviceId?: string;
 }
@@ -191,6 +239,10 @@ export function forkHostFor(src: ForkHostSources): ForkHost {
 	const rename = src.adapter.rename?.bind(src.adapter);
 	const pathForNote = src.pathForNote?.bind(src);
 	const pathForPdf = src.pathForPdf?.bind(src);
+	const resolvePath = src.store.resolvePath?.bind(src.store);
+	const duplicateLocked = src.duplicateLocked?.bind(src);
+	const deckHolds = src.deckHolds?.bind(src);
+	const pdfInkHeld = src.pdfInkHeld?.bind(src);
 	return {
 		...(pathForNote || pathForPdf
 			? {
@@ -210,9 +262,26 @@ export function forkHostFor(src: ForkHostSources): ForkHost {
 			// The current live page can hold ink drawn after the fork, in no
 			// other file. Copied first, and a failed copy stops the restore.
 			await src.store.preserve(pageId);
+			// A PDF read that started while the copy was made (the live-reload poll, or a pane opening it) would land
+			// under the strokes handed to the PDF store next and write them back merged. Asked again before they are
+			// handed over: nothing is replaced or written, and the copy stays.
+			if (pdfInkHeldBack(src, pageId, data)) throw new Error("the PDF's ink is held back from its file");
+			// A PDF page's claim is the live file's, read again now: the copy above flushed any queued save, a rename's
+			// included, so the list written is the list the file holds. Where it cannot be read, `data` as it stands; a
+			// read that throws refuses the decision (the copy stays, as every refusal here).
+			if (isPdfInkId(pageId) && resolvePath) {
+				setClaim(data, await liveClaim(src.adapter, await resolvePath(pageId)));
+			}
 			if (await src.restoreOpen?.(pageId, data)) return;
+			// A presentation opened while the copy was made can hold the page by now, and its next save would put the
+			// page back over this write. Asked again just before it: the write is not made, and the copy stays.
+			if (presentationHolds(src, pageId)) throw new Error("an open presentation holds the page");
 			await src.store.saveNow(pageId, data);
 		},
+		...(resolvePath ? { servedPath: (pageId: string) => resolvePath(pageId) } : {}),
+		...(duplicateLocked ? { duplicateLocked: (pageId: string) => duplicateLocked(pageId) } : {}),
+		...(deckHolds ? { deckHolds: (pageId: string) => deckHolds(pageId) } : {}),
+		...(pdfInkHeld ? { pdfInkHeld: (pageId: string, page: PageData) => pdfInkHeld(pageId, page) } : {}),
 		...(list ? { list: async (folder: string) => (await list(folder)).files } : {}),
 	};
 }
@@ -244,6 +313,16 @@ const KEPT_COPY = /^(.+)\.conflict-(\d+(?:-\d+)?)\.json$/;
 const MOVE_COPY = /^(.+)\.conflict-migration-(\d+(?:-\d+)?)\.json$/;
 
 /**
+ * `<pageId>.flush-conflict-<mtime>.json`, or `-<n>` before `.json`: what loading
+ * a page (`PageStoreLoad.recoverFlushCarrier`) keeps a cut-off save's page as
+ * when that save was built on other bytes than the live page. The live page
+ * stands, so the copy can hold the newest strokes, and it is a kept copy like
+ * any other. Its `.conflict-` follows `-`, not `.`, so the two patterns above
+ * never take it, nor it them.
+ */
+const FLUSH_COPY = /^(.+)\.flush-conflict-(\d+(?:-\d+)?)\.json$/;
+
+/**
  * Find preserved pairs by looking, because nothing else can find them.
  *
  * THE REGISTER ABOVE IS PER-SESSION and a fork outlives the session that made
@@ -271,6 +350,15 @@ const MOVE_COPY = /^(.+)\.conflict-migration-(\d+(?:-\d+)?)\.json$/;
  * other device's strokes, so it is listed the same way, for note and PDF
  * pages alike. A sync tool's copy of one of the plugin's own copies or pair
  * legs names no live page, so it is not listed against one.
+ *
+ * SO IS A CUT-OFF SAVE'S. When a save is cut off and its carrier turns out to
+ * be built on other bytes than the live page, loading the page keeps the
+ * carrier's page as `<id>.flush-conflict-<mtime>.json` and leaves the live page
+ * as it is. That copy can hold the newest strokes, so it is listed the same
+ * way, for note and PDF pages alike. Its own write can be cut off too, leaving
+ * part of a page there and the whole one under the next free name: a copy of
+ * that kind whose bytes do not parse is not listed, so no copy holding nothing
+ * anyone can read is put on screen for good.
  */
 export async function scanForForks(host: ForkHost, folder: string): Promise<ForkRecord[]> {
 	if (!host.list) return [];
@@ -295,10 +383,12 @@ export async function scanForForks(host: ForkHost, folder: string): Promise<Fork
 	const out: ForkRecord[] = [];
 	for (const name of names) {
 		const base = name.slice(name.lastIndexOf("/") + 1);
-		const m = KEPT_COPY.exec(base) ?? MOVE_COPY.exec(base);
+		const flush = FLUSH_COPY.exec(base);
+		const m = KEPT_COPY.exec(base) ?? MOVE_COPY.exec(base) ?? flush;
 		const pageId = m ? m[1]! : livePageOfSyncToolCopy(base);
 		if (!pageId) continue;
 		const incoming = `${folder}/${base}`;
+		if (flush && !(await parsesAsJson(host, incoming))) continue;
 		const st = await host.stat(incoming).catch(() => null);
 		out.push({
 			pageId,
@@ -341,6 +431,18 @@ export async function scanForForks(host: ForkHost, folder: string): Promise<Fork
 function livePageOfSyncToolCopy(name: string): string | null {
 	const id = syncToolCopyOf(name);
 	return id !== null && isLiveSidecarName(`${id}.json`) ? id : null;
+}
+
+/** Do the file's bytes read and parse as JSON? A cut-off write of a whole page leaves bytes that do not. */
+async function parsesAsJson(host: ForkHost, path: string): Promise<boolean> {
+	try {
+		const text = await host.read(path);
+		if (text === null) return false;
+		JSON.parse(text);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /** The install that wrote a pair, from its outgoing leg, or null when none is recorded or it cannot be read. */
@@ -651,13 +753,60 @@ async function applyChangingDecision(
 	// A kept copy can come from another id (a note whose id the other device
 	// changed keeps this device's ink under the old one): the page restored
 	// here is this page, whatever id its bytes declare.
+	// On a PDF page the decision changes the ink, never the claim: the paths the restored page names are the live
+	// file's beside the fork (a copy kept from before a rename names the old path, and writing it moved the ink to
+	// another PDF there). Where the live list cannot be read, the copy's own as before. Note pages as before.
 	const restored = { ...recoverExactPage(parsed.data), pageId: rec.pageId };
+	let claimUnread = false;
+	if (isPdfInkId(rec.pageId)) {
+		try {
+			setClaim(restored, await liveClaim(host, livePathBeside(rec)));
+		} catch {
+			claimUnread = true;
+		}
+	}
 	// Take the other with the other revision already live: nothing to write.
 	// Keep mine on a kept copy (Keep Version A): the live page is the side
 	// kept, so nothing is written and only the copy is retired.
 	const write = rec.kept
 		? decision === "take-theirs" && !(await livePageHolds(host, rec, restored))
 		: decision === "keep-mine" || !(await livePageHolds(host, rec, restored));
+	// The live claim could not be read (the read threw): what the write would name is unknown. Refused before
+	// anything is copied, written, renamed or removed; the fork stays listed.
+	if (write && claimUnread) {
+		return { kind: "refused", wrote: false, stillListed: true, why: "not saved" };
+	}
+	// The write lands on the page the store serves, and the decision judges and
+	// reads back the page beside the fork. When the store serves another file
+	// (the page is in two ink folders and the copy in the other one is served),
+	// the write would replace that page, strokes drawn since included, and then
+	// read back the wrong file and say "not saved". Refused before anything is
+	// copied, written, renamed or removed: the fork stays listed.
+	if (write && !(await servesBeside(host, rec))) {
+		return { kind: "refused", wrote: false, stillListed: true, why: "not saved" };
+	}
+	// While a duplicate lock stands on a note carrying the page, open or not, a
+	// note holding it keeps the page this would replace and writes it back
+	// later: the open note's next stroke, or the lock clearing. Refused here,
+	// before anything is copied, written, renamed or removed: the fork stays
+	// listed, and the same choice works once the lock is gone.
+	if (write && duplicateLockStands(host, rec)) {
+		return { kind: "refused", wrote: false, stillListed: true, why: "not saved" };
+	}
+	// The same while an open presentation holds the page: its next save puts the
+	// page this would replace back. The same choice works once it is closed.
+	if (write && presentationHolds(host, rec.pageId)) {
+		return { kind: "refused", wrote: false, stillListed: true, why: "not saved" };
+	}
+	// The same while a PDF's ink is held back from its file (still being read,
+	// or locked as damaged or newer): ink drawn since is in no file, and the
+	// write would copy aside a file without it, replace it in the store and
+	// write over a file the store keeps as it is. The same choice works once
+	// the file reads. Under the damaged lock alone it goes through when the
+	// store owes the file nothing and holds no stroke the restored page lacks.
+	if (write && pdfInkHeldBack(host, rec.pageId, restored)) {
+		return { kind: "refused", wrote: false, stillListed: true, why: "not saved" };
+	}
 	if (write) {
 		try {
 			if (host.restore) await host.restore(rec.pageId, restored);
@@ -687,7 +836,9 @@ async function applyChangingDecision(
  * scan does not match. A kept copy `<id>.conflict-<mtime>.json` becomes
  * `<id>.conflict-resolved-<mtime>.json`, and a copy the folder move kept,
  * `<id>.conflict-migration-<ms>.json`, becomes
- * `<id>.conflict-resolved-migration-<ms>.json`; the other leg of either is the
+ * `<id>.conflict-resolved-migration-<ms>.json`, and a cut-off save's copy,
+ * `<id>.flush-conflict-<mtime>.json`, becomes
+ * `<id>.conflict-resolved-flush-<mtime>.json`; the other leg of each is the
  * live page and is never renamed. A sync tool's copy (`SyncToolCopies.ts`)
  * has no `.conflict-` part to rewrite, so it becomes
  * `<id>.conflict-resolved-sync-<mtime>.json` beside it, with `-<n>` added
@@ -713,7 +864,8 @@ async function markResolved(host: ForkHost, rec: ForkRecord): Promise<void> {
 async function resolvedKeptCopyName(host: ForkHost, rec: ForkRecord, leg: string): Promise<string> {
 	const own = leg
 		.replace(/\.conflict-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-")
-		.replace(/\.conflict-migration-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-migration-");
+		.replace(/\.conflict-migration-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-migration-")
+		.replace(/\.flush-conflict-(?=\d+(?:-\d+)?\.json$)/, ".conflict-resolved-flush-");
 	const slash = leg.lastIndexOf("/");
 	if (own !== leg || !isSyncToolCopyName(leg.slice(slash + 1))) return own;
 	const stem = `${leg.slice(0, slash + 1)}${rec.pageId}.conflict-resolved-sync-${Math.round(rec.at)}`;
@@ -732,8 +884,103 @@ function livePathBeside(rec: ForkRecord): string {
 }
 
 /**
+ * Does the store read and write this page at the file beside the pair? A host
+ * that cannot say is taken to; a lookup that throws is not.
+ */
+async function servesBeside(host: ForkHost, rec: ForkRecord): Promise<boolean> {
+	if (!host.servedPath) return true;
+	try {
+		return (await host.servedPath(rec.pageId)) === livePathBeside(rec);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Does a duplicate lock stand on a note carrying this page? A host that cannot
+ * say is taken to have none; a question that throws is taken as a lock.
+ */
+function duplicateLockStands(host: ForkHost, rec: ForkRecord): boolean {
+	if (!host.duplicateLocked) return false;
+	try {
+		return host.duplicateLocked(rec.pageId);
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Does an open presentation hold this page? A host that cannot say is taken to
+ * have none; a question that throws is taken as a deck.
+ */
+function presentationHolds(host: { deckHolds?(pageId: string): boolean }, pageId: string): boolean {
+	if (!host.deckHolds) return false;
+	try {
+		return host.deckHolds(pageId);
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Is a PDF's ink held back from its file, for writing `page`? A host that
+ * cannot say is taken to hold nothing back; a question that throws is taken
+ * as held.
+ */
+function pdfInkHeldBack(
+	host: { pdfInkHeld?(pageId: string, page: PageData): boolean },
+	pageId: string,
+	page: PageData
+): boolean {
+	if (!host.pdfInkHeld) return false;
+	try {
+		return host.pdfInkHeld(pageId, page);
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * The claim a PDF ink file at `path` makes: `{ paths }` with its top-level
+ * `pdfPaths` list, or `paths` undefined when the key is absent. Read from the
+ * raw JSON, so a damaged page whose text still parses keeps its list. Null
+ * where it cannot be read, and the page is written as before: no file, text
+ * that is not JSON, or a key that is not a list of strings. A read that throws
+ * throws.
+ */
+async function liveClaim(
+	io: { read(path: string): Promise<string | null>; stat(path: string): Promise<unknown> },
+	path: string
+): Promise<{ paths: string[] | undefined } | null> {
+	// Stat first: the vault adapter's read throws on a missing file, and missing is not a failed read.
+	if ((await io.stat(path)) === null) return null;
+	const text = await io.read(path);
+	if (text === null) return null;
+	let raw: unknown;
+	try {
+		raw = JSON.parse(text.startsWith("\uFEFF") ? text.slice(1) : text);
+	} catch {
+		return null;
+	}
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+	if (!Object.prototype.hasOwnProperty.call(raw, "pdfPaths")) return { paths: undefined };
+	const list: unknown = (raw as Record<string, unknown>).pdfPaths;
+	if (!Array.isArray(list) || !list.every((p): p is string => typeof p === "string")) return null;
+	return { paths: [...list] };
+}
+
+/** Puts a live claim on `page`: its list, or no `pdfPaths` key; a claim that could not be read leaves `page` as it is. */
+function setClaim(page: PageData, claim: { paths: string[] | undefined } | null): void {
+	if (claim === null) return;
+	if (claim.paths === undefined) delete page.pdfPaths;
+	else page.pdfPaths = claim.paths;
+}
+
+/**
  * Does the live sidecar now hold exactly this page's strokes, text boxes and
- * images, in this order and in this form?
+ * images, in this order and in this form? On a PDF page, the claim too: the
+ * same paths, in any order (a save of the open PDF between the write and this
+ * read writes the union, the same set).
  *
  * Ids alone are not enough: a lasso move keeps a stroke's id, so a moved
  * stroke read as the chosen revision and "Take the other" wrote nothing, and a
@@ -758,7 +1005,8 @@ async function livePageHolds(host: ForkHost, rec: ForkRecord, page: PageData): P
 		same(onDisk.strokes, wanted.strokes) &&
 		same(onDisk.textBoxes, wanted.textBoxes) &&
 		same(onDisk.images, wanted.images) &&
-		same(onDisk.attachments ?? [], wanted.attachments ?? [])
+		same(onDisk.attachments ?? [], wanted.attachments ?? []) &&
+		(!isPdfInkId(rec.pageId) || same([...(onDisk.pdfPaths ?? [])].sort(), [...(wanted.pdfPaths ?? [])].sort()))
 	);
 }
 

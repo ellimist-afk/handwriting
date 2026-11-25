@@ -340,7 +340,7 @@ describe("Reading view and PDF draw a moved group where the editor shows it", ()
 		expect(t.reading("c"), "premise: Reading view draws it where it was drawn").toEqual({ dx: 0, dy: 0 });
 		t.edit(0, 0, "a new first line\n");
 		expect(t.offset(r.id), "premise: the editor shows it one line down").toEqual({ dx: 0, dy: LH });
-		return t;
+		return { ...t, id: r.id };
 	};
 
 	it("a paragraph group under a line typed above: once the editor is quiet, Reading view draws it one line down", async () => {
@@ -349,9 +349,24 @@ describe("Reading view and PDF draw a moved group where the editor shows it", ()
 		expect(reading("c"), "Reading view draws it where the editor shows it").toEqual({ dx: 0, dy: LH });
 	});
 
-	it("a paragraph group under a line typed above: before the editor is quiet, Reading view draws it at its stored place", async () => {
-		const { reading } = await paragraph("range-para-gap.md");
-		expect(reading("c"), "no sideways move without its line's").toEqual({ dx: 0, dy: 0 });
+	it("a paragraph group under a line typed above: before the editor is quiet, Reading view draws it where the editor shows it", async () => {
+		const { id, offset, reading } = await paragraph("range-para-gap.md");
+		expect(reading("c"), "Reading view draws it where the editor shows it, before the editor is quiet").toEqual(offset(id));
+	});
+
+	it("a word group that wraps to the next row, read before the editor is quiet: Reading view draws both moves or neither, never the sideways move alone", async () => {
+		const { attach, edit, offset, quiet, reading, text } = rig("range-wrap-gap.md", [loop("c", X(FOX) - 4, X(FOX + 3) + 4, 4, 36)], { follow: true });
+		const r = await attach(["c"]);
+		quiet();
+		expect(anchorOf("range-wrap-gap.md", "c"), "premise: the member is anchored").toBeDefined();
+		edit(0, 0, "and then a big ");
+		const now = text().split("\n")[0]!, rows = rowsOf(now), at = now.indexOf("fox");
+		expect(at >= rows[1]!.start, "premise: the word is on the second row").toBe(true);
+		const shown = { dx: X(at - rows[1]!.start) - X(FOX), dy: LH };
+		expect(offset(r.id), "premise: the editor shows the circle on the second row").toEqual(shown);
+		expect(shown.dx !== 0, "premise: the wrap moves the circle sideways too").toBe(true);
+		const drawn = reading("c");
+		expect([shown, { dx: 0, dy: 0 }], `Reading view draws both moves or neither (${JSON.stringify(drawn)})`).toContainEqual(drawn);
 	});
 
 	it("control: free ink under a line typed above stays where it was drawn in Reading view", () => {

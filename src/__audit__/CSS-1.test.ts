@@ -33,6 +33,7 @@ import { inlineInk } from "../inline/InkOverlay";
 import { mountOverlay } from "../inline/mountRig.test.util";
 import { InlineInkStore, type InlineInkHost } from "../inline/InlineInkStore";
 import { UnreadableFrontmatterError, claimMarkdown, hasFrontmatterBlock } from "../inline/InlineClaim";
+import { tracePageIdWrite } from "../diag/NoteTraceRows";
 import { parseMarkdownPage } from "../model/MarkdownPage";
 import { isSafePageId, type PageData, type ParseResult } from "../model/PageData";
 import type { InkStroke } from "../ink/Stroke";
@@ -97,6 +98,7 @@ const makeClaimNotePageId = new Function(
 	"claimMarkdown",
 	"hasFrontmatterBlock",
 	"UnreadableFrontmatterError",
+	"tracePageIdWrite",
 	transformSync(
 		`return async function claimNotePageId(path: string, proposedId: string, guard?: any): Promise<any> {\n${claimBody}\n};`,
 		{ loader: "ts", target: "es2022" }
@@ -209,7 +211,7 @@ class World {
 	}
 	host(): InlineInkHost {
 		const notePageId = makeNotePageId(isSafePageId).bind(this.plugin);
-		const claimNotePageId = makeClaimNotePageId(claimMarkdown, hasFrontmatterBlock, UnreadableFrontmatterError).bind(this.plugin);
+		const claimNotePageId = makeClaimNotePageId(claimMarkdown, hasFrontmatterBlock, UnreadableFrontmatterError, tracePageIdWrite).bind(this.plugin);
 		return {
 			readPageId: (path) => notePageId(path),
 			claimId: (path, proposedId) => claimNotePageId(path, proposedId),

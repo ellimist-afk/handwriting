@@ -2,39 +2,24 @@
 
 ## supported version
 
-Handwriting v0.13.10 is the supported version. Only the newest release is
-supported.
+the newest release on GitHub is the supported version. update to fix bugs.
 
 ## reporting a vulnerability
 
-Do not open a normal issue for an exploitable defect. A public issue tells
-everyone else how to use it before there is a fix.
+do not open a normal issue for an exploitable defect please. message me.
 
-Use GitHub private vulnerability reporting on this repository, under the
-Security tab. That channel is private to the maintainer until a fix is out.
+use GitHub private vulnerability reporting on this repository, under the Security tab
 
-Include what you did, what happened, and what an attacker gets out of it. A
-reproduction helps more than anything else.
+include what you did, what happened, and what an attacker may get out of it. repros helps more than anything else.
 
 ## what belongs in the issue tracker instead
 
-Ordinary crashes, hangs, rendering faults and data-loss bugs go in the normal
-issue tracker, unless the defect crosses a security boundary. Losing your
-own ink to a save bug is a serious bug, but not a vulnerability. Reading or
-writing a file outside the vault, or executing something a note controls,
-would be.
-
-If you are not sure which one you have, use private reporting. It can
-always be moved into the open later.
+crashes, hangs, rendering faults and data-loss bugs go in the normal issue tracker. losing your ink to a bug is serious but not a vulnerability. reading or writing a file outside the vault for example or executing something a note controls, would be.
 
 ## scope
 
-Handwriting makes no network request on its own, has no accounts, and runs
-no server. The one request is the bug-report window's Upload to developer
-button: it is sent only when you tap it, and it carries the report shown on
-screen. The realistic surface is what it reads and writes on disk, and what it does
-with content that comes from a note or a sidecar file.
+Handwriting makes no network request on its own, has no accounts, and runs no server. the one exception to this promise is the bug report's Upload to developer button, which sends relevant data to a server i control personally, for the sake of fixing bugs. it is completely optional.
 
-## no bug bounty
+## rewards
 
-There is no bug-bounty program and no payment for reports.
+there is no bug bounty program and no payment for reports beyond my gratitude. i will probably acknowledge you in the patch notes but do not have to.

@@ -31,9 +31,9 @@ import { bindRecoveryNotices } from "../main";
  * A lands; the app freezes before B's own save. On restart the live file is A
  * and the carrier's base is not A's stamp.
  *
- * (a) B holds every stroke of A: it was built on that page, so it is promoted
- * and the newest strokes show. (b) B lacks a stroke A has (erased, then more
- * drawn): the live page stands, B is kept aside, and a notice names the copy.
+ * (a) B holds every stroke of A, or (b) B lacks one (erased, then more drawn):
+ * either way B names A's stamp among its saves in flight, so it is promoted,
+ * the newest strokes show, and A is kept beside it.
  *
  * The real PageStore over the fake adapter, the real bindRecoveryNotices from
  * main.ts, and a fresh store over the frozen files for the restart.
@@ -138,14 +138,17 @@ describe("a flush carrier built on older bytes is promoted or announced after a 
 		]);
 	});
 
-	it("(b) the carrier lacks a stroke of the live page: the page stands, the copy is kept, and a notice names it", async () => {
+	it("(b) the carrier lacks a stroke of the live page, erased after that save: it names the save's stamp, so it is promoted and the erase holds", async () => {
 		const { frozen, loaded } = await raceFreezeRestart(pageWith("a0", "a1"), pageWith("a0", "b1"));
-		expect(loaded?.data.strokes.map((s) => s.id), "premise: the live page stands").toEqual(["a0", "a1"]);
-		const aside = [...frozen.files.keys()].filter((k) => k.includes(".flush-conflict-"));
-		expect(aside, "premise: the carrier was kept aside").toHaveLength(1);
-		expect(idsIn(frozen.files.get(aside[0]!))).toEqual(["a0", "b1"]);
-		expect(notices.messages, "no notice named the kept copy").toEqual([
-			`Handwriting found ink on "Budget" from a save that was cut off. It does not match the saved page, so the page was left as it was. That ink is kept as ${aside[0]}`,
+		expect(loaded?.data.strokes.map((s) => s.id), "the older save opened, not the carrier's newer page").toEqual(["a0", "b1"]);
+		expect(idsIn(frozen.files.get(LIVE))).toEqual(["a0", "b1"]);
+		expect([...frozen.files.keys()].filter((k) => k.includes(".flush-conflict-")), "the newer page was kept aside as a conflict").toEqual([]);
+		const superseded = [...frozen.files.keys()].filter((k) => k.includes(".superseded-"));
+		expect(superseded, "the replaced live page was not kept").toHaveLength(1);
+		expect(idsIn(frozen.files.get(superseded[0]!))).toEqual(["a0", "a1"]);
+		expect(frozen.files.has(`${LIVE}.flush`)).toBe(false);
+		expect(notices.messages, "the promotion was not announced in its own words").toEqual([
+			`Handwriting restored ink on "Budget" from a save that was cut off. The page as it was before is kept as ${superseded[0]}`,
 		]);
 	});
 

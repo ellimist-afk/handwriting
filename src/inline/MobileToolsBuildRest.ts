@@ -82,16 +82,11 @@ declare module "./MobileTools" {
 		// spends most of its time in. Same threshold, so the tap above still
 		// reads as a tap.
 		this.armDrag(this.pill);
-		parent.ownerDocument.addEventListener("pointerdown", this.outsideTap, { capture: true });
-		parent.ownerDocument.addEventListener("keydown", this.escapeKey, { capture: true });
-		parent.ownerDocument.addEventListener("pointerup", this.releaseSlider, { capture: true });
-		parent.ownerDocument.addEventListener("pointercancel", this.releaseSlider, { capture: true });
-		parent.ownerDocument.addEventListener("pointerup", this.endDrag, { capture: true });
-		parent.ownerDocument.addEventListener("pointercancel", this.endDrag, { capture: true });
-		parent.ownerDocument.addEventListener("click", this.traceClick, { capture: true });
+		this.listenOn(parent.ownerDocument);
 		this.el = parent.createDiv({ cls: "handwriting-mobile-tools" });
 		// The whole strip, its grip and its pops included: see the pill above.
 		this.el.dataset.ignoreSwipe = "true";
+		this.watchWindowMoves();
 		// The row and its look; the pops built later hang beside it, outside
 		// its opacity (see `face`).
 		this.face = this.el.createDiv({ cls: "handwriting-mobile-tools-face" });

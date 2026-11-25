@@ -106,6 +106,15 @@ const ASSIST_SLOP_PX = 8;
 
 	/** Returns true when the pinch owned this move. */
 	function updatePinch(this: InlinePenRouter, e: PointerEvent): boolean {
+		// NO PINCH STARTS UNDER A LIVE STROKE. Fingers down while the pen writes are the writing hand (the claim ended any
+		// live pinch), and a finger of that pair moving on used to zoom the page mid-stroke. Finger ink is not held here:
+		// a second finger cancels it, and clears the id, before the pinch is armed. The caller has already written the
+		// moved place, so the pair is measured again from where it is now: whichever way the stroke ends, the pair's
+		// first move after it starts from its spread at the end, not from the claim's, and carries no drift.
+		if (this.anyPenDown()) {
+			this.rebasePinch();
+			return false;
+		}
 		if (this.touchPos.size !== 2) return false;
 		const pts = [...this.touchPos.values()];
 		const spread = pinchSpread(pts[0]!, pts[1]!);

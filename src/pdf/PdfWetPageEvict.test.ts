@@ -322,6 +322,7 @@ function trackedCanvas(): Kid {
 		setCssStyles: () => {},
 		toggleClass: () => {},
 		classList: { add: () => {}, remove: () => {}, contains: () => false },
+		addEventListener: () => {},
 		remove() {
 			const p = c.parentElement;
 			if (p) p.children = p.children.filter((k) => k !== c);

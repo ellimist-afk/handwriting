@@ -107,6 +107,8 @@ interface AxisSummary {
 interface Reading {
 	arm: string; variant: string; paper: string; scrollHeight: number; scrollWidth: number; clientHeight: number; clientWidth: number;
 	dsf: number; zoom: number; fontPx: number; zoomSeen: number;
+	/** One plain body row's height in layout px, read off the page before the hide: the pitch the plan should hold. */
+	rowLayout: number;
 	pitchLayout: number; ruleLayout: number; k: number; pitchDevice: number; ruleDevice: number; pitchDeviceWhole: boolean;
 	phase: number; phaseX: number; phaseDevice: number; phaseXDevice: number; textHidingMovedThePlan: boolean;
 	/** The page guides' box was in the scroller before the hide: the fixture runs Infinite Canvas on, so it should be. */
@@ -190,6 +192,8 @@ interface Variant {
 	readonly tall?: number;
 	/** The ruling's plant: both layers back on the scroller, the vertical box emptied. */
 	readonly plantBothOnScroller?: boolean;
+	/** The stylesheet's fail-safe as it paints with no overlay box: the split class off, the vertical box emptied. */
+	readonly failSafe?: boolean;
 }
 
 async function mountGrid(dsf: number, zoom: number, fontPx: number, v: Variant) {
@@ -216,8 +220,14 @@ async function readArm(dsf: number, zoom: number, fontPx: number, v: Variant = {
 		const before = await p.evaluate(() => {
 			const host = document.querySelector(".cm-editor") as HTMLElement, cs = getComputedStyle(host);
 			const num = (n: string): number => Number.parseFloat(cs.getPropertyValue(n)) || 0;
+			// One plain body row's height, read the way the overlay plans the pitch from it: the content's computed line
+			// height when it is a px length, else a plain line box's own height (what CodeMirror measures as its default
+			// line height), to the engine's 1/64 px layout unit. The fixture sets the line height with the text size.
+			const content = document.querySelector(".cm-content") as HTMLElement, lh = getComputedStyle(content).lineHeight;
+			const line = document.querySelector(".cm-line") as HTMLElement | null;
+			const row = /px$/.test(lh.trim()) ? Number.parseFloat(lh) : line ? line.offsetHeight : Number.NaN;
 			return { pitch: num("--handwriting-paper-pitch"), rule: num("--handwriting-paper-rule"), phase: num("--handwriting-paper-phase"), phaseX: num("--handwriting-paper-phase-x"),
-				guideBox: !!document.querySelector(".cm-scroller > .handwriting-page-guides") };
+				rowPx: Math.round(row * 64) / 64, guideBox: !!document.querySelector(".cm-scroller > .handwriting-page-guides") };
 		});
 		// The page guides are a screen line over the paper on an Infinite Canvas note, not paper: hidden below with the text.
 		expect(before.guideBox, `premise: the page guides' box is up before the hide (dsf${dsf}@${zoom}/${fontPx}px ${v.name}); none here means the hide proves nothing`).toBe(true);
@@ -243,10 +253,13 @@ async function readArm(dsf: number, zoom: number, fontPx: number, v: Variant = {
 			// background is asking what one box paints, so the plugin's own box is emptied first - left painting, it adds
 			// a perfect set of vertical rules underneath the arm's own, and an arm built to paint one axis reads two.
 			// The arms that measure the SHIPPED paper (the gate's seven, and every default arm) touch nothing here.
-			if (v.literalStops || v.mixed || v.tile || v.previewBox || v.sacrificial || v.twoBoxes || v.plantBothOnScroller) {
+			if (v.literalStops || v.mixed || v.tile || v.previewBox || v.sacrificial || v.twoBoxes || v.plantBothOnScroller || v.failSafe) {
 				const column = document.querySelector(".handwriting-paper-grid-column") as HTMLElement | null;
 				if (column) column.style.backgroundImage = "none";
 			}
+			// The fail-safe (styles.css, the grid scroller rule): with the split class off the shipped stylesheet paints
+			// both axes on the scroller, horizontal first, as it does on a grid editor with no overlay box.
+			if (v.failSafe) sc.classList.remove("handwriting-paper-grid-split");
 			// E2: the rule set to a whole number of device px, in the layout px the property is written in. The overlay
 			// leaves a value it did not write alone, so this holds for the rest of the arm.
 			if (v.ruleDevicePx) host.style.setProperty("--handwriting-paper-rule", `${v.ruleDevicePx / (k0 * dsf)}px`);
@@ -442,7 +455,7 @@ async function readArm(dsf: number, zoom: number, fontPx: number, v: Variant = {
 			arm: `dsf${dsf}@${zoom}/${fontPx}px${v.name ? ` ${v.name}` : ""}`, variant: v.name, paper: v.paper ?? "grid",
 			scrollHeight: g.scrollHeight, scrollWidth: g.scrollWidth, clientHeight: g.clientHeight, clientWidth: g.clientWidth,
 			dsf, zoom, fontPx, zoomSeen: round(g.zoom, 6),
-			pitchLayout: g.pitch, ruleLayout: g.rule, k: round(g.k, 6), pitchDevice: round(pitchDevice, 4), ruleDevice: round(ruleDevice, 4),
+			rowLayout: before.rowPx, pitchLayout: g.pitch, ruleLayout: g.rule, k: round(g.k, 6), pitchDevice: round(pitchDevice, 4), ruleDevice: round(ruleDevice, 4),
 			pitchDeviceWhole: Math.abs(pitchDevice - Math.round(pitchDevice)) <= 1e-3,
 			phase: g.phase, phaseX: g.phaseX, phaseDevice: round(g.phase * g.k * dsf, 4), phaseXDevice: round(g.phaseX * g.k * dsf, 4),
 			// The E2 arms overwrite the rule themselves, so only the properties this arm did not set are compared.
@@ -467,13 +480,22 @@ async function readArm(dsf: number, zoom: number, fontPx: number, v: Variant = {
 /** The premises a reading has to meet before its numbers mean anything. */
 function premises(r: Reading): void {
 	expect(r.zoomSeen, `premise: the arm is at zoom ${r.zoom} (${r.arm})`).toBeCloseTo(r.zoom, 4);
-	expect(r.pitchLayout, `premise: the pitch follows the text size (${r.arm})`).toBeCloseTo((28 * r.fontPx) / 16, 2);
+	// The pitch is one plain body row of the text, read off the page; the fixture's row scales with the text size.
+	expect(Number.isFinite(r.rowLayout) && r.rowLayout > 0, `premise: a row height was read off the page (${r.arm}) ${r.rowLayout}`).toBe(true);
+	expect(r.pitchLayout, `premise: the pitch is the text's row height (${r.arm}) row ${r.rowLayout}`).toBeCloseTo(r.rowLayout, 2);
 	expect(r.textHidingMovedThePlan, `premise: hiding the text left the paper plan alone (${r.arm})`).toBe(false);
 	// A count under eight is a RESULT on the arms that set out to break the axis, not a broken instrument: the E1 and E7
 	// long arms are named by how little they paint. Everywhere else, too few rules means the reader missed them.
 	// The shipped grid's own arms are the ones under investigation: too few rules there is the defect, not the reader.
 	const breaking = /E1-verylong|E7-reversed|F2-shipped|G1[ab]-verylong/.test(r.variant);
 	if (r.variant === "E6-v-only") expect(r.rows.count, `premise: a vertical-only layer paints no horizontal rule (${r.arm})`).toBe(0);
+	// G1a and G1b on the very long area are the one-box shape (both layers on the scroller), an older defect than the
+	// row pitch: at the old pitch of 31.5 the shipped fail-safe kept 2 of the 21 rows the two-box grid paints there, and
+	// at the text's row height of 27 it keeps none. The count is pinned as the finding: an older one-box defect, its own row after the release. The
+	// two-box arms on the same area (GATE, G2) are the pins that hold the shipped paper. This 21601 px wide, very long
+	// one-box shape is not one the product paints for long: the main note editor puts its box up at its first paper
+	// plan, and the editors that never get a box (Canvas cards, popovers) are a few hundred px wide.
+	else if (/G1[ab]-verylong/.test(r.variant)) expect(r.rows.count, `finding: the one-box shape paints no horizontal rule on the very long area (${r.arm}) ${JSON.stringify(r.rows)}`).toBe(0);
 	else if (!breaking) expect(r.rows.count, `premise: horizontal rules were found (${r.arm}) ${JSON.stringify(r.rows)}`).toBeGreaterThanOrEqual(8);
 	else expect(r.rows.count, `premise: the arm painted something to read (${r.arm}) ${JSON.stringify(r.rows)}`).toBeGreaterThanOrEqual(1);
 	if (r.paper !== "lines" && r.variant !== "E6-h-only" && !breaking) expect(r.cols.count, `premise: vertical rules were found (${r.arm}) ${JSON.stringify(r.cols)}`).toBeGreaterThanOrEqual(8);
@@ -591,6 +613,23 @@ const G_ARMS = G_SHAPES.flatMap(({ key, v }) => [
 it.each(G_ARMS.map(a => [a.label, a] as const))("G-ARM %s", async (_label, a) => {
 	const r = await readArm(a.dsf, a.zoom, a.fontPx, a.v);
 	premises(r);
+}, 240_000);
+
+/**
+ * MEASURE, log only: the one-box shapes the product can paint, at the priority arm on the long and the very long area.
+ * FAILSAFE is the shipped stylesheet with no overlay box (the split class off, the vertical box emptied): both axes on
+ * the scroller, horizontal first. ONEBOX is the same two layers as literal stops (the both-on-scroller plant's shape).
+ * Each logs its PAPER-GRID line (rows.count is the horizontal rule count); the only check is the zoom premise.
+ */
+const ONEBOX_ARMS = [
+	{ label: "FAILSAFE long area", v: { name: "FAILSAFE-long", failSafe: true } as Variant },
+	{ label: "FAILSAFE very long area", v: { name: "FAILSAFE-verylong", failSafe: true, kind: "former-far" } as Variant },
+	{ label: "ONEBOX long area", v: { name: "ONEBOX-long", plantBothOnScroller: true } as Variant },
+	{ label: "ONEBOX very long area", v: { name: "ONEBOX-verylong", plantBothOnScroller: true, kind: "former-far" } as Variant },
+];
+it.each(ONEBOX_ARMS.map(a => [a.label, a] as const))("MEASURE %s", async (_label, a) => {
+	const r = await readArm(2, 0.518, 18, a.v);
+	expect(r.zoomSeen, `premise: the arm is at zoom ${r.zoom} (${r.arm})`).toBeCloseTo(r.zoom, 4);
 }, 240_000);
 
 const F_ARMS: { label: string; dsf?: number; zoom?: number; fontPx?: number; v: Variant }[] = [

@@ -1,4 +1,4 @@
-import { installInlineInkStorePersist } from "./InlineInkStorePersist";
+import { actedOnGroups, installInlineInkStorePersist } from "./InlineInkStorePersist";
 import { InkStroke } from "../ink/Stroke";
 import { PageData, type NotePaperKind } from "../model/PageData";
 import type { AttachmentData } from "./InkAttachments";
@@ -81,6 +81,13 @@ export interface InlineInkHost {
 	 * file with no copy kept. Optional, as the sync poll's own check is.
 	 */
 	hasQueuedWrite?(pageId: string): boolean;
+	/**
+	 * Has the write of this very page, as handed to scheduleSidecar or scheduleSidecarNow, landed (its file held exactly
+	 * it then)? A page replaced in the queue, or whose write failed, has not. A read of the file then knows which of this
+	 * note's changes are in it: one the file no longer holds was cut or erased by the other side since. Optional: a host
+	 * without it has nothing landed, and every change of this note's stays its own.
+	 */
+	sidecarLanded?(page: PageData): boolean;
 	/**
 	 * Is every pane bound to this note quiet (no pen, eraser, lasso or gesture
 	 * in flight)? A reopen adopts only then, as the sync poll does. Optional: a
@@ -476,10 +483,13 @@ export class InlineInkStore {
 	/**
 	 * The note's attached groups changed. `edit`: a real edit (Attach, Detach, a group moved, a correction a document change
 	 * moved), which writes the page; a target only mapped through typing is held for the next write and writes nothing.
+	 * `acted`: a user action on the note made this list (all but a document change's, a find in the text and a store merge);
+	 * each group whose record it replaced, added or removed is then this note's own at a duplicate lock's clear.
 	 */
-	setAttachments(path: string, list: readonly AttachmentData[], edit: boolean): void {
+	setAttachments(path: string, list: readonly AttachmentData[], edit: boolean, acted = edit): void {
 		const rec = this.record(path);
 		if (rec.attachments === list) return;
+		if (acted) actedOnGroups(rec, this.attachments(path), list);
 		rec.attachments = list;
 		if (!edit) return;
 		// A save would write the new list, so the mutation counts; no stroke changed, so the strokes' generation holds.
@@ -516,7 +526,7 @@ export class InlineInkStore {
 		if (!rec) return null;
 		const stored = rec.basePage?.columnRefPx ?? rec.columnRefPx;
 		if (stored !== undefined) return stored;
-		const derived = columnRefOf(rec.strokes);
+		const derived = columnRefOf(rec.strokes, this.fontRefPx(path));
 		if (derived === undefined) return null;
 		rec.columnRefPx = derived;
 		return derived;

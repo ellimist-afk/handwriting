@@ -114,6 +114,15 @@ export class PageIdIndex {
 		return freed;
 	}
 
+	/** The ids `path` owns now. Read only. */
+	idsOf(path: string): string[] {
+		const out: string[] = [];
+		for (const [id, owner] of this.byId) {
+			if (owner === path) out.push(id);
+		}
+		return out;
+	}
+
 	/** The path stopped carrying this id (user edited the line away). */
 	release(path: string, id: string): void {
 		if (this.byId.get(id) === path) this.byId.delete(id);

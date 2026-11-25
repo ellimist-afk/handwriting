@@ -5,12 +5,14 @@
 import { describe, expect, it } from "vitest";
 import { ChangeSet, Text } from "@codemirror/state";
 import {
+	alignShown,
 	applyAttachStep,
 	attachGroup,
 	attachmentMembership,
 	attachmentSelection,
 	detachGroup,
 	followOffset,
+	hiddenInCell,
 	insertSpaceMembers,
 	invertAttachStep,
 	liveAttachments,
@@ -28,6 +30,12 @@ import {
 import { isSafePageId } from "../model/PageData";
 import { clearInkClipboard, copyInk, inkClipboardMarker, markerIsCurrent, pasteInk } from "./InkClipboard";
 import type { InkStroke } from "../ink/Stroke";
+import { appendFileSync } from "node:fs";
+
+declare module "node:fs" { export function appendFileSync(path: string, data: string): void; }
+declare const process: { env: Record<string, string | undefined> };
+/** HW_TABLE_ATTACH_OUT=<path>: the long cell's time is appended there too (passing cells' console is not kept). */
+const OUT = process.env.HW_TABLE_ATTACH_OUT ?? "";
 
 const DOC = "Intro line here.\nThe word benzene sits in this line.\nLast line of the note.\n";
 const at = (doc: string, word: string) => { const from = doc.indexOf(word); return { from, to: from + word.length }; };
@@ -53,11 +61,11 @@ describe("A1 attach", () => {
 
 describe("A3 mixed selections (model half)", () => {
 	const two: AttachmentData[] = [record(DOC, "benzene", "g1", ["a", "b"]), record(DOC, "Last", "g2", ["c"])];
-	it("one group: Detach on; group plus free: Attach gives the union, Detach off; two groups: Detach on, Attach off", () => {
+	it("one group: Detach on; group plus free: Attach gives the union, Detach off; two groups: Attach on, Detach on", () => {
 		expect(attachmentSelection(two, ["a"])).toMatchObject({ attach: true, detach: true, groupIds: ["g1"], expandedIds: ["a", "b"] });
 		expect(attachmentSelection(two, ["a", "free"])).toMatchObject({ attach: true, detach: false, groupIds: ["g1"] });
-		expect(attachmentSelection(two, ["a", "c"])).toMatchObject({ attach: false, detach: true, groupIds: ["g1", "g2"] });
-		expect(attachmentSelection(two, ["a", "c", "free"]), "loose ink in the lasso").toMatchObject({ attach: false, detach: true, groupIds: ["g1", "g2"] });
+		expect(attachmentSelection(two, ["a", "c"])).toMatchObject({ attach: true, detach: true, groupIds: ["g1", "g2"] });
+		expect(attachmentSelection(two, ["a", "c", "free"]), "loose ink in the lasso").toMatchObject({ attach: true, detach: true, groupIds: ["g1", "g2"] });
 		expect(attachmentSelection(two, ["free"])).toMatchObject({ attach: true, detach: false, groupIds: [] });
 	});
 	it("Detach removes only the chosen group's record, whatever is selected", () => {
@@ -287,6 +295,236 @@ describe("A12 copy and paste", () => {
 		expect(marker).toMatch(/^handwriting-ink\/v1 \S+ \(2 strokes\)$/);
 		clearInkClipboard();
 	});
+});
+
+describe("a table cell's source matched to the text the cell draws", () => {
+	const log = (line: string) => {
+		console.log(line);
+		if (OUT) appendFileSync(OUT, line + "\n");
+	};
+	// Plain text that ends a longer cell.
+	const TAIL = " and the rest of the cell is plain text";
+	// [the source with the word in braces (not in the note), the drawn text, the word's first drawn index].
+	const CASES: [string, string, number][] = [
+		// Markup letters that a later word also holds: the word keeps its own drawn letters.
+		["beta<br>{bob}", "betabob", 4],
+		["x<br>{rb}", "xrb", 1],
+		['[a](u "t") {t}', "a t", 2],
+		// Markup letters that an earlier word also holds.
+		["{bob}<br>x", "bobx", 0],
+		// Between two <br>s that hold its letters.
+		["a<br>{b}<br>c", "abc", 1],
+		["1<br>{r}<br>2", "1r2", 1],
+		["x<br>{br}<br>y", "xbry", 1],
+		["to oa<br>b<br>{rlu}", "to oabrlu", 6],
+		// Other markup with letters: an HTML tag, a wikilink's target under its alias, a link's title.
+		["<b>{bold}</b> b", "bold b", 0],
+		["[[bob\\|al]] {b}", "al b", 3],
+		['[x](b "b") {b}', "x b", 2],
+		// Read right before this fix too: they stay right.
+		["beta<br>{gamma}", "betagamma", 4],
+		["**b** {bold}", "b bold", 2],
+		["[[alpha\\|al]] {x}", "al x", 3],
+		["plain {words}", "plain words", 6],
+		// Drawn characters the source does not hold in order: only the whole alignment places the word after them.
+		["<https://a> {b}", "https://a b", 10],
+		["x<br><https://a> {b}", "xhttps://a b", 11],
+		["a &lt; {b}", "a < b", 4],
+		["a&nbsp;{b}", "a\u00a0b", 2],
+		["[[n#h]] {b}", "n > h b", 6],
+		// The same in a longer cell, its plain text after the word.
+		["<https://a> {b}" + TAIL, "https://a b" + TAIL, 10],
+		["x<br><https://a> {b}" + TAIL, "xhttps://a b" + TAIL, 11],
+		["a &lt; {b}" + TAIL, "a < b" + TAIL, 4],
+		["a&nbsp;{b}" + TAIL, "a\u00a0b" + TAIL, 2],
+		["[[n#h]] {b}" + TAIL, "n > h b" + TAIL, 6],
+		// An entity's name and a comment's text hold the word's letters across a <br>.
+		["&amp;<br>{amp}", "&amp", 1],
+		["%%b%%<br>{b}", "b", 0],
+		["%%s%%<br>{s}<br>x", "sx", 0],
+	];
+	for (const [marked, shown, first] of CASES) {
+		const at = marked.indexOf("{"), word = marked.slice(at + 1, marked.indexOf("}")), src = marked.replace(/[{}]/g, "");
+		it(`${JSON.stringify(src)} drawn ${JSON.stringify(shown)}: ${word} reads its own drawn letters`, () => {
+			const map = alignShown(src, shown);
+			expect(Array.from({ length: word.length }, (_, k) => map[at + k]!)).toEqual(Array.from({ length: word.length }, (_, k) => first + k));
+		});
+	}
+
+	/** mulberry32, seeded. */
+	const rng = (seed: number) => {
+		let a = seed >>> 0;
+		return () => {
+			a = (a + 0x6d2b79f5) >>> 0;
+			let t = a;
+			t = Math.imul(t ^ (t >>> 15), t | 1);
+			t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+			return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+		};
+	};
+	/** One cell of words, <br>s, bold, links with addresses and titles and escaped pipes, with each source character's true drawn index. */
+	const fuzzCell = (r: () => number) => {
+		const ALPHA = "abrtoul";
+		const word = () => Array.from({ length: 1 + Math.floor(r() * 4) }, () => ALPHA[Math.floor(r() * ALPHA.length)]!).join("");
+		let src = "", shown = "";
+		const truth: number[] = [], words: { from: number; to: number }[] = [];
+		const hidden = (s: string) => { for (const _ of s) truth.push(-1); src += s; };
+		const drawn = (s: string) => { for (const ch of s) { truth.push(shown.length); src += ch; shown += ch; } };
+		const n = 1 + Math.floor(r() * 5);
+		for (let k = 0; k < n; k++) {
+			if (k > 0) {
+				const sep = r();
+				if (sep < 0.5) drawn(" ");
+				else if (sep < 0.8) hidden("<br>");
+				else { drawn(" "); hidden("<br>"); }
+			}
+			const kind = r();
+			if (kind < 0.45) { const from = src.length; drawn(word()); words.push({ from, to: src.length }); }
+			else if (kind < 0.6) { hidden("**"); drawn(word()); hidden("**"); }
+			else if (kind < 0.75) { hidden("["); drawn(word()); hidden(`](${word()})`); }
+			else if (kind < 0.88) { hidden("["); drawn(word()); hidden(`](${word()} "${word()}")`); }
+			else { drawn(word()); truth.push(shown.length, shown.length); src += "\\|"; shown += "|"; drawn(word()); }
+		}
+		return { src, shown, truth, words };
+	};
+
+	it("20000 seeded cells with markup: every plain word reads its own first and last drawn letter, every letter matched", () => {
+		const r = rng(20261117);
+		let cells = 0, words = 0, wrong = 0;
+		const ex: string[] = [];
+		for (let c = 0; c < 20000; c++) {
+			const cell = fuzzCell(r);
+			if (cell.src === cell.shown) continue;
+			cells++;
+			const map = alignShown(cell.src, cell.shown);
+			for (const w of cell.words) {
+				words++;
+				let bad = map[w.from] !== cell.truth[w.from] || map[w.to - 1] !== cell.truth[w.to - 1];
+				for (let i = w.from; i < w.to; i++) if (map[i]! < 0) bad = true;
+				if (bad) { wrong++; if (ex.length < 5) ex.push(`${JSON.stringify(cell.src)} word ${JSON.stringify(cell.src.slice(w.from, w.to))}@${w.from}`); }
+			}
+		}
+		log(`ALIGN fuzz: ${cells} cells, ${words} plain words, ${wrong} wrong ${ex.join(" | ")}`);
+		expect(wrong).toBe(0);
+	});
+
+	/**
+	 * One cell of more markup: italics, highlight, strike, code, HTML tags, wikilinks with an alias or a heading, entities,
+	 * comments and autolinks too, with each source character's true drawn index.
+	 */
+	const fuzzCell2 = (r: () => number) => {
+		const ALPHA = "abrtoulmpshin";
+		const word = () => Array.from({ length: 1 + Math.floor(r() * 4) }, () => ALPHA[Math.floor(r() * ALPHA.length)]!).join("");
+		const pick = <T,>(l: readonly T[]) => l[Math.floor(r() * l.length)]!;
+		let src = "", shown = "";
+		const truth: number[] = [], words: { from: number; to: number }[] = [];
+		const hidden = (s: string) => { for (const _ of s) truth.push(-1); src += s; };
+		const drawn = (s: string) => { for (const ch of s) { truth.push(shown.length); src += ch; shown += ch; } };
+		const n = 1 + Math.floor(r() * 5);
+		for (let k = 0; k < n; k++) {
+			if (k > 0) {
+				const sep = r();
+				if (sep < 0.5) drawn(" ");
+				else if (sep < 0.8) hidden("<br>");
+				else { drawn(" "); hidden("<br>"); }
+			}
+			const kind = pick(["word", "word", "word", "bold", "ital", "hl", "strike", "code", "html", "link", "title", "wiki", "alias", "head", "ent", "comment", "auto", "pipe"] as const);
+			if (kind === "word") { const from = src.length; drawn(word()); words.push({ from, to: src.length }); }
+			else if (kind === "bold" || kind === "ital" || kind === "hl" || kind === "strike" || kind === "code") {
+				const m = { bold: "**", ital: "*", hl: "==", strike: "~~", code: "`" }[kind];
+				hidden(m); drawn(word()); hidden(m);
+			}
+			else if (kind === "html") { const tag = pick(["b", "i", "span", "u"]); hidden(`<${tag}>`); drawn(word()); hidden(`</${tag}>`); }
+			else if (kind === "link") { hidden("["); drawn(word()); hidden(`](${word()})`); }
+			else if (kind === "title") { hidden("["); drawn(word()); hidden(`](${word()} "${word()}")`); }
+			else if (kind === "wiki") { hidden("[["); drawn(word()); hidden("]]"); }
+			else if (kind === "alias") { hidden(`[[${word()}\\|`); drawn(word()); hidden("]]"); }
+			else if (kind === "head") { hidden("[["); drawn(word()); hidden("#"); shown += " > "; drawn(word()); hidden("]]"); }
+			else if (kind === "ent") { const [name, ch] = pick([["amp", "&"], ["lt", "<"], ["nbsp", "\u00a0"], ["#38", "&"], ["#x3C", "<"]] as const); truth.push(shown.length); src += "&"; shown += ch; hidden(`${name};`); }
+			else if (kind === "comment") hidden(`%%${word()}%%`);
+			else if (kind === "auto") { hidden("<"); drawn(`https://${word()}`); hidden(">"); }
+			else { drawn(word()); truth.push(shown.length, shown.length); src += "\\|"; shown += "|"; drawn(word()); }
+		}
+		return { src, shown, truth, words };
+	};
+
+	it("20000 seeded cells of more markup: every plain word reads its own first and last drawn letter, every letter matched", () => {
+		const r = rng(2026111703);
+		let cells = 0, words = 0, wrong = 0;
+		const ex: string[] = [];
+		for (let c = 0; c < 20000; c++) {
+			const cell = fuzzCell2(r);
+			if (cell.src === cell.shown) continue;
+			cells++;
+			const map = alignShown(cell.src, cell.shown);
+			for (const w of cell.words) {
+				words++;
+				let bad = map[w.from] !== cell.truth[w.from] || map[w.to - 1] !== cell.truth[w.to - 1];
+				for (let i = w.from; i < w.to; i++) if (map[i]! < 0) bad = true;
+				if (bad) { wrong++; if (ex.length < 5) ex.push(`${JSON.stringify(cell.src)} word ${JSON.stringify(cell.src.slice(w.from, w.to))}@${w.from}: ${JSON.stringify(Array.from(map.slice(w.from, w.to)))}`); }
+			}
+		}
+		log(`ALIGN fuzz 2: ${cells} cells, ${words} plain words, ${wrong} wrong ${ex.join(" | ")}`);
+		expect(wrong).toBe(0);
+	});
+
+	it("the same source and drawn text twice: the one map, not aligned again", () => {
+		const a = alignShown("beta<br>bob", "betabob"), b = alignShown("beta<br>bob", "betabob");
+		expect(b).toBe(a);
+		expect(alignShown("beta<br>bob", "betab")).not.toBe(a);
+	});
+
+	it("an escaped pipe: both its characters read the one pipe drawn, the letters after it their own", () => {
+		expect(Array.from(alignShown("al\\|pha", "al|pha"))).toEqual([0, 1, 2, 2, 3, 4, 5]);
+	});
+
+	it("an escaped pipe in a cell with bold: both its characters read the one pipe drawn, its word's letters their own", () => {
+		expect(Array.from(alignShown("**x** a\\|b", "x a|b").slice(6, 10))).toEqual([2, 3, 3, 4]);
+	});
+
+	/** k blocks of `<p><i><br>**b<i>**`: the source, the drawn text, and each block's two words' source and drawn places. */
+	const longCell = (k: number, p: string) => {
+		let src = "", shown = "";
+		const places: [number, number][] = [];
+		for (let i = 0; i < k; i++) {
+			if (i) { src += " "; shown += " "; }
+			places.push([src.length, shown.length]);
+			src += `${p}${i}<br>**`;
+			shown += `${p}${i}`;
+			places.push([src.length, shown.length]);
+			src += `b${i}**`;
+			shown += `b${i}`;
+		}
+		return { src, shown, places };
+	};
+	for (const [k, label] of [[60, "879 x 399"], [600, "9979 x 5179"]] as const) {
+		it(`a long cell with markup through it (${label} characters): every word read right, within 50 ms`, () => {
+			const warm = longCell(k, "v"), cell = longCell(k, "w");
+			alignShown(warm.src, warm.shown);
+			const t = performance.now(), map = alignShown(cell.src, cell.shown), ms = performance.now() - t;
+			log(`ALIGN long cell: ${cell.src.length} x ${cell.shown.length} in ${ms.toFixed(2)} ms`);
+			expect(`${cell.src.length} x ${cell.shown.length}`, "premise").toBe(label);
+			expect(cell.places.filter(([s, d]) => map[s] !== d), "words read off their drawn letter").toEqual([]);
+			expect(ms).toBeLessThan(50);
+		});
+	}
+});
+
+describe("a table cell's entities: the characters its drawing hides", () => {
+	// [a cell's source, 1 for each character hiddenInCell marks hidden].
+	const PINS: [string, string][] = [
+		["&amp;", "01111"],
+		["&#38;x", "011110"],
+		["\\&amp;", "100000"],
+		["\\\\&amp;", "1000000"],
+		["&amp;&lt;", "011110111"],
+		["a\\&amp;&lt;", "01000000111"],
+	];
+	for (const [src, hidden] of PINS) {
+		it(`${JSON.stringify(src)} hides ${hidden}`, () => {
+			expect(Array.from(hiddenInCell(src)).join("")).toBe(hidden);
+		});
+	}
 });
 
 describe("mapping cost", () => {

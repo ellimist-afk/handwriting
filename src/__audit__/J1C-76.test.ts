@@ -51,7 +51,7 @@ describe("J1C-76: paste into a PDF with fewer pages", () => {
 			(m) => notes.push(m),
 		);
 
-		expect(copyInk([pdfStroke(5)], "long-doc")).toBe(1);
+		expect(copyInk([pdfStroke(5)], "long-doc", null, "pdf")).toBe(1);
 		ctl.pasteFromClipboard();
 
 		const pdf = new TextEncoder().encode(pdfDocument(2));

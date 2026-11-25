@@ -13,12 +13,13 @@ import { stripMarkdownExtension } from "../util/MarkdownPath";
 import { routineNoticesVisible } from "../diag/RoutineNotices";
 import { inkToSvg } from "../ink/SvgExport";
 import { keptShownStrokes } from "../inline/AttachFollow";
-import { inkToPdf } from "../ink/InkPdf";
+import { inkToExportPdf } from "../ink/InkPdf";
+import { setSnipPageSetting } from "../inline/InkOverlayClipboard";
 import { bytesOf } from "../pdf/PdfSyntax";
 import { createFreshFile } from "../export/CreateFreshFile";
 import { clipboardSize } from "../inline/InkClipboard";
 import { runDetached } from "../util/Detached";
-import { ConfirmDeleteInkModal } from "../ink/DeleteAllInk";
+import { ConfirmDeleteInkModal, PDF_INK_NOT_READY, pdfDeleteAllStrokes } from "../ink/DeleteAllInk";
 import type { HandwritingPlugin } from "../main";
 import type { InkStroke } from "../ink/Stroke";
 
@@ -30,6 +31,10 @@ declare module "../main" {
 }
 
 	function registerExportSelectionCommands(this: HandwritingPlugin): void {
+		// A note snip paints its own page and cannot see the settings, so it is
+		// told where to read the export page from - once, here, and read at
+		// every snip, so a change in the settings tab holds from the next one.
+		setSnipPageSetting(() => this.settings.exportPage);
 		// Delete all ink on the active note: explicit, and recoverable three
 		// ways. The confirm dialog in front, a .handwriting/trash/ copy made FIRST,
 		// and one Ctrl+Z (a single history entry) while the session lives.
@@ -94,7 +99,8 @@ declare module "../main" {
 				}
 				if (!checking) {
 					// Attached ink where it is shown; mapped only for the run, not for each availability check.
-					const pdf = inkToPdf(this.exportedStrokes(file.path));
+					// On the export page picked in the settings, read at each run.
+					const pdf = inkToExportPdf(this.exportedStrokes(file.path), this.settings.exportPage);
 					if (!pdf) {
 						new Notice("Handwriting: no ink to export on this note");
 						return true;
@@ -135,6 +141,14 @@ declare module "../main" {
 					const id = this.pdfIdForPath(file.path);
 					if (!id) {
 						new Notice("Handwriting: still identifying this PDF - try again in a moment");
+						return true;
+					}
+					// The id comes before the ink file is read. Until a sound read lands, the store's list is only
+					// this session's strokes - none while the read is in flight, and under either lock only what was
+					// drawn since - so a copy of it is not the PDF's ink, and "no ink" is not true either. The pen's
+					// words for the same state.
+					if (!this.pdfStore.inkReady(id)) {
+						new Notice("Handwriting: this PDF's ink is not ready - try again in a moment");
 						return true;
 					}
 					if (this.pdfStore.strokes(id).length === 0) {
@@ -219,13 +233,41 @@ declare module "../main" {
 					const id = this.pdfIdForPath(file.path);
 					if (!id) {
 						new Notice("Handwriting: still identifying this PDF - try again in a moment");
+					} else if (!this.pdfStore.inkReady(id)) {
+						// As Flatten above: the count would be this session's strokes, not the PDF's. Refused
+						// before the dialog, in the words the delete itself uses for this state (DeleteAllInk.ts).
+						new Notice(PDF_INK_NOT_READY);
 					} else {
-						const count = this.pdfStore.strokes(id).length;
-						if (count === 0) new Notice("Handwriting: no ink on this PDF");
+						const ask = (count: number): void => {
+							if (count === 0) new Notice("Handwriting: no ink on this PDF");
+							else {
+								new ConfirmDeleteInkModal(this.app, count, "PDF", () => {
+									// The PDF changed on disk while the dialog was open: its panes moved to a new id
+									// and its ink went with them (onPdfModified). The id the dialog opened with is
+									// not the PDF's now, so nothing is deleted, in the words above for an id not known.
+									// pdfIdForPath gives the first pane's id only: a pane still on the old id (busy at the
+									// change) opened first would hide the move, so every pane on the PDF must hold the id.
+									const moved = [...this.pdfFiles].some(([root, at]) => at === file.path && this.pdfIds.get(root) !== id);
+									if (moved || this.pdfIdForPath(file.path) !== id) {
+										new Notice("Handwriting: still identifying this PDF - try again in a moment");
+										return;
+									}
+									runDetached(this.deleteAllPdfInk(id, file.path), `delete all ink on ${file.path}`);
+								}, () => this.store.trashFolderFor(id)).open();
+							}
+						};
+						// Ink found for this PDF still owes its leave of it: the delete reaches the other ink too
+						// (pdfInkOwedWith), so the count does, read from that ink's file when no pane holds it.
+						const others = this.pdfInkOwedWith(file.path, id);
+						if (others.length === 0) ask(this.pdfStore.strokes(id).length);
 						else {
-							new ConfirmDeleteInkModal(this.app, count, "PDF", () => {
-								runDetached(this.deleteAllPdfInk(id), `delete all ink on ${file.path}`);
-							}, () => this.store.trashFolderFor(id)).open();
+							runDetached(
+								pdfDeleteAllStrokes(this, id, others).then((count) => {
+									if (count === null) new Notice(PDF_INK_NOT_READY);
+									else ask(count);
+								}),
+								`count the ink on ${file.path}`
+							);
 						}
 					}
 				}

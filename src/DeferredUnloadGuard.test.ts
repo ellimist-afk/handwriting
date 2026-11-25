@@ -102,8 +102,9 @@ describe("deferred onLayoutReady callbacks check unloaded", () => {
 		// this guard keeps counting.
 		expect(occurrences(mainCode, "onLayoutReady(")).toBe(occurrences(mainCode, DEFER));
 		// Existing popout Escape listeners are installed once layout is ready; the
-		// fifth drops the kept zoom and scroll of notes the indexed vault no longer has.
-		expect(occurrences(mainCode, DEFER)).toBe(5);
+		// fifth drops the kept zoom and scroll of notes the indexed vault no longer has;
+		// the sixth starts the grace of the PDF deletions restored at load.
+		expect(occurrences(mainCode, DEFER)).toBe(6);
 	});
 
 	it("every deferred callback opens with the unloaded guard", () => {

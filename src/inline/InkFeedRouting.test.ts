@@ -361,6 +361,7 @@ describe("stabilizing-hand contextmenu", () => {
 	}
 
 	it("suppressed once a pen has been seen this session", () => {
+		markPenHardwareSeen();
 		markPenSeen();
 		expect(touchMenu()).toBe(1);
 	});

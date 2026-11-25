@@ -220,7 +220,8 @@ declare module "./InkOverlay" {
 			if (withGroups) this.attachedLayer?.moved(work);
 		}
 		// Only a whole-world paint puts every stroke of the store on the raster; a partial one draws the strokes in its rects.
-		if (work === "all") this.paintedStrokeCount = strokes.length;
+		// Both callers take `strokes` from the note filePath() names in this task: the record names that note.
+		if (work === "all") { this.paintedStrokeCount = strokes.length; this.paintedPath = this.filePath(); }
 		// Attached ink, on its own layer above: copies of its groups' sprites. Nothing with no group.
 		this.paintAttached(cam, work === "all");
 		// A held group's tag, on the committed layer after its rect paints, so nothing selected keeps the tail compact.

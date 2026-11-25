@@ -15,6 +15,16 @@ import { validCameraScale } from "./ZoomScale";
 import { surfaceExtents } from "./SurfaceExtent";
 import { scrollProbeExtent } from "./ScrollProbe";
 import { settleLineApplied } from "./InkOverlayZoomApi";
+import { type InlinePenRouter, ownsNativeFallout } from "./InlinePenRouter";
+import { tr } from "./InlinePenRouterTrace";
+import { scrollClaimText } from "./InkOverlayReload";
+
+/** The pen-trace row type for a scroll request the overlay did not issue, met while a tool is lit. */
+export const SCROLL_FOREIGN_ROW = "scroll-request-foreign";
+/** The router's lift tail, for the row's ms since the lift only; the window reads the router's own deadline. */
+const ROW_LIFT_TAIL_MS = 350;
+/** Requests that have their row: the editor asks our handler again after a pass when it is listed twice. */
+const rowedRequests = new WeakSet<object>();
 
 /** Where the last preview frame painted the page, per settle hold, kept for the re-aim of that settle's ease on each attempt. */
 const settlePaintedBefore = new WeakMap<object, { x: number; y: number }>();
@@ -45,7 +55,7 @@ declare module "./InkOverlay" {
 		panFitReadout(): { fitsX: boolean; fitsY: boolean; contentX: number; contentY: number; viewportX: number; viewportY: number; boundHits: number; boundMaxPx: number };
 		reanchorPan(): void;
 		ownScrollRange(range: SelectionRange, owner: object): SelectionRange | null;
-		consumeViewportScroll(range: SelectionRange): boolean;
+		consumeViewportScroll(range: SelectionRange, request?: object): boolean;
 		ownsPanSettle(hold: NonNullable<InkOverlayPlugin["panAnchorHold"]>): boolean;
 		clearViewportPan(): void;
 		columnMarginLocal(layout: NonNullable<InkOverlayPlugin["viewportLayout"]>): number | null;
@@ -114,6 +124,9 @@ declare module "./InkOverlay" {
 		// which runs synchronously before paint on the one caller that passes true (the live pinch frame).
 		if (deferPaper) this.previewPaperBoxDirty = true;
 		else this.writePaperPan();
+		// The page guides' box takes the sizer's translate on every pan write, deferred or not: it writes nothing while
+		// the box is blank under a preview, and the preview's end brings it current (InkOverlayPaperPinch).
+		this.writePageGuidePan();
 		this.writeInkLayerTransform();
 	}
 
@@ -791,11 +804,24 @@ declare module "./InkOverlay" {
 	}
 
 	/** A receipt survives cancellation so its pending request cannot become a
-	 * default scroll. This consumer never changes geometry or dispatches.
+	 * default scroll. This consumer never dispatches; only the page id write's own request moves the scroller.
 	 */
-	function overlayConsumeViewportScroll(this: InkOverlayPlugin, range: SelectionRange): boolean {
+	function overlayConsumeViewportScroll(this: InkOverlayPlugin, range: SelectionRange, request?: object): boolean {
 		const owner = this.scrollRangeOwners.get(range);
-		if (!owner) { this.retirePanSettle("a scroll request the overlay did not issue"); return false; }
+		if (!owner) {
+			this.retirePanSettle("a scroll request the overlay did not issue");
+			// The page id write's own request: the editor's scroller alone takes it, with no row.
+			if (scrollClaimText(this.view, range, request)) return true;
+			const r = this.router;
+			if (!r || r.penOff()) return false;
+			const now = performance.now();
+			const kept = ownsNativeFallout({ activeStroke: r.activePenId !== null, now, ownershipTailUntil: r.ownershipTailUntil });
+			if (diagnosticsEnabled() && !(request && rowedRequests.has(request))) {
+				if (request) rowedRequests.add(request);
+				try { foreignScrollRow(this, r, range, kept, now); } catch { /* the row never changes the answer */ }
+			}
+			return kept;
+		}
 		const hold = this.panAnchorHold;
 		if (hold === owner) {
 			if (!this.ownsPanSettle(hold) || this.view.scrollDOM.scrollLeft !== hold.left || this.view.scrollDOM.scrollTop !== hold.top) hold.outcome = "cancelled";
@@ -804,6 +830,13 @@ declare module "./InkOverlay" {
 			this.retirePanSettle("consumed");
 		}
 		return true;
+	}
+
+	/** The row for a request not ours while a tool is lit: kept or passed, the ms since the lift, where the scroller stands. */
+	function foreignScrollRow(overlay: InkOverlayPlugin, r: InlinePenRouter, range: SelectionRange, kept: boolean, now: number): void {
+		const since = r.activePenId !== null ? "contact" : r.ownershipTailUntil > 0 ? `${Math.round(now - r.ownershipTailUntil + ROW_LIFT_TAIL_MS)} ms since lift` : "no lift";
+		const s = overlay.view.scrollDOM;
+		tr(SCROLL_FOREIGN_ROW, null, `${kept ? "kept" : "passed"}, ${since}: scrollTop ${+s.scrollTop.toFixed(1)} scrollLeft ${+s.scrollLeft.toFixed(1)}, range ${range.from}-${range.to} head ${range.head}`);
 	}
 
 	function ownsPanSettle(this: InkOverlayPlugin, hold: NonNullable<InkOverlayPlugin["panAnchorHold"]>): boolean {

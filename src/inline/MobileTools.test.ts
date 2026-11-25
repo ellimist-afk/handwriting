@@ -322,15 +322,16 @@ describe("zoom bar visibility while writing", () => {
  * bare `4` (the old 400% ceiling) instead of MAX_PINCH_SCALE, so it would
  * have disabled the button 200 points early once the pinch ceiling itself
  * moved to 600%. Red against that literal: at 500% - past the old ceiling,
- * under the new one - the button must stay enabled; only 600% disables it.
+ * under the new one - the button must stay enabled. The ceiling is 800% now,
+ * so 700% (past 600%) stays enabled too, and only 800% disables it.
  */
-describe("zoom bar ceiling at 600%", () => {
+describe("zoom bar ceiling at 800%", () => {
 	beforeEach(() => {
 		resetPenToolsForTest();
 		resetNoteZoomControlsForTest();
 	});
 
-	it("the plus button disables at the new ceiling, not at the old 400%, and the readout shows 600%", () => {
+	it("the plus button disables at the new ceiling, not at the old 400% or 600%, and the readout shows 800%", () => {
 		const pane = new FakeEl("div", new FakeDoc());
 		let zoom = 1;
 		const strip = new MobileTools(pane as unknown as HTMLElement, fakeHost({
@@ -344,10 +345,15 @@ describe("zoom bar ceiling at 600%", () => {
 		expect(plus.disabled, "500% is past the old 400% ceiling but under the new one").toBe(false);
 		expect(readout.textContent).toBe("500%");
 
+		zoom = 7;
+		strip.refreshNow();
+		expect(plus.disabled, "700% is past the old 600% ceiling but under the new one").toBe(false);
+		expect(readout.textContent).toBe("700%");
+
 		zoom = MAX_PINCH_SCALE;
 		strip.refreshNow();
-		expect(plus.disabled, "600% is the new ceiling").toBe(true);
-		expect(readout.textContent).toBe("600%");
+		expect(plus.disabled, "800% is the new ceiling").toBe(true);
+		expect(readout.textContent).toBe("800%");
 	});
 });
 

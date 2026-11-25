@@ -31,9 +31,9 @@ import {
 
 /** The palette's light pen - the colour the public complaint was about. */
 const NEAR_WHITE = "#f4f4f2";
-/** What `pdfColor` writes for it untouched, and for the white-adapted mid-tone. */
+/** What `pdfColor` writes for it untouched, and adapted to white: the palette's black (FOLLOWUPS 378). */
 const STORED_RG = "0.96 0.96 0.95 rg";
-const ADAPTED_RG = "0.58 0.58 0.51 rg";
+const ADAPTED_RG = "0 0 0 rg";
 const HIGHLIGHTER_RG = "1 0.84 0.04 rg";
 
 function strokeOf(color: string, tool: "pen" | "highlighter"): InkStroke {
@@ -114,13 +114,14 @@ describe("flattening onto a page whose colour cannot be known", () => {
 		expect(flattened([strokeOf("#ffd60a", "highlighter")], "lighten")).toContain(HIGHLIGHTER_RG);
 	});
 
-	// The COST of the default, pinned so it stays deliberate. If the floor rule
-	// in readableInkColor is ever retuned, this is the case that should notice:
-	// the band exists because the adjustment stops at the smallest passing move
-	// and therefore lands near luminance 0.29, which is where a mid-grey page
-	// already is. Not a defect - a documented trade Alan took with his eyes
-	// open, and the reason the toggle above exists at all.
-	it("by default gives up readability on mid-grey pages, and that band is known", () => {
+	// The COST of the default, pinned so it stays deliberate. If the rule in
+	// readableInkColor is ever retuned, this is the case that should notice.
+	// It was retuned for FOLLOWUPS 378: a grey pen on a light page now goes to
+	// the palette's black instead of stopping near luminance 0.29, so the band
+	// moved from mid-grey pages to the darkest ones - white ink written over a
+	// dark picture leaves as black. A documented trade, and the reason the
+	// toggle above exists at all.
+	it("by default gives up readability on the darkest pages, and that band is known", () => {
 		const written = fills(flattened([strokeOf(NEAR_WHITE, "pen")]))[0]!;
 		const adaptedLum = relativeLuminance(written[0], written[1], written[2]);
 		const storedLum = relativeLuminance(0xf4, 0xf4, 0xf2);
@@ -134,7 +135,7 @@ describe("flattening onto a page whose colour cannot be known", () => {
 				lost.push(`#${v.toString(16).padStart(2, "0").repeat(3)}`);
 			}
 		}
-		expect(lost).toEqual(["#4b4b4b", "#5a5a5a", "#696969", "#787878", "#878787"]);
+		expect(lost).toEqual(["#000000", "#0f0f0f", "#1e1e1e", "#2d2d2d", "#3c3c3c", "#4b4b4b"]);
 	});
 });
 

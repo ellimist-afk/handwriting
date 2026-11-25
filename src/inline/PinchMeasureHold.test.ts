@@ -28,6 +28,11 @@ import { describe, expect, it, vi } from "vitest";
 (globalThis as { window?: unknown }).window = globalThis;
 
 import { InkOverlayPlugin } from "./InkOverlay";
+import { MAX_PINCH_SCALE, PINCH_GIVE } from "./PinchScale";
+
+/** The zoom cap, and a live preview past it inside the preview's give (6.4 against a cap of 6 when written). */
+const CAP = MAX_PINCH_SCALE;
+const PAST_CAP = CAP * (6.4 / 6);
 
 type Phase = "start" | "move" | "end";
 type Point = { x: number; y: number };
@@ -120,6 +125,10 @@ function makeRig(shared?: { view: Fields }) {
 	const containerStyles = vi.fn();
 	overlay.container = { setCssStyles: containerStyles };
 	overlay.frame = { locked: false }; overlay.cssScale = 1; overlay.fontZoom = 1;
+	// No pen contact: the overlay's own resting state (class fields Object.create does not initialise).
+	overlay.builder = null; overlay.mode = "ink";
+	// The pen-down hook reads the camera first (it keeps the camera from before a zoom it ends).
+	overlay.camera = { snapshot: { x: 0, y: 0, zoom: 1 } };
 	// THIS RIG'S SUBJECT IS ZOOM MECHANICS, so its note is a CANVAS note. With the canvas off a
 	// two-finger gesture is not a zoom at all (`pinch` returns on its first line), and a fixture left in
 	// that mode would run none of the code these arms are about while still reporting a result - measured,
@@ -423,14 +432,15 @@ describe("InkOverlay pinch preview holds CodeMirror's measuring", () => {
 			// A class field Object.create does not initialise; the lift's ease back runs only from null.
 			rig.overlay.pinchGive = null;
 			rig.onPinch("start", 1, centroid);
-			// Past the cap of 6 by the preview's give (up to 6.6).
-			rig.previewAt(6.4);
-			expect(rig.scale(), "premise: the preview is past the cap").toBeGreaterThan(6);
+			// Past the cap by the preview's give (up to CAP * PINCH_GIVE).
+			expect(PAST_CAP, "premise: the preview stays inside the give").toBeLessThan(CAP * PINCH_GIVE);
+			rig.previewAt(PAST_CAP);
+			expect(rig.scale(), "premise: the preview is past the cap").toBeGreaterThan(CAP);
 			expect(rig.fireTimers(), "premise: the watchdog fired").toBe(1);
 			expect({ easing: rig.overlay.pinchGive !== null, settles: rig.settles }, "the watchdog's lift eases back to the cap, with nothing settled yet").toEqual({ easing: true, settles: [] });
 			now.mockReturnValue(5000);
 			rig.runFrames();
-			expect({ scale: rig.scale(), settles: rig.settles }, "the gesture settled at the cap").toEqual({ scale: 6, settles: [6] });
+			expect({ scale: rig.scale(), settles: rig.settles }, "the gesture settled at the cap").toEqual({ scale: CAP, settles: [CAP] });
 		} finally { now.mockRestore(); }
 	});
 
@@ -453,5 +463,127 @@ describe("InkOverlay pinch preview holds CodeMirror's measuring", () => {
 		expect(rig.requestMeasure).toHaveBeenCalledTimes(1);
 		shadow();
 		expect(rig.requestMeasure).toHaveBeenCalledTimes(2);
+	});
+});
+
+/**
+ * THE WATCHDOG UNDER A PEN. A pinch lifts past the zoom cap, so an ease back to the cap starts; a pen lands inside its
+ * half second and pauses it (beforePenDown); the pen stays down 10 s. The watchdog must move nothing under the pen,
+ * and the lift's ease lands the cap. A lost end with no pen still settles at 10 s (the two watchdog cells above).
+ *
+ * The rig is this file's: the real pinch, ease, pause, resume and watchdog. The pen contact is the state penDown leaves
+ * (InkOverlayPenPath.ts): ink locks the frame and builds a stroke; the pan tool leaves the frame live and sets the mode.
+ * The commit refuses a locked frame, as commitCameraScale does (InkOverlayZoomApi.ts), and every attempt is kept; a
+ * refused settle clears the pan (InkOverlayPinch.ts), which is the jump, so that call is counted.
+ */
+describe("the zoom watchdog under a pen contact", () => {
+	type Contact = "ink" | "pan";
+	type Give = { paused: boolean } | null;
+	const proto = InkOverlayPlugin.prototype as unknown as Record<string, (this: Fields, ...args: unknown[]) => void>;
+
+	function pausedUnderPen(contact: Contact) {
+		const rig = makeRig();
+		const o = rig.overlay;
+		o.pinchGive = null;
+		o.wheelZoomRun = { isLive: false };
+		const attempts: number[] = [];
+		const commit = o.commitCameraScale as (next: number, scroll?: { left: number; top: number }) => boolean;
+		o.commitCameraScale = (next: number, scroll?: { left: number; top: number }) => {
+			attempts.push(next);
+			return (o.frame as { locked: boolean }).locked ? false : commit(next, scroll);
+		};
+		const panCleared = vi.fn();
+		o.clearViewportPan = panCleared;
+		const now = vi.spyOn(performance, "now").mockReturnValue(1000);
+		rig.onPinch("start", 1, centroid);
+		rig.previewAt(PAST_CAP);
+		rig.onPinch("end", PAST_CAP, centroid);
+		expect(o.pinchGive, "premise: the lift past the cap started the ease back").not.toBeNull();
+		proto.beforePenDown!.call(o);
+		if (contact === "ink") { (o.frame as { locked: boolean }).locked = true; o.builder = {}; o.mode = "ink"; }
+		else o.mode = "pan";
+		expect((o.pinchGive as Give)?.paused, "premise: the pen paused the ease").toBe(true);
+		const before = { scale: rig.scale(), transform: rig.transform() };
+		/** What must not change while the pen is down. */
+		const still = () => ({ paused: (o.pinchGive as Give)?.paused ?? null, scale: rig.scale(), transform: rig.transform(), commits: [...attempts], panCleared: panCleared.mock.calls.length });
+		const unmoved = { paused: true, scale: before.scale, transform: before.transform, commits: [], panCleared: 0 };
+		/** The contact ends as penDown's counterpart leaves it; `lift` resumes the ease as endPenGesture does. */
+		const endContact = (): void => { (o.frame as { locked: boolean }).locked = false; o.builder = null; o.mode = "ink"; };
+		const lift = (): void => { endContact(); if ((o.pinchGive as Give)?.paused) proto.resumePinchGive!.call(o); };
+		/** Moves the clock and runs every frame asked for. */
+		const after = (ms: number): void => { now.mockReturnValue(1000 + ms); rig.runFrames(); };
+		return { rig, o, attempts, still, unmoved, endContact, lift, after, now };
+	}
+
+	it("C6: the watchdog at 10 s moves nothing under the pen, and the lift lands the cap", () => {
+		const t = pausedUnderPen("ink");
+		try {
+			expect(t.rig.fireTimers(), "premise: the watchdog fired").toBeGreaterThan(0);
+			t.after(10_000);
+			expect(t.still(), "the watchdog moved the page under the pen").toEqual(t.unmoved);
+			t.now.mockReturnValue(11_000); t.lift(); t.after(10_600);
+			expect({ scale: t.rig.scale(), settles: t.rig.settles }, "the lift's ease lands the cap").toEqual({ scale: CAP, settles: [CAP] });
+		} finally { t.now.mockRestore(); }
+	});
+
+	it("C7: a second end while the ease is paused under the pen moves nothing", () => {
+		const t = pausedUnderPen("ink");
+		try {
+			t.rig.onPinch("end", 1, centroid);
+			t.after(500);
+			expect(t.still(), "a second end moved the page under the pen").toEqual(t.unmoved);
+			t.now.mockReturnValue(2000); t.lift(); t.after(1600);
+			expect({ scale: t.rig.scale(), settles: t.rig.settles }, "the lift's ease lands the cap").toEqual({ scale: CAP, settles: [CAP] });
+		} finally { t.now.mockRestore(); }
+	});
+
+	it("C8: under the pan tool (frame live) the watchdog moves nothing either", () => {
+		const t = pausedUnderPen("pan");
+		try {
+			expect((t.o.frame as { locked: boolean }).locked, "premise: the pan leaves the frame live").toBe(false);
+			expect(t.rig.fireTimers(), "premise: the watchdog fired").toBeGreaterThan(0);
+			t.after(10_000);
+			expect(t.still(), "the watchdog stepped the page to the cap under the pan drag").toEqual(t.unmoved);
+		} finally { t.now.mockRestore(); }
+	});
+
+	it("C9: a pinch start under the pen keeps the paused ease, and the watchdog then moves nothing", () => {
+		const t = pausedUnderPen("ink");
+		// The note reads busy under a contact, as getNoteViewportState does.
+		t.o.getNoteViewportState = () => ({ busy: (t.o.frame as { locked: boolean }).locked || t.o.builder !== null || t.o.mode !== "ink" });
+		try {
+			t.rig.onPinch("start", 1, centroid);
+			expect((t.o.pinchGive as Give)?.paused ?? null, "the start dropped the paused ease").toBe(true);
+			t.rig.fireTimers();
+			t.after(10_500);
+			expect(t.still(), "the page moved under the pen at 10.5 s").toEqual(t.unmoved);
+		} finally { t.now.mockRestore(); }
+	});
+
+	it("C10: a contact that ends without a lift after the watchdog still lands the cap and lets the hold go", () => {
+		const t = pausedUnderPen("ink");
+		const noop = (): void => undefined;
+		const layer = { clear: noop, clearAll: noop, prepareLive: noop };
+		Object.assign(t.o, { scheduleRepaint: noop, replayDeferredResize: noop, wet: layer, highlightWet: layer, tail: layer, highlightWetCanvas: { setCssStyles: noop }, cssWidth: 0, cssHeight: 0 });
+		try {
+			t.rig.fireTimers();
+			t.after(10_000);
+			// The blur path's tail (strokeAbandoned -> contactEndedWithoutLift).
+			t.now.mockReturnValue(11_000); t.endContact(); proto.contactEndedWithoutLift!.call(t.o, false); t.after(10_600);
+			expect({ scale: t.rig.scale(), hold: t.o.measureHold ?? null }, "after the contact the page sits at the cap with no hold").toEqual({ scale: CAP, hold: null });
+		} finally { t.now.mockRestore(); }
+	});
+
+	// Pin, green before and after: a fix that drops every end under a pen would leave the ease paused when the canvas
+	// goes off, and with the canvas off pinch drops every phase, so the preview and the hold would stay up for good.
+	it("C11: the canvas going off under the pen still takes the preview and the hold down", () => {
+		const t = pausedUnderPen("ink");
+		try {
+			// applyCanvasMode with the answer off: the gesture in flight ends while the canvas is on, then it goes off.
+			proto.endZoomGestureInFlight!.call(t.o);
+			t.o.canvasMode = false;
+			t.now.mockReturnValue(2000); t.lift(); t.after(1600);
+			expect({ preview: t.o.pinchPreview, hold: t.o.measureHold ?? null }, "the preview or the hold stayed up").toEqual({ preview: false, hold: null });
+		} finally { t.now.mockRestore(); }
 	});
 });

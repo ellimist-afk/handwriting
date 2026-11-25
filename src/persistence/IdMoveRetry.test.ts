@@ -7,7 +7,9 @@
  *
  * - a stroke drawn between the rounds is on screen and in the new id's live
  *   file after the retry, with no copy set aside;
- * - a stroke erased between the rounds stays erased, on screen and on disk;
+ * - a stroke erased between the rounds stays erased, on screen, in the new
+ *   id's live file and in a fresh load; the first round's file, which still
+ *   holds it, is kept as a copy beside the new id (logged);
  * - control: when the new id's file changed between the rounds (another
  *   device, a sync tool), the old-id file is still set beside it as a listed
  *   copy and the new id's file is left as it was;
@@ -251,7 +253,9 @@ describe("an id move retried after a held Slides save", () => {
 		expect(inlineInk.pageIdOf(NOTE), "precondition: the note followed its new id").toBe(NEW);
 		expect(inlineInk.strokes(NOTE).map((s) => s.id), "the erased stroke came back on screen").toEqual([]);
 		expect(onDisk(v.adapter, NEW), "the erased stroke came back in the new id's live file").toEqual([]);
-		expect(conflictCopies(v.adapter, NEW), "the retry set this move's own file aside as a copy").toEqual([]);
+		const fresh = await new PageStore({ vault: { adapter: v.adapter } } as never).load(NEW);
+		expect((fresh?.data.strokes ?? []).map((s) => s.id), "the erased stroke came back in a fresh load of the new id").toEqual([]);
+		console.log(`[facts] erased between the rounds: copies beside the new id ${JSON.stringify(conflictCopies(v.adapter, NEW))}`);
 		expect(v.adapter.files.has(sidecarPath(OLD)), "a file stayed under the old id, which nothing names").toBe(false);
 	});
 

@@ -3,14 +3,17 @@
  * the vault rename, delete and duplicate-id handling, and the carry of a note's own ink. They are methods of InlineInkStore, installed on its prototype when InlineInkStore.ts loads.
  */
 import { UnreadableFrontmatterError } from "./InlineClaim";
-import { emptyPage, newPageId, PageData } from "../model/PageData";
+import { emptyPage, newId, newPageId, PageData } from "../model/PageData";
 import { type ExternalAdoptionPrep } from "../persistence/PageStore";
 import { forkFromAdoption, recordFork } from "../persistence/ForkResolution";
 import { runDetached } from "../util/Detached";
-import { notifyInkChanged } from "./InkEvents";
+import { traceInkDropped } from "../diag/NoteTraceRows";
+import { notifyInkChanged, notifyInkReread } from "./InkEvents";
 import { installMethods } from "./InstallMethods";
 import { takeColumnRef } from "../ink/ColumnRef";
-import { isOpaqueAttachment, liveAttachments } from "./InkAttachments";
+import { isOpaqueAttachment, liveAttachments, type AttachmentRecord } from "./InkAttachments";
+import { changesHanded, changesHandedTo, forgetHanded, handedGroups, unsavedChanges } from "./InlineInkStoreCommit";
+import { SLIDES_SIDECAR_SUFFIX } from "../slides/SlidesSections";
 import { ADOPTION_QUIET_MS, ADOPTION_RUN_GAP_MS, ADOPTION_STILL_FAILING, type ExternalAdoptionHeldReason, type ExternalAdoptionResult, INK_FILE_MISSING, inkFingerprint, type NoteRecord, InlineInkStore } from "./InlineInkStore";
 
 declare module "./InlineInkStore" {
@@ -38,8 +41,9 @@ declare module "./InlineInkStore" {
 		consumeRename(from: string, to: string): boolean;
 		handleDelete(path: string): void;
 		markDuplicateLocked(path: string, otherPath: string): void;
-		clearDuplicateLock(path: string): void;
+		clearDuplicateLock(path: string, filesMoved?: boolean): void;
 		isDuplicateLocked(path: string): boolean;
+		duplicateLockedOn(pageId: string): boolean;
 		handleDeclaimed(path: string): void;
 		carryOwnInk(path: string, rec: NoteRecord): void;
 		reassignPage(copyPath: string, newId: string, ownerPath: string): "rescheduled-owner" | "old-queue-orphaned";
@@ -79,6 +83,8 @@ function adoptionFound(this: InlineInkStore, path: string): void {
 const TRANSIENT_NOTICE =
 	"Handwriting: this note's ink file could not be read yet. New ink on it is not saved until it loads.";
 
+const RESOLVED_NOTICE = "Handwriting: duplicate resolved. Ink on this note saves again.";
+
 function adoptionHeld(reason: ExternalAdoptionHeldReason): ExternalAdoptionResult {
 	return { outcome: "held", changed: false, reason };
 }
@@ -111,6 +117,364 @@ function freezePage(page: PageData): PageData {
 
 function hasChoice(rec: NoteRecord): boolean {
 	return (rec.choices?.canvas ?? null) !== null || (rec.choices?.paper ?? null) !== null;
+}
+
+type Group = NonNullable<NoteRecord["attachments"]>[number];
+
+/**
+ * A copy whose duplicate lock was cleared and lifts once its file has been read again, with the token of that read.
+ * Meanwhile the note answers unlocked (it saves again once the read is over), while the page still answers locked to any
+ * other writer. A second clear meanwhile does nothing more; the note locked again meanwhile takes the token back, and
+ * the lock stays. A clear made after that waits for the read under way to end (clearAfterRead), then runs as a clear.
+ */
+const liftAfterRead = new WeakMap<NoteRecord, object>();
+
+/**
+ * Records whose clear is reading the file again, with that clear's whole run, its tail after the read included. A clear
+ * made meanwhile (the note locked again between) waits for the run to end, then reads the file itself.
+ */
+const clearReading = new WeakMap<NoteRecord, Promise<void>>();
+
+/**
+ * A copy locked again and cleared again while an earlier clear reads the file, with the token of that second clear. It
+ * waits for the read under way to end, then runs as a clear: its own read, made after the relock and the second clear,
+ * keeps what the other note saved meanwhile. Meanwhile the note answers unlocked (it saves again once the reads are
+ * over), while the page still answers locked to any other writer. Locked again meanwhile, the token goes and the lock
+ * stays; a third clear meanwhile does nothing more.
+ */
+const clearAfterRead = new WeakMap<NoteRecord, object>();
+
+/**
+ * Clears' runs made after this session's own move took the id's inline file away (clearDuplicateLock's `filesMoved`).
+ * A run is never asked again: only a clear made while its read is under way, which waits for it (that run then ends
+ * locked again, writing nothing), takes it from here.
+ */
+const movedAwayRuns = new WeakSet<Promise<void>>();
+
+/**
+ * How many real edits of its attached groups a record had made when its groups last went into a scheduled save, or were
+ * replaced by the file's (a read again, an adoption, a restored revision). An edit past it is in memory only: a lock
+ * refused its save. A list only mapped through typing is not an edit and never counts. None yet reads as zero.
+ */
+const groupEditsSaved = new WeakMap<NoteRecord, number>();
+
+/**
+ * The attached groups a user action in this session acted on, by id, since the record's list was last handed to a save or
+ * replaced by the file's: Attach, Detach, a re-attach, a member added or cut, the group's ink moved, resized or turned.
+ * Recorded where the action sets the list (setAttachments). A target only mapped through typing, a correction the note's
+ * own text moved or a measure stamped, and a list found again in the text act on no group. Memory only.
+ */
+const groupsActed = new WeakMap<NoteRecord, Set<string>>();
+
+/**
+ * A user action on this record set its list from `before` to `after`: the groups it acted on are the ones whose record it
+ * replaced, added or removed. An action builds its list from the one it found (attachGroup, detachGroup, replaceMembers),
+ * so every group it left alone is the same record object.
+ */
+export function actedOnGroups(rec: NoteRecord, before: readonly Group[], after: readonly Group[]): void {
+	const was = new Map(before.map((g) => [g.id, g]));
+	const now = new Set<string>();
+	let set = groupsActed.get(rec);
+	const add = (id: string): void => {
+		if (!set) groupsActed.set(rec, (set = new Set()));
+		set.add(id);
+	};
+	for (const g of after) {
+		now.add(g.id);
+		if (was.get(g.id) !== g) add(g.id);
+	}
+	for (const id of was.keys()) if (!now.has(id)) add(id);
+}
+
+function groupsSaved(rec: NoteRecord): void {
+	groupEditsSaved.set(rec, rec.attachOnlyEdits ?? 0);
+	groupsActed.delete(rec);
+}
+
+/**
+ * Whether this record holds a change of its groups that is in memory only: a real edit past the last save, or a user
+ * action on a group (Attach, Detach, a member cut) whose save a lock refused. Those lean on the save just after them and
+ * count no edit, so the action's own record is asked too.
+ */
+export function groupsUnsaved(rec: NoteRecord): boolean {
+	return (rec.attachOnlyEdits ?? 0) > (groupEditsSaved.get(rec) ?? 0) || (groupsActed.get(rec)?.size ?? 0) > 0;
+}
+
+/**
+ * Whether a user action in this session acted on group `id` of this record, not yet handed to a save (groupsActed), or
+ * handed to a save not seen to land (handedGroups): "saved" is one line for groups and strokes.
+ */
+export function groupChangedHere(rec: NoteRecord): (id: string) => boolean {
+	const acted = groupsActed.get(rec);
+	const handed = handedGroups(rec);
+	return (id) => (acted?.has(id) ?? false) || handed.has(id);
+}
+
+/**
+ * The attached groups to hold once the file is read again under this session's list. Per group id: the file's version,
+ * whole, unless a user action in this session acted on that group (groupChangedHere); then this session's version, or
+ * none when it removed the group. Groups added here join after the file's, which keep their order.
+ *
+ * A stroke the merge kept as this session's that the file lacks stays in the group this session holds it in. That group
+ * in the file, its record the same but for members, target offsets and the correction last shown (a text change on
+ * either side moves those; the pane finds the target again by its words): the stroke joins it, and the record lists no
+ * stroke the merged page lacks. Its record changed otherwise: one record carries one follow, so the stroke stays in this
+ * session's record, pruned to the kept members, under an id of its own, and the file's group keeps its members. The group
+ * not in the file: this session's record, pruned to the kept members (as carryOwnInk prunes), or none.
+ */
+function groupsOverFile(rec: NoteRecord, session: readonly Group[], file: readonly Group[]): Group[] {
+	const changedHere = groupChangedHere(rec);
+	const mine = new Map(session.map((g) => [g.id, g]));
+	const held = new Set((rec.basePage?.strokes ?? []).map((s) => s.id));
+	const live = new Set(rec.strokes.map((s) => s.id));
+	const kept = (g: Group): string[] => (isOpaqueAttachment(g) ? [] : g.strokeIds.filter((id) => rec.localStrokeIds.has(id) && live.has(id) && !held.has(id)));
+	const out: Group[] = [];
+	const split: AttachmentRecord[] = [];
+	const seen = new Set<string>();
+	for (const g of file) {
+		if (seen.has(g.id)) continue;
+		seen.add(g.id);
+		const m = mine.get(g.id);
+		if (changedHere(g.id)) {
+			if (m) out.push(m);
+			continue;
+		}
+		const ours = m ? kept(m) : [];
+		if (!m || ours.length === 0 || isOpaqueAttachment(m) || isOpaqueAttachment(g)) out.push(g);
+		else if (samePlacing(m, g)) {
+			const theirs = new Set(g.strokeIds);
+			const members = [...m.strokeIds.filter((id) => ours.includes(id) || theirs.has(id)), ...g.strokeIds.filter((id) => !m.strokeIds.includes(id))];
+			out.push({ ...g, strokeIds: members.filter((id) => live.has(id)) });
+		} else {
+			out.push(g);
+			split.push({ ...m, strokeIds: ours });
+		}
+	}
+	for (const g of session) {
+		if (seen.has(g.id)) continue;
+		seen.add(g.id);
+		if (changedHere(g.id)) out.push(g);
+		else if (!isOpaqueAttachment(g)) {
+			const ours = kept(g);
+			if (ours.length > 0) out.push(ours.length === g.strokeIds.length ? g : { ...g, strokeIds: ours });
+		}
+	}
+	if (split.length > 0) {
+		const taken = new Set([...out, ...session, ...file].map((g) => g.id));
+		for (const g of split) {
+			let id = newId("att");
+			while (taken.has(id)) id = newId("att");
+			taken.add(id);
+			out.push({ ...g, id });
+		}
+	}
+	return claimedStaysHere(out, changedHere);
+}
+
+/**
+ * A stroke in a group this session acted on (groupChangedHere) and in a readable group it did not leaves the one it did
+ * not: that group is trimmed as a load trims (liveAttachments), and dropped only when left with no stroke. Opaque groups,
+ * and strokes in no group acted on here (a file's own two groups on one stroke), are left as they are.
+ */
+function claimedStaysHere(list: Group[], changedHere: (id: string) => boolean): Group[] {
+	const claimed = new Set<string>();
+	for (const g of list) if (!isOpaqueAttachment(g) && changedHere(g.id)) for (const id of g.strokeIds) claimed.add(id);
+	if (claimed.size === 0) return list;
+	const out: Group[] = [];
+	for (const g of list) {
+		if (isOpaqueAttachment(g) || changedHere(g.id) || !g.strokeIds.some((id) => claimed.has(id))) {
+			out.push(g);
+			continue;
+		}
+		const left = g.strokeIds.filter((id) => !claimed.has(id));
+		if (left.length > 0) out.push({ ...g, strokeIds: left });
+	}
+	return out;
+}
+
+/** Two records the same but for their members, their targets' offsets and the correction last shown. */
+function samePlacing(a: AttachmentRecord, b: AttachmentRecord): boolean {
+	const bare = (r: AttachmentRecord): Partial<AttachmentRecord> => {
+		const rest: Partial<AttachmentRecord> = { ...r, target: { ...r.target, from: 0, to: 0 } };
+		delete rest.strokeIds;
+		delete rest.shown;
+		return rest;
+	};
+	return sameValue(bare(a), bare(b));
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+	if (Array.isArray(a) !== Array.isArray(b)) return false;
+	const ka = Object.keys(a), kb = Object.keys(b);
+	if (ka.length !== kb.length) return false;
+	for (const k of ka) if (!sameValue((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) return false;
+	return true;
+}
+
+/**
+ * Records whose duplicate lock cleared while their file could not be read: the clear's merge of the groups, and its rule
+ * for what is written, are owed to the read that lands (healOwedMerge). A read that fails again leaves them owed.
+ */
+const mergeOwed = new WeakSet<NoteRecord>();
+
+/**
+ * The file was read at last under a record whose clear could not read it (retryDamaged, by a reopen or the sync poll):
+ * the groups are merged as the clear would have merged them, and the answer is the clear's rule for a write, true only when
+ * the copy changed ink itself. Null when nothing is owed, or when the file was gone by then and the record keeps every
+ * group it holds: the heal's own rule stands. `unloaded`: the record held no page before this read, so the read merged
+ * the groups itself (firstReadMerge) and only the write rule is owed.
+ */
+export function healOwedMerge(rec: NoteRecord, unloaded: boolean): boolean | null {
+	if (!mergeOwed.has(rec)) return null;
+	mergeOwed.delete(rec);
+	if (!rec.lastAdoptFound) return null;
+	if (!unloaded && rec.attachments !== undefined) rec.attachments = groupsOverFile(rec, rec.attachments, rec.basePage?.attachments ?? []);
+	return rec.localStrokeIds.size > 0 || groupsUnsaved(rec) || handedGroups(rec).size > 0;
+}
+
+/**
+ * The note's file was read for the first time under this record (adoptSidecar with no page before: the first load, a claim
+ * that found an id, a heal of a note whose file could not be read when it opened, a clear's read, the read under a new id):
+ * a list set meanwhile holds only what this session made, and written as it stands it would take the file's groups out of
+ * the file. The groups are merged as a clear merges them: the file's stand, the ones acted on here take this session's
+ * version, the ones made here join after. Merged here once, at the read, before anything can write the list.
+ */
+export function firstReadMerge(rec: NoteRecord): void {
+	if (rec.attachments !== undefined) rec.attachments = groupsOverFile(rec, rec.attachments, rec.basePage?.attachments ?? []);
+}
+
+/**
+ * Where a record is now: the path it was asked under, or the one a rename moved it to while a read waited. Null when no
+ * path holds it any more (the note was deleted, or another note took its path and it was not renamed).
+ */
+function pathNow(store: InlineInkStore, path: string, rec: NoteRecord): string | null {
+	if (store.byPath.get(path) === rec) return path;
+	for (const [p, r] of store.byPath) if (r === rec) return p;
+	return null;
+}
+
+/** What the note's panes show, taken before a read of its file: its strokes, its groups, and those with the font size. */
+interface ShownBeforeRead {
+	strokes: string;
+	groups: readonly Group[];
+	shown: string;
+}
+
+function shownBeforeRead(store: InlineInkStore, path: string, rec: NoteRecord): ShownBeforeRead {
+	const groups = store.attachments(path);
+	// By content: the read and the merge make a new list even when every group is the same.
+	return { strokes: inkFingerprint(rec.strokes), groups, shown: JSON.stringify([groups, store.fontRefPx(path)]) };
+}
+
+/**
+ * The panes on the note take what a read of its file changed as after an outside reload: the stored font size, the groups
+ * found again in their text, a repaint. A read that changed nothing tells them nothing.
+ */
+function tellWhatTheReadChanged(store: InlineInkStore, now: string, rec: NoteRecord, before: ShownBeforeRead): void {
+	const strokesChanged = inkFingerprint(rec.strokes) !== before.strokes;
+	if (strokesChanged || store.attachments(now) !== before.groups) notifyInkChanged(now);
+	if (strokesChanged || JSON.stringify([store.attachments(now), store.fontRefPx(now)]) !== before.shown) notifyInkReread(now);
+}
+
+/**
+ * A copy's duplicate lock lifted while it holds the page it loaded: a locked record refuses a reload, so whatever the
+ * other note saved since is in the file, or queued for it, and not here. The file is read again through the load path
+ * (the read answers with a save still queued under the id) and merged as a load merges: the file's strokes in its order,
+ * an id changed here taking this copy's version, an id erased here leaving it. Only then is anything written, and only
+ * when this copy changed ink itself: a stroke drawn or erased, or an attached group edited and not yet saved. A file
+ * that cannot be read now locks the record as any load does: nothing is written and the ink stays in memory. When a
+ * read that threw holds ink not saved yet, the user is told so at once.
+ *
+ * The lock on the page stands until the read is over, so nothing else may write the file (a fork choice is refused)
+ * between the read and this copy's save, which would go over it. It lifts after the read, before the save is queued,
+ * unless the note was locked again while the file was read. "Duplicate resolved" is told then, only when the note can
+ * save: not for a damaged or unreadable file, a note locked again, or a note gone. A clear made after such a relock
+ * waits for this whole run to end, then reads the file itself (clearWhenRead).
+ *
+ * `filesMoved`: this session's own move of the other note's files took the id's file away just before this lift. A read
+ * that then finds no file leaves the copy showing ink no file holds, blank once reopened: what it shows is saved under
+ * the id, once, when it shows a stroke. Any other read that finds no file writes nothing (a file mid-replace by a sync).
+ */
+async function saveOwnOverFile(store: InlineInkStore, path: string, rec: NoteRecord, id: string, lift: object, filesMoved: boolean): Promise<void> {
+	const before = shownBeforeRead(store, path, rec);
+	const loaded = rec.basePage;
+	rec.load = "loading";
+	await store.trackLoad(rec, async () => {
+		try {
+			return await store.adoptSidecar(rec, id);
+		} catch (err) {
+			console.error("[handwriting] ink file read after a duplicate lock rejected", err);
+			store.holdUnreadQuietly(rec);
+			return false;
+		} finally {
+			rec.load = "yes";
+		}
+	});
+	clearReading.delete(rec);
+	if (liftAfterRead.get(rec) === lift) {
+		liftAfterRead.delete(rec);
+		rec.duplicateLocked = false;
+	}
+	// The note may have been renamed while the file was read: it is saved where it is now. Deleted, or its path taken by
+	// another note: this record is no longer what any note shows, and nothing is written.
+	const now = pathNow(store, path, rec);
+	if (now === null) return;
+	// A read that failed leaves this merge owed to the read that lands.
+	if (rec.basePage === loaded && rec.damagedLocked) mergeOwed.add(rec);
+	else mergeOwed.delete(rec);
+	// The file's groups stand beside the ones this session changed; a list kept unchanged would hide them. With no page
+	// loaded before, the read merged them itself (firstReadMerge).
+	if (loaded !== null && rec.basePage !== loaded && rec.attachments !== undefined) {
+		rec.attachments = groupsOverFile(rec, rec.attachments, rec.basePage?.attachments ?? []);
+	}
+	// Told also when the note was locked again meanwhile.
+	tellWhatTheReadChanged(store, now, rec, before);
+	// Locked again, given another id, or the file unreadable: nothing is written.
+	if (rec.duplicateLocked || rec.pageId !== id || rec.damagedLocked || rec.legacyLocked || rec.futureLocked) {
+		tellUnreadOwed(store, rec);
+		return;
+	}
+	store.host?.notify(RESOLVED_NOTICE);
+	// A group acted on by a save not seen to land is the copy's own too: its page may never have reached the file.
+	const own = rec.localStrokeIds.size > 0 || groupsUnsaved(rec) || handedGroups(rec).size > 0;
+	// The read found no file because the move here took it: the ink shown is kept under the id.
+	const shownOnly = filesMoved && !rec.lastAdoptFound && rec.strokes.length > 0;
+	if (own || shownOnly) store.persist(now, rec);
+}
+
+/** A read that threw holds ink not saved yet: said now, not after a minute of failing reads. Nothing unsaved: silent. */
+function tellUnreadOwed(store: InlineInkStore, rec: NoteRecord): void {
+	const unsaved = (unsavedChanges(rec)?.size ?? 0) > 0 || groupsUnsaved(rec);
+	if (!rec.duplicateLocked && rec.damagedLocked && rec.damageSilent && unsaved) store.noticeTransient(rec);
+}
+
+/**
+ * A clear made while an earlier clear reads the file (the note locked again between): it waits for that clear's whole
+ * run, then runs as a clear where the note is now. The order relied on: `reading` settles only once the run's tail after
+ * the read is over, so that read has already lifted or kept the lock, and told what it tells, before anything here
+ * runs; and the load the run started is waited out too, so the read this clear starts does not meet it still set.
+ * Locked again meanwhile (the token gone), or another clear's token in its place: nothing. The note gone: nothing. Left
+ * by the first read unable to save (damaged, legacy or a newer format): the lock lifts and the note says, as a clear
+ * alone does after such a read, that its file could not be read yet; nothing is written and "saves again" is not told.
+ * `filesMoved` is the earlier clear's, or this one's: this clear reads in its place (saveOwnOverFile).
+ */
+async function clearWhenRead(store: InlineInkStore, path: string, rec: NoteRecord, reading: Promise<void>, wait: object, filesMoved: boolean): Promise<void> {
+	await reading.catch(() => undefined);
+	// A run that ended before its tail leaves its entry: dropped here, or the clear below would wait on it again.
+	if (clearReading.get(rec) === reading) clearReading.delete(rec);
+	if (rec.loadInFlight) await rec.loadInFlight;
+	if (clearAfterRead.get(rec) !== wait) return;
+	clearAfterRead.delete(rec);
+	const now = pathNow(store, path, rec);
+	if (now === null || !rec.duplicateLocked) return;
+	if (rec.damagedLocked || rec.legacyLocked || rec.futureLocked) {
+		rec.duplicateLocked = false;
+		tellUnreadOwed(store, rec);
+		return;
+	}
+	store.clearDuplicateLock(now, filesMoved);
 }
 
 
@@ -166,6 +530,8 @@ function hasChoice(rec: NoteRecord): boolean {
 		// The caller established a clean record, so only mutations from here
 		// onward can override the freshly read page.
 		rec.localStrokeIds.clear();
+		changesHanded(rec);
+		forgetHanded(rec);
 		rec.reloading = true;
 		// The BASE PAGE is kept for the same reason and was not, which cost
 		// more than the strokes would have. It carries the text boxes, the
@@ -178,7 +544,10 @@ function hasChoice(rec: NoteRecord): boolean {
 		await this.loadRecord(path, rec, { basePage: keptBase });
 		// The session's attached groups belonged to the copy just replaced: the file read now answers with its own, resolved
 		// again by the open note. A read that failed kept the old page, and the session's list with it.
-		if (rec.basePage !== keptBase) rec.attachments = undefined;
+		if (rec.basePage !== keptBase) {
+			rec.attachments = undefined;
+			groupsSaved(rec);
+		}
 		// Joining viewers need the restored picture even when existing panes
 		// still show identical ink. Only actual changes notify the poller.
 		return inkFingerprint(this.strokes(path)) !== before;
@@ -363,11 +732,14 @@ function hasChoice(rec: NoteRecord): boolean {
 		takeColumnRef(rec, prep.prepared.data);
 		rec.strokes = prep.prepared.data.strokes.slice();
 		rec.localStrokeIds.clear();
+		changesHanded(rec);
+		forgetHanded(rec);
 		// The other device's choices come with its file, as its strokes do:
 		// the last device to save wins.
 		rec.choices = undefined;
 		// So do its attached groups; the open note resolves them against its text again.
 		rec.attachments = undefined;
+		groupsSaved(rec);
 		if (prep.prepared.data.attachments?.length) {
 			adoptionMarks.set(rec, { serial: ++adoptionSerial, base: prep.prepared.data, edits: rec.attachOnlyEdits ?? 0 });
 		} else adoptionMarks.delete(rec);
@@ -477,8 +849,11 @@ function hasChoice(rec: NoteRecord): boolean {
 			takeColumnRef(rec, page);
 			rec.strokes = page.strokes.slice();
 			rec.localStrokeIds.clear();
+			changesHanded(rec);
+			forgetHanded(rec);
 			// The restored page's attached groups, not the session's; the open note resolves them again.
 			rec.attachments = undefined;
+			groupsSaved(rec);
 			rec.mutationGeneration++;
 			const snap = this.snapshot(rec);
 			const host = this.host;
@@ -571,10 +946,28 @@ function hasChoice(rec: NoteRecord): boolean {
 		runDetached(pending, label);
 	}
 
+/** Told around each page id write: before it, with the note's path and the id it will hold; after it, whether it wrote. */
+export interface PageIdClaimWatcher { before(path: string, pageId: string): void; after(path: string, pageId: string, written: boolean): void }
+
+let claimWatcher: PageIdClaimWatcher | null = null;
+
+/** Set the one watcher told around each page id write. */
+export function onPageIdClaim(watch: PageIdClaimWatcher | null): void {
+	claimWatcher = watch;
+}
+
+/** Tell the watcher; a watcher that throws never stops the claim. */
+function tellClaimWatcher(tell: (watch: PageIdClaimWatcher) => void): void {
+	if (!claimWatcher) return;
+	try { tell(claimWatcher); } catch (err) { console.error("[handwriting] page id claim watcher failed", err); }
+}
+
 	async function claim(this: InlineInkStore, path: string, rec: NoteRecord): Promise<void> {
 		if (!this.host) return;
+		const proposed = newPageId();
+		let written = false;
+		tellClaimWatcher((watch) => watch.before(path, proposed));
 		try {
-			const proposed = newPageId();
 			const result = await this.host.claimId(path, proposed);
 			if (result.futureVersion !== undefined) {
 				rec.futureLocked = true;
@@ -585,11 +978,17 @@ function hasChoice(rec: NoteRecord): boolean {
 				return;
 			}
 			rec.pageId = result.pageId;
+			written = result.pageId === proposed;
 			if (result.pageId !== proposed) {
 				// The file already had an id we did not see at load (another
 				// pane, another device, a cold metadata cache). Its sidecar may
 				// hold ink; merge it BEFORE our first write can overwrite it.
+				const before = shownBeforeRead(this, path, rec);
 				await this.adoptSidecar(rec, result.pageId);
+				// The panes on the note were never told this file: its strokes, its groups, its font size. A note deleted, or its
+				// path taken by another note, while the file was read is told nothing.
+				const now = pathNow(this, path, rec);
+				if (now !== null) tellWhatTheReadChanged(this, now, rec, before);
 			}
 		} catch (err) {
 			if (err instanceof UnreadableFrontmatterError) {
@@ -604,6 +1003,8 @@ function hasChoice(rec: NoteRecord): boolean {
 			}
 			console.error("[handwriting] inline claim failed", err);
 			this.noteOnce(rec, "Handwriting: could not write the page id into this note, so its ink is not being saved.");
+		} finally {
+			tellClaimWatcher((watch) => watch.after(path, proposed, written));
 		}
 	}
 
@@ -655,6 +1056,10 @@ function hasChoice(rec: NoteRecord): boolean {
 	function schedule(this: InlineInkStore, rec: NoteRecord): void {
 		const page = this.snapshot(rec);
 		if (!this.host || !page || !rec.pageId) return;
+		// The groups acted on go with the save before they count as saved: until it is seen landed they are still this note's.
+		changesHandedTo(rec, page, this.host.sidecarLanded?.bind(this.host), groupsActed.get(rec));
+		groupsSaved(rec);
+		changesHanded(rec);
 		this.host.scheduleSidecar(rec.pageId, page);
 	}
 
@@ -662,6 +1067,10 @@ function hasChoice(rec: NoteRecord): boolean {
 	function scheduleFirst(this: InlineInkStore, rec: NoteRecord): void {
 		const page = this.snapshot(rec);
 		if (!this.host || !page || !rec.pageId) return;
+		// The groups acted on go with the save before they count as saved: until it is seen landed they are still this note's.
+		changesHandedTo(rec, page, this.host.sidecarLanded?.bind(this.host), groupsActed.get(rec));
+		groupsSaved(rec);
+		changesHanded(rec);
 		if (!this.host.scheduleSidecarNow) {
 			this.host.scheduleSidecar(rec.pageId, page);
 			return;
@@ -776,7 +1185,11 @@ function hasChoice(rec: NoteRecord): boolean {
 	 */
 	function markDuplicateLocked(this: InlineInkStore, path: string, otherPath: string): void {
 		const rec = this.record(path);
-		if (rec.duplicateLocked) return;
+		// Locked again while a clear reads the file, or while a clear waits for that read: that clear no longer lifts the
+		// lock, and the user hears it again. Both tokens go.
+		const lifting = liftAfterRead.delete(rec);
+		const waiting = clearAfterRead.delete(rec);
+		if (rec.duplicateLocked && !lifting && !waiting) return;
 		rec.duplicateLocked = true;
 		this.noteOnce(
 			rec,
@@ -784,13 +1197,48 @@ function hasChoice(rec: NoteRecord): boolean {
 		);
 	}
 
-	/** The collision resolved (an id line was removed, or a note deleted). */
-	function clearDuplicateLock(this: InlineInkStore, path: string): void {
+	/**
+	 * The collision resolved (an id line was removed, or a note deleted). `filesMoved`: the other note's move to its
+	 * edited id took this id's file away just before (countLeftOn); it is this clear's alone, and no other clear's.
+	 */
+	function clearDuplicateLock(this: InlineInkStore, path: string, filesMoved = false): void {
 		const rec = this.byPath.get(path);
-		if (!rec || !rec.duplicateLocked) return;
-		rec.duplicateLocked = false;
+		// A clear already reading the file lifts the lock when that read ends; one waiting for that read runs after it.
+		if (!rec || !rec.duplicateLocked || liftAfterRead.has(rec) || clearAfterRead.has(rec)) return;
+		// Before the read: a damaged or unreadable file it finds is told, not taken for the lock notice already shown.
 		rec.noticed = false;
-		this.host?.notify("Handwriting: duplicate resolved. Ink on this note saves again.");
+		// Locked again and cleared again while an earlier clear reads the file: that read began before the relock, so a
+		// save the other note made since may not be in it. Wait for it to end, then clear as below, reading again.
+		const reading = clearReading.get(rec);
+		if (reading) {
+			const wait = {};
+			clearAfterRead.set(rec, wait);
+			const moved = filesMoved || movedAwayRuns.has(reading);
+			this.trackPersist(clearWhenRead(this, path, rec, reading, wait, moved), `clear ${path} once the read under way is over`);
+			return;
+		}
+		// A loaded page of a file the other note kept writing: read it again first, the page still locked to other
+		// writers, then lift the lock, tell the user and save what was drawn here.
+		const id = rec.pageId;
+		if (this.host && id && rec.load === "yes" && !rec.damagedLocked && !rec.legacyLocked && !rec.futureLocked) {
+			const lift = {};
+			liftAfterRead.set(rec, lift);
+			const run = saveOwnOverFile(this, path, rec, id, lift, filesMoved);
+			if (filesMoved) movedAwayRuns.add(run);
+			clearReading.set(rec, run);
+			this.trackPersist(run, `read ${path} again before saving the ink drawn on it while locked`);
+			return;
+		}
+		// A file this note already cannot save to (damaged, an older layout or a newer format): the lock lifts and the note
+		// says what a clear says after a read that left it so (clearWhenRead). Nothing is written and "saves again" is not
+		// told; an older or newer page says its own words at its next stroke, `noticed` being reset above.
+		if (rec.damagedLocked || rec.legacyLocked || rec.futureLocked) {
+			rec.duplicateLocked = false;
+			tellUnreadOwed(this, rec);
+			return;
+		}
+		rec.duplicateLocked = false;
+		this.host?.notify(RESOLVED_NOTICE);
 		// Strokes drawn while locked were refused at the snapshot and are in
 		// memory only. Save them now, or they are gone at restart. An erase
 		// down to nothing leaves no strokes but still differs from disk: the
@@ -799,7 +1247,27 @@ function hasChoice(rec: NoteRecord): boolean {
 	}
 
 	function isDuplicateLocked(this: InlineInkStore, path: string): boolean {
-		return this.byPath.get(path)?.duplicateLocked ?? false;
+		const rec = this.byPath.get(path);
+		// A clear reading the file again, or waiting for that read: the note saves again once the reads are over.
+		return rec !== undefined && rec.duplicateLocked && !liftAfterRead.has(rec) && !clearAfterRead.has(rec);
+	}
+
+	/**
+	 * Does a duplicate lock stand on any note carrying this page id, open or not?
+	 * Read only. A note locked at start-up and never opened has a record with no
+	 * page id yet, so the note's own id line is read too. A note's Slides page
+	 * carries the note's id with ".slides" after it, so that page is locked when
+	 * its note is.
+	 */
+	function duplicateLockedOn(this: InlineInkStore, pageId: string): boolean {
+		const ids = pageId.endsWith(SLIDES_SIDECAR_SUFFIX) ? [pageId, pageId.slice(0, -SLIDES_SIDECAR_SUFFIX.length)] : [pageId];
+		for (const [path, rec] of this.byPath) {
+			if (!rec.duplicateLocked) continue;
+			if (rec.pageId !== null && ids.includes(rec.pageId)) return true;
+			const own = this.host?.readPageId(path) ?? null;
+			if (own !== null && ids.includes(own)) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -824,6 +1292,7 @@ function hasChoice(rec: NoteRecord): boolean {
 		const rec = this.byPath.get(path);
 		if (!rec || !rec.pageId) return;
 		this.byPath.delete(path);
+		traceInkDropped(rec.duplicateLocked === true);
 		if (rec.duplicateLocked) this.carryOwnInk(path, rec);
 		// Last, once any carried ink is on the new record: embed layers of this
 		// note repaint from what `strokes()` answers now.
@@ -846,16 +1315,10 @@ function hasChoice(rec: NoteRecord): boolean {
 		fresh.mutationGeneration++;
 		// Read first, then persist: the write waits on the read (persist), so
 		// the carried ink merges in after whatever the new id's sidecar holds.
+		// The read is the record's first, so the carried groups stand beside the
+		// file's there (firstReadMerge), before anything is written.
 		this.trackPersist(
-			this.ensureLoaded(path).then(() => {
-				// The session's list stands over the file's once read: the file's own groups join it, and the page is
-				// written again with both.
-				if (groups.length === 0 || this.byPath.get(path) !== fresh || !fresh.attachments) return;
-				const session = fresh.attachments;
-				const ids = new Set(session.map((a) => a.id));
-				const file = (fresh.basePage?.attachments ?? []).filter((a) => !ids.has(a.id));
-				if (file.length > 0) this.setAttachments(path, [...file, ...session], true);
-			}),
+			this.ensureLoaded(path).then(() => undefined),
 			`load ${path} for the ink carried off its shared page id`
 		);
 		this.persist(path, fresh);
@@ -951,6 +1414,7 @@ export function installInlineInkStorePersist(proto: InlineInkStore): void {
 		markDuplicateLocked,
 		clearDuplicateLock,
 		isDuplicateLocked,
+		duplicateLockedOn,
 		handleDeclaimed,
 		carryOwnInk,
 		reassignPage,

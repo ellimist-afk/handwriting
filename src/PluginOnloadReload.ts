@@ -7,7 +7,8 @@ import { MarkdownRenderChild } from "obsidian";
 import { reloadSlidesExternal, slidesReloadCandidate } from "./slides/SlidesInkSurface";
 import { captureInlineReloadAdmission, inkExternallyReloaded, inlineInk, inlineReloadCandidates, overlayForPath } from "./inline/InkOverlay";
 import { isMarkdownPath } from "./util/MarkdownPath";
-import { attachEmbedInkOnceReady, embedInkDiagLine, embedInkIsLiveEditorBlock, initEmbedInkDiagnostics } from "./inline/EmbedInk";
+import { attachEmbedInkOnceReady, embedInkChanged, embedInkDiagLine, embedInkIsLiveEditorBlock, embedInkLinesMoved, initEmbedInkDiagnostics, onEmbedInkLinesMoved } from "./inline/EmbedInk";
+import { mobileExportWait } from "./inline/EmbedInkMobileExport";
 import { notifyInkChanged } from "./inline/InkEvents";
 import { PdfInkController } from "./pdf/PdfInkController";
 import { runDetached } from "./util/Detached";
@@ -87,6 +88,12 @@ function reloadStride(quietTicks: number): number {
 			object,
 			{ rendered: string; verdict: Promise<boolean>; fresh: boolean }
 		>();
+		// The note's line source moved (the metadata cache parsed its saved
+		// text): its rendered sections let their read text go, and a note with an
+		// attached group repaints its views from the new lines (EmbedInk.ts).
+		this.registerEvent(this.app.metadataCache.on("changed", (file) => {
+			if (embedInkLinesMoved(file.path)) embedInkChanged(file.path);
+		}));
 		this.registerMarkdownPostProcessor((el, ctx) => {
 			const path = ctx.sourcePath;
 			if (!path || !isMarkdownPath(path)) return;
@@ -117,6 +124,16 @@ function reloadStride(quietTicks: number): number {
 			// note's cached sections onto its blocks once the note's text is read.
 			let noteText: string | null = null;
 			let readingText = false;
+			// Moves at each drop: a read begun before it answers the old text, and is let go.
+			let textDrop = 0;
+			let stopDrop: (() => void) | null = null;
+			// The note's ink load when the child found it not loaded yet (see `mobileExportWait`).
+			let loading: Promise<void> | null = null;
+			const dropText = () => {
+				noteText = null;
+				readingText = false;
+				textDrop++;
+			};
 			const lines = {
 				section: () => ctx.getSectionInfo(el),
 				cached: (wake: () => void) => {
@@ -125,9 +142,10 @@ function reloadStride(quietTicks: number): number {
 					if (noteText === null) {
 						if (!readingText) {
 							readingText = true;
+							const asked = textDrop;
 							runDetached(
 								readNoteText(path).then((text) => {
-									if (text === null || childUnloaded) return;
+									if (text === null || childUnloaded || asked !== textDrop) return;
 									noteText = text;
 									wake();
 								}),
@@ -186,6 +204,7 @@ function reloadStride(quietTicks: number): number {
 				);
 			};
 			child.onload = () => {
+				stopDrop = onEmbedInkLinesMoved(path, dropText);
 				// Synchronously when the ink is already in the session, which
 				// it is whenever the note is open. An export renders the note
 				// and then SERIALIZES it, so ink that arrives on a later tick
@@ -214,16 +233,18 @@ function reloadStride(quietTicks: number): number {
 					}
 					return;
 				}
-				runDetached(
-					inlineInk.ensureLoaded(path).then(attach),
-					"render ink into an embed"
-				);
+				loading = inlineInk.ensureLoaded(path).then(attach);
+				runDetached(loading, "render ink into an embed");
 			};
 			child.onunload = () => {
 				childUnloaded = true;
 				cancelRetry?.();
+				stopDrop?.();
 			};
 			ctx.addChild(child);
+			// The child loads inside addChild. A phone or tablet export awaits what the post-processors return, then takes
+			// its picture: a note whose ink is still loading hands it a wait, so the ink is in the picture.
+			return loading ? mobileExportWait(el, loading) : undefined;
 		});
 	}
 
@@ -337,14 +358,20 @@ function reloadStride(quietTicks: number): number {
 								// nothing drawn saved, for as long as the PDF stayed
 								// open. Adoption answers a lock with "existing-lock",
 								// so a locked record is re-read here instead, the way
-								// reopening the PDF re-reads it. A read that is still
-								// unsound changes nothing and falls through as before.
-								if (this.pdfStore.inkReady?.(id) === false && (await this.pdfStore.reloadExternal?.(id))) {
-									changed = true;
-									for (const [root, controller] of currentPdfPanes(id)) {
-										pendingPdfRefreshes.set(root, { id, controller });
+								// reopening the PDF re-reads it. The pass ends there,
+								// whatever the read found: a sound read queues the
+								// save of ink drawn under the lock, and an adoption
+								// now would see that ink as a fork and write a
+								// recovery pair for it. A read that is still unsound
+								// changes nothing.
+								if (this.pdfStore.inkReady?.(id) === false) {
+									if (await this.pdfStore.reloadExternal?.(id)) {
+										changed = true;
+										for (const [root, controller] of currentPdfPanes(id)) {
+											pendingPdfRefreshes.set(root, { id, controller });
+										}
+										refreshPendingPdfPanes(failedPdfRefreshes);
 									}
-									refreshPendingPdfPanes(failedPdfRefreshes);
 									continue;
 								}
 								// Only a completed preserving adoption may replace an
@@ -373,6 +400,32 @@ function reloadStride(quietTicks: number): number {
 									}
 									refreshPendingPdfPanes(failedPdfRefreshes);
 								}
+							} catch (err) {
+								console.error(`[handwriting] live-reload poll failed for PDF ${id}`, err);
+							}
+						}
+						// A locked PDF record no pane shows: its pane closed under the lock, or the PDF's bytes
+						// changed and the pane moved to the new bytes' ink file. The ink drawn under the lock is
+						// held only here, and the loop above walks only the ids panes show. It is read the way the
+						// pane's heal reads it, once the file's bytes differ from the ones that failed: a sound read
+						// merges the file under that ink and saves it once, a damaged one keeps the lock and writes
+						// nothing. A pane that took the id while the read was out is repainted; with none, the
+						// record is released as a closed PDF's is, so a later open reads the file as it is then.
+						const shown = (id: string) => [...this.pdfIds.values()].includes(id);
+						for (const id of this.pdfStore?.lockedWithUnsavedInk?.() ?? []) {
+							try {
+								if (shown(id)) continue;
+								if (!(await this.store.externallyChanged(id))) continue;
+								// The check awaited: a pane may have taken the id, or a read of it landed.
+								if (shown(id) || this.store.hasQueuedWrite(id) || this.pdfStore.inkReady(id)) continue;
+								if (await this.pdfStore.reloadExternal(id)) {
+									changed = true;
+									for (const [root, controller] of currentPdfPanes(id)) {
+										pendingPdfRefreshes.set(root, { id, controller });
+									}
+									refreshPendingPdfPanes(failedPdfRefreshes);
+								}
+								if (this.pdfStore.inkReady(id) && !shown(id)) this.releasePdfId(id);
 							} catch (err) {
 								console.error(`[handwriting] live-reload poll failed for PDF ${id}`, err);
 							}

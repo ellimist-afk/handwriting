@@ -487,6 +487,13 @@ export class PageStore {
 	 * filed as a tagged generation, which a restore never opens over it.
 	 */
 	removedWithQueued = new Map<string, number>();
+	/**
+	 * A delete whose move of the live file into the trash failed after its queued page went there tries the move
+	 * again (`remove`). The try waiting, per page: dropped when the page is loaded, scheduled or deleted again
+	 * (dropLiveMoveRetry), and every one at unload (dropLiveMoveRetries). A delete again makes the waiting move itself
+	 * first: `take` is that try, where the live file was (`at`).
+	 */
+	liveMoveRetries = new Map<string, { timer: number; at: string; take: () => Promise<void> }>();
 
 	/** A later batch from this writer has already left the queue for this page. */
 	superseded(pageId: string, writer: PageWriter | undefined, seq: number | undefined): boolean {
@@ -558,6 +565,17 @@ export class PageStore {
 	observedMissing = new Set<string>();
 	/** Stamp of the content this session last read or wrote (see contentStamp). */
 	knownHash = new Map<string, string>();
+	/**
+	 * Each page handed to schedule or saveNow whose own write has landed: its rename is done, so the file held exactly it
+	 * then. A page replaced in the queue before it was written, or whose write failed and is waiting on its retry, is not
+	 * here. Memory only; a page object leaves with its last holder.
+	 */
+	landedPages = new WeakSet<PageData>();
+
+	/** Whether this page's own write has landed (landedPages). */
+	hasLanded(page: PageData): boolean {
+		return this.landedPages.has(page);
+	}
 	/** Bound same-mtime content reads to once per five seconds per polled page. */
 	contentCheckedAt = new Map<string, number>();
 	/**
@@ -942,30 +960,59 @@ export class PageStore {
 		return this.externalChangeObservations.get(pageId) ?? "unchanged";
 	}
 
-	/** What `readPdfClaim` last read for each id this session, with the file's mtime and size at that read. */
-	private readonly pdfClaimsRead = new Map<string, { mtime: number; size: number | undefined; paths: string[] | null }>();
+	/** The claims `readPdfClaim` last read for each id this session, with the file's mtime and size at that read. */
+	private readonly pdfClaimsRead = new Map<string, { mtime: number; size: number | undefined; paths: string[] }>();
 
 	/**
 	 * `readPdfPaths` for a scan over many sidecars, with the file's mtime. The
 	 * file is stat'ed first; when its mtime and size are what they were at this
 	 * session's last read of it, the paths read then are returned and the file
 	 * is not read or parsed again. Null when there is no live sidecar.
+	 *
+	 * Only claims that were read are kept. `readPdfPaths` answers null for a read that failed (a read that threw, an
+	 * `exists` that answered false on an error after the good stat) as well as for a damaged file, and cannot say which.
+	 * A kept failure was "claims nothing" for the rest of the session while the file stayed unchanged: a PDF changed
+	 * while closed then reopened blank. So a null answer is not kept and the next look reads the file again; the cost is
+	 * one read per look for a damaged ink file.
+	 *
+	 * A look that failed is not "no file": it answers as a file whose claim cannot be read (paths null, mtime 0). The
+	 * host's `stat` rejects for any failure but a file not there, and its `exists` answers false for any failure, so the
+	 * path resolved can be the configured folder's while the file sits in another search folder. Null only once the id's
+	 * name answers "not there" in every search folder. A stat that rejects as not found answers "not there" for its
+	 * folder, as the load's second look at a file takes it (lookPastExists): ENOENT, or no code, the mobile host's shape,
+	 * which sets ENOENT only when its message says "does not exist". The gap, as there: on mobile a failed look with no
+	 * code is taken as not there.
 	 */
 	async readPdfClaim(pageId: string): Promise<{ paths: string[] | null; mtime: number } | null> {
+		const failedLook = { paths: null, mtime: 0 };
+		const adapter = this.app.vault.adapter;
+		const stat = async (path: string) => {
+			try {
+				return await adapter.stat(path);
+			} catch (err) {
+				const code = (err as { code?: unknown } | null)?.code;
+				if (typeof code !== "string" || code === "ENOENT") return null;
+				throw err;
+			}
+		};
 		try {
 			const final = await this.resolvePath(pageId);
-			const st = await this.app.vault.adapter.stat(final);
+			const st = await stat(final);
 			if (!st) {
+				for (const folder of this.searchFolders()) {
+					const other = this.pathIn(folder, pageId);
+					if (other !== final && (await stat(other))) return failedLook;
+				}
 				this.pdfClaimsRead.delete(pageId);
 				return null;
 			}
 			const known = this.pdfClaimsRead.get(pageId);
 			if (known && known.mtime === st.mtime && known.size === st.size) return { paths: known.paths, mtime: st.mtime };
 			const paths = await this.readPdfPaths(pageId);
-			this.pdfClaimsRead.set(pageId, { mtime: st.mtime, size: st.size, paths });
+			if (paths !== null) this.pdfClaimsRead.set(pageId, { mtime: st.mtime, size: st.size, paths });
 			return { paths, mtime: st.mtime };
 		} catch {
-			return null;
+			return failedLook;
 		}
 	}
 

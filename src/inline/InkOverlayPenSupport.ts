@@ -302,10 +302,25 @@ declare module "./InkOverlay" {
 	}
 
 	/**
+	 * The scroll a pan drag asked for and the scroller did not move, in scroll px, keyed by the `panLast` point the
+	 * write left behind. Pen down puts a fresh point there, so each drag starts owing nothing.
+	 */
+	const panOwed = new WeakMap<object, { x: number; y: number }>();
+
+	/**
 	 * Drag the scroller by the pen's travel. Client coordinates, like the
 	 * touch assist pan: they are viewport-absolute, so scrolling the surface
 	 * cannot feed back into the next delta the way overlay-relative ones
 	 * would (the page would accelerate away under the nib).
+	 *
+	 * The travel is screen px; the scroller counts its own px, and one of them
+	 * paints as `cssScale` screen px, so the step is divided by the scale, as
+	 * the finger pan does when it pays pan into the scroll. The scroller
+	 * rounds what it is given, which at a high zoom would eat a small step
+	 * whole, every time; so what a write did not move is owed to the next.
+	 * More than a px left over is the end of the range holding the page, not
+	 * rounding, and is dropped, so a reversal there moves the page at once.
+	 * At 100 percent the step is written as it is.
 	 */
 	function panMove(this: InkOverlayPlugin, ev: PointerEvent): void {
 		const last = this.panLast;
@@ -313,10 +328,22 @@ declare module "./InkOverlay" {
 		const dx = ev.clientX - last.x;
 		const dy = ev.clientY - last.y;
 		if (dx === 0 && dy === 0) return;
-		this.panLast = { x: ev.clientX, y: ev.clientY };
+		const next = { x: ev.clientX, y: ev.clientY };
+		this.panLast = next;
 		const el = this.view.scrollDOM;
-		el.scrollLeft -= dx;
-		el.scrollTop -= dy;
+		const scale = this.cssScale > 0 ? this.cssScale : 1;
+		if (scale === 1) {
+			el.scrollLeft -= dx;
+			el.scrollTop -= dy;
+			return;
+		}
+		const owed = panOwed.get(last);
+		const wantX = el.scrollLeft - dx / scale + (owed ? owed.x : 0);
+		const wantY = el.scrollTop - dy / scale + (owed ? owed.y : 0);
+		el.scrollLeft = wantX;
+		el.scrollTop = wantY;
+		const kept = (left: number): number => (Math.abs(left) < 1 ? left : 0);
+		panOwed.set(next, { x: kept(wantX - el.scrollLeft), y: kept(wantY - el.scrollTop) });
 	}
 
 	/** Move this editor's strip to the configured corner. */
@@ -343,6 +370,16 @@ declare module "./InkOverlay" {
 		// Optional-chained for the harnesses that build this off the prototype.
 		this.tailCanvas?.setCssStyles({ opacity: highlighter ? String(HIGHLIGHTER_ALPHA) : "1" });
 	}
+
+/**
+ * The disc a live highlighter's tip must keep clear of on a note, or undefined for no cut: the strip's end disc, while the stroke is on the highlighter's wet layer and the tail is dressed as washed,
+ * so both canvases carry the wash. A pen never dresses the tail. No strip painted yet (the pen-down dot, a resting tap,
+ * smoothing off): no disc, no cut.
+ */
+export function washedStripEnd(o: InkOverlayPlugin): Readonly<{ x: number; y: number; hw: number }> | undefined {
+	if (!o.tailWashed || o.builder === null || o.activeWet !== o.highlightWet) return undefined;
+	return o.activeWet.stripEnd();
+}
 
 export function installPenSupport(proto: InkOverlayPlugin): void {
 	installMethods(proto, {

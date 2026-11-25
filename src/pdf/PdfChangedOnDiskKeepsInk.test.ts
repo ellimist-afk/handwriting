@@ -501,14 +501,17 @@ for (const failure of ["damaged", "read-throws"] as const) {
 it("D-null control: false-negative existence returns null; actual save preserves displaced disk ink", async () => {
 	const { v, path, bytes } = await seeded();
 	const exists = v.adapter.exists.bind(v.adapter);
-	// Explicit fault injection: an existing live sidecar is reported absent during load.
-	// This proves the consequence of that input, not that any real adapter does this.
+	const stat = v.adapter.stat.bind(v.adapter);
+	// Explicit fault injection: an existing live sidecar is reported absent during load by both looks, `exists` and
+	// `stat`. This proves the consequence of that input, not that any real adapter does this.
 	const injection = vi.spyOn(v.adapter, "exists").mockImplementation(async (p) => p === path ? false : exists(p));
+	const statInjection = vi.spyOn(v.adapter, "stat").mockImplementation(async (p) => p === path ? null : stat(p));
 	const s = session(v);
 	const load = vi.spyOn(s.store, "load");
 	await s.pdfStore.ensureLoaded(fixedId);
 	const result = await load.mock.results[0]!.value;
 	injection.mockRestore();
+	statInjection.mockRestore();
 	expect(result, "the injected adapter fault must actually reach PageStore's null path").toBeNull();
 	expect(v.adapter.files.get(path)).toBe(bytes);
 	s.pdfStore.commit(fixedId, stroke("new-session-ink"));

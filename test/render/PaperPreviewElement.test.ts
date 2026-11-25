@@ -65,7 +65,7 @@ declare const process: { env: Record<string, string | undefined> };
 
 let realBrowser: Browser, script: string;
 const OBSIDIAN_CAMERA_CSS = readFileSync(fileURLToPath(new URL("./noteViewportCamera.css", import.meta.url)), "utf8");
-const DSF = 2, PITCH = 28, TOL_DEV = 2, TOL_PREVIEW_DEV = TOL_DEV + 0.5, PAGE_GREY = 255, RULE_GREY = 0x77, BAND_CUT = 0.1;
+const DSF = 2, TOL_DEV = 2, TOL_PREVIEW_DEV = TOL_DEV + 0.5, PAGE_GREY = 255, RULE_GREY = 0x77, BAND_CUT = 0.1;
 const PINCH = /src[\\/]inline[\\/]InkOverlayPinch\.ts$/, PAN = /src[\\/]inline[\\/]PaperPan\.ts$/;
 const PAPER = /src[\\/]inline[\\/]InkOverlayPaperPinch\.ts$/;
 
@@ -348,11 +348,23 @@ async function groundColour(p: Page): Promise<[number, number, number]> {
 	return top.split(",").map(Number) as [number, number, number];
 }
 
+/**
+ * The paper's pitch as the page resolves it on the editor, layout px: one plain body row's height, which the overlay
+ * planned and wrote. Read, never assumed, so every band reader below looks for rules where the text's rows are. Not a
+ * px length (a host's own value the cells below do not set) throws rather than read at a guessed pitch.
+ */
+const paperPitch = (p: Page): Promise<number> => p.evaluate(() => {
+	const text = getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).getPropertyValue("--handwriting-paper-pitch").trim();
+	const pitch = /^(\d+\.?\d*|\.\d+)px$/.test(text) ? Number.parseFloat(text) : Number.NaN;
+	if (!(pitch > 0)) throw new Error(`the paper's pitch on the editor is not a px length: "${text}"`);
+	return pitch;
+});
+
 const scrollerBox = (p: Page) => p.evaluate(() => { const r = (document.querySelector(".cm-scroller") as HTMLElement).getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; });
 
 /** What a patch of paper reads, for the kind drawn: lattice bands on both axes for rules, dots for dots. */
 async function paperRead(p: Page, kind: Kind | "none", k: number) {
-	const s = await scrollerBox(p), pitchDev = PITCH * k * DSF;
+	const s = await scrollerBox(p), pitchDev = (await paperPitch(p)) * k * DSF;
 	if (kind === "dots") return { kind, ...(await dotsIn(p, { x: Math.round(s.left + 20), y: Math.round(s.top + 60), width: 200, height: 200 })) };
 	const y = summarise(lattice(await profile(p, { x: Math.round(s.left + 4), y: Math.round(s.top + 40), width: 12, height: 300 }, "y"), pitchDev));
 	const x = kind === "grid" ? summarise(lattice(await profile(p, { x: Math.round(s.left + 20), y: Math.round(s.top + 200), width: 300, height: 12 }, "x"), pitchDev)) : null;
@@ -419,14 +431,18 @@ it.each(PATHS)("CHOKE POINT, %s: the preview element comes down, the scroller's 
 // HOST PITCH (gap 2, K3): the element folds by the pitch the scroller resolves, and only a px length puts it up.
 // ---------------------------------------------------------------------------------------------------------------------
 
-it.each([["40px", true], ["calc(20px + 20px)", false], ["2.5rem", false]] as const)("HOST PITCH %s: the element is up %s, and the paper tracks the text through a drag of three and a half pitches", async (value, element) => {
+// The second calc arm drags 2.25 pitches (90 px): a whole multiple of neither the painted 40 nor the planned row pitch, so a
+// pan folded by the pitch that does not paint shows at a drag the 3.5 arm's fold could happen to match.
+// The scroller arms (R1-A): a theme rule on .cm-scroller, the element that paints, with no priority. It beats the value the
+// scroller inherits from the editor, and the editor's own computed pitch is still the planned one.
+it.each([["40px", true, 3.5, "editor"], ["calc(20px + 20px)", false, 3.5, "editor"], ["calc(20px + 20px)", false, 2.25, "editor"], ["2.5rem", false, 3.5, "editor"], ["calc(20px + 20px)", false, 3.5, "scroller"], ["calc(20px + 20px)", false, 2.25, "scroller"]] as const)("HOST PITCH %s: the element is up %s, and the paper tracks the text through a drag of %s pitches (rule on the %s)", async (value, element, pitches, on) => {
 	const { p, close } = await open();
 	try {
-		await mount(p, { hostCss: `\n.markdown-source-view .cm-editor { --handwriting-paper-pitch: ${value} !important; }\n` });
+		await mount(p, { hostCss: on === "editor" ? `\n.markdown-source-view .cm-editor { --handwriting-paper-pitch: ${value} !important; }\n` : `\n.markdown-source-view .cm-scroller { --handwriting-paper-pitch: ${value}; }\n` });
 		await installFrameModel(p);
 		const rest = await frameNow(p, "rest");
 		await pinchStart(p, 400, 380);
-		await pinchDrag(p, 0, 3.5 * 40);
+		await pinchDrag(p, 0, pitches * 40);
 		const live = await frameNow(p, "live"), el = await preview(p);
 		const s = await scrollerBox(p), pitchDev = 40 * live.k * DSF;
 		// Coverage: bands all the way down the pane, none further apart than a pitch.
@@ -434,7 +450,7 @@ it.each([["40px", true], ["calc(20px + 20px)", false], ["2.5rem", false]] as con
 		const gaps = bands.slice(1).map((b, i) => b.centre - bands[i]!.centre);
 		await stagedRelease(p);
 		// eslint-disable-next-line no-console
-		console.log(`PREVIEW-PAPER HOST PITCH ${value}`, JSON.stringify({ rest, live, el, bands: bands.length, gaps: gaps.map(g => Math.round(g)) }));
+		console.log(`PREVIEW-PAPER HOST PITCH ${value} ${pitches} ${on}`, JSON.stringify({ rest, live, el, bands: bands.length, gaps: gaps.map(g => Math.round(g)) }));
 		expect(rest.source, "premise: at rest the scroller's own paper").toBe("scroller");
 		expect(live.preview, "frame identity: the fingers are still down").toBe(true);
 		expect(live.k, "premise: the drag was read back at the scale the rest reading was taken at").toBeCloseTo(1, 2);
@@ -532,7 +548,7 @@ it("RTL: a right-to-left note keeps the scroller's own route through a pinch, an
 it("A THEME'S OWN GRADIENTS: a scroller background on a period of its own keeps the scroller's route through a pinch", async () => {
 	const { p, close } = await open();
 	try {
-		// The cost control's background: 32 repeating gradients, attached to the text like the paper, period 6 px, not 28.
+		// The cost control's background: 32 repeating gradients, attached to the text like the paper, period 6 px, not the paper's pitch.
 		const themeOwn = Array.from({ length: 32 }, (_, i) => `repeating-linear-gradient(${i * 11}deg, rgba(0,0,0,0.04) 0, rgba(0,0,0,0.04) 1px, transparent 1px, transparent 6px)`).join(", ");
 		await mount(p, { global: "off", hostCss: `\n.markdown-source-view .cm-scroller { background-image: ${themeOwn}; background-attachment: local; }\n` });
 		await installFrameModel(p);
@@ -692,13 +708,17 @@ it.each(SMEAR_ARMS)("SMEAR %s AT %s: a quarter and a half device px of pan keep 
 		// The phases the copy carries: what the offset is rounded WITH, so that the rules - not the offset - land on whole
 		// device px (K5). The offset itself carries the phase's own fraction back out and is not whole.
 		const phases = await p.evaluate(() => { const o = (window as any).viewportFixture.paperOrigin("paper") as { phase: number; phaseX: number }; return { y: o.phase, x: o.phaseX }; });
-		const s = await scrollerBox(p), pitchDev = PITCH * k * DSF;
+		const s = await scrollerBox(p), pitchDev = (await paperPitch(p)) * k * DSF;
 		const clips = { y: { x: Math.round(s.left + 4), y: Math.round(s.top + 240), width: 12, height: 230 }, x: { x: Math.round(s.left + 20), y: Math.round(s.top + 250), width: 300, height: 12 } };
 		const axes = (kind === "grid" ? ["y", "x"] : ["y"]) as ("x" | "y")[];
-		// Counting window: a pitch in from each strip end, so a band at a crop edge never moves the count.
+		// Counting window: a pitch in from the strip's start, so a band at a crop edge never moves the count, and a whole
+		// number of pitches long, so a lattice shifted by any pan holds the same number of rules in it. The window was the
+		// strip less a pitch at each end, not a whole number of pitches (17.2 at 50 percent at the text's row height, 24 px):
+		// the half device px pan carried one hard rule across its end (17 vs 18). At 28 px the rules happened to sit clear of it.
 		const read = async (axis: "x" | "y") => {
 			const prof = await profile(p, clips[axis], axis), span = prof.length;
-			return summarise(lattice(prof, pitchDev, pitchDev, span - pitchDev));
+			const whole = Math.floor((span - 2 * pitchDev) / pitchDev) * pitchDev;
+			return summarise(lattice(prof, pitchDev, pitchDev, pitchDev + whole));
 		};
 		const setPan = (dev: number) => p.evaluate(async ({ dev, kd }) => {
 			const o = (window as any).viewportFixture.overlay("paper");
@@ -767,7 +787,7 @@ it("GRID AT 10 PERCENT, ON THE ELEMENT: every rule in the window draws, both axe
 	const { p, close } = await open();
 	try {
 		await mount(p, { global: "grid", zoom: 0.1, scrollTop: 600 });
-		const s = await scrollerBox(p), pitchDev = PITCH * 0.1 * DSF;
+		const s = await scrollerBox(p), pitchDev = (await paperPitch(p)) * 0.1 * DSF;
 		const strips = { y: { x: Math.round(s.left + 4), y: Math.round(s.top + 40), width: 12, height: 300 }, x: { x: Math.round(s.left + 20), y: Math.round(s.top + 250), width: 300, height: 12 } };
 		const counts = async () => {
 			const out: Record<string, { bands: number; expected: number }> = {};
@@ -850,7 +870,7 @@ it.each([1, 0.3, 0.1])("BOUNDS AT %s: the element is the scroller plus a pitch o
 		await pinchStart(p, 400, 380);
 		await pinchStage(p, 0.9, 6);
 		await pinchStage(p, 1, 4);
-		const k = zoom, pitchCss = PITCH * k;
+		const pitch = await paperPitch(p), k = zoom, pitchCss = pitch * k;
 		const reads: { dy: number; el: Preview; gaps: number[]; first: number; last: number; span: number }[] = [];
 		for (const dy of [pitchCss / 2, 3 * pitchCss]) {
 			await pinchStage(p, 1, 6, 0, dy);
@@ -869,7 +889,7 @@ it.each([1, 0.3, 0.1])("BOUNDS AT %s: the element is the scroller plus a pitch o
 			// The box without its translate: one pitch rounded up to whole device px, plus one, on each side (css px), and
 			// one more device px because the painted edge of an absolutely placed box rounds to the device grid (measured
 			// on green run 8: right and bottom margins over by .09 to .25 css px).
-			const hi = (Math.ceil(PITCH * k * DSF - 1e-6) + 2) / DSF + 0.01;
+			const hi = (Math.ceil(pitch * k * DSF - 1e-6) + 2) / DSF + 0.01;
 			for (const [side, v] of Object.entries(sides)) {
 				expect.soft(v, `BOUNDS z=${zoom}: the element's ${side} margin is at least a pitch`).toBeGreaterThanOrEqual(pitchCss - 0.01);
 				expect.soft(v, `BOUNDS z=${zoom}: the element's ${side} margin is a pitch and at most two device px more, never the scroll area`).toBeLessThanOrEqual(hi);

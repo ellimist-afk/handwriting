@@ -111,4 +111,28 @@ describe("a locked copy's attached ink keeps its group when the id line is fixed
 		const last = [...writes].reverse().find((w) => w.pageId === NEW);
 		expect(groupIds(last?.page.attachments ?? []), "the new id's file lost a group").toEqual(["g-own", "g-there"]);
 	});
+
+	it("the new id's file holds the carried group's id placed elsewhere: the file's group stands, the own stroke keeps its own follow", async () => {
+		// Defect: the carried list stands over the file's whole, so the file's version of the group is gone: its stroke stops
+		// following its word, and the file is written without it.
+		const theirs: AttachmentRecord = { ...group("g-own", ["there"]), ref: { x: 0, y: 50 }, probe: { id: "there", x: 10, y: 100 } };
+		const { store, writes, release } = await lockedCopyWithOwnGroup(page(NEW, [stroke("there", 100)], [theirs]));
+		release();
+		await settle();
+		expect(store.strokes(COPY).map((s) => s.id).sort(), "precondition: the file's stroke and the carried one").toEqual(["own", "there"]);
+		const want = (list: readonly AttachmentData[], where: string): void => {
+			const file = list.find((a) => a.id === "g-own");
+			expect(file, `${where}: the file's group is gone or not as the file holds it`).toEqual(theirs);
+			const own = list.filter((a) => a.id !== "g-own") as AttachmentRecord[];
+			expect(own.map((a) => a.strokeIds), `${where}: the own stroke is not in a group of its own`).toEqual([["own"]]);
+			expect(own[0]!.shown, `${where}: the own stroke's group lost its shown move`).toEqual({ dx: 0, dy: 20 });
+			expect(own[0]!.target, `${where}: the own stroke's group does not follow its word`).toEqual(group("g-own", ["own"]).target);
+			expect(own[0]!.ref, `${where}: the own stroke's group took another placing`).toEqual({ x: 0, y: 20 });
+		};
+		want(store.attachments(COPY), "the note");
+		expect(store.strokes(COPY).find((s) => s.id === "own")!.points[0], "the own stroke's points moved").toEqual({ x: 10, y: 60, pressure: 0.5, t: 0 });
+		const last = [...writes].reverse().find((w) => w.pageId === NEW);
+		expect(last, "precondition: the carried ink was written under the new id").toBeDefined();
+		want(last!.page.attachments ?? [], "the new id's file");
+	});
 });

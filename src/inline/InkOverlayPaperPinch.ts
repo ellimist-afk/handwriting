@@ -16,11 +16,13 @@ import { surfaceExtents } from "./SurfaceExtent";
 import { paperPlan, type PaperPlan } from "./PaperPlan";
 import { copyPreviewPaperBackground, foldIntoPitch, fractionOf, previewPaperCopyable, previewPaperPhase, previewPaperPitch, type PreviewPaperEnd, type PreviewPaperSource } from "./PaperPan";
 import { scrollProbeExtent } from "./ScrollProbe";
-import { pageGuidePitch } from "./PageGuides";
+import { PAGE_GUIDE_DASH_SCREEN_PX, pageGuideOutline } from "./PageGuides";
 
 /** The guides' box, and its own class while a preview lives (styles.css blanks it under that class). */
 const PAGE_GUIDES_CLASS = "handwriting-page-guides";
 const PAGE_GUIDES_PREVIEWING = "handwriting-page-guides-previewing";
+/** The outline's right edge lies past the box, which stops at the area's edge: no right line. */
+const PAGE_GUIDES_OPEN = "handwriting-page-guides-open";
 import { PAN_MIN_VISIBLE_PX, PAN_FIT_SLACK_PX, OVERSCROLL_BOUNCE_MS, PAPER_PROPERTIES, committedFloorFor, inkLookKey, inlineInk, type RasterCamera, standInFactorFits, type InkOverlayPlugin } from "./InkOverlay";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
 
@@ -71,6 +73,7 @@ declare module "./InkOverlay" {
 		syncGridPaperBox(): void;
 		removeGridPaperBox(): void;
 		syncPageGuideBox(): void;
+		writePageGuidePan(): void;
 		removePageGuideBox(): void;
 		markPageGuidesPreview(on: boolean): void;
 		stopPaperKindWatch(): void;
@@ -89,6 +92,7 @@ declare module "./InkOverlay" {
 		updatePaperSpacing(): void;
 		writePaperVars(plan: PaperPlan): boolean;
 		clearOwnPaperVars(): void;
+		paperCssChanged(): void;
 		heldRaster?: HeldRaster | null;
 		heldRasterClip?: HTMLElement | null;
 		heldRasterHlWrap?: HTMLElement | null;
@@ -322,7 +326,8 @@ declare module "./InkOverlay" {
 		const x = (this.panX() + this.paperColumnDrift) * s - (carry?.x ?? 0), y = this.panY() * s + this.paperRewrapY - (carry?.y ?? 0);
 		// While the preview paper is up it carries the pan, and the scroller's pan properties stay off.
 		if (this.previewPaperEl) { this.movePreviewPaper(x, y); return; }
-		// Folded by the pitch this overlay planned; a pitch the host owns is not known here, so its values go unfolded.
+		// Folded by the pitch this overlay planned and saw paint; a pitch the host owns (inline, or a stylesheet rule with a
+		// priority, which writePaperVars leaves unrecorded) is not known here, so its values go unfolded.
 		const pitch = Number.parseFloat(this.paperWritten?.get("--handwriting-paper-pitch") ?? "");
 		const ax = x === 0 ? "" : `${foldIntoPitch(x, pitch)}px`, ay = y === 0 ? "" : `${foldIntoPitch(y, pitch)}px`;
 		const last = this.paperPanWritten;
@@ -515,13 +520,17 @@ declare module "./InkOverlay" {
 	}
 
 	/**
-	 * THE PAGE GUIDES' BOX, made, sized or taken away. Infinite Canvas on, with the text column measured: faint lines at
-	 * every page height (PageGuides.ts) from the note's top edge, on every paper, at every zoom.
+	 * THE PAGE GUIDES' BOX, made, sized or taken away. Infinite Canvas on, with the text column and its left edge
+	 * measured: a faint dashed page outline (PageGuides.ts) on every paper, at every zoom. The box IS the outline: its
+	 * left at the column's left edge (the origin the paper's vertical rules are planned from), one page wide at the
+	 * export's scale; its background layers draw the side lines at its two edges and the page ends between them
+	 * (styles.css), so no line reaches past it. The column's left edge not yet measured: no box, never a line at 0.
 	 *
-	 * SCREEN ONLY AND INERT: absolutely placed behind the text (z-index -1, no pointer events), sized like the grid box
-	 * from the content and the grant, so it adds no scroll room; its top is the note origin the paper's phase is planned
-	 * from, so page 1 starts where the note does and no line sits at its top edge. It draws, clips and moves nothing,
-	 * and the print path never reads it.
+	 * SCREEN ONLY AND INERT: absolutely placed behind the text (z-index -1, no pointer events), as tall as the grid box
+	 * from the content and the grant, and never past the area's right edge, so it adds no scroll room: an outline wider
+	 * than the area is cut there and its right line, past the box, is not drawn. Its top is the note origin the paper's
+	 * phase is planned from, so page 1 starts where the note does and no line sits at its top edge. It draws, clips and
+	 * moves nothing, and the print path never reads it.
 	 *
 	 * QUIET WHILE A PREVIEW LIVES: the stylesheet blanks it under its own previewing class (markPageGuidesPreview), set
 	 * and cleared where the preview paper begins and ends, so it goes quiet on paper `none` too, where the scroller's
@@ -536,8 +545,10 @@ declare module "./InkOverlay" {
 		if (!scroller?.isConnected) { this.removePageGuideBox(); return; }
 		if (this.pinchPreview || !this.winRef?.getComputedStyle) return;
 		const column = this.viewportLayout?.columnBox ?? 0;
-		const pitch = this.canvasMode && column > 0 ? pageGuidePitch(column) : Number.NaN;
-		if (!(pitch > 0)) { this.removePageGuideBox(); return; }
+		const outline = this.canvasMode && column > 0 ? pageGuideOutline(column) : null;
+		const pitch = outline?.pitch ?? Number.NaN, pageW = outline?.width ?? Number.NaN;
+		const left = this.paperOriginLeft;
+		if (!(pitch > 0) || !(pageW > 0) || left === null || !Number.isFinite(left)) { this.removePageGuideBox(); return; }
 		if (!this.pageGuideBox) {
 			if (this.winRef.getComputedStyle(scroller).position === "static") {
 				scroller.setCssStyles({ position: "relative" });
@@ -548,26 +559,78 @@ declare module "./InkOverlay" {
 			scroller.insertBefore(box, this.paperGridBox?.parentElement === scroller ? this.paperGridBox.nextElementSibling : scroller.firstElementChild);
 			this.pageGuideBox = box;
 			this.pageGuideBoxKey = null;
+			this.pageGuidePanWritten = null;
 		}
 		const { w, h } = paperBoxArea(this, scroller);
 		const origin = this.paperOriginLayout;
 		const top = origin !== null && Number.isFinite(origin) && origin > 0 ? origin : 0;
 		const px = Math.round(pitch * 1000) / 1000;
-		const key = `${w},${h},${top},${px}`;
-		if (key === this.pageGuideBoxKey) return;
-		this.pageGuideBoxKey = key;
-		this.pageGuideBox.setCssStyles({ width: `${w}px`, height: `${Math.max(0, h - top)}px`, top: `${top}px` });
-		this.pageGuideBox.style.setProperty("--handwriting-page-guide-pitch", `${px}px`);
+		// The outline: from the column's left edge, one page wide. Its width, height and cut are the pan write's, below.
+		const x = Math.max(0, Math.round(left * 1000) / 1000);
+		const full = Math.round(pageW * 1000) / 1000;
+		this.pageGuideArea = { x, full, w, top, h };
+		// The dash and the gap are screen px at every zoom: the box lives inside the scaled host, so each is 4 over the
+		// painted scale in layout px. Written here, at rest, never on a preview frame (the box is blank there).
+		const k = this.cssScale;
+		const dash = Math.round((PAGE_GUIDE_DASH_SCREEN_PX / (Number.isFinite(k) && k > 0 ? k : 1)) * 1000) / 1000;
+		const key = `${x},${top},${px},${dash}`;
+		if (key !== this.pageGuideBoxKey) {
+			this.pageGuideBoxKey = key;
+			this.pageGuideBox.setCssStyles({ left: `${x}px`, top: `${top}px` });
+			this.pageGuideBox.style.setProperty("--handwriting-page-guide-pitch", `${px}px`);
+			this.pageGuideBox.style.setProperty("--handwriting-page-guide-dash", `${dash}px`);
+			this.pageGuideBox.style.setProperty("--handwriting-page-guide-gap", `${dash}px`);
+		}
+		// A box made or re-sized under a standing pan carries the pan, and the cut it needs, at once.
+		this.writePageGuidePan();
+	}
+
+	/**
+	 * THE GUIDES' BOX FOLLOWS THE PAN. The box is placed from the unpanned origin; the text moves by the sizer's
+	 * translate (writeViewportPan), so the box takes the same translate, the same numbers and the same string, "" at no
+	 * pan. Called from writeViewportPan on every pan write, from the preview's end where the box paints again, and from
+	 * syncPageGuideBox; not from the paper's write, which folds the pan and skips while a preview paper is up.
+	 *
+	 * NO SCROLL ROOM: a transformed child counts toward the scroller's scrollable overflow, so the box is cut by the pan
+	 * it carries: its right edge after the translate stays at the area's right edge or inside it, and its bottom at the
+	 * area's bottom, at either sign: a pan up or left grows the box by the pan, so the lines reach the area's edges in
+	 * the band the pan shows. Cut on the right, the right line lies past the box and is not drawn. A pan up or left
+	 * moves the box past the scroller's origin, which is not scroll room.
+	 *
+	 * No read, ever: the area is the one the last sync measured. Each of the transform, the size and the cut is written
+	 * only when it changes. Nothing while the box is blank under its previewing class, and nothing with no box.
+	 */
+	function writePageGuidePan(this: InkOverlayPlugin): void {
+		const box = this.pageGuideBox, area = this.pageGuideArea;
+		if (!box?.style || !area || this.pageGuidesPreviewing) return;
+		const k = this.cssScale;
+		const s = Number.isFinite(k) && k > 0 ? 1 / k : 0;
+		const tx = this.panX() * s, ty = this.panY() * s;
+		const transform = tx === 0 && ty === 0 ? "" : `translate(${tx}px,${ty}px)`;
+		// The signed pan: at a pan up or left (the canvas's common rest) the box grows by it, so its far edges after the
+		// translate still land on the area's. Floored to the 0.001, never rounded up past the edge.
+		const cut = Math.min(area.full, Math.floor((area.w - area.x - tx) * 1000) / 1000);
+		const open = cut < area.full;
+		const width = `${Math.max(0, cut)}px`;
+		const height = `${Math.max(0, Math.floor((area.h - area.top - ty) * 1000) / 1000)}px`;
+		const last = this.pageGuidePanWritten;
+		if (last?.transform !== transform) box.style.transform = transform;
+		if (last?.width !== width || last.height !== height) box.setCssStyles({ width, height });
+		if (box.classList.contains(PAGE_GUIDES_OPEN) !== open) box.classList.toggle(PAGE_GUIDES_OPEN, open);
+		this.pageGuidePanWritten = { transform, width, height, open };
 	}
 
 	/**
 	 * The guides' own previewing class, on or off: written only when it changes. Kept as state too, so a box made while a
-	 * preview lives starts quiet, and the box going and coming leaves the preview's word standing.
+	 * preview lives starts quiet, and the box going and coming leaves the preview's word standing. Off, the box takes the
+	 * pan in force: a pan written while it was blank (the live pinch frame, a settle that writes the paper only) is not
+	 * on it yet.
 	 */
 	function markPageGuidesPreview(this: InkOverlayPlugin, on: boolean): void {
 		if (this.pageGuidesPreviewing === on) return;
 		this.pageGuidesPreviewing = on;
 		this.pageGuideBox?.classList.toggle(PAGE_GUIDES_PREVIEWING, on);
+		if (!on) this.writePageGuidePan();
 	}
 
 	/** The guides' box goes: the canvas off, the column gone, a note switch, a release. */
@@ -576,6 +639,8 @@ declare module "./InkOverlay" {
 		this.pageGuideBox.remove();
 		this.pageGuideBox = null;
 		this.pageGuideBoxKey = null;
+		this.pageGuideArea = null;
+		this.pageGuidePanWritten = null;
 	}
 
 	/** The box goes: paper switched away from grid, a note switch, a release. Its own state goes with it. */
@@ -800,7 +865,7 @@ declare module "./InkOverlay" {
   if(!this.view?.dom?.isConnected)return;
   const layout=this.viewportLayout;
   const zoom=layout?layout.externalScale*this.pinchScaleNow:Number.isFinite(this.paperRestZoom)?this.paperRestZoom:this.cssScale;
-  const plan=paperPlan(this.paperFontPx,this.paperOriginLayout,(this.dpr||1)*zoom,this.paperOriginLeft);
+  const plan=paperPlan(this.paperFontPx,this.paperOriginLayout,(this.dpr||1)*zoom,this.paperOriginLeft,this.paperRowPx);
   if(!plan)return;
   // A re-plan while the preview paper rides a bounce (its settle's measure, say) is copied onto it at once; the settle re-copies its own.
   if(this.writePaperVars(plan)&&this.previewPaperEl&&!this.pinchPreview&&!this.previewPaperSettling)this.rebasePreviewPaper();
@@ -830,14 +895,61 @@ declare module "./InkOverlay" {
  function writePaperVars(this: InkOverlayPlugin, plan:PaperPlan):boolean {
   const host=this.view.dom;
   let wrote=false;
+  // Owed by a css-change (paperCssChanged), once, at rest: the new stylesheet may hold a pitch this overlay wrote and
+  // recorded, and the loop below skips a plan equal to its own inline value with no read. One read on the scroller; a
+  // recorded pitch that no longer paints comes back off, is refused, and the pan is re-written unfolded. Only the
+  // overlay's own inline value without a priority is checked: any other is the host's and is neither read nor touched.
+  let dropped=false;
+  if(this.paperPitchCheckOwed&&!this.pinchPreview){
+   this.paperPitchCheckOwed=false;
+   const name="--handwriting-paper-pitch",own=this.paperWritten?.get(name);
+   if(own&&host.style.getPropertyValue(name)===own&&!host.style.getPropertyPriority(name)
+    &&this.winRef.getComputedStyle(this.view.scrollDOM??host).getPropertyValue(name).trim()!==own){
+    host.style.removeProperty(name);this.paperWritten?.delete(name);this.paperPitchRefused=own;dropped=true;
+   }
+  }
   for(const [name,px] of [["--handwriting-paper-pitch",plan.pitch],["--handwriting-paper-rule",plan.rule],["--handwriting-paper-dot",plan.dot],["--handwriting-paper-phase",plan.phase],["--handwriting-paper-phase-x",plan.phaseX]] as const) {
+   // A record the editor no longer holds as the overlay left it (the host set its own value inline, or took this one with
+   // a priority) is the host's now: dropped before anything else, every name, with or without a planned value, so the
+   // pan is not folded by a pitch, nor a residual taken from a phase, that is not the overlay's. Inline style only, no read.
+   const rec=this.paperWritten?.get(name);
+   if(rec!==undefined&&(host.style.getPropertyValue(name)!==rec||host.style.getPropertyPriority(name))){
+    this.paperWritten?.delete(name);if(name==="--handwriting-paper-pitch")dropped=true;
+   }
    if(px===null)continue;
    const value=`${px}px`,current=host.style.getPropertyValue(name);
    if(current===value)continue;
    if(current&&(host.style.getPropertyPriority(name)||current!==this.paperWritten?.get(name)))continue;
-   host.style.setProperty(name,value);this.paperWritten?.set(name,value);wrote=true;
+   const pitch=name==="--handwriting-paper-pitch";
+   // The same plan a host's stylesheet kept from painting: nothing new to try, so no write and no read.
+   if(pitch&&!current&&value===this.paperPitchRefused)continue;
+   host.style.setProperty(name,value);
+   // A stylesheet rule with a priority beats an inline value without one, and the inline style does not show it: one
+   // read, only after a pitch write. Read on the scroller, the element that paints: a rule there beats the value it
+   // inherits from the host with or without a priority, and the host's own computed value would still be the planned one.
+   // Under either rule the planned pitch comes back off and is not recorded, and the pan goes unfolded (writePaperPan)
+   // rather than folded by a pitch that does not paint.
+   if(pitch&&this.winRef.getComputedStyle(this.view.scrollDOM??host).getPropertyValue(name).trim()!==value){
+    host.style.removeProperty(name);this.paperWritten?.delete(name);this.paperPitchRefused=value;continue;
+   }
+   if(pitch)this.paperPitchRefused=null;
+   this.paperWritten?.set(name,value);wrote=true;
   }
+  if(dropped)this.writePaperPan();
   return wrote;
+ }
+
+ /**
+  * A theme or snippet switch (css-change): the stylesheet that refused the planned pitch may be gone, and a re-plan at
+  * the same value skips the write, so the refusal ends here and the plan is written again at rest. The other way round,
+  * the new stylesheet may hold a pitch the overlay wrote and recorded: the next at-rest plan owes one check that it
+  * still paints (writePaperVars). At rest that plan runs now; on a preview frame nothing is read or written, and the
+  * release's at-rest plan runs the check. A detached editor plans nothing, so it reads nothing either.
+  */
+ function paperCssChanged(this: InkOverlayPlugin):void {
+  this.paperPitchRefused=null;
+  this.paperPitchCheckOwed=true;
+  if(!this.pinchPreview)this.updatePaperSpacing();
  }
 
  /**
@@ -852,6 +964,7 @@ declare module "./InkOverlay" {
   const host=this.view?.dom;
   if(host)for(const name of PAPER_PROPERTIES){const own=this.paperWritten?.get(name);if(own&&host.style.getPropertyValue(name)===own&&!host.style.getPropertyPriority(name))host.style.removeProperty(name);}
   this.paperWritten?.clear();
+  this.paperPitchRefused=null;this.paperPitchCheckOwed=false;
   // The pan properties live on the scroller and are only ever this overlay's.
   const scroller=this.view?.scrollDOM;
   if(scroller?.style){scroller.style.removeProperty("--handwriting-paper-pan-x");scroller.style.removeProperty("--handwriting-paper-pan-y");}
@@ -1103,6 +1216,7 @@ export function installPaperPinch(proto: InkOverlayPlugin): void {
 		syncGridPaperBox,
 		removeGridPaperBox,
 		syncPageGuideBox,
+		writePageGuidePan,
 		removePageGuideBox,
 		markPageGuidesPreview,
 		stopPaperKindWatch,
@@ -1121,6 +1235,7 @@ export function installPaperPinch(proto: InkOverlayPlugin): void {
 		updatePaperSpacing,
 		writePaperVars,
 		clearOwnPaperVars,
+		paperCssChanged,
 		putUpHeldRaster,
 		heldRasterSource,
 		placeHeldRasterCanvases,

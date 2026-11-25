@@ -4,7 +4,7 @@
  * when InkOverlay.ts loads.
  */
 import { Platform } from "obsidian";
-import { CameraState } from "../camera/coordinates";
+import { CameraState, screenToWorld } from "../camera/coordinates";
 import { contentOrigin } from "./ContentOrigin";
 import { anchorPaddingTop, anchorTop } from "./DocumentTop";
 import { cameraOriginYLayout, documentAnchorLadder, impliedDocumentTop, rungIndexFor } from "./DocumentAnchor";
@@ -39,7 +39,63 @@ import { eraserWholeStrokes, getInkSizeMult, inlineTool, scribbleEraseOn, shapeS
 import { scribbleEraseTargets } from "../ink/ScribbleErase";
 import { removeSelectedInlineStrokes } from "./InlineSelectionDelete";
 import { committedFloorFor, inlineInk, metrics, PRED_HISTORY, type InkOverlayPlugin } from "./InkOverlay";
+import { washedStripEnd } from "./InkOverlayPenSupport";
 import { handleInput } from "./LassoTransform";
+import { rebaseSelectionTouch, takeSelectionClaimAnchor } from "./InlinePenRouterInput";
+
+/** The camera as each overlay's pre-down hook found it, before ending a zoom there moved it (beforePenDown). */
+const camerasBeforePenDown = new WeakMap<InkOverlayPlugin, Readonly<CameraState>>();
+export function keepCameraBeforePenDown(o: InkOverlayPlugin): void {
+	camerasBeforePenDown.set(o, o.camera.snapshot);
+}
+
+/**
+ * A finger the selection took at its landing, claimed past the tap limit, when the claim's hook ended a wheel or
+ * touchpad zoom that moved the camera. `landing` is `sample`, the landing as it was mapped then, read through
+ * the camera from before the hook and handed back in the camera of now: the world point the finger landed on, so the hit
+ * test and lassoDown take the same contact (pin, Attach button, handle or box) of the same selection the claim did.
+ * `shift` runs from that point to the one the finger rests over now (the router's anchor): the drag counts from there,
+ * so its first step is the finger's own travel. The same when the zoom ended by its own quiet time during the wait
+ * (`settled`): the router's landing was handed back in the camera that end left (selectionTouchAfterSettle). Null for
+ * every other contact, and when neither moved the camera, which is today's path whole.
+ */
+function selectionClaimAfterHook(o: InkOverlayPlugin, sample: PenSample): { landing: PenSample; shift: { x: number; y: number } } | null {
+	const anchor = takeSelectionClaimAnchor(o.router);
+	const before = camerasBeforePenDown.get(o);
+	if (!anchor || !before) return null;
+	const now = o.camera.snapshot;
+	if (!anchor.settled && now.x === before.x && now.y === before.y && now.zoom === before.zoom) return null;
+	const w = screenToWorld(before, sample.x, sample.y);
+	const s = o.camera.worldToScreen(w.x, w.y);
+	const a = o.camera.screenToWorld(anchor.at.x, anchor.at.y);
+	return { landing: { ...sample, x: s.x, y: s.y }, shift: { x: a.x - w.x, y: a.y - w.y } };
+}
+
+/**
+ * A wheel or touchpad zoom ended by its own quiet time (InkOverlay's armWheelZoomQuiet) and moved the camera from
+ * `before`. A finger waiting on the selection keeps the point it landed on: its landing is handed back in the camera of
+ * now (rebaseSelectionTouch), as selectionClaimAfterHook does when the claim's hook ends the zoom.
+ */
+export function selectionTouchAfterSettle(o: InkOverlayPlugin, before: Readonly<CameraState>): void {
+	const now = o.camera.snapshot;
+	if (now.x === before.x && now.y === before.y && now.zoom === before.zoom) return;
+	rebaseSelectionTouch(o.router, (s) => {
+		const w = screenToWorld(before, s.x, s.y);
+		const p = o.camera.worldToScreen(w.x, w.y);
+		return { ...s, x: p.x, y: p.y };
+	});
+}
+
+/**
+ * Moves the start lassoDown just set for a box or handle grab by `d`, world px: the drag's and the transform's. A pin or
+ * Attach button press keeps its own: its pin goes where the contact lifts and the button acts on the lift, each read
+ * through the camera of now, so neither carries the zoom's error.
+ */
+function shiftSelectionGrab(o: InkOverlayPlugin, d: { x: number; y: number }): void {
+	if (o.dragFrom) o.dragFrom = { x: o.dragFrom.x + d.x, y: o.dragFrom.y + d.y };
+	const t = o.spaceSnapshot?.transform;
+	if (t) t.gesture = { ...t.gesture, from: { x: t.gesture.from.x + d.x, y: t.gesture.from.y + d.y } };
+}
 
 declare module "./InkOverlay" {
 	interface InkOverlayPlugin {
@@ -129,12 +185,17 @@ declare module "./InkOverlay" {
 		const eraser = intent === "erase";
 		// The lasso's resize and rotate handles size their hit squares by the input: a finger's is larger.
 		const input = handleInput(ev.pointerType);
+		// A selection finger whose claim ended a zoom: tested at the point it landed on, its grab counted from where it
+		// rests now (selectionClaimAfterHook). Every other contact: `at` is `sample`, and nothing is shifted.
+		const claimed = selectionClaimAfterHook(this, sample);
+		const at = claimed ? claimed.landing : sample;
 		if (intent === "lasso") {
 			this.mode = "lasso";
 			// With the toolbar lasso on, a finger reaches here on the selection too (the router's claim does not read the tip
 			// mode): its drag is the finger's, so a cancel or a pen landing puts it back, as on the branch below.
-			this.fingerOnSelection = this.selectionContactAt(this.camera.screenToWorld(sample.x, sample.y), input) !== null && ev.pointerType === "touch";
-			this.lassoDown(sample, input);
+			this.fingerOnSelection = this.selectionContactAt(this.camera.screenToWorld(at.x, at.y), input) !== null && ev.pointerType === "touch";
+			this.lassoDown(at, input);
+			if (claimed) shiftSelectionGrab(this, claimed.shift);
 			return;
 		}
 		// A bare tip landing INSIDE an active selection drags it - OneNote's
@@ -153,10 +214,20 @@ declare module "./InkOverlay" {
 		// the rotate knob sits above the box) or the padded box. A mouse works a held group's pin with nothing selected; a
 		// pen tip there inks. A finger reaches here on the selection only once it passed the tap limit (the router's
 		// claimTouch asks the same test), so it moves the selection; anywhere else a finger here is iPhone finger ink.
-		if (!eraser && this.selectionContactAt(this.camera.screenToWorld(sample.x, sample.y), input) !== null) {
+		// A finger never erases, whatever tool is lit: with the eraser lit the selection's finger moves it as with the nib.
+		const finger = ev.pointerType === "touch";
+		if ((!eraser || finger) && this.selectionContactAt(this.camera.screenToWorld(at.x, at.y), input) !== null) {
 			this.mode = "lasso";
-			this.fingerOnSelection = ev.pointerType === "touch";
-			this.lassoDown(sample, input);
+			this.fingerOnSelection = finger;
+			this.lassoDown(at, input);
+			if (claimed) shiftSelectionGrab(this, claimed.shift);
+			return;
+		}
+		// With the eraser lit a finger reaches here only by the selection's claim (finger ink needs the nib), so this one
+		// missed the contact it was claimed for. It holds an empty lasso contact to its lift, which lassoMove and lassoUp
+		// read as nothing: the selection stays and nothing is erased. Not "ink": its lift would end a metric never begun.
+		if (eraser && finger) {
+			this.mode = "lasso";
 			return;
 		}
 		// Tip and eraser return the pen to normal behavior: selection dissolves.
@@ -385,6 +456,9 @@ declare module "./InkOverlay" {
 			},
 			hide: () => this.snapCanvas?.clear(),
 			world: (x, y) => this.camera.screenToWorld(x, y),
+			// The scale the router maps each sample with (its provider reads cssScale), so the hold's slack is 4 screen px at
+			// every zoom. Not `scale`: that one carries the font zoom, which the router does not divide by.
+			scale: () => this.cssScale,
 			ended: () => { if (this.builder === builder) this.snapSealed = true; },
 			frame: typeof win.requestAnimationFrame === "function"
 				? { request: draw => win.requestAnimationFrame(() => draw()), cancel: id => win.cancelAnimationFrame(id) }
@@ -455,7 +529,7 @@ declare module "./InkOverlay" {
 		let lastAccepted: { x: number; y: number } | undefined;
 		for (const s of samples) {
 			this.snapPreview?.move(s.x, s.y);
-			if (Math.hypot(s.x - this.rawLastMoveX, s.y - this.rawLastMoveY) > 4) {
+			if (Math.hypot(s.x - this.rawLastMoveX, s.y - this.rawLastMoveY) > visualToNote(4, this.cssScale)) {
 				this.rawLastMoveT = s.timestamp;
 				this.rawLastMoveX = s.x;
 				this.rawLastMoveY = s.y;
@@ -527,6 +601,11 @@ declare module "./InkOverlay" {
 		// drawn last event, whether that was real or a guess.
 		if (prediction) this.tail.draw(prediction.fromX, prediction.fromY,
 			prediction.points, this.activeStyle.color, prediction.lineWidthPx);
+		// A highlighter's tip and predicted line keep out of the strip's end disc, after both are drawn: that disc is
+		// ink the washed wet layer already shows, and the tail wears the wash too (washedStripEnd). The tip's run goes
+		// with it, so the cut also takes the back ring the tip shares with the disc's edge.
+		const stripEnd = washedStripEnd(this);
+		if (stripEnd) this.tail.cutDisc(cam, stripEnd, liveHead ?? undefined);
 		// Probe AFTER the head is drawn: `head()` is then exactly the geometry
 		// on screen, so the recorded endpoint is the rendered endpoint.
 		if (isPenProbeEnabled()) {

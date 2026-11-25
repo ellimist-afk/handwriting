@@ -25,8 +25,8 @@
  * that also exists with no pan at such a placement). That reading is bounded separately: every lost rule must be a
  * boundary rule, and no more rules may be lost than sit on the boundary.
  *
- * DOTS (50 / 30 / 10 percent, pitch 30 at 120/7 px text so a tile is a whole number of device px, the tile placed on the
- * device grid first). Half a device px of pan must move the dots by 0.4-0.75 device px on both axes (the pan reached
+ * DOTS (50 / 30 / 10 percent, 20 px text so the pitch, the text's 30 px row, makes a tile a whole number of device px,
+ * the tile placed on the device grid first). Half a device px of pan must move the dots by 0.4-0.75 device px on both axes (the pan reached
  * them). It PASSES when the median dot mass is within 15 percent and the median peak at least .75 of the no-pan reading.
  *
  * POSITIVE CONTROLS, each of which must read RED on the same criteria:
@@ -61,16 +61,21 @@ beforeAll(async () => {
 afterAll(async () => { await realBrowser?.close(); });
 
 type Clip = { x: number; y: number; width: number; height: number };
-type Geo = { left: number; top: number; clientLeft: number; clientTop: number; scrollLeft: number; scrollTop: number; k: number; pitch: number; rule: number; phase: number; phaseX: number };
+type Geo = { left: number; top: number; clientLeft: number; clientTop: number; scrollLeft: number; scrollTop: number; k: number; pitch: number; rule: number; phase: number; phaseX: number; row: number };
 
 const readGeo = (p: Page): Promise<Geo> => p.evaluate(() => {
 	const sc = document.querySelector(".cm-scroller") as HTMLElement, host = document.querySelector(".cm-editor") as HTMLElement;
 	const r = sc.getBoundingClientRect(), cs = getComputedStyle(host);
 	const num = (name: string) => Number.parseFloat(cs.getPropertyValue(name)) || 0;
 	const zoom = Number.parseFloat(cs.zoom);
+	// One plain body row in layout px, read the way the overlay plans the pitch: the content's px line height, else a
+	// plain line box's height, to 1/64 px.
+	const content = document.querySelector(".cm-content") as HTMLElement, lh = getComputedStyle(content).lineHeight;
+	const line = content.querySelector(".cm-line") as HTMLElement | null;
+	const row = /px$/.test(lh.trim()) ? Number.parseFloat(lh) : line ? line.offsetHeight : Number.NaN;
 	return { left: r.left, top: r.top, clientLeft: sc.clientLeft, clientTop: sc.clientTop, scrollLeft: sc.scrollLeft, scrollTop: sc.scrollTop,
 		k: Number.isFinite(zoom) && zoom > 0 ? zoom : r.height / sc.offsetHeight, pitch: num("--handwriting-paper-pitch"), rule: num("--handwriting-paper-rule"),
-		phase: num("--handwriting-paper-phase"), phaseX: num("--handwriting-paper-phase-x") };
+		phase: num("--handwriting-paper-phase"), phaseX: num("--handwriting-paper-phase-x"), row: Math.round(row * 64) / 64 };
 });
 
 async function mount(p: Page, kind: "lines" | "grid" | "dots", z: number, textPx = 0): Promise<Geo> {
@@ -302,9 +307,16 @@ const dotVerdict = (none: DotRead, other: DotRead) => {
 	return { pass: massOk && peakOk, massOk, peakOk };
 };
 
+/**
+ * The text size for the dots arms. The pitch is the text's row, and fontPx sets the row to 1.5 x the text, so 20 px text
+ * is a 30 px row: a whole number of device px at every dots zoom here (30, 18 and 6 at DSF 2), as 120/7 px text gave
+ * under the old 28 x font / 16 pitch.
+ */
+const DOTS_TEXT_PX = 20;
+
 /** Dots at a whole-number device pitch with the tile on the device grid; returns the pan that placed it. */
 async function dotsOnGrid(p: Page, z: number) {
-	const g = await mount(p, "dots", z, 120 / 7), dev = 1 / (g.k * DSF);
+	const g = await mount(p, "dots", z, DOTS_TEXT_PX), dev = 1 / (g.k * DSF);
 	const corner = (screen: number, client: number, phase: number, scroll: number) => DSF * (screen + (client + phase - scroll) * g.k);
 	const fill = (v: number) => { const r = Math.ceil(v - 1e-6) - v; return r < 1e-3 ? 0 : r; };
 	const base = { x: fill(corner(g.left, g.clientLeft, g.phaseX, g.scrollLeft)) * dev, y: fill(corner(g.top, g.clientTop, g.phase, g.scrollTop)) * dev };
@@ -323,7 +335,9 @@ it.each([0.5, 0.3, 0.1])("DOTS AT %s: half a device px of pan moves the dots and
 		const none = dotRead(noneDots), half = dotRead(halfDots), moved = medianShift(noneDots, halfDots), verdict = dotVerdict(none, half);
 		// eslint-disable-next-line no-console
 		console.log(`SMEAR-CRITERIA DOTS z=${z}`, JSON.stringify({ geo: g, base, none, half, moved, verdict }));
-		expect(g.pitch, "premise: the pitch at 120/7 px text").toBeCloseTo(30, 3);
+		expect(g.pitch, `premise: the pitch at ${DOTS_TEXT_PX} px text is its row (${g.row} px)`).toBeCloseTo(g.row, 3);
+		const pitchDev = g.pitch * g.k * DSF;
+		expect(Math.abs(pitchDev - Math.round(pitchDev)), `premise: the tile is a whole number of device px (${pitchDev})`).toBeLessThanOrEqual(1e-3);
 		expect(none.dots, "premise: whole dots in the patch").toBeGreaterThanOrEqual(4);
 		expect(Math.min(moved.x, moved.y), `premise: the pan reached the dots ${JSON.stringify(moved)}`).toBeGreaterThanOrEqual(0.4);
 		expect(Math.max(moved.x, moved.y), `premise: by half a device px, not more ${JSON.stringify(moved)}`).toBeLessThanOrEqual(0.75);

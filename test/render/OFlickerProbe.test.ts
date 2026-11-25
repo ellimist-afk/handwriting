@@ -10,8 +10,8 @@
  * Order type there), and samples every frame after paint. This is a probe: it records which orders paint a dropped frame
  * and gates only its own instrument.
  *  - inlineHidden (control): the block hidden by inline style never shows, so no frame may drop.
- *  - userRow (plant): a block with a user row stays shown, so the text must end lower by the block height (46 px, within
- *    1 px) and the frames after it must read the block shown. A probe that reads nothing here is blind.
+ *  - userRow (plant): a block with a user row stays shown, so its height must be in the layout (scroll top change plus the
+ *    text's move is 46 px, within 1 px) and the frames after it must read the block shown. A probe that reads nothing here is blind.
  * Every other order is reported, not gated: per order the dropped frames (a frame after the claim, block shown, where the
  * O's drawn top or `.cm-content` top is 1 px or more off its settled value), the largest drop and how long the drop lasts.
  * It cannot say which order Obsidian uses; only the live run in real Obsidian says that.
@@ -39,7 +39,7 @@ const ORDERS: Order[] = ["textThenBlock", "blockThenText", "rowsNextFrame", "blo
 const REPORT = process.env.HW_O_FLICKER_PROBE_REPORT ?? "";
 
 type Sample = { f: number; t: number; mark: string; block: boolean; display: string; height: number; idOnly: boolean; rows: number;
-	docHasFm: boolean; contentTop: number; cmDocTop: number; camDocTop: number; oTop: number | null; oDy: number | null; anchorGen: number | null; shownMoves: number | null };
+	docHasFm: boolean; contentTop: number; scrollTop: number; cmDocTop: number; camDocTop: number; oTop: number | null; oDy: number | null; anchorGen: number | null; shownMoves: number | null };
 type Run = { order: Order; samples: Sample[]; times: Record<string, number>; strokes: number; frontmatterEnd: number };
 
 let browser: Browser;
@@ -82,7 +82,7 @@ function summarise(run: Run) {
 	const shown = after.filter((x) => x.display !== "none" && x.display !== "absent" && x.height > 0);
 	return {
 		order: run.order, frames: s.length, strokes: run.strokes, times: run.times,
-		rest: { contentTop: rest.contentTop, oTop: rest.oTop }, settled: { contentTop: settled.contentTop, oTop: settled.oTop, display: settled.display, idOnly: settled.idOnly, rows: settled.rows },
+		rest: { contentTop: rest.contentTop, scrollTop: rest.scrollTop, oTop: rest.oTop }, settled: { contentTop: settled.contentTop, scrollTop: settled.scrollTop, oTop: settled.oTop, display: settled.display, idOnly: settled.idOnly, rows: settled.rows },
 		shownFrames: shown.length, droppedFrames: dropped.length, maxDropPx: dropped.reduce((m, x) => Math.max(m, off(x)), 0),
 		dropMs: dropped.length ? Math.round(dropped[dropped.length - 1]!.t - dropped[0]!.t) : 0,
 		firstDrop: dropped[0] ?? null, marksDropped: [...new Set(dropped.map((x) => x.mark))],
@@ -106,7 +106,7 @@ for (const order of ORDERS) {
 			expect(sum.droppedFrames, "control: no frame drops").toBe(0);
 		}
 		if (order === "userRow") {
-			expect(Math.abs(sum.settled.contentTop - sum.rest.contentTop - PROPERTIES_PX), `plant: the text ends ${PROPERTIES_PX} px lower (rest ${sum.rest.contentTop}, settled ${sum.settled.contentTop})`).toBeLessThanOrEqual(1);
+			expect(Math.abs(sum.settled.scrollTop - sum.rest.scrollTop + sum.settled.contentTop - sum.rest.contentTop - PROPERTIES_PX), `plant: scroll top change plus text move is ${PROPERTIES_PX} px (scroll ${sum.rest.scrollTop} -> ${sum.settled.scrollTop}, text ${sum.rest.contentTop} -> ${sum.settled.contentTop})`).toBeLessThanOrEqual(1);
 			expect(sum.settled.display, "plant: the block with a user row stays shown").not.toBe("none");
 			expect(sum.shownFrames, "plant: the frames after the claim read the block shown").toBeGreaterThan(0);
 		}

@@ -30,6 +30,8 @@ import {
 	streamObject,
 	streamedDocument,
 } from "../../test/pdf-fixture";
+import { appendInkToPdf } from "../ink/InkPdfAppend";
+import { type InkStroke, computeBBox } from "../ink/Stroke";
 
 function read(src: string) {
 	const doc = readPdf(src);
@@ -106,6 +108,148 @@ describe("editing a dictionary", () => {
 			])
 		);
 		expect(after).toBe("<< /A (one) /B 2 /C (three) >>");
+	});
+});
+
+/** One stroke on page 1, shaped the way the canvas records it. */
+function stroke(tool: "pen" | "highlighter"): InkStroke {
+	const points = [0, 1, 2, 3].map((i) => ({ x: 100 + i * 10, y: 200 + i, pressure: 0.5, t: i * 8 }));
+	return {
+		id: `s-${tool}`,
+		tool,
+		color: tool === "pen" ? "#4b7bec" : "#ffd60a",
+		width: 3,
+		points,
+		bbox: computeBBox(points, 3),
+		createdAt: 0,
+		page: 1,
+	};
+}
+
+/** The one page of `src` as the flattened copy holds it, read back by this reader. */
+function flattenedPage(src: string, tool: "pen" | "highlighter"): string {
+	const r = appendInkToPdf(bytesOf(src), [stroke(tool)]);
+	if (!r.ok) throw new Error(`unexpected refusal: ${r.reason}`);
+	const doc = readPdf(r.bytes);
+	if (!doc.ok) throw new Error(`the copy does not read back: ${doc.reason}`);
+	const pages = pdfPages(doc.value);
+	expect(pages.ok && pages.value.map((p) => p.num)).toEqual([3]);
+	const body = objectBody(doc.value, 3);
+	if (body === null) throw new Error("the copy has no page object 3");
+	return body;
+}
+
+describe("adding a key to a dictionary whose last line is a comment", () => {
+	// A comment runs to the end of its line. A key added on that line becomes
+	// part of the comment, and so does the `>>` after it: the dictionary never
+	// closes, and a reader finds none of its keys.
+
+	it("starts the added keys on a line of their own", () => {
+		const after = setEntries(
+			"<< /Type /Page /Parent 2 0 R % a blank page\n>>",
+			new Map([["/Contents", "[4 0 R]"]])
+		);
+		expect([...dictEntries(after)]).toEqual([
+			["/Type", "/Page"],
+			["/Parent", "2 0 R"],
+			["/Contents", "[4 0 R]"],
+		]);
+		expect(after).toBe("<< /Type /Page /Parent 2 0 R % a blank page\n/Contents [4 0 R] >>");
+	});
+
+	it("takes a carriage return as the end of the comment's line as well", () => {
+		for (const eol of ["\r", "\r\n"]) {
+			const after = setEntries(`<< /A 1 % note${eol}>>`, new Map([["/B", "2"]]));
+			expect([...dictEntries(after)]).toEqual([
+				["/A", "1"],
+				["/B", "2"],
+			]);
+		}
+	});
+
+	it("adds to a dictionary that holds nothing but a comment", () => {
+		const after = setEntries("<< % nothing yet\n>>", new Map([["/A", "1"]]));
+		expect([...dictEntries(after)]).toEqual([["/A", "1"]]);
+	});
+
+	it("replaces a key in place and still closes after the comment", () => {
+		const after = setEntries(
+			"<< /Contents 4 0 R % made by hand\n>>",
+			new Map([
+				["/Contents", "[8 0 R 4 0 R]"],
+				["/Resources", "<< /ProcSet [/PDF] >>"],
+			])
+		);
+		expect([...dictEntries(after)]).toEqual([
+			["/Contents", "[8 0 R 4 0 R]"],
+			["/Resources", "<< /ProcSet [/PDF] >>"],
+		]);
+	});
+
+	it("writes the same bytes as before when the last line holds no comment", () => {
+		const add = new Map([["/C", "3"]]);
+		// A comment on an earlier line already ends at its own line break.
+		expect(setEntries("<< /A % note\n1 /B 2 >>", add)).toBe("<< /A % note\n1 /B 2 /C 3 >>");
+		expect(setEntries("<< /A % note\r1 /B 2 >>", add)).toBe("<< /A % note\r1 /B 2 /C 3 >>");
+		expect(setEntries("<< /A 1 /B 2\n>>", add)).toBe("<< /A 1 /B 2 /C 3 >>");
+		// A percent sign inside a string starts no comment, on one line or two,
+		// and an escaped paren does not end the string early.
+		expect(setEntries("<< /T (100% sure) >>", add)).toBe("<< /T (100% sure) /C 3 >>");
+		expect(setEntries("<< /T (half\n50% off)\n>>", add)).toBe("<< /T (half\n50% off) /C 3 >>");
+		expect(setEntries("<< /T (a \\) 5% b) >>", add)).toBe("<< /T (a \\) 5% b) /C 3 >>");
+	});
+
+	it("gives a blank page whose dictionary ends in a comment its ink, and keeps every key", () => {
+		const page = flattenedPage(document(1, () => "% a blank page\n"), "pen");
+		expect([...dictEntries(page).keys()]).toEqual(["/Type", "/Parent", "/MediaBox", "/Contents"]);
+		expect(dictEntries(page).get("/Contents")).toBe("[4 0 R]");
+	});
+
+	it("gives a page that inherits its resources and ends in a comment the highlighter's resources", () => {
+		const page = flattenedPage(
+			document(1, () => "/Contents 4 0 R % made by hand\n", "/Resources << /ProcSet [/PDF] >> ", [
+				streamObject("0 0 m 10 10 l S"),
+			]),
+			"highlighter"
+		);
+		expect([...dictEntries(page).keys()]).toEqual(["/Type", "/Parent", "/MediaBox", "/Contents", "/Resources"]);
+		expect([...dictEntries(dictEntries(page).get("/Resources")!).keys()]).toEqual([
+			"/ProcSet",
+			"/ExtGState",
+			"/XObject",
+		]);
+	});
+
+	it("keeps a page's own resources whole when they end in a comment", () => {
+		const page = flattenedPage(
+			document(1, () => "/Contents 4 0 R /Resources << /ProcSet [/PDF] % fonts later\n>> ", "", [
+				streamObject("0 0 m 10 10 l S"),
+			]),
+			"highlighter"
+		);
+		expect([...dictEntries(page).keys()]).toEqual(["/Type", "/Parent", "/MediaBox", "/Contents", "/Resources"]);
+		expect([...dictEntries(dictEntries(page).get("/Resources")!).keys()]).toEqual([
+			"/ProcSet",
+			"/ExtGState",
+			"/XObject",
+		]);
+	});
+
+	it("writes a page without a comment exactly as before", () => {
+		expect(flattenedPage(document(1), "pen")).toBe(
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [4 0 R] >>"
+		);
+		expect(
+			flattenedPage(
+				document(1, () => "/Contents 4 0 R ", "/Resources << /ProcSet [/PDF] >> ", [
+					streamObject("0 0 m 10 10 l S"),
+				]),
+				"highlighter"
+			)
+		).toBe(
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [8 0 R 4 0 R 9 0 R 7 0 R] " +
+				"/Resources << /ProcSet [/PDF] /ExtGState << /HwAlpha 5 0 R >> /XObject << /HwHighlights 6 0 R >> >> >>"
+		);
 	});
 });
 
@@ -361,5 +505,78 @@ describe("the page tree", () => {
 
 	it("reads numbers out of a box that spells them with decimals", () => {
 		expect(numbersIn("[0 0 595.28 841.89]")).toEqual([0, 0, 595.28, 841.89]);
+	});
+});
+
+/**
+ * Two pages in the tree, 3 and 4, and a third page object, 5, that the tree
+ * does not list. `kids` is the tree's /Kids text.
+ */
+function treeWithKids(kids: string): string {
+	return assemble([
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		`<< /Type /Pages /Kids ${kids} /Count 2 >>`,
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] >>",
+	]);
+}
+
+function pageNums(src: string): number[] {
+	const pages = pdfPages(read(src));
+	if (!pages.ok) throw new Error(`unexpected refusal: ${pages.reason}`);
+	return pages.value.map((p) => p.num);
+}
+
+describe("the page tree, with a comment among its kids", () => {
+	// A comment runs to the end of its line, and a viewer reads past it. A
+	// reference written inside one names no page, so the pages here have to
+	// be the ones the viewer shows, or ink is drawn on the wrong page.
+
+	it("leaves out a page named only inside a comment", () => {
+		const pages = pdfPages(read(treeWithKids("[3 0 R %5 0 R\n 4 0 R]")));
+		expect(pages.ok && pages.value.map((p) => [p.index, p.num])).toEqual([
+			[1, 3],
+			[2, 4],
+		]);
+	});
+
+	it("draws the second page's ink on the second page", () => {
+		const src = treeWithKids("[3 0 R %5 0 R\n 4 0 R]");
+		const r = appendInkToPdf(bytesOf(src), [{ ...stroke("pen"), page: 2 }]);
+		if (!r.ok) throw new Error(`unexpected refusal: ${r.reason}`);
+		const doc = read(latin1(r.bytes));
+		expect(dictEntries(objectBody(doc, 4)!).get("/Contents")).toMatch(/^\[\d+ 0 R\]$/);
+		expect(dictEntries(objectBody(doc, 3)!).has("/Contents")).toBe(false);
+		expect(objectBody(doc, 5)).toBe("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] >>");
+	});
+
+	it("does not refuse a tree whose comment names a page it also lists", () => {
+		const pages = pdfPages(read(treeWithKids("[3 0 R %4 0 R\n 4 0 R]")));
+		expect(pages.ok || pages.reason).toBe(true);
+		expect(pages.ok && pages.value.map((p) => p.num)).toEqual([3, 4]);
+	});
+
+	it("does not take an object named in a comment for a page", () => {
+		const src = assemble([
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R %6 0 R\n 4 0 R] /Count 2 /MediaBox [0 0 612 792] >>",
+			"<< /Type /Page /Parent 2 0 R >>",
+			"<< /Type /Page /Parent 2 0 R >>",
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] >>",
+			"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		]);
+		expect(pageNums(src)).toEqual([3, 4]);
+	});
+
+	it("takes a carriage return as the end of the comment's line", () => {
+		expect(pageNums(treeWithKids("[3 0 R %5 0 R\r 4 0 R]"))).toEqual([3, 4]);
+		expect(pageNums(treeWithKids("[3 0 R %5 0 R\r\n 4 0 R]"))).toEqual([3, 4]);
+	});
+
+	it("reads kids with no comment among them as before", () => {
+		expect(pageNums(treeWithKids("[3 0 R 4 0 R]"))).toEqual([3, 4]);
+		// A percent sign inside a string starts no comment.
+		expect(pageNums(treeWithKids("[3 0 R (50%) 4 0 R]"))).toEqual([3, 4]);
 	});
 });

@@ -382,7 +382,7 @@ describe("export of attached ink", () => {
 		expect({ y: r.inkY("g1"), shown: shownY(r, "g1"), rec: rec() }).toEqual(before);
 	});
 
-	it("after typing above, the SVG and PDF exports show the group where it is shown, and free ink where it is stored", async () => {
+	it("after typing above, the SVG and PDF exports show the group where it is shown, and free ink where it is shown (its line not moved: as stored)", async () => {
 		// Defect: export reads the store, and with no point settle at a write the stored points stay where the group was
 		// attached, so the exported drawing puts it a line above its words.
 		const r = await rig(TEXT);
@@ -418,7 +418,7 @@ describe("export of a group this pane has not read yet", () => {
 		return r;
 	}
 
-	it("the editor's export draws the group at its record's kept correction, and free ink where it is stored", async () => {
+	it("the editor's export draws the group at its record's kept correction, and free ink where it is shown (its line not moved: as stored)", async () => {
 		const r = await reopened();
 		const store = inlineInk.strokes(r.path);
 		const exported = r.overlay.exportStrokes(r.path) as InkStroke[];

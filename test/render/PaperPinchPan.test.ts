@@ -19,6 +19,10 @@
  * Tolerance: 2 device rows. Premise for every preview reading: the pan, in
  * device rows, sits at least 4 rows away from a whole pitch, so a pan-less paper
  * cannot pass by landing on the next rule.
+ *
+ * The pitch is one plain body row's height. Every reading takes it from the page, the
+ * `--handwriting-paper-pitch` the overlay wrote on the editor (layout px), never from a constant here, so
+ * each lattice filter, circular mean and modulo below runs at the period actually painted.
  */
 import { beforeAll, afterAll, it, expect } from "vitest";
 import { build } from "esbuild";
@@ -32,7 +36,7 @@ import { MAX_PINCH_SCALE } from "../../src/inline/PinchScale";
 
 let realBrowser: Browser, script: string;
 const OBSIDIAN_CAMERA_CSS = readFileSync(fileURLToPath(new URL("./noteViewportCamera.css", import.meta.url)), "utf8");
-const DSF = 2, PITCH = 28, TOL_DEV = 2, PAN_CLEAR_DEV = 4;
+const DSF = 2, TOL_DEV = 2, PAN_CLEAR_DEV = 4;
 /** On a preview frame the paper is the preview element, whose rules land on whole device px: half a device px more. */
 const TOL_PREVIEW_DEV = TOL_DEV + 0.5;
 const PAGE_GREY = 255, RULE_GREY = 0x77;
@@ -95,6 +99,9 @@ async function realPage(): Promise<Page> {
 async function mountPaper(p: Page, kind: "lines" | "grid" | "dots" = "lines", doc = "x", readable = false, ink = "far", note: "lines" | "grid" | "dots" | "" = "") {
 	await p.setContent(`<!doctype html><body class="handwriting-paper-${kind}" style="margin:0; background:#ffffff; --background-modifier-border:#777777"></body>`);
 	await p.addStyleTag({ content: pageCss() + OBSIDIAN_CAMERA_CSS });
+	// This file reads the paper alone. The page guides draw a dashed line down the text column's left edge, where the
+	// dots' first column also sits, and the reader would take the dashes for dots: the guides are hidden here.
+	await p.addStyleTag({ content: ".handwriting-page-guides { visibility: hidden !important; }" });
 	if (readable) {
 		// Obsidian's readable-width rules (verbatim, obsidianReadableWidth.ts) with a 320 px line width, so the 640 px editor
 		// shows a centred column that re-centres under a zoom-in. The classes go on the fixture's host as it is inserted.
@@ -154,8 +161,23 @@ function ruleEnds(greys: number[]): number[] {
 }
 
 const circ = (a: number, p: number) => { const r = ((a % p) + p) % p; return Math.min(r, p - r); };
+/**
+ * THE FOCAL Y for a pinch to k at the page's pitch (layout px). The live y pan is cy x (1 - 1/k) layout px (measured:
+ * translate -191.667 px at cy 230, k 6), so the focal point decides how far the pan sits from a whole number of pitches,
+ * which the arms' premise needs clear of PAN_CLEAR_DEV. The fixture's 230 was picked at a 28 px pitch; at the text's row
+ * height (24 px here) its pan at 600% lands 3.996 device px from a whole pitch. The 230 stays while its pan clears twice
+ * the premise's band; else the first y below it whose pan sits at least a quarter pitch from a whole one. The premise
+ * itself still reads the measured pan.
+ */
+function focalY(k: number, pitch: number, cy0 = 230): number {
+	const pDev = pitch * k * DSF, off = (cy: number) => circ(cy * (k - 1) * DSF, pDev);
+	if (!(pDev > 0) || off(cy0) >= 2 * PAN_CLEAR_DEV) return cy0;
+	for (let cy = cy0 + 1; cy <= cy0 + Math.ceil(pitch * k); cy++) if (off(cy) >= pDev / 4) return cy;
+	return cy0;
+}
 
-type Geo = { scrollerTop: number; scrollerLeft: number; scrollerHeight: number; lineTop: number; zoom: number; sizer: string; scrollTop: number; scrollLeft: number; vars: string; hostZoom: string; padTop: number; preview: boolean };
+/** `pitch`: the paper's pitch the overlay wrote on the editor, layout px (NaN when it is not a px length, which reds every reading). */
+type Geo = { scrollerTop: number; scrollerLeft: number; scrollerHeight: number; lineTop: number; zoom: number; sizer: string; scrollTop: number; scrollLeft: number; vars: string; hostZoom: string; padTop: number; preview: boolean; pitch: number };
 
 const readGeo = (p: Page): Promise<Geo> => p.evaluate(() => {
 	const sc = document.querySelector(".cm-scroller") as HTMLElement, line = document.querySelector(".cm-line") as HTMLElement;
@@ -165,7 +187,8 @@ const readGeo = (p: Page): Promise<Geo> => p.evaluate(() => {
 		zoom: (window as any).viewportFixture.snap("paper").state.zoom, sizer: sizer.style.transform, scrollTop: sc.scrollTop, scrollLeft: sc.scrollLeft,
 		vars: ["--handwriting-paper-pitch", "--handwriting-paper-rule", "--handwriting-paper-phase"].map(k => getComputedStyle(sc).getPropertyValue(k).trim()).join("|"),
 		hostZoom: getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).zoom, padTop: Number.parseFloat(getComputedStyle(document.querySelector(".cm-content") as HTMLElement).paddingTop),
-		preview: (window as any).viewportFixture.preview("paper") as boolean };
+		preview: (window as any).viewportFixture.preview("paper") as boolean,
+		pitch: Number.parseFloat(getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).getPropertyValue("--handwriting-paper-pitch")) };
 });
 
 type PreviewPaperState = { present: boolean; all: number; previewing: boolean; tx: number; ty: number; marginX: number; marginY: number; pitch: number; panX: number; panY: number };
@@ -189,7 +212,7 @@ const panY = (sizer: string) => { const m = /translate\(\s*(-?[\d.e+-]+)px\s*,\s
 async function readLines(p: Page, label: string) {
 	const before = await readGeo(p);
 	const clip = { x: Math.round(before.scrollerLeft + 4), y: Math.round(before.scrollerTop), width: 8, height: Math.min(420, Math.max(80, Math.floor(before.scrollerHeight - 10))) };
-	const pDev = PITCH * before.zoom * DSF;
+	const pDev = before.pitch * before.zoom * DSF;
 	// Only bands on the pitch lattice count: a band with another band one pitch away.
 	const allEnds = ruleEnds(await deviceRowGreys(p, clip));
 	const ends = allEnds.filter(e => allEnds.some(f => f !== e && Math.abs(Math.abs(f - e) - pDev) <= 2));
@@ -265,7 +288,7 @@ it("LINES: on a live pinch frame the rules keep their place under the text, and 
 		expect(live.stable, `premise: the preview did not move while it was read ${JSON.stringify(live)}`).toBe(true);
 		await expectFoldedPreview(p, "y", live.geo.zoom);
 		expect(live.geo.zoom, `premise: the preview reached 60 percent ${JSON.stringify(live.geo)}`).toBeCloseTo(0.6, 2);
-		expect(Math.abs(live.measuredPitch - live.pDev), `premise: the rules read at 28 x z x dsf device rows ${JSON.stringify(live)}`).toBeLessThanOrEqual(1);
+		expect(Math.abs(live.measuredPitch - live.pDev), `premise: the rules read at the page's pitch x z x dsf device rows ${JSON.stringify(live)}`).toBeLessThanOrEqual(1);
 		expect(live.panOffPitch, `premise: the focal pan is not a whole number of pitches ${JSON.stringify(live)}`).toBeGreaterThanOrEqual(PAN_CLEAR_DEV);
 		expect.soft(live.off, `LIVE PINCH: rule bottom edges vs the note origin, device rows (pan ${live.panDev.toFixed(1)} rows) ${JSON.stringify(live)}`).toBeLessThanOrEqual(TOL_PREVIEW_DEV);
 
@@ -291,9 +314,11 @@ it("LINES: on a live pinch frame the rules keep their place under the text, and 
 it("LINES AT 600%: on a live pinch frame the rules keep their place under the text, and again once the pinch settles", async () => {
 	// A literal target, not the imported constant: the gesture below asks for 600% on its own
 	// terms, so a regression that left MAX_PINCH_SCALE itself at 4 (not only a stray call site)
-	// still reddens the "reached the new ceiling" premise a few lines down, rather than the test
-	// silently retargeting itself to whatever the constant currently says.
-	expect(MAX_PINCH_SCALE, "premise: this pin targets the real ceiling").toBe(6);
+	// still reddens the "reached the target" premise a few lines down, rather than the test
+	// silently retargeting itself to whatever the constant currently says. 600% was the ceiling
+	// when this was written; the ceiling is now 800% (pinned by the zoom ceiling cells), so 600%
+	// is a zoom inside it and the premise reads the constant instead of naming it.
+	expect(MAX_PINCH_SCALE, "premise: 600% is inside the real ceiling").toBeGreaterThanOrEqual(6);
 	const p = await realPage();
 	try {
 		await mountPaper(p, "lines");
@@ -310,14 +335,14 @@ it("LINES AT 600%: on a live pinch frame the rules keep their place under the te
 
 		// A smaller starting spread (see pinchTo): 300 x 6 would walk both touch points off a
 		// 900 px window; 60 keeps the whole gesture on-screen at the same ratio.
-		await pinchTo(p, 6, 300, 230, 24, 60);
+		await pinchTo(p, 6, 300, focalY(6, rest.geo.pitch), 24, 60);
 		const live = await readLines(p, "live pinch frame");
 		expect(live.geo.preview, "frame identity: the pinch preview is still live for this reading").toBe(true);
 		expect(live.stable, `premise: the preview did not move while it was read ${JSON.stringify(live)}`).toBe(true);
 		// THE PLANT CATCHES HERE FIRST (leave the ceiling at 4 anywhere): the pinch settles at
 		// 400%, not 600%, and this premise reddens on its own.
 		expect(live.geo.zoom, `premise: the preview reached the new ceiling, not the old one ${JSON.stringify(live.geo)}`).toBeCloseTo(6, 2);
-		expect(Math.abs(live.measuredPitch - live.pDev), `premise: the rules read at 28 x z x dsf device rows ${JSON.stringify(live)}`).toBeLessThanOrEqual(1);
+		expect(Math.abs(live.measuredPitch - live.pDev), `premise: the rules read at the page's pitch x z x dsf device rows ${JSON.stringify(live)}`).toBeLessThanOrEqual(1);
 		expect(live.panOffPitch, `premise: the focal pan is not a whole number of pitches ${JSON.stringify(live)}`).toBeGreaterThanOrEqual(PAN_CLEAR_DEV);
 		expect.soft(live.off, `LIVE PINCH AT 600%: rule bottom edges vs the note origin, device rows (pan ${live.panDev.toFixed(1)} rows) ${JSON.stringify(live)}`).toBeLessThanOrEqual(TOL_DEV);
 
@@ -386,6 +411,7 @@ async function readPatch(p: Page, dots = false, patch = PATCH) {
 		const line = (document.querySelector(".cm-line") as HTMLElement).getBoundingClientRect();
 		return { scrollerLeft: r.left, scrollerTop: r.top, zoom: (window as any).viewportFixture.snap("paper").state.zoom as number, sizerLeft: s.left, sizerTop: s.top,
 			lineLeft: line.left, lineTop: line.top, rule: Number.parseFloat(getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).getPropertyValue("--handwriting-paper-rule")) || 1,
+			pitch: Number.parseFloat(getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).getPropertyValue("--handwriting-paper-pitch")),
 			sizer: sizer.style.transform, scrollLeft: sc.scrollLeft, scrollTop: sc.scrollTop, preview: (window as any).viewportFixture.preview("paper") as boolean,
 			vars: ["--handwriting-paper-pitch", "--handwriting-paper-rule", "--handwriting-paper-dot", "--handwriting-paper-phase"].map(k => getComputedStyle(sc).getPropertyValue(k).trim()).join("|") };
 	});
@@ -401,7 +427,7 @@ async function readPatch(p: Page, dots = false, patch = PATCH) {
 		rows[y] = rows[y]! + f / d.width; cols[x] = cols[x]! + f / d.height;
 	}
 	const after = await g();
-	const k = before.zoom;
+	const k = before.zoom, pitch = before.pitch;
 	const centres: Record<Axis, number[]> = { x: bandCentres(cols), y: bandCentres(rows) };
 	if (dots) {
 		// A dot is too small a share of a row for a projection: each dot is its own blob, and its weighted centre is one
@@ -432,7 +458,7 @@ async function readPatch(p: Page, dots = false, patch = PATCH) {
 		}
 	}
 	// Only positions on the pitch lattice count: one with another position a whole number of pitches away along the axis.
-	const pLattice = PITCH * k * DSF;
+	const pLattice = pitch * k * DSF;
 	for (const a of ["x", "y"] as const) {
 		const all = centres[a];
 		centres[a] = all.filter(c => all.some(o => { const d = Math.abs(o - c); const n = Math.round(d / pLattice); return n >= 1 && Math.abs(d - n * pLattice) <= 2; }));
@@ -442,15 +468,15 @@ async function readPatch(p: Page, dots = false, patch = PATCH) {
 	const rel = (a: Axis) => {
 		const c = centres[a];
 		if (!c.length) return Number.NaN;
-		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % PITCH) + PITCH) % PITCH) / PITCH);
+		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % pitch) + pitch) % pitch) / pitch);
 		const m = Math.atan2(ang.reduce((s, v) => s + Math.sin(v), 0), ang.reduce((s, v) => s + Math.cos(v), 0));
-		return (((m / (2 * Math.PI)) * PITCH) + PITCH) % PITCH;
+		return (((m / (2 * Math.PI)) * pitch) + pitch) % pitch;
 	};
 	/** How tightly the positions agree modulo the pitch (1 = one lattice exactly, 0 = no lattice at this pitch). */
 	const tight = (a: Axis) => {
 		const c = centres[a];
 		if (!c.length) return 0;
-		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % PITCH) + PITCH) % PITCH) / PITCH);
+		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % pitch) + pitch) % pitch) / pitch);
 		return Math.hypot(ang.reduce((s, v) => s + Math.sin(v), 0), ang.reduce((s, v) => s + Math.cos(v), 0)) / c.length;
 	};
 	const medianGap = (xs: number[]) => { const gs = xs.slice(1).map((v, i) => v - xs[i]!).sort((a, b) => a - b); return gs.length ? gs[Math.floor(gs.length / 2)]! : Number.NaN; };
@@ -458,18 +484,18 @@ async function readPatch(p: Page, dots = false, patch = PATCH) {
 	// THE CONTRACT, absolutely: the vertical rules' right edges and the dot columns' centres on the text column's left edge
 	// (plus half a pitch for a dot), the horizontal rules' bottom edges and the dot rows' centres on the note's top, modulo
 	// the pitch. The largest distance over the marks read, in device px.
-	const pDevHere = PITCH * k * DSF, ruleDev = before.rule * k * DSF;
+	const pDevHere = pitch * k * DSF, ruleDev = before.rule * k * DSF;
 	const anchor: Record<Axis, number> = { x: (before.lineLeft - clip.x) * DSF, y: (before.lineTop - clip.y) * DSF };
 	const markOffset = dots ? pDevHere / 2 : -ruleDev / 2;
 	const abs = (a: Axis) => centres[a].length ? Math.max(...centres[a].slice(0, 6).map(c => circ(c - (anchor[a] + markOffset), pDevHere))) : Number.NaN;
-	return { geo: before, stable: JSON.stringify(before) === JSON.stringify(after), abs: { x: abs("x"), y: abs("y") } as Record<Axis, number>,
+	return { geo: before, pitch, stable: JSON.stringify(before) === JSON.stringify(after), abs: { x: abs("x"), y: abs("y") } as Record<Axis, number>,
 		centres: { x: centres.x.slice(0, 5).map(v => Math.round(v * 10) / 10), y: centres.y.slice(0, 5).map(v => Math.round(v * 10) / 10) },
 		rel: { x: rel("x"), y: rel("y") } as Record<Axis, number>, tight: { x: tight("x"), y: tight("y") } as Record<Axis, number>, count: { x: centres.x.length, y: centres.y.length } as Record<Axis, number>, pitchDev: { x: medianGap(centres.x), y: medianGap(centres.y) } as Record<Axis, number>,
 		pan: { x: pan.x * k * DSF, y: pan.y * k * DSF } as Record<Axis, number> };
 }
 
-/** Distance in device px, at zoom k, between two layout-px places modulo the pitch. */
-const relOffDev = (a: number, b: number, k: number) => circ(a - b, PITCH) * k * DSF;
+/** Distance in device px, at zoom k, between two layout-px places modulo the pitch (layout px, as read from the page). */
+const relOffDev = (a: number, b: number, k: number, pitch: number) => circ(a - b, pitch) * k * DSF;
 
 /**
  * `scale`/`spread0` default to the original 150%/300 (every caller before MAXZOOM-6 got exactly
@@ -493,14 +519,14 @@ async function bothAxesArm(kind: "grid" | "dots", scale = 1.5, spread0 = 300, pa
 		expect(rest.geo.scrollLeft, `premise: the note scrolls sideways, so the x pan has a scroll to spend into ${JSON.stringify(rest.geo)}`).toBeGreaterThan(0);
 		for (const a of AXES) {
 			expect(rest.count[a], `premise: the ${kind} lattice is found on ${a} at rest ${JSON.stringify(rest)}`).toBeGreaterThanOrEqual(4);
-			expect(rest.tight[a], `premise: the ${kind} ${a} positions form one lattice at 28 x dsf at rest ${JSON.stringify(rest)}`).toBeGreaterThanOrEqual(0.9);
+			expect(rest.tight[a], `premise: the ${kind} ${a} positions form one lattice at the page's pitch x dsf at rest ${JSON.stringify(rest)}`).toBeGreaterThanOrEqual(0.9);
 		}
 
 		// A pinch IN: zooming out spends the x pan into the column and the scroll on this fixture (measured: translate(0px, 155px)
 		// at 60 percent), so only a zoom-in carries a pan on both axes here.
-		await pinchTo(p, scale, 320, 230, 24, spread0);
+		await pinchTo(p, scale, 320, focalY(scale, rest.pitch), 24, spread0);
 		const live = await readPatch(p, kind === "dots", patch);
-		const k = live.geo.zoom, pDev = PITCH * k * DSF;
+		const k = live.geo.zoom, pDev = live.pitch * k * DSF;
 		expect(live.geo.preview, "frame identity: the pinch preview is still live for this reading").toBe(true);
 		expect(live.stable, `premise: the preview did not move while it was read ${JSON.stringify(live.geo)}`).toBe(true);
 		// THE PLANT CATCHES HERE FIRST (leave the ceiling at 4 anywhere): the pinch settles at
@@ -508,9 +534,9 @@ async function bothAxesArm(kind: "grid" | "dots", scale = 1.5, spread0 = 300, pa
 		expect(k, `premise: the preview reached the target scale, not a lower ceiling ${JSON.stringify(live.geo)}`).toBeCloseTo(scale, 2);
 		for (const a of AXES) {
 			expect(live.count[a], `premise: the ${kind} lattice is found on ${a} on the live frame ${JSON.stringify(live)}`).toBeGreaterThanOrEqual(3);
-			expect(live.tight[a], `premise: the ${kind} ${a} positions form one lattice at 28 x z x dsf on the live frame ${JSON.stringify(live)}`).toBeGreaterThanOrEqual(0.9);
+			expect(live.tight[a], `premise: the ${kind} ${a} positions form one lattice at the page's pitch x z x dsf on the live frame ${JSON.stringify(live)}`).toBeGreaterThanOrEqual(0.9);
 			expect(circ(live.pan[a], pDev), `premise: the ${a} pan is not a whole number of pitches ${JSON.stringify(live)}`).toBeGreaterThanOrEqual(PAN_CLEAR_DEV);
-			expect.soft(relOffDev(live.rel[a], rest.rel[a], k), `LIVE PINCH ${kind} ${a}: the lattice against the text's box, device px from its at-rest place (pan ${live.pan[a].toFixed(1)} px); rest ${rest.rel[a].toFixed(3)} live ${live.rel[a].toFixed(3)} ${JSON.stringify(live)}`).toBeLessThanOrEqual(TOL_PREVIEW_DEV);
+			expect.soft(relOffDev(live.rel[a], rest.rel[a], k, live.pitch), `LIVE PINCH ${kind} ${a}: the lattice against the text's box, device px from its at-rest place (pan ${live.pan[a].toFixed(1)} px); rest ${rest.rel[a].toFixed(3)} live ${live.rel[a].toFixed(3)} ${JSON.stringify(live)}`).toBeLessThanOrEqual(TOL_PREVIEW_DEV);
 		}
 
 		await release(p);
@@ -521,7 +547,7 @@ async function bothAxesArm(kind: "grid" | "dots", scale = 1.5, spread0 = 300, pa
 		// WHATEVER zoom actually landed - so the commit's own target is pinned explicitly here too.
 		expect(settled.geo.zoom, "premise: the settle actually committed the target scale").toBeCloseTo(scale, 2);
 		for (const a of AXES) {
-			expect.soft(relOffDev(settled.rel[a], rest.rel[a], settled.geo.zoom), `SETTLED ${kind} ${a}: the lattice against the text's box, device px from its at-rest place (standing pan ${settled.pan[a].toFixed(1)} px); rest ${rest.rel[a].toFixed(3)} settled ${settled.rel[a].toFixed(3)} ${JSON.stringify(settled)}`).toBeLessThanOrEqual(TOL_DEV);
+			expect.soft(relOffDev(settled.rel[a], rest.rel[a], settled.geo.zoom, settled.pitch), `SETTLED ${kind} ${a}: the lattice against the text's box, device px from its at-rest place (standing pan ${settled.pan[a].toFixed(1)} px); rest ${rest.rel[a].toFixed(3)} settled ${settled.rel[a].toFixed(3)} ${JSON.stringify(settled)}`).toBeLessThanOrEqual(TOL_DEV);
 		}
 		// eslint-disable-next-line no-console
 		console.log(`PAPER-PAN ${kind.toUpperCase()}`, JSON.stringify({ rest, live, settled }));
@@ -542,7 +568,7 @@ it("DOTS: on a live pinch frame the dots keep their place under the text on both
  */
 it("GRID AT 600%: on a live pinch frame both rule directions keep their place under the text, and again once the pinch settles", () => {
 	// A literal 6, not the imported constant - see the LINES AT 600% arm's own note above.
-	expect(MAX_PINCH_SCALE, "premise: this pin targets the real ceiling").toBe(6);
+	expect(MAX_PINCH_SCALE, "premise: 600% is inside the real ceiling").toBeGreaterThanOrEqual(6);
 	return bothAxesArm("grid", 6, 60, { dx: 20, dy: 20, w: 600, h: 600 });
 });
 
@@ -671,7 +697,7 @@ it.each([["grid", true], ["grid", false], ["dots", true], ["dots", false]] as co
 			await (window as any).viewportFixture.settle();
 		});
 		const rest = await readPatch(p, kind === "dots");
-		const pDev = PITCH * rest.geo.zoom * DSF;
+		const pDev = rest.pitch * rest.geo.zoom * DSF;
 		const columnFromEdge = (rest.geo.lineLeft - rest.geo.scrollerLeft) * DSF;
 		expect(rest.tight.x, `premise: one lattice on x ${JSON.stringify(rest)}`).toBeGreaterThanOrEqual(0.9);
 		// eslint-disable-next-line no-console
@@ -728,7 +754,7 @@ it.each([["grid", true], ["dots", true], ["grid", false]] as const)("ZOOM IN %s,
 		for (const { label, r } of readings) {
 			expect(r.stable, `premise: ${label} did not move while it was read`).toBe(true);
 			for (const a of axesRead) {
-				expect.soft(relOffDev(r.rel[a], rest.rel[a], r.geo.zoom), `ZOOM IN ${kind} RLL=${readable} ${label} ${a}: the lattice against the text's box, device px from its at-rest place`).toBeLessThanOrEqual(label === "settled" ? TOL_DEV : TOL_PREVIEW_DEV);
+				expect.soft(relOffDev(r.rel[a], rest.rel[a], r.geo.zoom, r.pitch), `ZOOM IN ${kind} RLL=${readable} ${label} ${a}: the lattice against the text's box, device px from its at-rest place`).toBeLessThanOrEqual(label === "settled" ? TOL_DEV : TOL_PREVIEW_DEV);
 				expect.soft(r.abs[a], `ZOOM IN ${kind} RLL=${readable} ${label} ${a}: the marks against the column's left edge / the note's top, device px`).toBeLessThanOrEqual(label === "settled" ? TOL_DEV : TOL_PREVIEW_DEV);
 			}
 		}
@@ -763,7 +789,7 @@ it("ZOOM OUT grid, readable line length on: no re-centring, and the paper stays 
 		expect(settled.geo.preview, "frame identity: the preview has ended for this reading").toBe(false);
 		for (const [label, r] of [["live", live], ["settled", settled]] as const) {
 			for (const a of AXES) {
-				expect.soft(relOffDev(r.rel[a], rest.rel[a], r.geo.zoom), `ZOOM OUT ${label} ${a}: the lattice against the text's box, device px`).toBeLessThanOrEqual(label === "live" ? TOL_PREVIEW_DEV : TOL_DEV);
+				expect.soft(relOffDev(r.rel[a], rest.rel[a], r.geo.zoom, r.pitch), `ZOOM OUT ${label} ${a}: the lattice against the text's box, device px`).toBeLessThanOrEqual(label === "live" ? TOL_PREVIEW_DEV : TOL_DEV);
 				expect.soft(r.abs[a], `ZOOM OUT ${label} ${a}: the marks against the column's left edge / the note's top, device px`).toBeLessThanOrEqual(label === "live" ? TOL_PREVIEW_DEV : TOL_DEV);
 			}
 		}
@@ -924,7 +950,7 @@ it.fails("NO-PAN CONTROL: a pinch in and back about one point, fingers down, car
 		expect(live.geo.zoom, `premise: back at its starting scale ${JSON.stringify(live.geo)}`).toBeCloseTo(1, 2);
 		for (const a of AXES) {
 			expect(Math.abs(live.pan[a]), `premise: no ${a} pan is left, device px ${JSON.stringify(live.geo)}`).toBeLessThanOrEqual(TOL_DEV);
-			expect.soft(relOffDev(live.rel[a], rest.rel[a], live.geo.zoom), `NO-PAN CONTROL ${a}: the lattice against the text's box, device px`).toBeLessThanOrEqual(TOL_PREVIEW_DEV);
+			expect.soft(relOffDev(live.rel[a], rest.rel[a], live.geo.zoom, live.pitch), `NO-PAN CONTROL ${a}: the lattice against the text's box, device px`).toBeLessThanOrEqual(TOL_PREVIEW_DEV);
 		}
 		await stagedRelease(p);
 	} finally {

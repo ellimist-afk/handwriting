@@ -262,14 +262,19 @@ describe("highlighter, which needs a transparency state", () => {
 		expect(gs.has("/HwAlpha1")).toBe(true);
 	});
 
-	it("writes into a shared resources object once, however many pages use it", () => {
+	it.each<["darken" | "lighten"]>([["darken"], ["lighten"]])("leaves a shared resources object alone, %s, and gives each page its own copy", (mode) => {
+		// Light pages under darken, and every page under Lighten for dark pages: each takes its group the same way.
 		const src = document(2, () => "/Resources 5 0 R ", "", ["<< /Font << /F1 9 0 R >> >>"]);
-		const doc = reread(appended(src, [stroke(1, "highlighter"), stroke(2, "highlighter")]));
-		const res = objectBody(doc, 5)!;
-		expect((res.match(/HwAlpha/g) ?? [])).toHaveLength(1);
-		expect(res).toContain("/Font << /F1 9 0 R >>");
-		// The pages reach it as they always did.
-		expect(dictEntries(objectBody(doc, 3)!).get("/Resources")).toBe("5 0 R");
+		const r = appendInkToPdf(bytes(src), [stroke(1, "highlighter"), stroke(2, "highlighter")], mode);
+		if (!r.ok) throw new Error(r.reason);
+		const doc = reread(r.bytes);
+		expect(objectBody(doc, 5)).toBe("<< /Font << /F1 9 0 R >> >>");
+		for (const num of [3, 4]) {
+			const res = dictEntries(objectBody(doc, num)!).get("/Resources")!;
+			expect(res.startsWith("<<")).toBe(true);
+			expect(dictEntries(res).get("/Font")).toBe("<< /F1 9 0 R >>");
+			expect(dictEntries(dictEntries(res).get("/ExtGState")!).has("/HwAlpha")).toBe(true);
+		}
 	});
 });
 
@@ -377,5 +382,59 @@ describe("where the ink lands", () => {
 		const body = doc.text(doc.offsets.get(ink)!, doc.bytes.length);
 		expect(body).toContain("0 1 -1 0 612 0 cm");
 		expect(body).toContain("1 0 0 -1 0 612 cm");
+	});
+});
+
+/** The page's restated content list, read back from the finished file. */
+function restatedContents(src: string): string {
+	const doc = reread(appended(src, [stroke(1)]));
+	const pages = pdfPages(doc);
+	expect(pages.ok && pages.value.map((p) => p.num)).toEqual([3]);
+	const page = dictEntries(objectBody(doc, 3)!);
+	expect([...page.keys()]).toEqual(["/Type", "/Parent", "/MediaBox", "/Contents"]);
+	return page.get("/Contents")!;
+}
+
+/** The references a reader sees in a content list: none inside a comment. */
+function refsSeen(list: string): number[] {
+	return (list.replace(/%[^\r\n]*/g, "").match(/\d+\s+\d+\s+R/g) ?? []).map((r) => Number(r.split(/\s/)[0]));
+}
+
+describe("a content list that ends in a comment", () => {
+	// A comment runs to the end of its line. The writer restates the page's
+	// list with its own references added after the old ones; written on the
+	// comment's line they, and the closing `]`, would be part of it.
+
+	it("keeps every old reference and the three added when the page's own array ends in a comment", () => {
+		const list = restatedContents(
+			document(1, () => "/Contents [4 0 R % the page's text\n] ", "", [streamObject("BT /F1 12 Tf (hello) Tj ET")])
+		);
+		// The ink stream is object 5, the guards around the old content 6 and 7.
+		expect(refsSeen(list)).toEqual([6, 4, 7, 5]);
+		expect(list.endsWith("]")).toBe(true);
+	});
+
+	it("keeps every old reference and the three added when the array it points at ends in a comment", () => {
+		const list = restatedContents(
+			document(1, () => "/Contents 5 0 R ", "", [
+				streamObject("BT /F1 12 Tf (hello) Tj ET"),
+				"[4 0 R % the page's text\n]",
+			])
+		);
+		expect(refsSeen(list)).toEqual([7, 4, 8, 6]);
+		expect(list.endsWith("]")).toBe(true);
+	});
+
+	it("writes the content list as before when its last line holds no comment", () => {
+		const text = streamObject("BT /F1 12 Tf (hello) Tj ET");
+		expect(restatedContents(document(1, () => "/Contents [4 0 R] ", "", [text]))).toBe("[6 0 R 4 0 R 7 0 R 5 0 R]");
+		expect(restatedContents(document(1, () => "/Contents [4 0 R\n] ", "", [text]))).toBe("[6 0 R 4 0 R 7 0 R 5 0 R]");
+		expect(restatedContents(document(1, () => "/Contents 4 0 R ", "", [text]))).toBe("[6 0 R 4 0 R 7 0 R 5 0 R]");
+		// A comment on an earlier line already ends at its own line end, a
+		// carriage return included.
+		const two = (eol: string): string =>
+			document(1, () => `/Contents [4 0 R % the page's text${eol}5 0 R] `, "", [text, text]);
+		expect(restatedContents(two("\n"))).toBe("[7 0 R 4 0 R % the page's text\n5 0 R 8 0 R 6 0 R]");
+		expect(restatedContents(two("\r"))).toBe("[7 0 R 4 0 R % the page's text\r5 0 R 8 0 R 6 0 R]");
 	});
 });

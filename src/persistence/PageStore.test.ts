@@ -86,8 +86,15 @@ class FakeAdapter {
 	async mkdir(path: string): Promise<void> {
 		this.dirs.add(path);
 	}
-	async stat(path: string): Promise<{ mtime: number } | null> {
-		return this.files.has(path) ? { mtime: this.mtimes.get(path)! } : null;
+	/**
+	 * A file's modified time. A folder is answered too, as both hosts' adapters answer one (and as the shared
+	 * FakeAdapter does): a path in `dirs`, or one that holds a file. Null only for a path that is neither.
+	 */
+	async stat(path: string): Promise<{ type?: "folder"; mtime: number } | null> {
+		if (this.files.has(path)) return { mtime: this.mtimes.get(path)! };
+		const inside = `${path}/`;
+		if (this.dirs.has(path) || [...this.files.keys()].some((p) => p.startsWith(inside))) return { type: "folder", mtime: 0 };
+		return null;
 	}
 	/**
 	 * Obsidian's adapter throws for a folder that does not exist, and the
@@ -2110,14 +2117,30 @@ describe("listIds enumerates every folder a page can be served from", () => {
 		expect((await store.load("pdf-aa"))?.data.strokes.map((s) => s.id)).toEqual(["a", "b"]);
 	});
 
-	it("a folder that will not enumerate is skipped, not fatal", async () => {
+	// This replaces the pin "a folder that will not enumerate is skipped, not fatal": skipping a folder that is there
+	// answered a partial list as a whole one, and an instance past it was handed out again.
+	it("a folder that is there but will not list fails the listing: it never answers a partial list", async () => {
 		fake.files.set(".handwriting/pdf-aa.json", sidecar("pdf-aa"));
 		fake.files.set("handwriting/pdf-aa-2.json", sidecar("pdf-aa-2"));
+		// There as on disk: a folder holding a file was made, so the adapter says it exists.
+		fake.dirs.add("handwriting");
 		const real = fake.list.bind(fake);
 		fake.list = async (path: string) => {
 			if (path === "handwriting") throw new Error("EACCES injected");
 			return real(path);
 		};
+		expect(await fake.exists("handwriting"), "precondition: the folder is there").toBe(true);
+		await expect(store.listIds("pdf-aa"), "a folder that is there and would not list was skipped").rejects.toThrow(/^could not list the ink folder handwriting/);
+	});
+
+	it("a folder that is not there is skipped, whatever its listing's error says", async () => {
+		fake.files.set(".handwriting/pdf-aa.json", sidecar("pdf-aa"));
+		const real = fake.list.bind(fake);
+		fake.list = async (path: string) => {
+			if (path === "handwriting") throw new Error("EACCES injected");
+			return real(path);
+		};
+		expect(await fake.exists("handwriting"), "precondition: the folder is not there").toBe(false);
 		expect(await store.listIds("pdf-aa")).toEqual(["pdf-aa"]);
 	});
 

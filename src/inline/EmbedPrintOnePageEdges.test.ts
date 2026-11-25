@@ -120,6 +120,9 @@ class FEl {
 		return copy;
 	}
 	querySelector(sel: string): FEl | null {
+		// A bare tag (the title's `:scope > h1`).
+		const t = /^:scope > ([a-z][a-z0-9]*)$/.exec(sel);
+		if (t) return this.children.find((k) => k.tag === t[1]) ?? null;
 		const m = /^:scope > ([a-z]+)\.([a-zA-Z0-9_-]+)$/.exec(sel);
 		if (!m) return null;
 		return this.children.find((k) => k.tag === m[1] && (k.attrs.get("class") ?? "").split(" ").includes(m[2]!)) ?? null;
@@ -251,6 +254,9 @@ function highlight(id: string, x0: number, x1: number, y: number): InkStroke {
 function heightFollowsMinHeight(root: FEl, text: number): void {
 	Object.defineProperty(root, "offsetHeight", { get: () => Math.max(text, Number.parseFloat(root.style.minHeight ?? "") || 0) });
 	Object.defineProperty(root, "scrollHeight", { get: () => Math.max(root.offsetHeight, 120_000) });
+	// The text ends where the box does: a container's one block reaches the text's foot.
+	const block = root.children.length === 1 ? root.children[0] : undefined;
+	if (block) Object.defineProperty(block, "offsetHeight", { get: () => Math.max(0, text - block.offsetTop) });
 }
 
 const LETTER_PORTRAIT = { pageSize: "Letter", landscape: false, margin: "0", downscalePercent: 100 };
@@ -336,5 +342,150 @@ describe("a one-page export printed on a shorter page than the saved settings", 
 		expect(ref.zoom).toBeLessThan(1);
 		const stale = exportNote(strokes(), A4_PORTRAIT, paperWidthFor(LETTER_PORTRAIT)!, 300);
 		expect(stale.zoom, `kept ${stale.zoom} against the Letter fit ${ref.zoom}`).toBeLessThanOrEqual(ref.zoom + 1e-9);
+	});
+});
+
+describe("the text foot of a canvas note is its text's, not the print container's box", () => {
+	// The app's print container has a fixed box (800 px in the app, whatever the text's length); the text runs past it. Each
+	// block is one line, LINE px tall, the first at the column-width top: the text's foot is TOP_AT_COLUMN + lines * LINE.
+	const LINE = 20;
+	const PAPER_W = paperWidthFor(LETTER_PORTRAIT)!;
+	const PAGE = paperHeightFor(LETTER_PORTRAIT)!;
+	const WIDTH_ZOOM = PAPER_W / (64 + 700);
+	/** The one-page limit past the text's foot: one page at the width fit, which wantsOnePage caps at 1. */
+	const LIMIT = PAGE / Math.min(1, WIDTH_ZOOM);
+
+	/** One export of a note `lines` lines long in a container whose box is `box` px (grown only by our min-height). */
+	function exportText(strokes: InkStroke[], lines: number, box: number, laidOut?: (root: FEl) => void): Exported {
+		const fdoc = new FDoc();
+		doc = fdoc;
+		ink = strokes;
+		initEmbedInkPrintCanvas(() => true);
+		initEmbedInkPrintPaper(() => LETTER_PORTRAIT);
+		const { root, block } = printContainer(fdoc, PAPER_W, 700, true);
+		block.offsetHeight = LINE;
+		for (let i = 1; i < lines; i++) {
+			const b = root.appendChild(new FEl("div", fdoc));
+			b.offsetParent = root;
+			b.offsetLeft = 32;
+			b.offsetHeight = LINE;
+			Object.defineProperty(b, "offsetTop", { get: () => block.offsetTop + i * LINE });
+		}
+		heightFollowsMinHeight(root, box);
+		attachEmbedInk(root as unknown as HTMLElement, "a.md", ink);
+		laidOut?.(root);
+		fdoc.printMedia = false;
+		fdoc.fire("beforeprint");
+		fdoc.printMedia = true;
+		root.offsetWidth = PAPER_W;
+		fdoc.fire("beforeprint");
+		return { root, zoom: Number(root.style.zoom), paddingLeft: root.style.paddingLeft, paddingTop: root.style.paddingTop };
+	}
+	/** A stroke on the last of `lines` lines, world y from the first line's top. */
+	const onLastLine = (lines: number): InkStroke => boxStroke("last", 40, 300, (lines - 1) * LINE + 2, (lines - 1) * LINE + 18);
+	const fullSize = (out: Exported, what: string): void => {
+		expect(out.paddingTop, `${what}: no top reach`).toBeUndefined();
+		expect(out.zoom, `${what}: the width fit, not one shrunk page`).toBeCloseTo(WIDTH_ZOOM, 6);
+	};
+
+	it("premise: the fixture's text foot passes an 800 px box plus a page at 151 lines, not at 51", () => {
+		expect(TOP_AT_COLUMN + 151 * LINE).toBeGreaterThan(800 + LIMIT);
+		expect(TOP_AT_COLUMN + 51 * LINE).toBeLessThan(800 + LIMIT);
+	});
+
+	it("a box shorter than its text: ink on the text's last line prints full size", () => {
+		const lines = 100;
+		fullSize(exportText([NEAR, onLastLine(lines)], lines, 800), `box 800, text foot ${TOP_AT_COLUMN + lines * LINE}`);
+	});
+
+	it("a box taller than its text: ink far below a short text makes one page", () => {
+		const out = exportText([NEAR, boxStroke("below", 20, 120, 2000, 2100)], 3, 4000);
+		expect(out.zoom, `box 4000, text foot ${TOP_AT_COLUMN + 3 * LINE}, ink foot past it plus a page`).toBeLessThan(WIDTH_ZOOM - 1e-6);
+	});
+
+	it("the foot does not follow our min-height: ink far below a short text in a box that is only the min-height makes one page", () => {
+		const out = exportText([NEAR, boxStroke("below", 20, 120, 2000, 2100)], 3, 0);
+		expect(out.zoom, `text foot ${TOP_AT_COLUMN + 3 * LINE}, the container grown to the ink`).toBeLessThan(WIDTH_ZOOM - 1e-6);
+	});
+
+	it("the foot does not follow the ink layer: a laid-out canvas as tall as the ink is not text", () => {
+		const out = exportText([NEAR, boxStroke("below", 20, 120, 2000, 2100)], 3, 0, (root) => {
+			const layer = root.children.find((c) => c.tag === "canvas" && c.classList.contains("handwriting-embed-ink"));
+			expect(layer, "the paint's canvas layer").toBeDefined();
+			layer!.offsetParent = root;
+			layer!.offsetTop = 0;
+			layer!.offsetHeight = TOP_AT_COLUMN + 2200;
+		});
+		expect(out.zoom, `text foot ${TOP_AT_COLUMN + 3 * LINE}, the layer reaching ${TOP_AT_COLUMN + 2200}`).toBeLessThan(WIDTH_ZOOM - 1e-6);
+	});
+
+	it.each([3, 51, 151, 301])("a canvas note of %i lines, an 800 px box, ink on its last line: full size", (lines) => {
+		fullSize(exportText([NEAR, onLastLine(lines)], lines, 800), `${lines} lines`);
+	});
+
+	/**
+	 * One export of a canvas note with no laid-out block: its title only (an h1, TITLE_TOP to TITLE_FOOT) or nothing at all,
+	 * in the app's fixed 800 px box, the box taller than the title. The text's foot is the title's bottom, or 0 with no title.
+	 */
+	const TITLE_TOP = 20;
+	const TITLE_FOOT = TITLE_TOP + 40;
+	function exportNoBlock(strokes: InkStroke[], title: boolean): Exported & { h1: FEl | null } {
+		const fdoc = new FDoc();
+		doc = fdoc;
+		ink = strokes;
+		initEmbedInkPrintCanvas(() => true);
+		initEmbedInkPrintPaper(() => LETTER_PORTRAIT);
+		const root = new FEl("div", fdoc);
+		root.attrs.set("class", "markdown-preview-view markdown-rendered");
+		root.offsetParent = {};
+		root.offsetWidth = PAPER_W;
+		root.offsetHeight = 800;
+		let h1: FEl | null = null;
+		if (title) {
+			h1 = root.appendChild(new FEl("h1", fdoc));
+			h1.offsetParent = root;
+			h1.offsetLeft = 32;
+			h1.offsetTop = TITLE_TOP;
+			h1.offsetHeight = TITLE_FOOT - TITLE_TOP;
+		}
+		attachEmbedInk(root as unknown as HTMLElement, "a.md", ink);
+		fdoc.printMedia = false;
+		fdoc.fire("beforeprint");
+		fdoc.printMedia = true;
+		root.offsetWidth = PAPER_W;
+		fdoc.fire("beforeprint");
+		return { root, h1, zoom: Number(root.style.zoom), paddingLeft: root.style.paddingLeft, paddingTop: root.style.paddingTop };
+	}
+	/** Ink 1300 to 1400 below the note's top: past the title's foot (or 0) plus a page, short of the 800 px box plus a page. */
+	const BELOW_TITLE = boxStroke("below", 20, 120, 1300, 1400);
+
+	it("premise: ink below a title-only note passes the title's foot plus a page, not the 800 px box plus a page", () => {
+		expect(TITLE_FOOT + 1300).toBeGreaterThan(TITLE_FOOT + LIMIT);
+		expect(TITLE_FOOT + 1400 + PAD).toBeLessThan(800 + LIMIT);
+	});
+
+	it("control: a title-only canvas note, ink on the title's page: full size", () => {
+		fullSize(exportNoBlock([NEAR, boxStroke("near-title", 20, 120, 200, 300)], true), `title foot ${TITLE_FOOT}, ink 200 to 300`);
+	});
+
+	it("a title-only canvas note, its box taller than the title, ink below it: the foot is the title's, one page", () => {
+		const out = exportNoBlock([NEAR, BELOW_TITLE], true);
+		expect(out.root.querySelector(":scope > h1"), "premise: the title is the container's h1").toBe(out.h1);
+		expect(out.zoom, `title foot ${TITLE_FOOT}, box 800, ink foot past the title's foot plus a page`).toBeLessThan(WIDTH_ZOOM - 1e-6);
+	});
+
+	it("an empty canvas note, no title and no block, its box 800, ink below: the foot is 0, one page", () => {
+		const out = exportNoBlock([NEAR, BELOW_TITLE], false);
+		expect(out.root.querySelector(":scope > h1"), "premise: no title").toBeNull();
+		expect(out.root.children.filter((c) => c.offsetParent === out.root).length, "premise: no block of text laid out").toBe(0);
+		expect(out.zoom, "text foot 0, box 800, ink foot past a page").toBeLessThan(WIDTH_ZOOM - 1e-6);
+	});
+
+	it("a one-page export holds all the text: the one-page box is no shorter than the text's foot", () => {
+		const lines = 151;
+		const textFoot = TOP_AT_COLUMN + lines * LINE;
+		const out = exportText([NEAR, boxStroke("left", -200, -120, 100, 200)], lines, 800);
+		expect(out.paddingLeft, "the ink left of the text makes one page").toBeDefined();
+		expect(out.zoom, `zoom ${out.zoom}, the text's foot ${textFoot} fits at ${PAGE / textFoot}`).toBeLessThanOrEqual(PAGE / textFoot + 1e-9);
 	});
 });

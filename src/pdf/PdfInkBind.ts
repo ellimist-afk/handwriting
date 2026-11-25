@@ -276,18 +276,29 @@ declare module "./PdfInkController" {
 				// 1.4.12: "hide the mouse reticle when a finger or pen is
 				// active"). `InlinePenRouter.onHandOnGlass` fires only on that
 				// edge - a stale mouse ring left over from before the finger or
-				// pen arrived - so `hideCursor` is safe here even mid pen-stroke:
-				// the router asks only when `handOnGlass()` was false a moment
-				// ago, which a claimed pen already made true. Byte-for-byte the
-				// note surface's reasoning (InkOverlay.ts, `onHandOnGlass:
-				// () => this.hidePenCursor()`); this surface had no reticle to
-				// stand down until now, so it was left `undefined` (an optional,
-				// note-only member) rather than sharing the rule - the gap this
-				// brief closes. `hideCursor` and not a narrower hide: it is the
-				// one teardown every abandon path already goes through, and it
-				// takes `handwriting-pdf-hover`'s `cursor: none` off with the
-				// ring, leaving the native cursor rather than no pointer at all.
-				onHandOnGlass: () => this.hideCursor(),
+				// pen arrived. This surface had no reticle to stand down until
+				// 1.4.12, so it was left `undefined` (an optional, note-only
+				// member) rather than sharing the rule. `hideCursor` and not a
+				// narrower hide: it is the one teardown every abandon path
+				// already goes through, and it takes `handwriting-pdf-hover`'s
+				// `cursor: none` off with the ring, leaving the native cursor
+				// rather than no pointer at all.
+				//
+				// NOT WHILE THIS PANE HOLDS A CONTACT (GitHub issue 53, the
+				// note's guard in InkOverlayLifecycle.ts). The edge is asked by
+				// the router the hand landed on and fanned out to every pane
+				// (InlinePenRouterInput.ts), so a palm resting in the next pane
+				// reached here in the middle of this pane's stroke: the eraser,
+				// lasso or space ring blinked off and the hover class came off
+				// the viewer, a restyle mid-stroke. A pane with its own contact
+				// has no stale mouse ring to stand down (pen-down hid it; the
+				// ring up now is the stroke's own). This pane's contact, not any
+				// pane's: a mouse ring parked over this PDF while a pen writes
+				// in another pane is still stood down by a palm.
+				onHandOnGlass: () => {
+					if (this.router?.isStroking) return;
+					this.hideCursor();
+				},
 				// PEN OFF (PenInk.ts, design §5): byte-for-byte the note
 				// overlay's line, because it is byte-for-byte the same rule.
 				// This surface passed NOTHING for two days - the state was

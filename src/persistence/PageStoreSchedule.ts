@@ -3,7 +3,8 @@
  * They are methods of PageStore, installed on its prototype when PageStore.ts loads.
  */
 import { ensureFolder } from "./InkFolder";
-import { PageData, serializePage } from "../model/PageData";
+import { PageData, parsePage, serializePage } from "../model/PageData";
+import { isOpaqueAttachment } from "../inline/InkAttachments";
 import { runDetached } from "../util/Detached";
 import { installMethods } from "../inline/InstallMethods";
 import { contentStamp, folderOf, MAX_DIRTY_MS, type PageWriter, type PageStore } from "./PageStore";
@@ -50,6 +51,8 @@ const DEBOUNCE_MS = 700;
 	 * for the next write; writes for one page stay serialized on the queue.
 	 */
 	function schedule(this: PageStore, pageId: string, data: PageData, writer?: PageWriter): void {
+		// The page is written again: a deleted note's move of its live file still to be tried is not this page's now.
+		this.dropLiveMoveRetry(pageId);
 		this.scheduled.set(pageId, (this.scheduled.get(pageId) ?? 0) + 1);
 		this.displaceForeignBatch(pageId, writer);
 		this.pending.set(pageId, data);
@@ -183,6 +186,7 @@ const DEBOUNCE_MS = 700;
 	 * meanwhile (a deck's teardown flush) sees this one too.
 	 */
 	async function saveNow(this: PageStore, pageId: string, data: PageData, writer?: PageWriter): Promise<void> {
+		this.dropLiveMoveRetry(pageId);
 		this.scheduled.set(pageId, (this.scheduled.get(pageId) ?? 0) + 1);
 		this.displaceForeignBatch(pageId, writer);
 		this.pending.set(pageId, data);
@@ -456,6 +460,46 @@ const DEBOUNCE_MS = 700;
 	}
 
 	/**
+	 * Does `taking` hold everything of `earlier` this build can name? Both are read as the store reads a page (parsePage),
+	 * so every shape the store reads counts. By id: every stroke, text box and image of `earlier`, and every attach record
+	 * this build reads, has an object of that id in `taking` (an attach record of any kind). By its bytes: an attach record
+	 * this build cannot read is in `taking` exactly as read. By key: every top-level key this build does not know (a canvas
+	 * or paper value this build cannot read is one, as parsePage keeps it), and every key it does not know on one object,
+	 * is in `taking`, on the object of the same id. What an object of the same id holds is not compared (a save here
+	 * rewrites attached strokes' points and links under their ids), nor the values of known top-level keys: the surface,
+	 * the deck and its slides, the coordinate space, font size, column width, a readable canvas or paper choice.
+	 * It fails closed: either side unreadable or damaged, with ink under a key this build does not read (set today only
+	 * with damaged), or written by a newer build, answers no, as such a file can hold strokes this build does not return.
+	 */
+	function holdsEverything(earlier: string, taking: string, pageId: string): boolean {
+		const was = parsePage(earlier, pageId);
+		const now = parsePage(taking, pageId);
+		for (const side of [was, now]) {
+			if (side.damaged || side.onlyUnknownPointKeys || side.futureVersion !== undefined) return false;
+		}
+		const a = was.data;
+		const b = now.data;
+		const hasIds = (from: ReadonlyArray<{ id: string }>, into: ReadonlyArray<{ id: string }>): boolean => {
+			const ids = new Set(into.map((o) => o.id));
+			return from.every((o) => ids.has(o.id));
+		};
+		if (!hasIds(a.strokes, b.strokes) || !hasIds(a.textBoxes, b.textBoxes) || !hasIds(a.images, b.images)) return false;
+		const records = b.attachments ?? [];
+		const recordIds = new Set(records.map((r) => r.id));
+		const opaque = new Set(records.filter(isOpaqueAttachment).map((r) => JSON.stringify(r.raw)));
+		for (const r of a.attachments ?? []) {
+			if (isOpaqueAttachment(r) ? !opaque.has(JSON.stringify(r.raw)) : !recordIds.has(r.id)) return false;
+		}
+		const own = (o: object, key: string): boolean => Object.prototype.hasOwnProperty.call(o, key);
+		if (!Object.keys(a.unknownTop).every((k) => own(b.unknownTop, k))) return false;
+		for (const [id, keys] of Object.entries(a.unknownByObject)) {
+			const there = own(b.unknownByObject, id) ? b.unknownByObject[id] : undefined;
+			if (there === undefined || !Object.keys(keys).every((k) => own(there, k))) return false;
+		}
+		return true;
+	}
+
+	/**
 	 * A note open here now names `newId`, an id the other device gave it, and
 	 * the ink this device drew sits in `oldId`'s file. Nothing names that file
 	 * any more, so it is set beside the new page where fix ink de-sync finds
@@ -476,9 +520,13 @@ const DEBOUNCE_MS = 700;
 	 * the text it wrote, taken from that text, not from a read after the write.
 	 * While that file is unchanged since (the same text) it is no other revision,
 	 * only this move's own older copy of the old file: the old file takes its
-	 * place the same way it would with no live file, and no copy is set aside.
-	 * Changed since, by another device or a sync tool, it is kept and the old
-	 * file set beside it. No stamp to compare keeps it too.
+	 * place the same way it would with no live file, and the earlier file is
+	 * removed only when the old file holds everything in it this build can name
+	 * (holdsEverything: its strokes, text boxes, images and attach records, and
+	 * the keys this build does not know); else it stays a copy beside the new
+	 * page. Changed since, by another device or a sync
+	 * tool, it is kept and the old file set beside it. No stamp to compare
+	 * keeps it too.
 	 */
 	async function keepAsideUnder(this: PageStore,
 		oldId: string,
@@ -577,14 +625,17 @@ const DEBOUNCE_MS = 700;
 					const tmp = `${to.replace(/\.json$/, "")}+from-${oldId}.json.tmp`;
 					await adapter.write(tmp, written);
 					// The new id's live file now, moved aside and judged by those
-					// bytes: an earlier round's own file (`own`) is removed, any
-					// other revision stays as a copy beside the new page.
+					// bytes: an earlier round's own file (`own`) is removed only
+					// when the text taking its place holds everything in it this
+					// build can name (holdsEverything); that file with anything the
+					// new text lacks, and any other revision, stays as a copy
+					// beside the new page.
 					if (await adapter.exists(to)) {
 						const lst = await adapter.stat(to).catch(() => null);
 						const live = await this.freeConflictPath(to, lst?.mtime ?? 0);
 						await adapter.rename(to, live);
 						const cur = own === undefined ? null : await adapter.read(live).catch(() => null);
-						if (cur !== null && contentStamp(cur) === own) await adapter.remove(live);
+						if (cur !== null && contentStamp(cur) === own && holdsEverything(cur, written, newId)) await adapter.remove(live);
 					}
 					// Anything at the live path now landed after that move: it is
 					// kept the same way. A file landing after this check makes the

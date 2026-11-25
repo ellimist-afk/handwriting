@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 (globalThis as { window?: unknown }).window = globalThis;
 
 import { NoteZoomControls } from "./NoteZoomControls";
+import { MAX_PINCH_SCALE } from "./PinchScale";
 
 interface FakeButton {
 	label: string;
@@ -101,8 +102,9 @@ describe("zoom bar + and - are greyed where a tap does nothing", () => {
 		b.controls.destroy();
 	});
 
-	it("at 5.98, next to the ceiling, plus is greyed and minus is live", () => {
-		const b = bar({ zoom: 5.98, busy: false, fitAvailable: true });
+	it("a third of a percent under the ceiling, plus is greyed and minus is live", () => {
+		// 5.98 when the ceiling was 6: inside the step grid's tolerance, so + would not move.
+		const b = bar({ zoom: MAX_PINCH_SCALE * (5.98 / 6), busy: false, fitAvailable: true });
 		expect(b.plus()).toBe(true);
 		expect(b.minus()).toBe(false);
 		b.controls.destroy();

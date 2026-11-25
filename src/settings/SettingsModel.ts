@@ -7,7 +7,7 @@ import { DEFAULT_ERASER_RADIUS_PX } from "../ink/EraserSize";
 import { InkPreset } from "../ink/InkPresets";
 import { HIGHLIGHTER_COLORS, PEN_COLORS } from "../ink/InkColor";
 import { PaperStyle } from "../inline/Paper";
-import { PdfPageAssumption } from "../ink/InkPdf";
+import { ExportPage, PdfPageAssumption } from "../ink/InkPdf";
 import { PenToolsMode } from "../inline/PenToolsMode";
 import { NoteZoomControlsMode } from "../inline/NoteZoomControlsMode";
 import { type BarsPair } from "../inline/BarsToggle";
@@ -93,6 +93,15 @@ export interface HandwritingSettings {
 	 * nothing rewrites a stored colour.
 	 */
 	inkPdfColorMode: PdfPageAssumption;
+	/**
+	 * The page under the ink in the two exports that paint their own page:
+	 * "Export ink as PDF (drawing only)" and a note's snip. Default white.
+	 *
+	 * Read at each export through `normalizeExportPage`, so a missing key or a
+	 * value this build does not know is white, and is kept as stored rather
+	 * than rewritten. Render time only: nothing rewrites a stored colour.
+	 */
+	exportPage?: ExportPage;
 	/** Vault folder holding the ink sidecars. Default `.handwriting`. */
 	inkFolder: string;
 	/** Which corner the floating pen toolbar parks in. Default top-right. */
@@ -264,6 +273,7 @@ export const DEFAULT_SETTINGS: HandwritingSettings = {
 	 * for the reason spelled out beside `inkReadableInExports`.
 	 */
 	inkPdfColorMode: "darken",
+	exportPage: "white",
 	inkColors: { pen: PEN_COLORS[0]!.hex, highlighter: HIGHLIGHTER_COLORS[0]!.hex },
 	penPalette: paletteSlots(PEN_COLORS.map((c) => c.hex)),
 	highlighterPalette: paletteSlots(HIGHLIGHTER_COLORS.map((c) => c.hex)),

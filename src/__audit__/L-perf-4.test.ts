@@ -182,8 +182,8 @@ describe("L-perf-4: PDF eraser per-sample cost vs ink on other pages", () => {
 
 	it("timing: per-sample erase cost does not grow with ink on other pages", () => {
 		setEraserWholeStrokes(false);
-		const perSample = (far: number, y: number): number => {
-			const { pen, ops } = build(far, false);
+		const perSample = (shared: InkStroke[], y: number): number => {
+			const { pen, ops } = build(shared.length, false, shared);
 			// Pen-down untimed, as in the per-call cell: its one pass over the document is per gesture, not per
 			// sample, and timing it here put that pass under a per-sample bound (failed 3 of 15 in npm test).
 			pen.penDown(sample(40, y));
@@ -194,16 +194,16 @@ describe("L-perf-4: PDF eraser per-sample cost vs ink on other pages", () => {
 			if (y === 100) expect(ops.filter((o) => o.mode === "live-page").length).toBeGreaterThanOrEqual(K);
 			return dt / K;
 		};
-		// warm up the JIT
-		perSample(1000, 400);
-		perSample(1000, 100);
+		perSample(farInk(1000, false), 400); // warm up the JIT
+		perSample(farInk(1000, false), 100);
 		const rows: string[] = [];
 		const out: Record<string, number> = {};
 		for (const far of [0, 10000, 50000]) {
-			// Best of three drags: the cost is the floor, and one scheduler or GC pause under a parallel suite is
-			// not cost.
-			const miss = Math.min(perSample(far, 400), perSample(far, 400), perSample(far, 400));
-			const hit = Math.min(perSample(far, 100), perSample(far, 100), perSample(far, 100));
+			const shared = farInk(far, false); // built once per size and shared, as in the per-call cell: no timed drag builds it
+			perSample(shared, 400); // one untimed drag first: what the build left to collect is collected here, not in a timed drag
+			// Best of three drags: the cost is the floor, and one scheduler or GC pause under a parallel suite is not cost.
+			const miss = Math.min(perSample(shared, 400), perSample(shared, 400), perSample(shared, 400));
+			const hit = Math.min(perSample(shared, 100), perSample(shared, 100), perSample(shared, 100));
 			out[`miss${far}`] = miss;
 			out[`hit${far}`] = hit;
 			rows.push(`far=${far}: miss ${(miss * 1000).toFixed(1)} us/sample, hit ${(hit * 1000).toFixed(1)} us/sample, hit per 4-sample frame ${(hit * 4).toFixed(2)} ms`);

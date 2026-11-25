@@ -79,7 +79,8 @@ function pdfRawShouldEmitBatch(index: number): boolean {
 		const r = (v: number): string => v.toFixed(2);
 		const p = toPagePoint(box, scale, content.x, content.y);
 		const rect = scroller.getBoundingClientRect();
-		const overlay = this.overlays.get(box.pageNumber)?.canvas.getBoundingClientRect() ?? null;
+		const attached = this.overlays.get(box.pageNumber);
+		const overlay = attached?.canvas.getBoundingClientRect() ?? null;
 		const lines = [
 			`  client (${ev ? r(ev.clientX) : "?"}, ${ev ? r(ev.clientY) : "?"})  type ${ev?.pointerType ?? "?"}`,
 			`  sample (${r(sample.x)}, ${r(sample.y)})  scroller rect (${r(rect.left)}, ${r(rect.top)})` +
@@ -92,8 +93,33 @@ function pdfRawShouldEmitBatch(index: number): boolean {
 		if (overlay && p) {
 			// Where the ink will actually be painted, measured off the live
 			// overlay element rather than believed from the box numbers.
-			const sx = overlay.left + p.x * (overlay.width / box.widthPx) * scale;
-			const sy = overlay.top + p.y * (overlay.height / box.heightPx) * scale;
+			let sx = overlay.left + p.x * (overlay.width / box.widthPx) * scale;
+			let sy = overlay.top + p.y * (overlay.height / box.heightPx) * scale;
+			// At high zoom the overlay covers only a BAND of its page
+			// (`placeBanded`), so its rectangle is the band's: its left and top
+			// already hold the band's offset and its size is the band's share of
+			// the page. Read as the whole page, that put a false DELTA on a page
+			// with the ink under the nib. On a banded page the point is placed
+			// inside the band instead: its css position on the page (the same
+			// share of the page div the box gives it), less the band's offset,
+			// at the overlay's own screen px per css px. The band was cut against
+			// the page div's own size (`backingFor`), read here live; the two
+			// agree once a sync has caught up. A page the band covers whole
+			// keeps the two lines above, as it always printed them.
+			const band = attached?.paintedBand ?? null;
+			const pageW = attached?.canvas.parentElement?.clientWidth ?? 0;
+			const pageH = attached?.canvas.parentElement?.clientHeight ?? 0;
+			if (
+				band &&
+				band.width > 0 &&
+				band.height > 0 &&
+				pageW > 0 &&
+				pageH > 0 &&
+				(band.left !== 0 || band.top !== 0 || band.width !== pageW || band.height !== pageH)
+			) {
+				sx = overlay.left + ((p.x * scale * pageW) / box.widthPx - band.left) * (overlay.width / band.width);
+				sy = overlay.top + ((p.y * scale * pageH) / box.heightPx - band.top) * (overlay.height / band.height);
+			}
 			lines.push(
 				`  overlay rect (${r(overlay.left)}, ${r(overlay.top)}) size ${r(overlay.width)}x${r(overlay.height)}`,
 				`  ink lands at client (${r(sx)}, ${r(sy)})` +

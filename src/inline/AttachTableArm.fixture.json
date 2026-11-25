@@ -1,0 +1,750 @@
+{
+ "about": "Recorded in the app 2026-11-17 (record hashes ffc14f05, 6b6a4dcf): Obsidian 1.15.1, Minimal dark, Bahnschrift 26px, Live Preview. Made by tools/make-arm-fixture.py.",
+ "sources": {
+  "dom/a-rest.json": "78823b7e",
+  "changes/b1-type.json": "4a6e0f4f",
+  "changes/b2-row-above.json": "0e5dd7ec",
+  "changes/b3-row-removed-above.json": "011b1598",
+  "changes/b4-col-before.json": "4f9427c5",
+  "changes/b5-row-moved.json": "662a3e59",
+  "changes/b6-sort.json": "6d6ba992",
+  "dom/a-cell-under-edit.json": "a21bc898"
+ },
+ "widget": {
+  "w": 1212.34,
+  "h": 183.91,
+  "cls": "cm-embed-block cm-table-widget markdown-rendered"
+ },
+ "coordsAtPos": {
+  "from": [
+   0.0,
+   0.0,
+   0.0,
+   183.91
+  ],
+  "from5": [
+   1212.34,
+   0.0,
+   1212.34,
+   183.91
+  ],
+  "mid": [
+   1212.34,
+   0.0,
+   1212.34,
+   183.91
+  ]
+ },
+ "table": "| Name | Note | Link |\n| ---- | ---- | ---- |\n| kilo | beta gamma | plain |\n| delta | **bold** word | [[other]] and [site](https://example.com) |\n| echo | foxtrot **hotel** and [[other]] | golf |",
+ "rows": [
+  [
+   {
+    "tag": "th",
+    "rect": [
+     16.0,
+     16.0,
+     91.31,
+     53.84
+    ],
+    "text": "Name",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "Name",
+      "words": [
+       {
+        "w": "Name",
+        "at": 0,
+        "rects": [
+         [
+          16.0,
+          23.33,
+          75.72,
+          46.1
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "tag": "th",
+    "rect": [
+     91.31,
+     16.0,
+     340.46,
+     53.84
+    ],
+    "text": "Note",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "Note",
+      "words": [
+       {
+        "w": "Note",
+        "at": 0,
+        "rects": [
+         [
+          101.59,
+          23.33,
+          149.54,
+          46.1
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "tag": "th",
+    "rect": [
+     340.46,
+     16.0,
+     512.08,
+     53.84
+    ],
+    "text": "Link",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "Link",
+      "words": [
+       {
+        "w": "Link",
+        "at": 0,
+        "rects": [
+         [
+          350.74,
+          23.33,
+          394.23,
+          46.1
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ],
+  [
+   {
+    "tag": "td",
+    "rect": [
+     16.0,
+     53.84,
+     91.31,
+     91.95
+    ],
+    "text": "kilo",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "kilo",
+      "words": [
+       {
+        "w": "kilo",
+        "at": 0,
+        "rects": [
+         [
+          16.0,
+          61.44,
+          52.73,
+          84.22
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "tag": "td",
+    "rect": [
+     91.31,
+     53.84,
+     340.46,
+     91.95
+    ],
+    "text": "beta gamma",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "beta gamma",
+      "words": [
+       {
+        "w": "beta",
+        "at": 0,
+        "rects": [
+         [
+          101.59,
+          61.44,
+          145.7,
+          84.22
+         ]
+        ]
+       },
+       {
+        "w": "gamma",
+        "at": 5,
+        "rects": [
+         [
+          151.8,
+          61.44,
+          227.25,
+          84.22
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "tag": "td",
+    "rect": [
+     340.46,
+     53.84,
+     512.08,
+     91.95
+    ],
+    "text": "plain",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "plain",
+      "words": [
+       {
+        "w": "plain",
+        "at": 0,
+        "rects": [
+         [
+          350.74,
+          61.44,
+          400.12,
+          84.22
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ],
+  [
+   {
+    "tag": "td",
+    "rect": [
+     16.0,
+     91.95,
+     91.31,
+     130.07
+    ],
+    "text": "delta",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "delta",
+      "words": [
+       {
+        "w": "delta",
+        "at": 0,
+        "rects": [
+         [
+          16.0,
+          99.56,
+          66.58,
+          122.34
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "tag": "td",
+    "rect": [
+     91.31,
+     91.95,
+     340.46,
+     130.07
+    ],
+    "text": "bold word",
+    "nodes": [
+     {
+      "path": [
+       "strong",
+       "div.table-cell-wrapper"
+      ],
+      "text": "bold",
+      "words": [
+       {
+        "w": "bold",
+        "at": 0,
+        "rects": [
+         [
+          101.59,
+          99.56,
+          145.22,
+          122.34
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": " word",
+      "words": [
+       {
+        "w": "word",
+        "at": 1,
+        "rects": [
+         [
+          151.32,
+          99.56,
+          202.86,
+          122.34
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "tag": "td",
+    "rect": [
+     340.46,
+     91.95,
+     512.08,
+     130.07
+    ],
+    "text": "other and site",
+    "nodes": [
+     {
+      "path": [
+       "a.internal-link",
+       "div.table-cell-wrapper"
+      ],
+      "text": "other",
+      "words": [
+       {
+        "w": "other",
+        "at": 0,
+        "rects": [
+         [
+          350.74,
+          99.56,
+          405.17,
+          122.34
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": " and ",
+      "words": [
+       {
+        "w": "and",
+        "at": 1,
+        "rects": [
+         [
+          411.28,
+          99.56,
+          448.37,
+          122.34
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "path": [
+       "a.external-link",
+       "div.table-cell-wrapper"
+      ],
+      "text": "site",
+      "words": [
+       {
+        "w": "site",
+        "at": 0,
+        "rects": [
+         [
+          454.48,
+          99.56,
+          491.61,
+          122.34
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ],
+  [
+   {
+    "tag": "td",
+    "rect": [
+     16.0,
+     130.07,
+     91.31,
+     167.91
+    ],
+    "text": "echo",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "echo",
+      "words": [
+       {
+        "w": "echo",
+        "at": 0,
+        "rects": [
+         [
+          16.0,
+          137.68,
+          64.64,
+          160.45
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "tag": "td",
+    "rect": [
+     91.31,
+     130.07,
+     340.46,
+     167.91
+    ],
+    "text": "foxtrot hotel and other",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "foxtrot ",
+      "words": [
+       {
+        "w": "foxtrot",
+        "at": 0,
+        "rects": [
+         [
+          101.59,
+          137.68,
+          169.02,
+          160.45
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "path": [
+       "strong",
+       "div.table-cell-wrapper"
+      ],
+      "text": "hotel",
+      "words": [
+       {
+        "w": "hotel",
+        "at": 0,
+        "rects": [
+         [
+          175.13,
+          137.68,
+          226.44,
+          160.45
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": " and ",
+      "words": [
+       {
+        "w": "and",
+        "at": 1,
+        "rects": [
+         [
+          232.54,
+          137.68,
+          269.64,
+          160.45
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "path": [
+       "a.internal-link",
+       "div.table-cell-wrapper"
+      ],
+      "text": "other",
+      "words": [
+       {
+        "w": "other",
+        "at": 0,
+        "rects": [
+         [
+          275.75,
+          137.68,
+          330.18,
+          160.45
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "tag": "td",
+    "rect": [
+     340.46,
+     130.07,
+     512.08,
+     167.91
+    ],
+    "text": "golf",
+    "nodes": [
+     {
+      "path": [
+       "div.table-cell-wrapper"
+      ],
+      "text": "golf",
+      "words": [
+       {
+        "w": "golf",
+        "at": 0,
+        "rects": [
+         [
+          350.74,
+          137.68,
+          389.2,
+          160.45
+         ]
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ ],
+ "underEdit": {
+  "nested": true,
+  "nestedText": "beta gamma",
+  "activeEditorIsMain": true,
+  "cellOuter": "<td dir=\"ltr\"><div class=\"table-cell-wrapper\" style=\"display: none;\">beta gamma</div><div class=\"table-cell-wrapper\" data-ignore-swipe=\"true\"><div class=\"cm-s-obsidian mod-cm6 node-insert-event is-live-preview\"><div class=\"cm-editor cm-focused ͼ1 ͼ2 \"><div class=\"cm-announced\" aria-live=\"polite\"></div><div tabindex=\"-1\" class=\"cm-scroller\"><div spellcheck=\"true\" autocorrect=\"on\" autocapitalize=\"on\" writingsuggestions=\"false\" translate=\"no\" contenteditable=\"true\" class=\"cm-content cm-lineWrapping\" role=\"textbox\" aria-multiline=\"true\" data-language=\"hypermd\" style=\"tab-size: 4;\"><div class=\"cm-line cm-active\" dir=\"ltr\">beta gamma</div></div><div class=\"cm-layer cm-layer-above cm-cursorLayer\" aria-hidden=\"true\" style=\"z-index: 150; animation-duration: 1200ms;\"></div><div class=\"cm-layer cm-selectionLayer\" aria-hidden=\"true\" style=\"z-index: -2;\"></div></div></div></div></div></td>",
+  "editors": [
+   {
+    "rect": [
+     101.59,
+     58.11,
+     330.18,
+     87.68
+    ],
+    "path": [
+     "div.cm-editor.cm-focused.ͼ1.ͼ2",
+     "div.cm-s-obsidian.mod-cm6.node-insert-event.is-live-preview",
+     "div.table-cell-wrapper"
+    ],
+    "text": "beta gamma",
+    "lines": [
+     {
+      "text": "beta gamma",
+      "r": [
+       461.58,
+       299.61,
+       690.17,
+       329.18
+      ],
+      "words": [
+       [
+        {
+         "w": "beta",
+         "at": 0,
+         "rects": [
+          [
+           461.58,
+           302.94,
+           505.69,
+           325.72
+          ]
+         ]
+        },
+        {
+         "w": "gamma",
+         "at": 5,
+         "rects": [
+          [
+           511.79,
+           302.94,
+           587.24,
+           325.72
+          ]
+         ]
+        }
+       ]
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "ops": [
+  {
+   "name": "b1-type",
+   "what": "a character typed at the start of the cell holding beta",
+   "before": "| Name | Note | Link |\n| ---- | ---- | ---- |\n| kilo | beta gamma | plain |\n| delta | **bold** word | [[other]] and [site](https://example.com) |\n| echo | foxtrot **hotel** and [[other]] | golf |",
+   "steps": [
+    [
+     {
+      "from": 0,
+      "to": 195,
+      "insert": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n| kilo  | beta gamma                      | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |",
+      "old": "| Name | Note | Link |\n| ---- | ---- | ---- |\n| kilo | beta gamma | plain |\n| delta | **bold** word | [[other]] and [site](https://example.com) |\n| echo | foxtrot **hotel** and [[other]] | golf |"
+     }
+    ],
+    [
+     {
+      "from": 185,
+      "to": 218,
+      "insert": " Zbeta gamma                     ",
+      "old": " beta gamma                      "
+     }
+    ]
+   ],
+   "classes": [
+    "whole-table",
+    "rows-in-table"
+   ]
+  },
+  {
+   "name": "b2-row-above",
+   "what": "a row added above beta's row",
+   "before": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n| kilo  | Zbeta gamma                     | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |",
+   "steps": [
+    [
+     {
+      "from": 0,
+      "to": 439,
+      "insert": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n|       |                                 |                                           |\n| kilo  | Zbeta gamma                     | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |",
+      "old": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n| kilo  | Zbeta gamma                     | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |"
+     }
+    ]
+   ],
+   "classes": [
+    "whole-table"
+   ]
+  },
+  {
+   "name": "b3-row-removed-above",
+   "what": "the row above beta's row removed",
+   "before": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n|       |                                 |                                           |\n| kilo  | Zbeta gamma                     | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |",
+   "steps": [
+    [
+     {
+      "from": 0,
+      "to": 527,
+      "insert": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n| kilo  | Zbeta gamma                     | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |",
+      "old": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n|       |                                 |                                           |\n| kilo  | Zbeta gamma                     | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |"
+     }
+    ]
+   ],
+   "classes": [
+    "whole-table"
+   ]
+  },
+  {
+   "name": "b4-col-before",
+   "what": "a column added to the left of beta's column",
+   "before": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n| kilo  | Zbeta gamma                     | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |",
+   "steps": [
+    [
+     {
+      "from": 0,
+      "to": 439,
+      "insert": "| Name  |     | Note                            | Link                                      |\n| ----- | --- | ------------------------------- | ----------------------------------------- |\n| kilo  |     | Zbeta gamma                     | plain                                     |\n| delta |     | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  |     | foxtrot **hotel** and [[other]] | golf                                      |",
+      "old": "| Name  | Note                            | Link                                      |\n| ----- | ------------------------------- | ----------------------------------------- |\n| kilo  | Zbeta gamma                     | plain                                     |\n| delta | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  | foxtrot **hotel** and [[other]] | golf                                      |"
+     }
+    ]
+   ],
+   "classes": [
+    "whole-table"
+   ]
+  },
+  {
+   "name": "b5-row-moved",
+   "what": "beta's row moved down",
+   "before": "| Name  |     | Note                            | Link                                      |\n| ----- | --- | ------------------------------- | ----------------------------------------- |\n| kilo  |     | Zbeta gamma                     | plain                                     |\n| delta |     | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  |     | foxtrot **hotel** and [[other]] | golf                                      |",
+   "steps": [
+    [
+     {
+      "from": 0,
+      "to": 469,
+      "insert": "| Name  |     | Note                            | Link                                      |\n| ----- | --- | ------------------------------- | ----------------------------------------- |\n| delta |     | **bold** word                   | [[other]] and [site](https://example.com) |\n| kilo  |     | Zbeta gamma                     | plain                                     |\n| echo  |     | foxtrot **hotel** and [[other]] | golf                                      |",
+      "old": "| Name  |     | Note                            | Link                                      |\n| ----- | --- | ------------------------------- | ----------------------------------------- |\n| kilo  |     | Zbeta gamma                     | plain                                     |\n| delta |     | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  |     | foxtrot **hotel** and [[other]] | golf                                      |"
+     }
+    ]
+   ],
+   "classes": [
+    "whole-table"
+   ]
+  },
+  {
+   "name": "b6-sort",
+   "what": "a sort by the first column, A to Z",
+   "before": "| Name  |     | Note                            | Link                                      |\n| ----- | --- | ------------------------------- | ----------------------------------------- |\n| delta |     | **bold** word                   | [[other]] and [site](https://example.com) |\n| kilo  |     | Zbeta gamma                     | plain                                     |\n| echo  |     | foxtrot **hotel** and [[other]] | golf                                      |",
+   "steps": [
+    [
+     {
+      "from": 0,
+      "to": 469,
+      "insert": "| Name  |     | Note                            | Link                                      |\n| ----- | --- | ------------------------------- | ----------------------------------------- |\n| delta |     | **bold** word                   | [[other]] and [site](https://example.com) |\n| echo  |     | foxtrot **hotel** and [[other]] | golf                                      |\n| kilo  |     | Zbeta gamma                     | plain                                     |",
+      "old": "| Name  |     | Note                            | Link                                      |\n| ----- | --- | ------------------------------- | ----------------------------------------- |\n| delta |     | **bold** word                   | [[other]] and [site](https://example.com) |\n| kilo  |     | Zbeta gamma                     | plain                                     |\n| echo  |     | foxtrot **hotel** and [[other]] | golf                                      |"
+     }
+    ]
+   ],
+   "classes": [
+    "whole-table"
+   ]
+  }
+ ]
+}

@@ -318,6 +318,15 @@ export function attachStands(op: AttachStep & { path: string }, docChanged = fal
 		this.repaintQueued = true;
 		scrollProbeSchedule(via);
 		this.winRef.requestAnimationFrame(() => {
+			// The first paint of arrived ink: the editor measures first, in this frame, so the ink is placed against the heights
+			// the text has now (the column held for the ink re-wraps it), not the height map's estimate from before; the frame
+			// would show the ink off its line until the measure the content's resize asks for, a frame later. A measure with
+			// nothing changed stops at once; a move it makes folds into this paint (still queued). Once per arrival.
+			if (this.inkPaintAwaitsMeasure) {
+				this.inkPaintAwaitsMeasure = false;
+				const v = this.view as unknown as { measure?: () => void } | null;
+				if (v && typeof v.measure === "function") v.measure();
+			}
 			this.repaintQueued = false;
 			this.inQueuedFrame = true;
 			try {

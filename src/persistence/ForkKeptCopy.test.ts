@@ -63,7 +63,7 @@ function host(files: Map<string, string>): ForkHost & { renames: [string, string
 }
 
 describe("a copy the save guard kept is a fork against the live page", () => {
-	it("is listed under its page id with the live page as this device's side; pairs, resolved names and the other kept-aside labels are not kept copies", async () => {
+	it("is listed under its page id with the live page as this device's side, and so is a cut-off save's copy; pairs, resolved names and the superseded and damaged labels are not kept copies", async () => {
 		const files = new Map([
 			[LIVE, bytes(["mine"])],
 			[`${FOLDER}/${ID}.conflict-1700.json`, bytes(["theirs"])],
@@ -80,6 +80,7 @@ describe("a copy the save guard kept is a fork against the live page", () => {
 		expect(kept.sort()).toEqual([
 			[ID, LIVE, `${FOLDER}/${ID}.conflict-1700-2.json`],
 			[ID, LIVE, `${FOLDER}/${ID}.conflict-1700.json`],
+			[ID, LIVE, `${FOLDER}/${ID}.flush-conflict-1650.json`],
 		]);
 		expect(found.filter((r) => r.outgoingPath !== LIVE), "the adoption pair is no longer listed").toHaveLength(1);
 	});

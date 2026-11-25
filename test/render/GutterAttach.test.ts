@@ -17,12 +17,15 @@
  *   rule matches and the gutter is absolute, as on Alan's device. Pinch to 2.698 about the word, lift, rest; pinch to
  *   5.981, lift, rest; scroll sideways to 71, 81, ... 121 local px (scrollLeft writes: the rig cannot drag with a finger).
  * - Arm sticky: the pane is a child of body, the rule does not match, the gutter keeps CodeMirror's sticky. Pinch to 3
- *   about the word, lift, rest, then one 300 screen px pan right.
+ *   about the word, lift, rest, then one 300 screen px pan right. The word is written far enough along its line that it
+ *   is still on the pane after the pan.
  *
  * Bound, every frame of both arms: the gutter's right edge is at or left of every text line's left edge (no tolerance).
  * Lift: across each lift the line, the gutter and the word move by at most 0.5 px (zero snap).
  * Ink: at every rest the ink sits where it was written on its line, the offset from the line's left scaled by k
- * (1.5 px). The 100% samples are written out (HW_L1_OUT) for the reader to compare against the base build.
+ * (1.5 px), read from each edge of the ink that the ink canvas does not cut (the canvas covers the pane and a margin,
+ * so ink past the margin is not on it). The sticky arm scores both edges at every rest. The 100% samples are written
+ * out (HW_L1_OUT) for the reader to compare against the base build.
  * Plants: HW_L1_PLANT=reserve holds the column's gutter reserve at 0 (the minimal arm must red), HW_L1_PLANT=travel
  * makes the gutter travel write a no-op (the sticky arm must red). Each plant counts its hits; a plant that is never
  * reached fails the cell.
@@ -107,7 +110,8 @@ function backingInk() {
 	for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; if (MAGENTA(d, i)) { n++; if (y < minY) minY = y; if (y > maxY) maxY = y; if (x < minX) minX = x; if (x > maxX) maxX = x; } }
 	if (!n) return { n };
 	const r = cc.getBoundingClientRect();
-	return { n, top: r.top + minY * r.height / h, bottom: r.top + (maxY + 1) * r.height / h, left: r.left + minX * r.width / w, right: r.left + (maxX + 1) * r.width / w };
+	// cutLeft / cutRight: the ink reaches the canvas's own edge there, so that edge is where the canvas ends, not where the ink does.
+	return { n, top: r.top + minY * r.height / h, bottom: r.top + (maxY + 1) * r.height / h, left: r.left + minX * r.width / w, right: r.left + (maxX + 1) * r.width / w, cutLeft: minX === 0, cutRight: maxX === w - 1 };
 }
 const r2 = v => Math.round(v * 100) / 100;
 const box = r => ({ left: r2(r.left), right: r2(r.right), top: r2(r.top), bottom: r2(r.bottom), w: r2(r.width), h: r2(r.height) });
@@ -124,7 +128,7 @@ function sample(phase, ink = false) {
 		gap: gr && lineLeft !== null ? r2(lineLeft - gr.right) : null,
 		reserve: overlay.columnGutterReserve ?? null, ownLines: overlay.viewportLayout ? !!overlay.viewportLayout.ownLines : null,
 		autoLeft: view.dom.style.getPropertyValue("--handwriting-column-auto-left"), marginLeft: view.dom.style.getPropertyValue("--handwriting-column-margin-left"), lineMargin: getComputedStyle(line).marginLeft };
-	if (ink) { const i = backingInk(); s.ink = i && i.n ? { n: i.n, left: r2(i.left), right: r2(i.right), top: r2(i.top), bottom: r2(i.bottom) } : { n: i ? i.n : 0 }; }
+	if (ink) { const i = backingInk(); s.ink = i && i.n ? { n: i.n, left: r2(i.left), right: r2(i.right), top: r2(i.top), bottom: r2(i.bottom), cutLeft: i.cutLeft, cutRight: i.cutRight } : { n: i ? i.n : 0 }; s.pane = { left: r2(pr.left), right: r2(pr.right) }; }
 	frames.push(s); return s;
 }
 function plant(kind) {
@@ -154,7 +158,8 @@ function plant(kind) {
 }
 
 window.l1 = {
-	async mount(arm, plantKind) {
+	/** inkAt: where the stroke starts, px right of where the last line's text starts (40 unless an arm needs its word elsewhere). */
+	async mount(arm, plantKind, inkAt = 40) {
 		setPenInk(true); setScrollExpansionEnabled(true);
 		setInlineTool("pen"); setInkColorHex("pen", "#ff00ff"); setInkSizeMult("pen", 4);
 		const path = "gutter-attach-" + arm + ".md";
@@ -179,7 +184,7 @@ window.l1 = {
 		const overlay = overlayForPath(path);
 		if (!overlay) throw new Error("no overlay for " + path);
 		rig = { pane, view, overlay, sizer, path };
-		const t = textBox(inkLine()), x = t.left + 40, y = t.cy;
+		const t = textBox(inkLine()), x = t.left + inkAt, y = t.cy;
 		const pen = (type, px, py, buttons) => document.elementFromPoint(px, py)?.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "pen", pointerId: 901, isPrimary: true, clientX: px, clientY: py, buttons, pressure: buttons ? 0.5 : 0 }));
 		pen("pointerdown", x, y, 1); for (let i = 1; i <= 4; i++) pen("pointermove", x + 20 * i, y, 1); pen("pointerup", x + 80, y, 0);
 		await settle(12);
@@ -288,11 +293,15 @@ afterAll(async () => {
 	if (process.env.HW_L1_OUT) writeFileSync(process.env.HW_L1_OUT, JSON.stringify(record, null, 1));
 });
 
-/** The ink where it was written: its offset from its line's left at rest equals the 100% offset times k. */
-function inkOnLine(natural: any, rest: any): number | null {
+/** The ink where it was written: an edge's offset from its line's left at rest equals the 100% offset times k. */
+function inkOnLine(natural: any, rest: any, edge: "left" | "right"): number | null {
 	if (!natural.ink?.n || !rest.ink?.n) return null;
-	return Math.round(((rest.ink.left - rest.line.left) - (natural.ink.left - natural.line.left) * rest.k) * 100) / 100;
+	return Math.round(((rest.ink[edge] - rest.line.left) - (natural.ink[edge] - natural.line.left) * rest.k) * 100) / 100;
 }
+/** The ink's edges the canvas does not cut at this rest; an edge the canvas cuts is the canvas's end, not the ink's. */
+const inkEdges = (rest: any): ("left" | "right")[] => (rest.ink?.n ? [...(rest.ink.cutLeft ? [] : ["left" as const]), ...(rest.ink.cutRight ? [] : ["right" as const])] : []);
+/** The sticky arm's stroke starts this far into the line, so that after the pinch to 3 and the 300 px pan its word is still on the pane. */
+const STICKY_INK_AT = 380;
 
 for (const arm of ["minimal", "sticky"] as const) {
 	const plantHere = (arm === "minimal" && PLANT === "reserve") || (arm === "sticky" && PLANT === "travel") ? PLANT : "";
@@ -305,7 +314,7 @@ for (const arm of ["minimal", "sticky"] as const) {
 			await page.addStyleTag({ content: css + REAL_OBSIDIAN_CSS + "\n.markdown-source-view img:not([width]) { max-width: 100%; }\n" });
 			await page.addStyleTag({ content: THEME_CSS });
 			await page.addScriptTag({ content: script });
-			const m = await page.evaluate(([a, p]) => (window as any).l1.mount(a, p), [arm, plantHere]) as any;
+			const m = await page.evaluate(([a, p, at]) => (window as any).l1.mount(a, p, at), [arm, plantHere, arm === "sticky" ? STICKY_INK_AT : 40] as const) as any;
 			expect(m.strokes, "the stroke committed").toBe(1);
 			const n = m.natural;
 			const rests: any[] = [];
@@ -323,7 +332,7 @@ for (const arm of ["minimal", "sticky"] as const) {
 			const frames = await page.evaluate(() => (window as any).l1.frames()) as any[];
 			const hits = await page.evaluate(() => (window as any).l1.plantHits()) as any;
 			const worst = frames.reduce((a, f) => (f.gap !== null && f.gap < a.gap ? f : a), { gap: Infinity, phase: null } as any);
-			const inkErr = rests.map(r => ({ phase: r.phase, k: r.k, err: inkOnLine(n, r) }));
+			const inkErr = rests.flatMap(r => inkEdges(r).map(edge => ({ phase: r.phase, k: r.k, edge, err: inkOnLine(n, r, edge) })));
 			// Zero snap: across each lift, the last preview frame against the first frame after it.
 			const lifts = frames.flatMap((f, i) => (i > 0 && frames[i - 1].phase.includes("-move-") && f.phase.includes("-lift-") ? [{ phase: f.phase, line: Math.round((f.line.left - frames[i - 1].line.left) * 100) / 100, gutter: Math.round((f.gutter.right - frames[i - 1].gutter.right) * 100) / 100, word: Math.round((f.wordText.left - frames[i - 1].wordText.left) * 100) / 100 }] : []));
 			record[arm] = { natural: n, rests, worst: { gap: worst.gap, phase: worst.phase }, inkErr, lifts, hits, frames };
@@ -340,11 +349,20 @@ for (const arm of ["minimal", "sticky"] as const) {
 			} else {
 				expect(rests[0].k, "premise: pinched to 3").toBeCloseTo(3, 2);
 				expect(rests[0].scrollLeft, "premise: the lift left the page scrolled sideways").toBeGreaterThan(0);
+				expect(Math.abs(rests[1].scrollLeft - rests[0].scrollLeft - 300 / rests[1].k), `premise: the pan moved the page 300 px (scrollLeft ${rests[0].scrollLeft} to ${rests[1].scrollLeft})`).toBeLessThanOrEqual(1);
+			}
+			// The ink is scored only from an edge the canvas does not cut. The sticky arm's word stays on the pane, so both of its
+			// edges are scored at every rest; the minimal arm's 300 px of sideways scroll at k 5.981 is wider than the pane leaves room for.
+			expect(inkEdges(n), "premise: at 100% the canvas holds the whole stroke").toEqual(["left", "right"]);
+			for (const r of rests) expect(inkEdges(r).length, `premise: at ${r.phase} an ink edge the canvas does not cut (canvas cuts left ${r.ink?.cutLeft}, right ${r.ink?.cutRight})`).toBeGreaterThan(0);
+			if (arm === "sticky") for (const r of rests) {
+				expect(inkEdges(r), `premise: at ${r.phase} the canvas holds the whole stroke`).toEqual(["left", "right"]);
+				expect(r.ink.left >= r.pane.left && r.ink.right <= r.pane.right, `premise: at ${r.phase} the word is on the pane (ink ${r.ink.left} to ${r.ink.right}, pane ${r.pane.left} to ${r.pane.right})`).toBe(true);
 			}
 			expect.soft(worst.gap, `the line numbers never reach a line (worst gap ${worst.gap} px at ${worst.phase})`).toBeGreaterThanOrEqual(0);
 			expect(lifts.length, "premise: every pinch has a lift").toBe(arm === "minimal" ? 2 : 1);
 			for (const l of lifts) expect.soft(Math.max(Math.abs(l.line), Math.abs(l.gutter), Math.abs(l.word)), `nothing jumps at the lift ${l.phase}: line ${l.line}, gutter ${l.gutter}, word ${l.word} px`).toBeLessThanOrEqual(0.5);
-			for (const e of inkErr) expect.soft(e.err === null ? Infinity : Math.abs(e.err), `the ink stays on its word at ${e.phase} (k ${e.k}): ${e.err} px`).toBeLessThanOrEqual(1.5);
+			for (const e of inkErr) expect.soft(e.err === null ? Infinity : Math.abs(e.err), `the ink stays on its word at ${e.phase} (k ${e.k}, ${e.edge} edge): ${e.err} px`).toBeLessThanOrEqual(1.5);
 			expect(errors).toEqual([]);
 		} finally { await page.close(); }
 	}, 240_000);

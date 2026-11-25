@@ -3,18 +3,21 @@
  * the external reload and its bindings. They are methods of InkOverlayPlugin, installed on its prototype when
  * InkOverlay.ts loads.
  */
-import type { Transaction } from "@codemirror/state";
-import { ViewUpdate } from "@codemirror/view";
+import { Annotation, EditorSelection, Transaction, type ChangeSet, type SelectionRange, type Text } from "@codemirror/state";
+import { EditorView, ViewUpdate } from "@codemirror/view";
 import { editorInfoField } from "obsidian";
 import type { Editor, TFile } from "obsidian";
 import { stripPenUp } from "./StripPenChrome";
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
+import { traceInkReload, traceNoteOpen } from "../diag/NoteTraceRows";
 import { HIGHLIGHTER_ALPHA } from "../ink/PenStyle";
 import { inkApplied, inkEffect } from "./InkHistory";
 import { discardUndoTrace, unregisterUndoTraceView } from "../diag/UndoHistoryTrace";
 import { MIN_PINCH_SCALE } from "./PinchScale";
 import { canvasForNote } from "./CanvasNoteOverride";
 import { installMethods } from "./InstallMethods";
+import { onPageIdClaim } from "./InlineInkStorePersist";
+import { bodyFromOf } from "./LineAnchor";
 import { enabled, inlineInk, instances, scrollExpansionEnabled, type InkOverlayPlugin, type InlineReloadBinding } from "./InkOverlay";
 
 declare module "./InkOverlay" {
@@ -81,6 +84,181 @@ declare module "./InkOverlay" {
 			&& !dom.closest(".markdown-embed, .hover-popover");
 	}
 
+	/** The character at an editor's top edge just before our page id write, waiting for that write to reach the editor. */
+	interface ClaimAnchor { path: string; pageId: string; doc: Text; pos: number; fromBody: number; offset: number; scrollTop: number; at: number }
+
+	/** The waiting anchor of each editor. */
+	const claimAnchors = new WeakMap<InkOverlayPlugin, ClaimAnchor>();
+
+	/** Marks the transaction that asks for the anchor's text back after the page id write. */
+	const claimScrollKept = Annotation.define<true>();
+
+	/** How long an anchor waits for the write to reach the editor, ms. */
+	const CLAIM_KEEP_MS = 3000;
+
+	/** How many characters at the anchor must read the same after the write. */
+	const CLAIM_TEXT_CHECK = 32;
+
+	/** Line length from which the editor draws a line in parts: lines wrapping, lines not wrapping. */
+	const PARTS_WRAP = 20000, PARTS_NO_WRAP = 4000;
+
+	/** The body's first character: the start of the line under a leading frontmatter block, 0 when there is none. */
+	function bodyStart(doc: Text): number {
+		return doc.line(bodyFromOf(doc)).from;
+	}
+
+	/** Whether the editor draws the line at `pos` in parts. */
+	function drawnInParts(view: EditorView, doc: Text, pos: number): boolean {
+		return doc.lineAt(pos).length >= (view.lineWrapping ? PARTS_WRAP : PARTS_NO_WRAP);
+	}
+
+	/** Whether the editor is inside its own update, where a layout read throws. */
+	function editorUpdating(pane: InkOverlayPlugin): boolean {
+		return pane.inUpdate || (pane.view as unknown as { updateState?: number }).updateState === 2;
+	}
+
+	/** A box's scale on screen against its layout size, 1 near 1, as the editor reads it for a scroll request. */
+	function screenScale(onScreen: number, layout: number): number {
+		const k = onScreen / layout;
+		return !Number.isFinite(k) || (k > 0.995 && k < 1.005) || Math.abs(onScreen - layout) < 1 ? 1 : k;
+	}
+
+	/** The top on screen of the character at `pos`, px, from the page's own boxes; null with no box or a node outside the text. */
+	function textTop(view: EditorView, pos: number): number | null {
+		const at = view.domAtPos(pos);
+		let node: Node = at.node, i = at.offset;
+		if (!view.contentDOM.contains(node)) return null;
+		if (node.nodeType !== 3) {
+			const next = node.childNodes[i], prev = node.childNodes[i - 1];
+			if (next) { node = next; i = 0; } else if (prev) { node = prev; i = prev.nodeType === 3 ? (prev as CharacterData).length : 0; }
+		}
+		let rect: { top: number; width: number; height: number } | undefined;
+		if (node.nodeType === 3) {
+			const len = (node as CharacterData).length, doc = node.ownerDocument;
+			if (len === 0 || !doc) return null;
+			const range = doc.createRange(), from = Math.min(i, len - 1);
+			range.setStart(node, from);
+			range.setEnd(node, from + 1);
+			rect = range.getClientRects()[0];
+		} else if (node.nodeType === 1) rect = (node as Element).getBoundingClientRect();
+		return !rect || (rect.width === 0 && rect.height === 0) ? null : rect.top;
+	}
+
+	/** The character at the editor's top edge and its top's offset from that edge, px; null when the pane has no layout or that character is not inside the view both ways, on screen and inside the editor's margin cut. */
+	function topAnchor(view: EditorView): { pos: number; offset: number } | null {
+		const scroller = view.scrollDOM;
+		if (scroller.clientHeight === 0) return null;
+		const box = scroller.getBoundingClientRect();
+		const { top, left } = box;
+		const bottom = top + scroller.clientHeight * Math.min(screenScale(box.height, scroller.offsetHeight), 1);
+		const right = left + scroller.clientWidth * screenScale(box.width, scroller.offsetWidth);
+		const pos = view.posAtCoords({ x: view.contentDOM.getBoundingClientRect().left + 1, y: top + 1 }, false);
+		const at = view.coordsAtPos(pos, 1);
+		if (!at || at.bottom <= top || at.top >= bottom || at.left < left || at.right > right) return null;
+		const textAt = textTop(view, pos);
+		return textAt === null ? null : { pos, offset: textAt - top };
+	}
+
+	/** Note the anchor of one editor of the note. */
+	function armClaimAnchor(pane: InkOverlayPlugin, path: string, pageId: string): void {
+		claimAnchors.delete(pane);
+		if (!pane.showsPath(path) || !pane.ownsMarkdownEditorRoot()) return;
+		try {
+			const anchor = topAnchor(pane.view);
+			const doc = pane.view.state.doc;
+			const from = bodyStart(doc);
+			if (anchor && anchor.pos >= from) claimAnchors.set(pane, { path, pageId, doc, ...anchor, fromBody: anchor.pos - from, scrollTop: pane.view.scrollDOM.scrollTop, at: performance.now() });
+		} catch (err) {
+			console.error("[handwriting] reading the text at the top before the page id write failed", err);
+		}
+	}
+
+	/** Before our page id write: note the anchor of each open editor of the note, after any update it is inside. */
+	function anchorTextForClaim(path: string, pageId: string): void {
+		for (const pane of instances) {
+			if (!pane.showsPath(path)) continue;
+			if (editorUpdating(pane)) queueMicrotask(() => armClaimAnchor(pane, path, pageId));
+			else armClaimAnchor(pane, path, pageId);
+		}
+	}
+
+	/** After our page id claim: a claim that wrote nothing drops its anchors. */
+	function settleClaimAnchors(path: string, pageId: string, written: boolean): void {
+		if (written) return;
+		for (const pane of instances) {
+			const anchor = claimAnchors.get(pane);
+			if (anchor && anchor.path === path && anchor.pageId === pageId) claimAnchors.delete(pane);
+		}
+	}
+
+	/** Whether a change inserts text holding `text`, in any shape. */
+	function insertsHolding(changes: ChangeSet, text: string): boolean {
+		let holds = false;
+		changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+			if (!holds && inserted.toString().includes(text)) holds = true;
+		});
+		return holds;
+	}
+
+	/** When our page id write reaches this editor, ask it once for the anchor's text at its offset, after the update, same task; never on a line drawn in parts. */
+	function restoreAfterClaim(pane: InkOverlayPlugin, u: ViewUpdate): void {
+		const anchor = claimAnchors.get(pane);
+		if (!anchor || !u.docChanged) return;
+		claimAnchors.delete(pane);
+		if (performance.now() - anchor.at > CLAIM_KEEP_MS || pane.filePath() !== anchor.path || u.startState.doc !== anchor.doc) return;
+		if (!insertsHolding(u.changes, anchor.pageId)) return;
+		if (Math.abs(pane.view.scrollDOM.scrollTop - anchor.scrollTop) > 1) return;
+		const doc = u.state.doc;
+		const from = bodyStart(doc);
+		const pos = from + anchor.fromBody;
+		const len = Math.min(CLAIM_TEXT_CHECK, anchor.doc.length - anchor.pos);
+		if (pos + len > doc.length || doc.sliceString(pos, pos + len) !== anchor.doc.sliceString(anchor.pos, anchor.pos + len)) return;
+		if (drawnInParts(pane.view, doc, from) || drawnInParts(pane.view, doc, pos)) return;
+		queueMicrotask(() => askClaimText(pane, anchor.path, doc, pos, anchor.offset));
+	}
+
+	/** The requests this file made after a page id write, by their own object, each with its anchor's offset from the view's top, px. */
+	const claimRequests = new WeakMap<object, number>();
+
+	/** In the editor's scroll handler, inside its update: our page id write's own request moves only the editor's scroll top, putting the anchor's text back at its offset, and never reaches the default; false for any other request, a lookalike too. */
+	export function scrollClaimText(view: EditorView, range: SelectionRange, request: object | undefined): boolean {
+		const offset = request === undefined ? undefined : claimRequests.get(request);
+		if (offset === undefined) return false;
+		try {
+			const scroller = view.scrollDOM;
+			if (scroller.clientHeight === 0) return true;
+			const at = textTop(view, range.head);
+			if (at === null) return true;
+			const box = scroller.getBoundingClientRect();
+			const move = (at - box.top - offset) / screenScale(box.height, scroller.offsetHeight);
+			if (move !== 0) scroller.scrollTop += move;
+		} catch (err) {
+			console.error("[handwriting] keeping the text after the page id write failed", err);
+		}
+		return true;
+	}
+
+	/** Ask the editor once for the anchor's text at its offset. */
+	function askClaimText(pane: InkOverlayPlugin, path: string, doc: Text, pos: number, offset: number): void {
+		const view = pane.view;
+		if (!pane.showsPath(path) || view.state.doc !== doc || view.scrollDOM.clientHeight === 0) return;
+		try {
+			const ask = EditorView.scrollIntoView(EditorSelection.cursor(pos, 1), { y: "start", yMargin: offset });
+			claimRequests.set(ask.value as object, offset);
+			view.dispatch({
+				effects: ask,
+				annotations: [claimScrollKept.of(true), Transaction.addToHistory.of(false)],
+			});
+		} catch (err) {
+			console.error("[handwriting] keeping the text after the page id write failed", err);
+		}
+	}
+
+	/** Whether an editor holds an anchor waiting for the page id write. */
+	export function claimAnchorHeldForTest(pane: InkOverlayPlugin): boolean {
+		return claimAnchors.has(pane);
+	}
+
 	/** Whether a transaction is a typed text edit: it changes the text with user event input.type, input.paste or delete. */
 	function typedTextEdit(tr: Transaction): boolean {
 		return tr.docChanged && (tr.isUserEvent("input.type") || tr.isUserEvent("input.paste") || tr.isUserEvent("delete"));
@@ -131,7 +309,8 @@ declare module "./InkOverlay" {
 			return;
 		}
 		const hold = this.panAnchorHold;
-		if (hold && u.transactions.some(tr => tr.docChanged || tr.selection || tr.scrollIntoView || tr.effects.some(effect => !hold.issuance.includes(effect)))) this.retirePanSettle("a transaction the settle did not issue");
+		if (hold && u.transactions.some(tr => !tr.annotation(claimScrollKept) && (tr.docChanged || tr.selection || tr.scrollIntoView || tr.effects.some(effect => !hold.issuance.includes(effect))))) this.retirePanSettle("a transaction the settle did not issue");
+		restoreAfterClaim(this, u);
 		if(u.docChanged)this.clearSpaceFeedback();
 		if (!this.container) {
 			if (enabled) this.mount();
@@ -153,6 +332,9 @@ declare module "./InkOverlay" {
 			// view keeps its scroll, zoom, selection and toolbar, which the note-switch reset below would drop.
 			// An external-reload capture taken before the rename names the old path, so it is retired as a switch does.
 			this.invalidateReloadBindings(this.lastPath, path);
+			// The layers still picture this note, and nothing repaints here: their record follows the note, or a note later
+			// opened at the old path would match it and take this note's pixels as its stand-in (takeStandIn).
+			if (this.paintedPath === this.lastPath) this.paintedPath = path;
 			this.lastPath = path;
 			this.updateHandwritingPageClass();
 		} else {
@@ -186,6 +368,7 @@ declare module "./InkOverlay" {
    this.scrollExpansion?.rebase(0,0);
 			this.lastPath = path;
 			this.armNoteCameraRestore(path);
+			if (diagnosticsEnabled()) traceNoteOpen("switch", this.noteCameraRestore !== null, this.view.hasFocus);
 			// The opened note's own canvas answer, as a mount takes it: the pane may have shown a note with the other answer.
 			this.canvasMode = canvasForNote(path, scrollExpansionEnabled);
 			this.router?.setCanvasMomentumDisabled(this.canvasMode);
@@ -245,11 +428,13 @@ declare module "./InkOverlay" {
 		if (u.geometryChanged || u.viewportChanged || u.docChanged) {
 			// Font-zoom edge: the quick-font-size reflow arrives here as a
 			// geometry update. One string compare against a LIVE computed
-			// style. No per-frame polling, no new style objects.
+			// style. No per-frame polling, no new style objects. The line height
+			// too: a theme or snippet can move it with the font unchanged, and the
+			// paper's pitch is the row height, re-read on the refresh path.
 			if (
 				u.geometryChanged &&
 				this.contentStyle &&
-				this.contentStyle.fontSize !== this.lastFontStr
+				(this.contentStyle.fontSize !== this.lastFontStr || this.contentStyle.lineHeight !== this.lastLineHeightStr)
 			) {
 				// Under a held preview this resize can reach commitCameraScale,
 				// whose release runs CodeMirror's measure; that must not happen
@@ -275,6 +460,7 @@ declare module "./InkOverlay" {
 	/** See inkExternallyReloaded. */
 	function noteExternallyReloaded(this: InkOverlayPlugin, path: string, strokesChanged = true): void {
 		if (this.filePath() !== path) return;
+		traceInkReload(strokesChanged);
 		// The adopted file may name another font reference than the one latched
 		// here; its ink is in that frame, and so is what is drawn from now on.
 		this.adoptStoredFontRef(path);
@@ -336,6 +522,7 @@ declare module "./InkOverlay" {
 	}
 
 export function installReload(proto: InkOverlayPlugin): void {
+	onPageIdClaim({ before: anchorTextForClaim, after: settleClaimAnchors });
 	installMethods(proto, {
 		showsPath,
 		ownsActiveEditor,

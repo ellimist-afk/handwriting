@@ -3,7 +3,7 @@
  * and the band they cover. They are methods of PdfInkController, installed on its prototype when PdfInkController.ts loads.
  */
 import { CameraState } from "../camera/coordinates";
-import { InkStroke } from "../ink/Stroke";
+import { InkStroke, InkTool } from "../ink/Stroke";
 import { WetInkRenderer } from "../ink/WetInkRenderer";
 import { TailRenderer } from "../ink/TailRenderer";
 import { drawStroke } from "../ink/StrokeRenderer";
@@ -18,6 +18,7 @@ import type { Attached, PenFrame, WetPair, PdfInkController } from "./PdfInkCont
 declare module "./PdfInkController" {
 	interface PdfInkController {
 		sync(): void;
+		syncForTool(): void;
 		pageWidthPt(pageNumber: number, wPx: number, hPx: number, scale: number): number;
 		isRotated(pageNumber: number): boolean;
 		viewTurn(): ViewTurn | null;
@@ -37,14 +38,21 @@ declare module "./PdfInkController" {
 		detachPairFrom(pageNumber: number): void;
 		dropPair(): void;
 		restoreSelectionOutline(pageEl: HTMLElement, box: PageBox): void;
+		refitPair(pageEl: HTMLElement, box: PageBox, size: { band: PageBandBox; w: number; h: number }): void;
+		boxTurn(box: PageBox): ViewTurn;
+		selectionFrame(pair: WetPair, box: PageBox): { cam: CameraState; matrix: TurnMatrix | null } | null;
 		paint(pageEl: HTMLElement, box: PageBox, scale: number, zoomed: boolean): void;
 		drawCommitted(ctx: CanvasRenderingContext2D, cam: CameraState, strokes: readonly InkStroke[]): void;
 		highlightLayered(pageNumber: number): boolean;
+		highlightMultiplies(pageNumber: number): boolean;
 		ensureHighlightLayer(pageEl: HTMLElement, attached: Attached): HighlightLayer;
 		dropHighlightLayer(attached: Attached | undefined): boolean;
 		pairHome(pageEl: HTMLElement, pageNumber: number): HTMLElement;
 		seatPair(pageEl: HTMLElement, pageNumber: number): void;
 		drawHighlights(ctx: CanvasRenderingContext2D, cam: CameraState, strokes: readonly InkStroke[]): void;
+		putBackTaken(records: readonly MutationRecord[]): void;
+		inkedPageShownBare(records: readonly MutationRecord[]): boolean;
+		syncShownBare(): void;
 	}
 }
 
@@ -55,15 +63,18 @@ export const OVERLAY_CLASS = "handwriting-pdf-ink";
  *
  * The group carries the wash once (styles.css: the highlighter's alpha,
  * blended multiply), so the page's own text stays dark under a highlight and white
- * paper takes the same colour one translucent fill gave it. Inside, the
- * highlights are painted opaque on a canvas of their own, so two crossing
- * highlights are one flat wash rather than a darker seam. A live
- * highlighter stroke draws inside the same group (see `pairHome`), so the
- * lift changes nothing on screen.
+ * paper takes the same colour one translucent fill gave it. On a page read as
+ * dark (`highlightMultiplies` false) the group blends normal instead: a
+ * multiply wash over a dark page leaves no colour band, and the normal blend
+ * at the same alpha is the plain wash those pages always showed for one coat.
+ * Inside, the highlights are painted opaque on a canvas of their own, so two
+ * crossing highlights are one flat wash rather than a darker seam, on every
+ * page. A live highlighter stroke draws inside the same group (see
+ * `pairHome`), so the lift changes nothing on screen.
  *
  * Both elements carry OVERLAY_CLASS: the viewer probe skips our canvases by
- * that class, and the group's own childList writes are ours to the root
- * observer by it. Only a page that holds a highlight, or has one being
+ * that class, and the group's own childList and style writes are ours to the
+ * root observer by it. Only a page that holds a highlight, or has one being
  * drawn, has a layer; a page with pen ink alone allocates nothing new.
  */
 export interface HighlightLayer {
@@ -71,6 +82,8 @@ export interface HighlightLayer {
 	canvas: HTMLCanvasElement;
 	/** Whether `paint` has drawn the saved highlights onto it since it was made. */
 	painted: boolean;
+	/** The group's inline mix-blend-mode as last written: "" is the stylesheet's multiply. */
+	blend: "" | "normal";
 }
 
 export const HIGHLIGHT_GROUP_CLASS = "handwriting-pdf-highlight-group";
@@ -78,6 +91,26 @@ export const HIGHLIGHT_CANVAS_CLASS = "handwriting-pdf-highlight";
 
 /** One layer per page overlay; it lives and goes with that overlay. */
 const highlightLayers = new WeakMap<Attached, HighlightLayer>();
+
+/**
+ * After a graphics reset on desktop and Android the browser gives a canvas
+ * back blank (`contextrestored`), at the same size. Nothing `paint` checks has
+ * changed, so it would skip the page as already correct and the ink would stay
+ * blank until a zoom or a stroke. The page that owns this canvas, as its saved
+ * pen canvas or its highlight canvas, is marked unpainted, and one sync is
+ * asked. Only that page is painted again, on the same canvases.
+ * `contextlost` gets no handler: cancelling it would stop the browser restoring.
+ */
+function repaintOnRestore(controller: PdfInkController, canvas: HTMLCanvasElement): void {
+	canvas.addEventListener("contextrestored", () => {
+		for (const attached of controller.overlays.values()) {
+			if (attached.canvas === canvas) attached.paintedCount = -1;
+			const layer = highlightLayers.get(attached);
+			if (layer?.canvas === canvas) layer.painted = false;
+		}
+		controller.schedule();
+	});
+}
 
 /**
  * What a viewer's whole-page canvas was found to be, kept for that element
@@ -95,6 +128,29 @@ type CanvasShade = "unread" | "dark" | "light" | "unseen-dark";
 const canvasShades = new WeakMap<HTMLCanvasElement, CanvasShade>();
 
 /**
+ * What the last read of a canvas on each page div found, dark or not: the
+ * answer a new canvas on that div gives until it is read (`standIns`). A
+ * read that cannot be done leaves a real answer in place; on a div never
+ * read it writes light, so the at-once sync still skips that div. The
+ * viewer keeps a page's div through a zoom and makes new divs for another
+ * file, so another file's page never takes it.
+ */
+const divShades = new WeakMap<HTMLElement, boolean>();
+
+/**
+ * The answer an unread canvas gives until a sync reads it: its page div's last
+ * read, taken at every sync that finds the canvas and leaves it unread (the
+ * root observer's at-once sync, a page still drawing, a pen or finger down).
+ * Kept on the element, so a sync that leaves it unread again does not drop it.
+ * A page's first canvas, on a div never read, has none and is light until its
+ * read.
+ */
+const standIns = new WeakMap<HTMLCanvasElement, boolean>();
+
+/** Controllers inside their at-once sync (`syncShownBare`). */
+const atOnceSyncs = new WeakSet<PdfInkController>();
+
+/**
  * Each live page's whole-page viewer canvas as the last sync found it: where
  * a page's answer is looked up between syncs (pen-down, the snip), which read
  * no layout. Rebuilt at every sync; the answer itself is the element's.
@@ -104,10 +160,22 @@ const pageCanvases = new WeakMap<PdfInkController, Map<number, HTMLCanvasElement
 /** The answer a gesture's page had at pen-down, held until the lift. */
 const heldShades = new WeakMap<PdfInkController, { frame: PenFrame; page: number; dark: boolean }>();
 
-/** Is this page's canvas, as the last sync found it, read dark? */
+/**
+ * The tool the pages were last asked under, at a sync with no pen or finger
+ * down. A pick of the other tool syncs at once (`syncForTool`).
+ */
+const askedTools = new WeakMap<PdfInkController, InkTool>();
+
+/**
+ * Is this page's canvas, as the last sync found it, read dark? One still
+ * unread answers with its stand-in, its div's last read, until a sync reads it.
+ */
 function keptDark(controller: PdfInkController, page: number): boolean {
 	const canvas = pageCanvases.get(controller)?.get(page);
-	return canvas !== undefined && canvasShades.get(canvas) === "dark";
+	if (canvas === undefined) return false;
+	const shade = canvasShades.get(canvas);
+	if (shade === "unread") return standIns.get(canvas) === true;
+	return shade === "dark";
 }
 
 /**
@@ -147,20 +215,25 @@ function fileDarkPage(controller: PdfInkController, page: number): boolean {
  * and every canvas first seen under them is marked never to be read. Only the
  * pages that hold a highlight, plus every live page while the highlighter is
  * the tool, and the strokes are asked first. Only a finished page; a page
- * still drawing is light meanwhile and is read at the sync after its draw.
- * None while a pen or finger is down; those are read at the lift's own sync.
+ * still drawing is read at the sync after its draw. None while a pen or
+ * finger is down; those are read at the lift's own sync. None in the root
+ * observer's at-once sync on a page whose div has been read
+ * (`syncShownBare`); the next sync reads it. A canvas left unread answers with
+ * its div's last read meanwhile (`standIns`), light where the div has none.
  */
 function shadePages(controller: PdfInkController, pages: ReadonlyArray<readonly [PageBox, HTMLElement | null]>): void {
 	// Before this sync's reads: a gesture keeps what it had at pen-down.
 	gestureShade(controller);
 	const appDark = appDarkPages(controller);
 	const reading = !appDark && controller.pageAssumption() !== "lighten";
+	const atOnce = atOnceSyncs.has(controller);
 	// No pixel is read while a pen or finger is down: one read of a big page
 	// can take a whole frame, and the stroke needs every frame. The canvas
-	// stays unread, so light, and is read at the first sync after the lift,
-	// which clears the frame before its own sync.
+	// stays unread, answering with its div's last read, and is read at the
+	// first sync after the lift, which clears the frame before its own sync.
 	const contact = controller.frame !== null;
-	const highlighter = getInlineTool() === "highlighter";
+	const tool = getInlineTool();
+	const highlighter = tool === "highlighter";
 	const found = new Map<number, HTMLCanvasElement>();
 	for (const [box, pageEl] of pages) {
 		if (!pageEl) continue;
@@ -176,10 +249,20 @@ function shadePages(controller: PdfInkController, pages: ReadonlyArray<readonly 
 			shade = appDark ? "unseen-dark" : "unread";
 			canvasShades.set(canvas, shade);
 		}
-		if (shade !== "unread" || !asked || contact || !pageDrawFinished(pageEl)) continue;
-		canvasShades.set(canvas, readCanvasDark(canvas) === true ? "dark" : "light");
+		if (shade !== "unread" || !asked) continue;
+		const kept = divShades.get(pageEl);
+		if (contact || !pageDrawFinished(pageEl) || (atOnce && kept !== undefined)) {
+			if (kept !== undefined) standIns.set(canvas, kept);
+			continue;
+		}
+		const read = readCanvasDark(canvas);
+		const dark = read === true;
+		canvasShades.set(canvas, dark ? "dark" : "light");
+		// A read that cannot be done keeps the div's last real answer.
+		if (read !== null || kept === undefined) divShades.set(pageEl, dark);
 	}
 	pageCanvases.set(controller, found);
+	if (!contact) askedTools.set(controller, tool);
 }
 
 /** Is this node part of a page's highlight layer? Read by the root observer's own-write filter. */
@@ -219,11 +302,20 @@ export function normalTurn(deg: number | null): ViewTurn | null {
 const paintedTurns = new WeakMap<object, ViewTurn>();
 
 /**
+ * The turn the wet pair's selection box was last drawn at, so a turn that
+ * leaves the page its size (a half turn, or one quarter turn to the other)
+ * still draws the box again. Absent means upright.
+ */
+const boxTurns = new WeakMap<WetPair, ViewTurn>();
+
+export type TurnMatrix = [number, number, number, number, number, number];
+
+/**
  * The matrix that carries the upright page's css px onto the page as the
  * viewer shows it turned clockwise by `turn`. `pageW` and `pageH` are the
  * TURNED box (the element being filled).
  */
-function turnMatrix(turn: ViewTurn, pageW: number, pageH: number): [number, number, number, number, number, number] {
+function turnMatrix(turn: ViewTurn, pageW: number, pageH: number): TurnMatrix {
 	switch (turn) {
 		case 90:
 			return [0, 1, -1, 0, pageW, 0];
@@ -288,8 +380,10 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		// that actually ran, and this is the work being spaced out. Without
 		// it `lastSyncAt` stayed 0 forever, every gap measured as "longer
 		// ago than the floor", and the throttle passed everything straight
-		// through even once it was being called.
-		this.lastSyncAt = Date.now();
+		// through even once it was being called. The steady clock, the one
+		// scheduleThrottled reads: on the wall clock, setting the PC clock
+		// back pushed the next zoom repaint out by as long as it went back.
+		this.lastSyncAt = performance.now();
 		const probed = this.probe();
 		if (!probed) return;
 		// The viewer was rebuilt under us. Rebind the pen before anything else,
@@ -308,7 +402,12 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 			// at every pen-down, straight after the strip steps aside, and
 			// only penUp and resetGestureState clear it, so it is the one
 			// field that says a contact is open whatever its mode.
-			if (this.frame !== null || this.builder !== null || this.erasing) this.penUp();
+			//
+			// Inside this sync, said so: a lift asks the pages again under the
+			// tool (`syncForTool`), and here that would be a second sync inside
+			// this one, binding the new viewer twice. This one reads the pages
+			// below, after the bind.
+			if (this.frame !== null || this.builder !== null || this.erasing) this.penUp(undefined, true);
 			this.dropOverlays();
 			this.resetGestureState();
 			this.bindTo(probed.scroller);
@@ -386,6 +485,25 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 			if (!pageEl) continue;
 			this.paint(pageEl, box, scale, zoomed);
 		}
+	}
+
+	/**
+	 * A tool was picked: if the pages were last asked under the other tool,
+	 * sync now, in the pick's own task.
+	 *
+	 * A page with no highlight is read only while the highlighter is the tool,
+	 * so after a pick of the highlighter such a page had no answer until
+	 * something else synced, and the first stroke went in the group, faint,
+	 * until its lift. A sync queued for a frame still misses a pen that comes
+	 * down in the same task. One per pick: a pick that puts a tip mode away
+	 * runs the strip fan-out twice, and the second finds the tool asked. None
+	 * while a pen or finger is down: no page is read then, and every lift asks
+	 * again - a stroke's by its own sync, every other by this, from `penUp`.
+	 */
+	function syncForTool(this: PdfInkController): void {
+		if (!this.mounted || this.frame !== null) return;
+		if (askedTools.get(this) === getInlineTool()) return;
+		this.sync();
 	}
 
 	/**
@@ -945,6 +1063,88 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		this.drawLasso(box);
 	}
 
+	/**
+	 * Set a resting pair right for its page after the page was painted at a new
+	 * size or band.
+	 *
+	 * The put-back (`putBackTaken`) keeps the pair on its page through a zoom,
+	 * so the rebuild that used to take it off no longer runs, and the pair kept
+	 * the size, band and transform of the page before the zoom. What was left
+	 * on it then stayed in the old geometry: a selection's box stretched over
+	 * the new page, a clear through the old transform reached only part of it
+	 * (Escape or a tool pick after a zoom out left a piece of box), a box drawn
+	 * later landed off its ink, and a stroke's wet copy or a divider that a
+	 * zoom ended was cleared only in part.
+	 *
+	 * So a page whose pair no longer has its size or band, with no gesture
+	 * down, takes the pair back to rest: the page holding the live selection
+	 * gets the pair at its new size and the box drawn again, once, in this same
+	 * task, so it is not gone for a frame; any other page lets go of the pair,
+	 * which takes whatever was left on it off the screen. A pair off every page
+	 * has no host, so the next pen-down's `attachPair` clears it as it puts it
+	 * back. The let-go is marked as ours for the root observer: it is our own
+	 * write and must not bring on a sync of its own.
+	 *
+	 * Never under a gesture, on any page: there is one pair and the gesture
+	 * owns it, so resizing or moving it would wipe the ink under the pen. A
+	 * pair that already has this size and band is left alone, which is what
+	 * keeps the box to one redraw per change and a grabbed selection from
+	 * blinking.
+	 *
+	 * A turn is a change too. The box is drawn turned with the page's ink
+	 * (`selectionFrame`), and a half turn, or one quarter turn to the other,
+	 * leaves the page its size and band: so a held box drawn at another turn
+	 * than the page's now is drawn again, once, the same as a new size.
+	 */
+	function refitPair(this: PdfInkController, pageEl: HTMLElement, box: PageBox, size: { band: PageBandBox; w: number; h: number }): void {
+		const pair = this.pair;
+		if (!pair || this.wetHostPage !== box.pageNumber || this.wetGestureLive()) return;
+		const held = this.selected.length > 0 && this.selectionPage === box.pageNumber;
+		const fits = pair.wetCanvas.width === size.w && pair.wetCanvas.height === size.h && sameBand(this.pairBand, size.band);
+		if (fits && !(held && (boxTurns.get(pair) ?? 0) !== this.boxTurn(box))) return;
+		if (held) {
+			this.attachPair(pageEl, box);
+			this.drawLasso(box);
+			return;
+		}
+		const seated = pair.wetCanvas.parentNode !== null || pair.headCanvas.parentNode !== null;
+		this.detachPairFrom(box.pageNumber);
+		if (seated) markOwnMove(this, pair.wetCanvas, pair.headCanvas);
+	}
+
+	/**
+	 * The turn a page's saved ink is painted at, as `paint` finds it: the
+	 * viewer's turn, once the page's box has turned with it.
+	 */
+	function boxTurn(this: PdfInkController, box: PageBox): ViewTurn {
+		return turnToPaint(this.viewTurn(), this.pageSize.get(box.pageNumber), box.widthPx, box.heightPx);
+	}
+
+	/**
+	 * The frame a page's selection box is drawn in on the wet pair: the one
+	 * `paint` draws the page's saved ink in, so the box sits on the ink it
+	 * picked. On a turned page that is the page's turn, and the scale from its
+	 * upright side. Upright it is `cameraFor` itself and no matrix: the call an
+	 * upright box was always drawn with, so nothing upright changes. The turn
+	 * is noted for `refitPair`. Null for a page with no size in points yet.
+	 */
+	function selectionFrame(this: PdfInkController, pair: WetPair, box: PageBox): { cam: CameraState; matrix: TurnMatrix | null } | null {
+		const turn = this.boxTurn(box);
+		if (turn === 0) {
+			boxTurns.delete(pair);
+			const cam = this.cameraFor(box);
+			return cam ? { cam, matrix: null } : null;
+		}
+		const wPt = this.pageSize.get(box.pageNumber)?.wPt ?? 0;
+		if (wPt <= 0) return null;
+		boxTurns.set(pair, turn);
+		const uprightW = turn === 90 || turn === 270 ? box.heightPx : box.widthPx;
+		return {
+			cam: { x: 0, y: 0, zoom: uprightW / wPt },
+			matrix: turnMatrix(turn, box.widthPx, box.heightPx),
+		};
+	}
+
 	function paint(this: PdfInkController, pageEl: HTMLElement, box: PageBox, scale: number, zoomed: boolean): void {
 		const strokes = this.strokes(box.pageNumber);
 		let attached = this.overlays.get(box.pageNumber);
@@ -1039,19 +1239,24 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		if (!attached) {
 			const canvas = pageEl.createEl("canvas", { cls: OVERLAY_CLASS });
 			canvas.setAttribute("aria-hidden", "true");
+			repaintOnRestore(this, canvas);
 			attached = { canvas, paintedScale: 0, paintedCount: -1, paintedBand: null };
 			this.overlays.set(box.pageNumber, attached);
 		}
 		// The page's highlight layer, below the saved pen canvas: wanted while
-		// the page holds a highlight or a highlighter is drawing on it, and
-		// never on dark pages (`highlightLayered`), which keep the plain wash
-		// on the pen canvas exactly as before. A layer that
-		// came or went this paint defeats the skip below.
+		// the page holds a highlight or a highlighter is drawing on it. A layer
+		// that came or went this paint defeats the skip below.
 		const hadLayer = highlightLayers.has(attached);
 		const wantLayer =
 			(strokes.some((s) => s.tool === "highlighter") || (this.wetHighlighter && this.wetHostPage === box.pageNumber)) &&
 			this.highlightLayered(box.pageNumber);
 		const layer = wantLayer ? this.ensureHighlightLayer(pageEl, attached) : null;
+		// The group's blend follows the page's answer at every paint, before
+		// the skip below: an answer can change with nothing else changed (the
+		// read landing, "Adapt to theme", a theme switch, the dark-page
+		// setting), and the highlight canvas's pixels are the same either way,
+		// so the skip would otherwise keep the old blend.
+		if (layer) blendGroup(layer, this.highlightMultiplies(box.pageNumber));
 		const dropped = !wantLayer && this.dropHighlightLayer(attached);
 		// The highlights left with the layer and go onto the pen canvas below.
 		// A paint that stops short of that (no 2d context, no page width yet)
@@ -1066,6 +1271,9 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		if (this.wetHostPage === box.pageNumber && this.pair && (rebuilt || (layer !== null && !hadLayer))) {
 			this.seatPair(pageEl, box.pageNumber);
 		}
+		// Before the skip below: the pen canvas can already be right at this
+		// size (painted while a gesture held the pair) while the pair is not.
+		this.refitPair(pageEl, box, size);
 		const reported = this.viewTurn() ?? 0;
 		const turn = turnToPaint(reported, this.pageSize.get(box.pageNumber), size.pageW, size.pageH);
 		if (
@@ -1172,15 +1380,43 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 	}
 
 	/**
-	 * Do highlights get a layer of their own here? Not on dark pages: a
-	 * multiply wash over a dark page leaves no colour band, so those pages
-	 * keep the plain wash on the pen canvas, on screen and in the snip,
-	 * exactly as before. Dark is what the reader declares ("Lighten for dark
-	 * pages"), or what the app has made the pages (`appDarkPages`), or, past
-	 * those two, what the PDF file itself draws on this page (`fileDarkPage`).
+	 * Do highlights get a layer of their own here? On every page: on a page
+	 * read as dark the layer blends normal rather than multiply
+	 * (`highlightMultiplies`), so crossings there are one coat too. Kept as
+	 * its own question because the live pair's dressing asks it
+	 * (PdfInkCommit.ts `dressWet`): a pair inside the group wears full
+	 * opacity and the group carries the wash.
 	 */
-	function highlightLayered(this: PdfInkController, pageNumber: number): boolean {
+	function highlightLayered(this: PdfInkController, _pageNumber: number): boolean {
+		return true;
+	}
+
+	/**
+	 * Does this page's highlight layer multiply? Not on dark pages: a
+	 * multiply wash over a dark page leaves no colour band, so there the group
+	 * blends normal, on screen and in the snip, which is the plain wash those
+	 * pages always showed for one coat. Dark is what the reader declares
+	 * ("Lighten for dark pages"), or what the app has made the pages
+	 * (`appDarkPages`), or, past those two, what the PDF file itself draws on
+	 * this page (`fileDarkPage`).
+	 */
+	function highlightMultiplies(this: PdfInkController, pageNumber: number): boolean {
 		return this.pageAssumption() !== "lighten" && !appDarkPages(this) && !fileDarkPage(this, pageNumber);
+	}
+
+	/**
+	 * Set the group's blend to the page's answer: the stylesheet's multiply,
+	 * or normal on a page read as dark. Written only when it changes, which
+	 * the layer keeps (`blend`), so a paint reads no style back; only this
+	 * writes the group's blend. The group carries OVERLAY_CLASS, so the root
+	 * observer takes the write as ours. The opacity stays the stylesheet's,
+	 * HIGHLIGHTER_ALPHA.
+	 */
+	function blendGroup(layer: HighlightLayer, multiplies: boolean): void {
+		const want = multiplies ? "" : "normal";
+		if (layer.blend === want) return;
+		layer.group.setCssStyles({ mixBlendMode: want });
+		layer.blend = want;
 	}
 
 	/**
@@ -1227,8 +1463,9 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		group.setAttribute("aria-hidden", "true");
 		if (attached.canvas.parentElement === pageEl) pageEl.insertBefore(group, attached.canvas);
 		const canvas = group.createEl("canvas", { cls: `${OVERLAY_CLASS} ${HIGHLIGHT_CANVAS_CLASS}` });
+		repaintOnRestore(this, canvas);
 		canvas.setAttribute("aria-hidden", "true");
-		const layer: HighlightLayer = { group, canvas, painted: false };
+		const layer: HighlightLayer = { group, canvas, painted: false, blend: "" };
 		highlightLayers.set(attached, layer);
 		return layer;
 	}
@@ -1266,7 +1503,12 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		if (!this.wetHighlighter || !this.highlightLayered(pageNumber)) return pageEl;
 		const attached = this.overlays.get(pageNumber);
 		if (!attached || attached.canvas.parentElement !== pageEl) return pageEl;
-		return this.ensureHighlightLayer(pageEl, attached).group;
+		// A group made here, at pen-down on a page with no saved highlight, has
+		// had no paint to set its blend: set it now, or a live highlighter on a
+		// page read as dark multiplies out of sight until the lift's paint.
+		const layer = this.ensureHighlightLayer(pageEl, attached);
+		blendGroup(layer, this.highlightMultiplies(pageNumber));
+		return layer.group;
 	}
 
 	/**
@@ -1289,14 +1531,160 @@ function sameBand(a: PageBandBox | null, b: PageBandBox): boolean {
 		if (groupMove) markOwnMove(this, pair.wetCanvas, pair.headCanvas);
 	}
 
+	/**
+	 * Put back, before the next paint, the canvases of ours the viewer just
+	 * took off a page that still shows its picture.
+	 *
+	 * A re-render (a zoom's reset, a page drawn again) sweeps the page div's
+	 * children it does not own, ours among them, and keeps its old canvas on
+	 * screen until the new one is drawn. The rebuild in `paint` put them back
+	 * only at our next sync, and that sync waits for the floor between syncs
+	 * (`scheduleThrottled`) and then a frame: every frame painted in between
+	 * showed the page's picture without its ink and highlights. This is called
+	 * from the root observer, whose callback runs before the next paint, so no
+	 * frame paints without them.
+	 *
+	 * The same nodes, never new ones. A canvas taken out of the document keeps
+	 * its pixels, so this adds no canvas and no backing store, and the next
+	 * sync repaints them at the page's new size as before. Only nodes this
+	 * controller still holds: every drop of ours deletes from the maps in the
+	 * same task that removes the node, so none is undone here. Only when nothing
+	 * has put them anywhere else. Only onto the page div they came off, while it
+	 * is still in the document and still holds a canvas of the viewer's: a page
+	 * the viewer let go of keeps no canvas of ours, and the next sync evicts it
+	 * as before.
+	 *
+	 * Handed every record, the ones the own-write filter calls ours included:
+	 * a highlight group taken alone reads as ours there (`isOwnLayerRecord`),
+	 * and nothing else would bring it back.
+	 */
+	function putBackTaken(this: PdfInkController, records: readonly MutationRecord[]): void {
+		if (!this.mounted) return;
+		let held: Map<Node, number> | null = null;
+		const taken = new Map<number, Element>();
+		for (const record of records) {
+			if (record.type !== "childList" || record.target.nodeType !== 1) continue;
+			for (const node of Array.from(record.removedNodes)) {
+				if (node.parentNode !== null || !isOwnNode(node)) continue;
+				held ??= heldNodes(this);
+				const pageNumber = held.get(node);
+				if (pageNumber !== undefined && !taken.has(pageNumber)) taken.set(pageNumber, record.target as Element);
+			}
+		}
+		for (const [pageNumber, pageEl] of taken) {
+			if (!pageEl.isConnected || pageEl.getAttribute("data-page-number") !== String(pageNumber)) continue;
+			if (pageEl.querySelector(`canvas:not(.${OVERLAY_CLASS})`) === null) continue;
+			const pair = this.pair;
+			// Under the pair while it is on this page: the three canvases share
+			// one z-index, so DOM order is what keeps the wet ink on top.
+			const pairHere = pair !== null && pair.wetCanvas.parentElement === pageEl ? pair.wetCanvas : null;
+			const attached = this.overlays.get(pageNumber);
+			if (attached) {
+				if (attached.canvas.parentNode === null) pageEl.insertBefore(attached.canvas, pairHere);
+				// Just below the pen canvas, where `ensureHighlightLayer` keeps it.
+				const layer = highlightLayers.get(attached);
+				if (layer && layer.group.parentNode === null) {
+					pageEl.insertBefore(layer.group, attached.canvas.parentElement === pageEl ? attached.canvas : pairHere);
+				}
+			}
+			if (pair && this.wetHostPage === pageNumber && pair.wetCanvas.parentNode === null) {
+				this.seatPair(pageEl as HTMLElement, pageNumber);
+			}
+		}
+	}
+
+	/**
+	 * Did the viewer just give a page with saved ink a canvas of its own while
+	 * no canvas of ours is over that page?
+	 *
+	 * Such a page gets its ink at the sync after its canvas appears. A canvas
+	 * that appears inside the floor between syncs, or from a frame callback
+	 * that runs after ours, waited the rest of the floor or a frame for that
+	 * sync, and the page's picture painted without its ink in between. The root
+	 * observer syncs at once when this answers true, before the next paint.
+	 *
+	 * A canvas added hidden counts: the viewer shows it later by an attribute
+	 * the observer does not watch, and to the sync a hidden canvas is already a
+	 * live page. Viewer records only, and only the viewer's canvases: ours never
+	 * count, so a sync's own writes cannot bring on another sync this way.
+	 */
+	function inkedPageShownBare(this: PdfInkController, records: readonly MutationRecord[]): boolean {
+		if (!this.mounted) return false;
+		for (const record of records) {
+			if (record.type !== "childList" || record.target.nodeType !== 1 || record.addedNodes.length === 0) continue;
+			if (!Array.from(record.addedNodes).some(holdsViewerCanvas)) continue;
+			const pageEl = (record.target as Element).closest("div.page[data-page-number]");
+			if (!pageEl) continue;
+			const pageNumber = Number(pageEl.getAttribute("data-page-number"));
+			if (this.strokes(pageNumber).length === 0) continue;
+			if (this.overlays.get(pageNumber)?.canvas.parentElement === pageEl) continue;
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * The sync `inkedPageShownBare` asks for, run now, reading no pixels of a
+	 * page whose div has been read before.
+	 *
+	 * A zoom in gives the page a new canvas, and a read of it here ran in the
+	 * frame the zoom lands in, beside the read that frame's own sync makes:
+	 * two reads of a big page in one frame, and the zoom landed frames later.
+	 * The page keeps its div's last answer instead, and the next sync reads the
+	 * new canvas (`shadePages`), so a page the file draws dark stays dark in the
+	 * meantime. A page's first canvas, with no answer on its div yet, is read
+	 * here as at any sync.
+	 */
+	function syncShownBare(this: PdfInkController): void {
+		atOnceSyncs.add(this);
+		try {
+			this.sync();
+		} finally {
+			atOnceSyncs.delete(this);
+		}
+	}
+
+/** Does this node carry our overlay class: a pen canvas, a highlight group or canvas, the pair? */
+function isOwnNode(node: Node): boolean {
+	return (node as Partial<Element>).classList?.contains(OVERLAY_CLASS) === true;
+}
+
+/** Is this node a canvas of the viewer's, or an element holding one? */
+function holdsViewerCanvas(node: Node): boolean {
+	if (node.nodeType !== 1) return false;
+	const el = node as Element;
+	if (el.tagName === "CANVAS") return !el.classList.contains(OVERLAY_CLASS);
+	return el.querySelector(`canvas:not(.${OVERLAY_CLASS})`) !== null;
+}
+
+/**
+ * Every node of ours a page holds, to that page's number: each pen canvas,
+ * each highlight group, and the pair on the page it is on.
+ */
+function heldNodes(controller: PdfInkController): Map<Node, number> {
+	const held = new Map<Node, number>();
+	for (const [pageNumber, attached] of controller.overlays) {
+		held.set(attached.canvas, pageNumber);
+		const layer = highlightLayers.get(attached);
+		if (layer) held.set(layer.group, pageNumber);
+	}
+	const pair = controller.pair;
+	if (pair && controller.wetHostPage > 0) {
+		held.set(pair.wetCanvas, controller.wetHostPage);
+		held.set(pair.headCanvas, controller.wetHostPage);
+	}
+	return held;
+}
+
 /**
  * The pair canvases this controller has just moved between a page and its
- * highlight group, held until the root observer has been handed that move's
- * records. Each mark is made AFTER its move and taken off in a microtask
- * queued then: the move's first record queued the observer's delivery (or
- * joined one already queued), so the delivery runs first and sees the mark,
- * and a later move by anything else does not. Counted, so one move's
- * microtask cannot take off another's mark of the same canvas.
+ * highlight group, or taken off a page in `refitPair`, held until the root
+ * observer has been handed that move's records. Each mark is made AFTER its
+ * move and taken off in a microtask queued then: the move's first record
+ * queued the observer's delivery (or joined one already queued), so the
+ * delivery runs first and sees the mark, and a later move by anything else
+ * does not. Counted, so one move's microtask cannot take off another's mark
+ * of the same canvas.
  */
 const ownMoves = new WeakMap<PdfInkController, Map<Node, number>>();
 
@@ -1319,7 +1707,8 @@ function markOwnMove(controller: PdfInkController, ...nodes: Node[]): void {
 
 /**
  * Is this childList record only a highlight layer appearing or going, or the
- * pair moving between a page and its highlight group? Read by
+ * pair moving between a page and its highlight group or taken off a page by
+ * `refitPair`? Read by
  * `isOwnMutation`; every other record is judged exactly as before.
  */
 export function isOwnLayerRecord(controller: PdfInkController, record: MutationRecord): boolean {
@@ -1333,6 +1722,7 @@ export function isOwnLayerRecord(controller: PdfInkController, record: MutationR
 export function installPdfBand(proto: PdfInkController): void {
 	installMethods(proto, {
 		sync,
+		syncForTool,
 		pageWidthPt,
 		isRotated,
 		viewTurn,
@@ -1352,13 +1742,20 @@ export function installPdfBand(proto: PdfInkController): void {
 		detachPairFrom,
 		dropPair,
 		restoreSelectionOutline,
+		refitPair,
+		boxTurn,
+		selectionFrame,
 		paint,
 		drawCommitted,
 		highlightLayered,
+		highlightMultiplies,
 		ensureHighlightLayer,
 		dropHighlightLayer,
 		pairHome,
 		seatPair,
 		drawHighlights,
+		putBackTaken,
+		inkedPageShownBare,
+		syncShownBare,
 	});
 }

@@ -83,7 +83,12 @@ declare module "./InkOverlay" {
 			!this.selection.isEmpty &&
 			this.view.state.selection.main.empty
 		) {
-			const k = event.key.toLowerCase();
+			// A layout that types another script (Russian, Greek, Arabic) reports its own letter in
+			// `key`, so C and X read as neither and the editor cut or copied the caret's line. Only
+			// then does the physical key decide; a Latin layout, however remapped, keeps what `key`
+			// says. The PDF surface's rule (PdfInkController.ts, its copy and cut keys).
+			const typed = event.key.toLowerCase();
+			const k = /^[a-z]$/.test(typed) ? typed : /^Key[A-Z]$/.test(event.code ?? "") ? event.code.slice(3).toLowerCase() : typed;
 			if (k === "c" || k === "x") {
 				if (k === "c") {
 					const n = this.copySelectedInk();

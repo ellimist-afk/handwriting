@@ -559,3 +559,65 @@ describe("WetInkRenderer.contactHalfWidth", () => {
 		);
 	});
 });
+
+/**
+ * The wet tile's size across note zoom, on the tablet pane the zoom pins use (ZoomLayersPins.test.ts). Band, grid
+ * and tile sizes up to 200 percent are the ones the real overlay printed in Chromium at those rows; they are literals
+ * here so a changed size law cannot carry its own expectation. Above 200 percent the tile is never larger on screen
+ * than it is at 200 percent, so it stays a small share of the band and stays on at 800 percent, where 256 css px
+ * times the backing is wider than the band and used to turn the tile off.
+ */
+const ODD_RATIO = 1.8257418870925903;
+type TileRow = { dpr: number; zoom: number; band: [number, number]; grid: number; size: [number, number] };
+const TILE_ROWS: TileRow[] = [
+	{ dpr: 2, zoom: 1, band: [3556, 2734], grid: 1, size: [512, 512] },
+	{ dpr: 2, zoom: 1.5, band: [3555, 2733], grid: 3, size: [768, 768] },
+	{ dpr: 2, zoom: 1.79, band: [3555, 2732], grid: 1, size: [917, 917] },
+	{ dpr: 2, zoom: 1.95, band: [3557, 2734], grid: 39, size: [1014, 1014] },
+	{ dpr: 2, zoom: 2, band: [3556, 2736], grid: 1, size: [1024, 1024] },
+	{ dpr: 2, zoom: 2.5, band: [3555, 2730], grid: 5, size: [1025, 1025] },
+	{ dpr: 2, zoom: 3.5, band: [3556, 2730], grid: 7, size: [1029, 1029] },
+	{ dpr: 2, zoom: 4, band: [3560, 2736], grid: 1, size: [1024, 1024] },
+	{ dpr: 2, zoom: 6, band: [3552, 2736], grid: 3, size: [1026, 1026] },
+	{ dpr: 2, zoom: 8, band: [3568, 2752], grid: 1, size: [1024, 1024] },
+	{ dpr: ODD_RATIO, zoom: 1, band: [3246, 2496], grid: 1, size: [468, 468] },
+	{ dpr: ODD_RATIO, zoom: 1.5, band: [3245, 2495], grid: 1, size: [702, 702] },
+	{ dpr: ODD_RATIO, zoom: 1.79, band: [3245, 2494], grid: 1, size: [837, 837] },
+	{ dpr: ODD_RATIO, zoom: 1.95, band: [3247, 2496], grid: 1, size: [912, 912] },
+	{ dpr: ODD_RATIO, zoom: 2, band: [3246, 2494], grid: 1, size: [935, 935] },
+	{ dpr: ODD_RATIO, zoom: 2.5, band: [3245, 2492], grid: 1, size: [935, 935] },
+	{ dpr: ODD_RATIO, zoom: 3.5, band: [3246, 2492], grid: 1, size: [935, 935] },
+	{ dpr: ODD_RATIO, zoom: 4, band: [3243, 2498], grid: 1, size: [935, 935] },
+	{ dpr: ODD_RATIO, zoom: 6, band: [3243, 2498], grid: 1, size: [935, 935] },
+	{ dpr: ODD_RATIO, zoom: 8, band: [3257, 2512], grid: 1, size: [935, 935] },
+];
+
+/** A canvas whose window reports the device ratio and supports translate; its pixels are fake. */
+function ratioCanvas(dpr: number): HTMLCanvasElement {
+	const ctx = new Proxy({} as CanvasRenderingContext2D, {
+		get(_t, prop) {
+			if (prop === "getContextAttributes") return () => ({ desynchronized: false });
+			return () => undefined;
+		},
+		set() { return true; },
+	});
+	const win = { devicePixelRatio: dpr, CSS: { supports: (property: string) => property === "translate" } };
+	return { width: 1, height: 1, style: {}, ownerDocument: { defaultView: win }, getContext: () => ctx } as unknown as HTMLCanvasElement;
+}
+
+describe("the wet tile's size across note zoom", () => {
+	for (const row of TILE_ROWS) {
+		const at = row.zoom <= 2 ? "as it is today" : "never larger than at 200 percent";
+		it(`ratio ${row.dpr}, note zoom ${row.zoom}: the tile is ${row.size[0]} x ${row.size[1]}, ${at}, and at most half the band`, () => {
+			const backing = row.dpr * row.zoom;
+			const cssW = row.zoom === 1 ? 1778 : row.band[0] / backing, cssH = row.zoom === 1 ? 1367 : row.band[1] / backing;
+			expect([Math.round(cssW * backing), Math.round(cssH * backing)], "the band in backing px").toEqual(row.band);
+			const wet = new WetInkRenderer(ratioCanvas(row.dpr), false);
+			const tile = ratioCanvas(row.dpr);
+			wet.configureWetTile(tile, cssW, cssH, backing, row.zoom, true);
+			expect(wet.tileGrid, "the grid").toBe(row.grid);
+			expect([tile.width, tile.height], `the wet tile at ${row.zoom} (1 x 1 is off: every pen event draws into the full wet canvas)`).toEqual(row.size);
+			expect(tile.width * tile.height, "the tile covers more than half the band").toBeLessThanOrEqual(row.band[0] * row.band[1] / 2);
+		});
+	}
+});

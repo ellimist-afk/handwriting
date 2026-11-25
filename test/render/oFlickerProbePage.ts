@@ -56,6 +56,8 @@ export type Order = "textThenBlock" | "blockThenText" | "rowsNextFrame" | "block
 
 let ORDER: Order = "textThenBlock";
 let EV: EditorView | null = null;
+/** The body line ofMount scrolled to the view's top; 0 for none. */
+let TOP_LINE = 0;
 let SIZER: HTMLElement | null = null;
 let CONTAINER: HTMLElement | null = null;
 let PROPS: HTMLElement | null = null;
@@ -147,8 +149,9 @@ const pen = (type: string, x: number, y: number, buttons: number) =>
 type Sample = {
 	f: number; t: number; mark: string;
 	block: boolean; display: string; height: number; idOnly: boolean; rows: number;
-	docHasFm: boolean; contentTop: number; cmDocTop: number; camDocTop: number;
+	docHasFm: boolean; contentTop: number; scrollTop: number; cmDocTop: number; camDocTop: number;
 	oTop: number | null; oDy: number | null; anchorGen: number | null; shownMoves: number | null;
+	topLineTop: number | null;
 };
 const samples: Sample[] = [];
 let sampling = false, frameNo = 0, mark = "";
@@ -170,9 +173,16 @@ function read(): Sample {
 		block: !!el, display: cs?.display ?? "absent", height: el ? r3(el.getBoundingClientRect().height) : 0,
 		idOnly: el?.classList.contains("handwriting-metadata-id-only") ?? false, rows: el?.querySelectorAll(".metadata-property").length ?? 0,
 		docHasFm: frontmatterEnd(view.state.doc) > 0, contentTop: r3(view.contentDOM.getBoundingClientRect().top),
-		cmDocTop: r3(view.documentTop), camDocTop: r3(ov?.lastSyncDocumentTop ?? NaN),
+		scrollTop: r3(view.scrollDOM.scrollTop), cmDocTop: r3(view.documentTop), camDocTop: r3(ov?.lastSyncDocumentTop ?? NaN),
 		oTop, oDy: oDy === null ? null : r3(oDy), anchorGen: ov?.lineAnchors?.generation ?? null, shownMoves: ov?.shownMoves ?? null,
+		topLineTop: TOP_LINE ? lineTop(view, TOP_LINE + frontmatterEnd(view.state.doc)) : null,
 	};
+}
+/** The screen top of doc line `n`'s own box; null when that line is not drawn. */
+function lineTop(view: EditorView, n: number): number | null {
+	const at = view.domAtPos(view.state.doc.line(n).from);
+	const el = (at.node.nodeType === 1 ? at.node as Element : at.node.parentElement)?.closest(".cm-line");
+	return el ? r3(el.getBoundingClientRect().top) : null;
 }
 function tick(): void {
 	if (!sampling) return;
@@ -183,8 +193,10 @@ function tick(): void {
 
 // ---- the page's calls -------------------------------------------------------
 
-w.ofMount = async (o: { text: string; paneW: number; paneH: number; order: Order }) => {
+/** Mount; with `topLine`, the scroller is scrolled so that doc line's box top sits at the view's top edge. */
+w.ofMount = async (o: { text: string; paneW: number; paneH: number; order: Order; topLine?: number }) => {
 	ORDER = o.order;
+	TOP_LINE = o.topLine ?? 0;
 	setPenInk(true);
 	setScrollExpansionEnabled(true);
 	setInlineTool("pen");
@@ -214,7 +226,16 @@ w.ofMount = async (o: { text: string; paneW: number; paneH: number; order: Order
 	EV = view; SIZER = sizer; CONTAINER = container;
 	await settle(30);
 	if (!overlayForPath(PATH)) return { error: "no overlay" };
-	return { mounted: true, order: ORDER, lines: view.state.doc.lines, frontmatterEnd: frontmatterEnd(view.state.doc) };
+	let top: { line: number; text: string; scrollTop: number } | undefined;
+	if (o.topLine) {
+		const line = view.state.doc.line(o.topLine);
+		view.scrollDOM.scrollTop += view.documentTop + view.lineBlockAt(line.from).top - view.scrollDOM.getBoundingClientRect().top;
+		await settle(10);
+		const box = view.scrollDOM.getBoundingClientRect();
+		const at = view.state.doc.lineAt(view.posAtCoords({ x: view.contentDOM.getBoundingClientRect().left + 1, y: box.top + 1 }, false));
+		top = { line: at.number, text: at.text, scrollTop: r3(view.scrollDOM.scrollTop) };
+	}
+	return { mounted: true, order: ORDER, lines: view.state.doc.lines, frontmatterEnd: frontmatterEnd(view.state.doc), top };
 };
 
 /**

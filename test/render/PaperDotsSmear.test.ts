@@ -109,10 +109,38 @@ it.each([0.5, 0.3, 0.1])("DOTS AT %s: half a device px of offset neither spreads
  * percent, a pan of half a device px on both axes against none: the horizontal rules' band thickness (device rows at
  * more than half the rule's contrast, along a strip) and the band count. PASS when the half-px band is at most one
  * device row thicker than the no-pan band (a smear widens a 1-2 row rule to several).
+ *
+ * The strip is read with the floating toolbar hidden. The rig sets --background-modifier-border to the rule grey, so
+ * the toolbar's buttons, over the x strip's top 8 device rows, read as rule there; with grid at 10 percent (pitch 4.8
+ * device px, 5 horizontal rules in the 24-row strip) those columns sit at 11 rows of 24, and half a device px of pan
+ * moves one rule out from under the toolbar to make 12, the strip median, so a gap reads as rule and two rules join.
+ * The shot as the page stands is logged too (shown).
  */
+async function toolbarHidden(p: Page, hidden: boolean): Promise<string[]> {
+	return await p.evaluate(async (hidden) => {
+		document.getElementById("instrument-hide-toolbar")?.remove();
+		if (hidden) {
+			const s = document.createElement("style");
+			s.id = "instrument-hide-toolbar";
+			s.textContent = ".handwriting-mobile-tools { visibility: hidden !important; }";
+			document.head.appendChild(s);
+		}
+		await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+		return Array.from(document.querySelectorAll(".handwriting-mobile-tools, .handwriting-mobile-tools-face")).map(e => getComputedStyle(e).visibility);
+	}, hidden);
+}
+
 async function ruleBands(p: Page, axis: "y" | "x") {
 	const r = await p.evaluate(() => { const s = (document.querySelector(".cm-scroller") as HTMLElement).getBoundingClientRect(); return { left: s.left, top: s.top }; });
 	const clip = axis === "y" ? { x: Math.round(r.left + 30), y: Math.round(r.top + 20), width: 12, height: 300 } : { x: Math.round(r.left + 20), y: Math.round(r.top + 30), width: 300, height: 12 };
+	const shown = await stripBands(p, axis, clip);
+	const toolbar = await toolbarHidden(p, true);
+	const read = await stripBands(p, axis, clip);
+	await toolbarHidden(p, false);
+	return { ...read, toolbar, shown };
+}
+
+async function stripBands(p: Page, axis: "y" | "x", clip: { x: number; y: number; width: number; height: number }) {
 	const d = decodePng(await p.screenshot({ clip }));
 	const n = axis === "y" ? d.height : d.width, other = axis === "y" ? d.width : d.height;
 	const profile: number[] = [];
@@ -167,6 +195,7 @@ it.each([["lines", 0.5], ["lines", 0.3], ["lines", 0.1], ["grid", 0.5], ["grid",
 			await setPan(0);
 			out[axis] = { none, half };
 			expect(none.bands, `premise: rules found on ${axis}`).toBeGreaterThanOrEqual(3);
+			expect([...none.toolbar, ...half.toolbar].every(v => v === "hidden"), `premise: the floating toolbar is hidden for the ${axis} shots (${[...none.toolbar, ...half.toolbar].join(",")})`).toBe(true);
 			expect.soft(half.max - none.max, `${kind} z ${z} ${axis}: widest band at half a device px of pan vs none, device rows (none ${JSON.stringify(none)}, half ${JSON.stringify(half)})`).toBeLessThanOrEqual(1);
 		}
 		// eslint-disable-next-line no-console

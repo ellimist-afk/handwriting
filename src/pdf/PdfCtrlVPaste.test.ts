@@ -218,7 +218,7 @@ describe("Ctrl+V with copied ink on the clipboard", () => {
 	let marker: string;
 	beforeEach(() => {
 		clearInkClipboard();
-		copyInk([pdfStroke("copied", 300)], DOC);
+		copyInk([pdfStroke("copied", 300)], DOC, null, "pdf");
 		marker = inkClipboardMarker()!;
 	});
 	afterEach(() => clearInkClipboard());
@@ -306,7 +306,7 @@ describe("Ctrl+V with copied ink on the clipboard", () => {
 		try {
 			// A second copy names new ink: the first marker, replayed from a
 			// clipboard manager's history, no longer names what is held.
-			copyInk([pdfStroke("copied-again", 400)], DOC);
+			copyInk([pdfStroke("copied-again", 400)], DOC, null, "pdf");
 			const ev = pasteEvent(marker, r.leaf.page);
 			const heard = deliverToRoot(r.leaf.leafContent, ev);
 			expect(r.notices, `paste listeners on the pane: ${heard}`).toContain(
@@ -334,7 +334,7 @@ describe("Ctrl+V on a PDF selects what it pasted", () => {
 		const c = r.controller as unknown as { selected: string[]; selectionPage: number };
 		c.selected = ["on-page"];
 		c.selectionPage = 1;
-		copyInk(r.ink().filter((s) => s.id === "on-page"), DOC);
+		copyInk(r.ink().filter((s) => s.id === "on-page"), DOC, null, "pdf");
 		return inkClipboardMarker()!;
 	}
 

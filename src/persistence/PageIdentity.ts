@@ -5,14 +5,23 @@
  * unchanged from the class. This file imports only types from main.
  */
 import { Notice, TFile } from "obsidian";
-import { slidesSidecarId } from "../slides/SlidesInkSurface";
-import { slidesNoteIdChanged } from "../slides/SlidesPersistence";
+import { SLIDES_SIDECAR_SUFFIX, slidesSidecarId } from "../slides/SlidesInkSurface";
+import { slidesLockLifted, slidesNoteIdChanged } from "../slides/SlidesPersistence";
 import { inkExternallyReloaded, inlineInk } from "../inline/InkOverlay";
 import { claimMarkdown, hasEmptyFrontmatterBlock, hasFrontmatterBlock, reassignMarkdown, UnreadableFrontmatterError } from "../inline/InlineClaim";
 import { notifyInkChanged } from "../inline/InkEvents";
 import { DiagnosticTextModal } from "../diag/DiagnosticTextModal";
+import {
+	type DuplicateRepairEnd,
+	traceDuplicateRepairEnd,
+	traceDuplicateRepairStart,
+	traceDuplicateRewrite,
+	traceDuplicateSeen,
+	tracePageIdWrite,
+} from "../diag/NoteTraceRows";
 import { isSafePageId, newPageId } from "../model/PageData";
 import { RegisterVerdict } from "../model/PageIdIndex";
+import { isPdfInkId } from "../pdf/PdfIdentity";
 import { runDetached } from "../util/Detached";
 import { findSplitInk, type SplitInkReport, splitInkReportText } from "./SplitInk";
 import { installMethods } from "../inline/InstallMethods";
@@ -100,32 +109,91 @@ const DECLAIM_GRACE_MS = 5_000;
 	}
 
 	/**
+	 * A PDF's ink id is never a note's own, whatever a note's id line names (a
+	 * copied property, a template, a hand edit): the rule RecycleOnDelete keeps
+	 * for a delete. No note's id move takes the PDF's file from under such an
+	 * id, or sets a note's file under or beside one. Asked case-blind, because
+	 * an id line can name the PDF's id in capitals, and a disk that does not
+	 * tell case apart finds the PDF's file by that name.
+	 *
+	 * A PDF never has a Slides file, so the file under a PDF id's Slides name
+	 * is a note's own deck page. Off a PDF's id (offPdfId) that file moves with
+	 * the note, alone (idMovePairs); onto one nothing of the note's moves.
+	 */
+	function pdfSide(from: string, to: string): boolean {
+		return isPdfInkId(from.toLowerCase()) || isPdfInkId(to.toLowerCase());
+	}
+
+	/** Off a PDF's id only: the old id a PDF's, the new id not (pdfSide's case-blind rule, one side each). */
+	function offPdfId(held: string, id: string): boolean {
+		return isPdfInkId(held.toLowerCase()) && !isPdfInkId(id.toLowerCase());
+	}
+
+	/**
+	 * The files one id move takes, in order: the note's inline file, then its Slides file. Off a PDF's id the Slides
+	 * file alone: the inline file under that id is the PDF's, and stays.
+	 */
+	function idMovePairs(held: string, id: string, slidesOnly: boolean): (readonly [string, string])[] {
+		const slides = [slidesSidecarId(held), slidesSidecarId(id)] as const;
+		return slidesOnly ? [slides] : [[held, id] as const, slides];
+	}
+
+	/**
+	 * The two ids the settings keep a part-done move under (keepFollowForLaunch). Off a PDF's id, the two Slides ids,
+	 * never the PDF's id: an older build reads any two ids there as a whole move with no PDF test, and would take the
+	 * PDF's file at its launch; it finds no note for a Slides id and drops the entry, touching no file.
+	 */
+	function keptIds(held: string, id: string): [string, string] {
+		return offPdfId(held, id) ? [slidesSidecarId(held), slidesSidecarId(id)] : [held, id];
+	}
+
+	/**
+	 * The move a kept entry names (resumeFollowsAtLaunch): this build's own pair of Slides ids off a PDF's id, and an
+	 * older build's raw pair off one, each finished as the Slides move alone; any other pair as it is.
+	 */
+	function keptMove(held: string, id: string): { held: string; id: string; slidesOnly: boolean } {
+		const base = (kept: string): string | null => (kept.endsWith(SLIDES_SIDECAR_SUFFIX) ? kept.slice(0, -SLIDES_SIDECAR_SUFFIX.length) : null);
+		const fromSlides = base(held);
+		const toSlides = base(id);
+		if (fromSlides !== null && toSlides !== null && offPdfId(fromSlides, toSlides)) return { held: fromSlides, id: toSlides, slidesOnly: true };
+		return { held, id, slidesOnly: offPdfId(held, id) };
+	}
+
+	/**
 	 * A page id move the app quit in the middle of (kept in the settings by
 	 * followEditedId) is finished here, at the census, before anything else
 	 * asks for the note's ink by its new id: the late ink and the deck are
 	 * otherwise left under the old id where nothing reads them.
 	 *
 	 * The note is the one that carries the new id now. With no such note, the
-	 * old id another note's, either id ambiguous, or the note locked, the entry
-	 * is dropped and no file is touched. Otherwise both moves run as the timer
-	 * rounds run them (moveIdFiles). Done, the note's ink is read again if it is
+	 * old id another note's, either id ambiguous, the new id a PDF's, or the
+	 * note locked, the entry is dropped and no file is touched. Otherwise the
+	 * moves run as the timer rounds run them (moveIdFiles): off a PDF's id the
+	 * Slides move alone (idMovePairs). Done, the note's ink is read again if it is
 	 * already loaded, and an open deck is pointed at the new file, as follow()
 	 * does. A move that throws sets what is left beside the new page as a listed
 	 * copy (keepAsideUnder with no stamp); if that throws too, or the move asks
 	 * to try again, the entry waits for the next launch.
+	 *
+	 * Off a PDF's id an entry names the two Slides ids (keptIds); one an older
+	 * build kept names the raw pair. Both are read as the Slides move (keptMove),
+	 * and a raw pair is kept from here on under the Slides ids.
 	 */
 	function resumeFollowsAtLaunch(plugin: HandwritingPlugin): void {
 		// Settings not read through settingsFrom may lack the key: nothing kept.
 		const kept = plugin.settings.partDoneFollows;
 		if (plugin.settingsReadFailed || !kept) return;
-		for (const [keptPath, entry] of Object.entries(kept)) {
-			const { held, id } = entry;
+		for (const [keptPath, found] of Object.entries(kept)) {
+			const { held, id, slidesOnly } = keptMove(found.held, found.id);
+			const [keptHeld, keptId] = keptIds(held, id);
+			const entry = keptHeld === found.held && keptId === found.id ? found : { ...found, held: keptHeld, id: keptId };
+			if (entry !== found) kept[keptPath] = entry;
 			const path = plugin.pageIds.owner(id);
 			const blocked = (): boolean => {
 				const heldOwner = plugin.pageIds.owner(held);
 				return (heldOwner !== undefined && heldOwner !== path) || plugin.ambiguousIds.has(held) || plugin.ambiguousIds.has(id) || (path !== undefined && inlineInk.isDuplicateLocked(path));
 			};
-			if (path === undefined || blocked()) {
+			if (path === undefined || (pdfSide(held, id) && !slidesOnly) || blocked()) {
 				delete kept[keptPath];
 				continue;
 			}
@@ -139,11 +207,11 @@ const DECLAIM_GRACE_MS = 5_000;
 				if (blocked()) return "retry";
 				return null;
 			};
-			const state: MoveState = { wrote: entry.wrote, keptLive: entry.keptLive, keepHeld: true, done: 0 };
+			const state: MoveState = { wrote: entry.wrote, keptLive: entry.keptLive, keepHeld: true, done: 0, took: false, tookSlides: false };
 			// A note names the old id again (its id set back, or a copy that carries it): its saves are its own, not late ones.
 			const named = (): boolean => plugin.pageIds.owner(held) !== undefined || plugin.ambiguousIds.has(held);
 			runDetached(
-				moveIdFiles(plugin.store, path, held, id, state, interrupted, named).then(
+				moveIdFiles(plugin.store, path, held, id, state, interrupted, named, slidesOnly).then(
 					(outcome) => {
 						if (outcome === "retry") return undefined;
 						forget();
@@ -159,7 +227,7 @@ const DECLAIM_GRACE_MS = 5_000;
 					},
 					async (err) => {
 						console.error("[handwriting] could not finish the page id move left part done at the last quit; setting the rest beside the new page", path, held, id, err);
-						const pairs = ([[held, id], [slidesSidecarId(held), slidesSidecarId(id)]] as const).slice(state.done);
+						const pairs = idMovePairs(held, id, slidesOnly).slice(state.done);
 						try {
 							for (const [from, to] of pairs) await plugin.store.keepAsideUnder(from, to);
 						} catch (again) {
@@ -209,6 +277,12 @@ const DECLAIM_GRACE_MS = 5_000;
 		// is a value.
 		const held = inlineInk.pageIdOf(path);
 		if (held !== null && held !== id) {
+			this.declaimLater(path);
+		} else if (this.pageIds.idsOf(path).some((owned) => owned !== id)) {
+			// The note's record is not on another id (its ink not loaded, or
+			// already under this one), yet the note still owns an id it no
+			// longer carries: the same grace, then it lets that id go and the
+			// notes left on it are counted (followEditedId).
 			this.declaimLater(path);
 		}
 		// It came back after the grace ran out: frontmatter that stayed
@@ -273,15 +347,21 @@ const DECLAIM_GRACE_MS = 5_000;
 	/**
 	 * A follow left part done, per plugin and note: the move it retries, how
 	 * many timer rounds it has had, whether an earlier round already made the
-	 * old Slides file the new id's live file, and the stamp of the bytes an
-	 * earlier round made the new id's live inline file. Dropped once the move is
-	 * done or the note moved on.
+	 * old Slides file the new id's live file, the stamp of the bytes an
+	 * earlier round made the new id's live inline file, whether an earlier
+	 * round took the old id's inline file away, and whether an earlier round
+	 * took the old id's Slides file away. Dropped once the move is done or the
+	 * note moved on. The launch's copy (keepFollowForLaunch) leaves `took` and
+	 * `tookSlides` out: the launch counts no notes left on the old id.
 	 */
-	const partDoneFollows = new WeakMap<HandwritingPlugin, Map<string, { held: string; id: string; rounds: number; keptLive: boolean; wrote?: string }>>();
+	const partDoneFollows = new WeakMap<HandwritingPlugin, Map<string, { held: string; id: string; rounds: number; keptLive: boolean; wrote?: string; took?: boolean; tookSlides?: boolean }>>();
 	/** Timer retries of a part-done move; after them it waits for the next identity check (a text edit) or the next launch. */
 	const PART_DONE_RETRIES = 3;
 
-	/** The settings copy of a part-done move, for the next launch (resumeFollowsAtLaunch); null removes it. Rides persistOwners' write. */
+	/**
+	 * The settings copy of a part-done move, for the next launch (resumeFollowsAtLaunch); null removes it. Rides
+	 * persistOwners' write. Off a PDF's id it names the two Slides ids (keptIds).
+	 */
 	function keepFollowForLaunch(plugin: HandwritingPlugin, path: string, entry: PartDoneFollow | null): void {
 		if (plugin.settingsReadFailed) return;
 		const kept = plugin.settings.partDoneFollows as Record<string, PartDoneFollow> | undefined;
@@ -289,7 +369,8 @@ const DECLAIM_GRACE_MS = 5_000;
 			if (!kept || !(path in kept)) return;
 			delete kept[path];
 		} else {
-			(plugin.settings.partDoneFollows = kept ?? {})[path] = { held: entry.held, id: entry.id, rounds: entry.rounds, keptLive: entry.keptLive, ...(entry.wrote !== undefined ? { wrote: entry.wrote } : {}) };
+			const [held, id] = keptIds(entry.held, entry.id);
+			(plugin.settings.partDoneFollows = kept ?? {})[path] = { held, id, rounds: entry.rounds, keptLive: entry.keptLive, ...(entry.wrote !== undefined ? { wrote: entry.wrote } : {}) };
 		}
 		plugin.persistOwners();
 	}
@@ -298,10 +379,12 @@ const DECLAIM_GRACE_MS = 5_000;
 	 * What one move carries across its steps: the stamp of what it last made the
 	 * new id's live inline file, whether the old Slides file became the new
 	 * id's live file (in this round or an earlier one), whether the deck's
-	 * strokes are then the new id's own, and how many of the two files it has
-	 * moved so far.
+	 * strokes are then the new id's own, how many of the two files it has
+	 * moved so far, whether it took the old id's inline file away from its
+	 * place, and whether it took the old id's Slides file away from its place
+	 * (each in this round or an earlier one).
 	 */
-	type MoveState = { wrote?: string; keptLive: boolean; keepHeld: boolean; done: number };
+	type MoveState = { wrote?: string; keptLive: boolean; keepHeld: boolean; done: number; took: boolean; tookSlides: boolean };
 
 	/**
 	 * Both moves of a page id change, in order: the note's inline file, then
@@ -311,7 +394,9 @@ const DECLAIM_GRACE_MS = 5_000;
 	 * timer rounds (followEditedId) and by the launch (resumeFollowsAtLaunch).
 	 * `named` (the launch only): the store remembers each move, and follows a
 	 * save that lands under the old id later only while this says no note
-	 * names that id.
+	 * names that id. `slidesOnly` (off a PDF's id): the Slides move alone, and
+	 * only its old id is asked about; the PDF's own saves under its id are the
+	 * PDF's, not late ones of the note's.
 	 */
 	async function moveIdFiles(
 		store: PageStore,
@@ -320,15 +405,23 @@ const DECLAIM_GRACE_MS = 5_000;
 		id: string,
 		state: MoveState,
 		interrupted: () => "moved-on" | "retry" | null,
-		named?: () => boolean
+		named?: () => boolean,
+		slidesOnly = false
 	): Promise<"moved" | "retry" | "moved-on"> {
 		const slidesHeld = slidesSidecarId(held);
+		const pairs = idMovePairs(held, id, slidesOnly);
 		// The saves asked for under each old id so far. One asked for during the moves and already written lands a
 		// new old-id file that nothing names, and leaves no queued write behind to say so.
-		const asked = [held, slidesHeld].map((from) => store.scheduled.get(from) ?? 0);
-		for (const [from, to] of [[held, id], [slidesHeld, slidesSidecarId(id)]] as const) {
+		const asked = pairs.map(([from]) => store.scheduled.get(from) ?? 0);
+		for (const [from, to] of pairs) {
 			const kept = await store.keepAsideUnder(from, to, from === held ? state.wrote : undefined, named);
-			if (from === held && kept.kind === "moved") state.wrote = kept.stamp;
+			if (from === held && kept.kind === "moved") {
+				state.wrote = kept.stamp;
+				// Made the new id's live file or set beside it: either way no file is left under the old id.
+				state.took = true;
+			}
+			// The same for the Slides file, made live or set beside, set before the round can stop on a queued save.
+			if (from === slidesHeld && kept.kind === "moved") state.tookSlides = true;
 			if (kept.kind !== "held") state.done++;
 			const stopped = interrupted();
 			if (stopped) return stopped;
@@ -349,7 +442,7 @@ const DECLAIM_GRACE_MS = 5_000;
 		// A note stroke lifted while the Slides file moved is saved under the old inline id, which the Slides step's
 		// check does not ask about: ask about every step's old id once more before the follow, whether its save is
 		// still queued or has already landed. The retry sets the new old-id file beside the new page.
-		for (const [i, from] of [held, slidesHeld].entries()) {
+		for (const [i, [from]] of pairs.entries()) {
 			if (store.hasQueuedWrite(from) || (store.scheduled.get(from) ?? 0) !== asked[i]) {
 				console.error("[handwriting] could not move the old id's ink beside the new page; will try again", path, from);
 				return "retry";
@@ -370,6 +463,13 @@ const DECLAIM_GRACE_MS = 5_000;
 	 * which case it is that note's. The note's Slides file moves the same way,
 	 * and an open presentation of it follows the new id.
 	 *
+	 * A PDF'S FILE NEVER MOVES (pdfSide). A note open on a PDF's id never drew
+	 * on that file (it is not an inline page), so the file stays the PDF's; the
+	 * note's own deck page under the PDF id's Slides name moves alone, the same
+	 * way (offPdfId, idMovePairs). A note whose line now names a PDF's id keeps
+	 * its own files under the old id, and lets the old id go with no move, as
+	 * for an id that is not its own.
+	 *
 	 * THE MOVE COMES FIRST. The record lets go of the old id only once both
 	 * files have moved: a queue that will not write, or a stroke queued under
 	 * the old id while a file moved, leaves the note writing under the old id,
@@ -378,6 +478,13 @@ const DECLAIM_GRACE_MS = 5_000;
 	 * throws, the next identity check tries again. The old id passing to
 	 * another note during the move stops the round before its next file, and
 	 * the retry takes the route that leaves that note's files where they are.
+	 *
+	 * THE COUNT COMES AFTER THE MOVE. Once the note lets go of the old id,
+	 * the notes still carrying it are counted in the vault (countLeftOn): one
+	 * left owns it and its lock lifts; two or more stay locked and the id is
+	 * listed. A locked copy heard on the id meanwhile waits for this count
+	 * (resolveIdentityCollision), so none of its strokes is saved into a file
+	 * that goes with this note.
 	 *
 	 * Between the rounds the note keeps saving its whole page under the old id.
 	 * When an earlier round made the old inline file the new id's live file and
@@ -396,15 +503,30 @@ const DECLAIM_GRACE_MS = 5_000;
 	 */
 	function followEditedId(this: HandwritingPlugin, path: string, id: string): void {
 		const held = inlineInk.pageIdOf(path);
-		if (held === null || held === id) return;
+		if (held === null || held === id) {
+			// No record on the old id: the note's ink is not loaded, or already
+			// follows the new id. An id it still owns and no longer carries is
+			// let go, and the notes left on it counted; its own files under that
+			// id are set beside the new page first (leaveOwnedIds).
+			leaveOwnedIds(this, path, id);
+			return;
+		}
 		// The old id is this note's own: not locked, not another note's, not ambiguous.
 		const ownsHeld = (): boolean => {
 			const owner = this.pageIds.owner(held);
 			return !inlineInk.isDuplicateLocked(path) && (owner === undefined || owner === path) && !this.ambiguousIds.has(held);
 		};
-		const keepAside = ownsHeld();
-		const follow = (keepHeld: boolean): Promise<void> => {
-			if (keepAside) {
+		// Neither id a PDF's: a note's move never takes a PDF's file, or sets the note's own beside one.
+		const keepAside = ownsHeld() && !pdfSide(held, id);
+		// Off a PDF's id only: the note's own Slides file under it moves, alone; the PDF's file stays.
+		const slidesOnly = ownsHeld() && offPdfId(held, id);
+		const moves = keepAside || slidesOnly;
+		const follow = (keepHeld: boolean, took = false, tookSlides = false): Promise<void> => {
+			// The note lets go of the old id when it is its own, or when it still
+			// owns it while locked (an id not listed: a listed one is counted by
+			// the ambiguous recheck when the edit is heard).
+			const leaves = moves || (this.pageIds.owner(held) === path && !this.ambiguousIds.has(held));
+			if (leaves) {
 				this.pageIds.release(path, held);
 				this.persistOwners();
 			}
@@ -414,6 +536,12 @@ const DECLAIM_GRACE_MS = 5_000;
 			// An open presentation of this note writes under the new id from now on; a locked copy's takes only the
 			// ink drawn here, as its inline ink does. `keepHeld` false: the deck's strokes are not the new id's.
 			slidesNoteIdChanged(path, wasLocked, id, keepHeld);
+			// The notes left on the old id are counted only now, after this
+			// note's files moved: no stroke of theirs lands in a file that
+			// goes with it. `took`: the move left no file under the old id, so
+			// the one left keeps what it shows by saving it there. `tookSlides`:
+			// the same for the old id's Slides file and the one left's open deck.
+			if (leaves) countLeftOn(this, held, took, tookSlides);
 			return inlineInk.ensureLoaded(path).then(() => {
 				inkExternallyReloaded(path);
 				notifyInkChanged(path);
@@ -427,10 +555,10 @@ const DECLAIM_GRACE_MS = 5_000;
 		const tracked = partDone;
 		const prior = tracked.get(path);
 		const earlier = prior !== undefined && prior.held === held && prior.id === id ? prior : null;
-		if (!keepAside) {
+		if (!moves) {
 			tracked.delete(path);
 			keepFollowForLaunch(this, path, null);
-			// The old id's Slides file is another note's, or shared: not this note's under the new id.
+			// The old id's Slides file is another note's, or shared, or the new id is a PDF's: not this note's under the new id.
 			runDetached(follow(false), `reload ink for ${path} under its edited page id`);
 			return;
 		}
@@ -439,7 +567,9 @@ const DECLAIM_GRACE_MS = 5_000;
 		// keepHeld: whether the old id's Slides file became the new id's live file (or there was none): the deck's strokes
 		// are then the new id's own. keptLive: a round that made it the live file counts for every later round of the same
 		// move. wrote: the stamp of what this move last made the new id's live inline file, in this round or an earlier one.
-		const state: MoveState = { wrote: earlier?.wrote, keptLive: earlier?.keptLive ?? false, keepHeld: true, done: 0 };
+		// took: a round that took the old id's inline file counts for every later round, which then finds it gone.
+		// tookSlides: the same for the old id's Slides file.
+		const state: MoveState = { wrote: earlier?.wrote, keptLive: earlier?.keptLive ?? false, keepHeld: true, done: 0, took: earlier?.took ?? false, tookSlides: earlier?.tookSlides ?? false };
 		// The note moved on meanwhile (another edit, a close): this round is not
 		// its follow any more. The old id passed to another note: stop before
 		// the next file, and let the retry take the route that leaves it there.
@@ -449,18 +579,18 @@ const DECLAIM_GRACE_MS = 5_000;
 			return null;
 		};
 		runDetached(
-			moveIdFiles(this.store, path, held, id, state, interrupted).then(
+			moveIdFiles(this.store, path, held, id, state, interrupted, undefined, slidesOnly).then(
 				(outcome) => {
 					if (outcome !== "retry") {
 						tracked.delete(path);
 						keepFollowForLaunch(this, path, null);
 					}
-					if (outcome === "moved") return follow(state.keepHeld);
+					if (outcome === "moved") return follow(state.keepHeld, state.took, state.tookSlides);
 					if (outcome === "moved-on") return undefined;
 					// Part done: the record stays on the old id. Try again a grace later, not at the next text edit,
 					// a bounded number of times. The settings keep it too, so a quit before then leaves it to the next launch.
 					const rounds = (earlier?.rounds ?? 0) + 1;
-					const entry = { held, id, rounds, keptLive: state.keptLive, wrote: state.wrote };
+					const entry = { held, id, rounds, keptLive: state.keptLive, wrote: state.wrote, took: state.took, tookSlides: state.tookSlides };
 					tracked.set(path, entry);
 					keepFollowForLaunch(this, path, entry);
 					if (rounds <= PART_DONE_RETRIES) this.declaimLater(path);
@@ -499,7 +629,9 @@ const DECLAIM_GRACE_MS = 5_000;
 				const other = this.findOtherCarrier(fid, path);
 				if (other) {
 					this.pageIds.claimOwnership(fid, other);
+					const wasLocked = inlineInk.isDuplicateLocked(other);
 					inlineInk.clearDuplicateLock(other);
+					if (wasLocked) slidesLockLifted(other);
 					slidesNoteIdChanged(other);
 				}
 			}
@@ -521,33 +653,194 @@ const DECLAIM_GRACE_MS = 5_000;
 		const ownerFile = this.app.vault.getFileByPath(v.ownerPath);
 		const ownerId = ownerFile ? this.recentPageIdFor(ownerFile) : null;
 		if (ownerId !== id) {
+			// The owner left the id by an edited value that has not settled, or
+			// its id line cannot be read (emptied on the way to a new value),
+			// and a locked copy is heard on it (its body edited inside the
+			// owner's grace, or heard first). The owner lets the id go once its
+			// files have moved, and the notes left are counted then
+			// (followEditedId, or declaimNow if the line stays empty): the copy
+			// is not given the id from under the move. The owner's grace starts
+			// here if its change is not heard.
+			if (ownerFile && inlineInk.isDuplicateLocked(path)) {
+				traceDuplicateSeen("wait for owner", path, id, this);
+				this.declaimLater(v.ownerPath);
+				return;
+			}
+			traceDuplicateSeen("transfer", path, id, this);
 			this.pageIds.transfer(id, path);
 			this.persistOwners();
 			return;
 		}
+		traceDuplicateSeen("repair", path, id, this);
 		runDetached(
 			this.resolveDuplicate(path, id, v.ownerPath),
 			`repair duplicate page identity for ${path}`
 		);
 	}
 
-	/** Ambiguous set changed: if exactly one carrier remains, it owns the id. */
+	/** Ambiguous set changed: if exactly one note in the vault carries the id, it owns the id; if none, the entry goes. */
 	function recheckCollision(this: HandwritingPlugin, id: string): void {
-		const paths = this.ambiguousIds.get(id);
-		if (!paths) return;
-		const carriers = paths.filter((p) => {
-			const f = this.app.vault.getFileByPath(p);
-			return f !== null && this.recentPageIdFor(f) === id;
-		});
+		if (!this.ambiguousIds.has(id)) return;
+		// The notes carrying the id now are counted in the vault, not on the
+		// census's list: a note copied since carries it too, and one note left
+		// on that list is then not the only one. Two or more: every lock stands.
+		const carriers: string[] = [];
+		for (const f of this.app.vault.getMarkdownFiles()) {
+			if (this.recentPageIdFor(f) === id) carriers.push(f.path);
+		}
 		if (carriers.length === 1) {
 			this.ambiguousIds.delete(id);
 			this.pageIds.claimOwnership(id, carriers[0]!);
+			const wasLocked = inlineInk.isDuplicateLocked(carriers[0]!);
 			inlineInk.clearDuplicateLock(carriers[0]!);
+			if (wasLocked) slidesLockLifted(carriers[0]!);
 			slidesNoteIdChanged(carriers[0]!);
 			this.persistOwners();
 		} else if (carriers.length === 0) {
 			this.ambiguousIds.delete(id);
 		}
+	}
+
+	/**
+	 * A note let go of `id` by an edited value: the notes still carrying it
+	 * are counted in the vault, as a delete counts them. One: it owns the id,
+	 * the id is not listed, its lock lifts (told once; the strokes drawn while
+	 * locked are saved once it has read the file again). Two or more: every
+	 * lock stands, no note is given the id, and once the census has run it is
+	 * listed as shared. None: nothing. `filesMoved`: this session's move of the
+	 * leaving note's files took the id's inline file away, so the one left
+	 * saves what it shows when its read finds no file (clearDuplicateLock).
+	 * `slidesMoved`: the same move took the id's Slides file away, so the one
+	 * left's open deck saves what it shows when its read finds no file.
+	 */
+	function countLeftOn(plugin: HandwritingPlugin, id: string, filesMoved = false, slidesMoved = false): void {
+		const carriers: string[] = [];
+		for (const f of plugin.app.vault.getMarkdownFiles()) {
+			if (plugin.recentPageIdFor(f) === id) carriers.push(f.path);
+		}
+		if (carriers.length === 1) {
+			const only = carriers[0]!;
+			plugin.pageIds.claimOwnership(id, only);
+			plugin.ambiguousIds.delete(id);
+			const wasLocked = inlineInk.isDuplicateLocked(only);
+			inlineInk.clearDuplicateLock(only, filesMoved);
+			if (wasLocked) slidesLockLifted(only);
+			slidesNoteIdChanged(only, false, undefined, true, slidesMoved);
+			// Before the census the ledger holds only this session's claims.
+			if (plugin.pageIdWatchReady) plugin.persistOwners();
+		} else if (carriers.length > 1 && plugin.pageIdWatchReady && plugin.pageIds.owner(id) === undefined) {
+			plugin.ambiguousIds.set(id, carriers);
+		}
+	}
+
+	/**
+	 * Every id `path` owns other than `id` (not listed) is let go, then the notes left on each are counted.
+	 *
+	 * The note has no record on the old id, so no follow moves its files. An id another note in the vault still
+	 * carries is that note's: it is let go at once and its files stay where they are. So is every id when `id` is a
+	 * PDF's (pdfSide): a note's move never sets the note's own file under or beside a PDF's, so the note's own ink stays
+	 * under its old id, named by nothing, as before these moves. An id no other note carries holds this note's own ink,
+	 * which nothing names once the id goes (a note merged into this one wrote its own id over this note's): its files
+	 * are set beside `id` first, and the id is let go only once they have moved (moveLeftIdFiles). Off a PDF's id that
+	 * is the note's Slides file alone; the PDF's file stays (offPdfId). One such id per round; any other waits for the
+	 * round after it.
+	 *
+	 * Not while the note is duplicate-locked, or does not own `id`: its files would go beside another note's page.
+	 * It keeps the old id, with no timer, until an identity check finds it owning `id`.
+	 */
+	function leaveOwnedIds(plugin: HandwritingPlugin, path: string, id: string): void {
+		const left = plugin.pageIds.idsOf(path).filter((owned) => owned !== id && !plugin.ambiguousIds.has(owned));
+		if (left.length === 0) return;
+		// Let go with no move: another note's, or every id when the new id is a PDF's.
+		const stay = left.filter((owned) => (pdfSide(owned, id) && !offPdfId(owned, id)) || plugin.findOtherCarrier(owned, path) !== null);
+		if (stay.length > 0) {
+			for (const owned of stay) plugin.pageIds.release(path, owned);
+			plugin.persistOwners();
+			for (const owned of stay) countLeftOn(plugin, owned);
+		}
+		const own = left.find((owned) => !stay.includes(owned));
+		const moving = own !== undefined && !inlineInk.isDuplicateLocked(path) && plugin.pageIds.owner(id) === path;
+		// A move left part done that this round does not go on with (its old id let go, or the note moved on) is dropped,
+		// here and in the settings, as the loaded follow drops it.
+		const tracked = partDoneFollows.get(plugin);
+		const prior = tracked?.get(path);
+		if (prior !== undefined && !(moving && prior.held === own && prior.id === id)) {
+			tracked!.delete(path);
+			keepFollowForLaunch(plugin, path, null);
+		}
+		if (moving) moveLeftIdFiles(plugin, path, own, id);
+	}
+
+	/**
+	 * The note's inline and Slides files under `held`, an id it owns and no longer carries, are set beside `id`, the
+	 * one it carries, by the moves the loaded follow runs (moveIdFiles): each becomes `id`'s live file when `id` has
+	 * none, or a copy beside it listed by fix ink de-sync. Off a PDF's id, the Slides file alone (offPdfId). Then
+	 * `held` is let go and the notes left on it counted.
+	 *
+	 * A round that asks to try again or throws keeps `held` and the files where they are, and is tried again a grace
+	 * later, PART_DONE_RETRIES times; the settings keep it for the next launch (resumeFollowsAtLaunch). The note moving
+	 * on (another id, `id` not its own, locked, or a record on another id) ends the round: its next identity check
+	 * decides again.
+	 *
+	 * A record on `id` (the note opened meanwhile) read that id's file before the move: it reads it again, as the
+	 * launch's move does, or it shows the page as it was and its next save sets the moved file aside.
+	 */
+	function moveLeftIdFiles(plugin: HandwritingPlugin, path: string, held: string, id: string): void {
+		let partDone = partDoneFollows.get(plugin);
+		if (!partDone) {
+			partDone = new Map();
+			partDoneFollows.set(plugin, partDone);
+		}
+		const tracked = partDone;
+		const prior = tracked.get(path);
+		const earlier = prior !== undefined && prior.held === held && prior.id === id ? prior : null;
+		const state: MoveState = { wrote: earlier?.wrote, keptLive: earlier?.keptLive ?? false, keepHeld: true, done: 0, took: earlier?.took ?? false, tookSlides: earlier?.tookSlides ?? false };
+		const interrupted = (): "moved-on" | "retry" | null => {
+			const file = plugin.app.vault.getFileByPath(path);
+			const record = inlineInk.pageIdOf(path);
+			if (!file || plugin.recentPageIdFor(file) !== id || plugin.pageIds.owner(id) !== path || inlineInk.isDuplicateLocked(path) || (record !== null && record !== id)) {
+				return "moved-on";
+			}
+			if (plugin.pageIds.owner(held) !== path || plugin.ambiguousIds.has(held) || plugin.findOtherCarrier(held, path) !== null) return "retry";
+			return null;
+		};
+		const again = (): void => {
+			const rounds = (earlier?.rounds ?? 0) + 1;
+			const entry = { held, id, rounds, keptLive: state.keptLive, wrote: state.wrote, took: state.took, tookSlides: state.tookSlides };
+			tracked.set(path, entry);
+			keepFollowForLaunch(plugin, path, entry);
+			if (rounds <= PART_DONE_RETRIES) plugin.declaimLater(path);
+		};
+		runDetached(
+			moveIdFiles(plugin.store, path, held, id, state, interrupted, undefined, offPdfId(held, id)).then(
+				(outcome) => {
+					if (outcome === "retry") {
+						again();
+						return undefined;
+					}
+					tracked.delete(path);
+					keepFollowForLaunch(plugin, path, null);
+					if (outcome === "moved-on") return undefined;
+					plugin.pageIds.release(path, held);
+					plugin.persistOwners();
+					countLeftOn(plugin, held, state.took, state.tookSlides);
+					slidesNoteIdChanged(path, false, id, state.keepHeld);
+					// Another old id left: the next round takes it.
+					if (plugin.pageIds.idsOf(path).some((owned) => owned !== id && !plugin.ambiguousIds.has(owned))) plugin.declaimLater(path);
+					if (inlineInk.pageIdOf(path) !== id) return undefined;
+					inlineInk.handleDeclaimed(path);
+					return inlineInk.ensureLoaded(path).then(() => {
+						inkExternallyReloaded(path);
+						notifyInkChanged(path);
+					});
+				},
+				(err) => {
+					console.error("[handwriting] could not move the old id's ink beside the new page; will try again", path, held, id, err);
+					again();
+				}
+			),
+			`set the ink ${path} left under its old page id beside its page`
+		);
 	}
 
 	/** Cached-metadata scan for another note carrying `id` (event paths only). */
@@ -581,7 +874,9 @@ const DECLAIM_GRACE_MS = 5_000;
 		if (!file) return;
 		if (this.resolvingDuplicates.has(file)) return;
 		this.resolvingDuplicates.add(file);
+		let ended: DuplicateRepairEnd = "threw";
 		try {
+			traceDuplicateRepairStart(file.path, this.app, inlineInk);
 			const newId = newPageId();
 			let cloned: "cloned" | "none" | "unreadable" | "exists";
 			let slidesCloned = false;
@@ -605,6 +900,7 @@ const DECLAIM_GRACE_MS = 5_000;
 				if (!ownerLive && inlineInk.pageIdOf(file.path) !== id && this.store.hasQueuedWrite(id)) {
 					if (!(await this.store.flushPage(id))) {
 						inlineInk.markDuplicateLocked(file.path, ownerPath);
+						ended = "locked: save not flushed";
 						return; // the save is re-queued for its retry: never clone without it
 					}
 				}
@@ -615,6 +911,7 @@ const DECLAIM_GRACE_MS = 5_000;
 					const slides = await this.store.clone(slidesSidecarId(id), slidesSidecarId(newId));
 					if (slides === "exists" || slides === "unreadable") {
 						inlineInk.markDuplicateLocked(file.path, ownerPath);
+						ended = slides === "exists" ? "locked: slides clone exists" : "locked: slides clone unreadable";
 						return;
 					}
 					slidesCloned = slides === "cloned";
@@ -622,18 +919,22 @@ const DECLAIM_GRACE_MS = 5_000;
 			} catch (err) {
 				console.error("[handwriting] duplicate sidecar clone failed", err);
 				inlineInk.markDuplicateLocked(file.path, ownerPath);
+				ended = "locked: flush or clone threw";
 				return; // fail closed: locked beats half-resolved
 			}
 			if (cloned === "exists") {
 				inlineInk.markDuplicateLocked(file.path, ownerPath);
+				ended = "locked: clone exists";
 				return;
 			}
 			let outcome: { changed: boolean; futureVersion?: number } = { changed: false };
+			traceDuplicateRewrite();
 			await this.app.vault.process(file, (data) => {
 				const r = reassignMarkdown(data, newId);
 				outcome = { changed: r.changed, futureVersion: r.futureVersion };
 				return r.content;
 			});
+			tracePageIdWrite("reassign", outcome.changed);
 			if (!outcome.changed) {
 				// The id line vanished meanwhile (nothing to do) or the note
 				// declares a newer format (never write): clean the unused clone.
@@ -642,6 +943,7 @@ const DECLAIM_GRACE_MS = 5_000;
 				if (outcome.futureVersion !== undefined) {
 					inlineInk.markDuplicateLocked(file.path, ownerPath);
 				}
+				ended = outcome.futureVersion !== undefined ? "locked: newer format" : "id line gone";
 				return;
 			}
 			// The original can be renamed while the clone or the rewrite is in
@@ -655,8 +957,11 @@ const DECLAIM_GRACE_MS = 5_000;
 			slidesNoteIdChanged(file.path, false, newId);
 			// Anything the copy queued under the OLD id before resolution is
 			// orphaned. Discard it only when this session provably has no other
-			// writer for that id (no live owner record).
-			if (verdict === "old-queue-orphaned") {
+			// writer for that id (no live owner record). A PDF's id always has
+			// another: the PDF, whose last strokes are that queued save. Never
+			// dropped, asked case-blind as pdfSide asks. A save the copy queued
+			// under such an id lands, as that note's saves do.
+			if (verdict === "old-queue-orphaned" && !isPdfInkId(id.toLowerCase())) {
 				this.store.discardPending(id);
 			}
 			const cam = this.settings.cameras[id];
@@ -670,8 +975,10 @@ const DECLAIM_GRACE_MS = 5_000;
 							? ". Its ink could not be copied because the source file is unreadable. The original was left untouched."
 							: ".")
 			);
+			ended = "repaired";
 		} finally {
 			this.resolvingDuplicates.delete(file);
+			traceDuplicateRepairEnd(ended);
 		}
 	}
 
@@ -845,6 +1152,7 @@ const DECLAIM_GRACE_MS = 5_000;
 		const file = this.app.vault.getFileByPath(path);
 		if (!file) throw new Error(`Handwriting: no file at ${path}`);
 		let out: { pageId: string; futureVersion?: number; content?: string } = { pageId: proposedId };
+		let claimChanged = false;
 		await this.app.vault.process(file, (data) => {
 			if (guard && (file !== guard.file || !guard.current() || data !== guard.markdown))
 				throw new Error("This canvas changed before its page identity could be saved.");
@@ -859,9 +1167,11 @@ const DECLAIM_GRACE_MS = 5_000;
 				throw new UnreadableFrontmatterError();
 			}
 			const r = claimMarkdown(data, proposedId);
+			claimChanged = r.changed;
 			out = { pageId: r.pageId, futureVersion: r.futureVersion, content: r.content };
 			return r.content;
 		});
+		tracePageIdWrite("claim", claimChanged);
 		// A claim is a first sighting for the ownership ledger. The note
 		// that mints an id owns it (duplicate detection, v0.13.6). Before the
 		// startup census the ledger holds only such claims, and saving it

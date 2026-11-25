@@ -1068,9 +1068,13 @@ export class InlinePenRouter {
  * page. Committed, not dropped. A hide is not a loss of continuity, so nothing else is torn down: a router with
  * no live stroke is left as it was, its tail and touch-action guard still armed, and its tail timer fires on
  * resume.
+ *
+ * Given the window that hid, only the routers whose note or PDF is in that window now: a stroke in another window
+ * keeps drawing, since that window is still in front. With no window, every router in every window (quit, which
+ * closes them all).
  */
-export function finishLiveStrokesOnHide(): void {
-	for (const r of [...liveRouters]) r.finishActiveStroke();
+export function finishLiveStrokesOnHide(win?: Window): void {
+	for (const r of [...liveRouters]) if (win === undefined || r.winRef === win) r.finishActiveStroke();
 }
 
 installInlinePenRouterNav(InlinePenRouter.prototype);

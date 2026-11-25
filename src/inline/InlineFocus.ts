@@ -1,4 +1,5 @@
 import { diagnosticsEnabled } from "../diag/DiagSwitch";
+import { caretNote, type CaretView } from "../diag/NoteTraceRows";
 import { tr } from "./InlinePenRouterTrace";
 import { describeEl } from "./PenHitProbe";
 
@@ -65,7 +66,7 @@ export function focusClaimedPenEditor(
  * overlay when the editor is reconfigured, so the owner calls it on destroy.
  */
 export function holdKeyboardForEveryPen(
-	view: { readonly hasFocus: boolean; readonly contentDOM?: HTMLElement; readonly dom?: HTMLElement; readonly scrollDOM?: HTMLElement },
+	view: { readonly hasFocus: boolean; readonly contentDOM?: HTMLElement; readonly dom?: HTMLElement; readonly scrollDOM?: HTMLElement } & CaretView,
 	skip: () => string | null
 ): () => void {
 	if (typeof view.dom?.addEventListener !== "function" || !view.contentDOM) return () => {};
@@ -86,7 +87,7 @@ export function holdKeyboardForEveryPen(
 				`keyboard at pen-down: editor focused=${focused ? "yes" : "no"}, inputmode before=${shown(before)} after=${shown(content.getAttribute("inputmode"))}, ` +
 					`hold=${why !== null ? `no (${why})` : held ? "already" : "placed"}`
 			);
-			armFocusinRow(content, view.scrollDOM ?? null, ev);
+			armFocusinRow(content, view.scrollDOM ?? null, ev, caretNote(view, view.scrollDOM ?? null));
 		}
 	};
 	root.addEventListener("pointerdown", onPenDown, true);
@@ -101,13 +102,16 @@ export function holdKeyboardForEveryPen(
  * editor content; the first focusin within FOCUSIN_ROW_MS writes one row: the
  * active element before the pen-down and at the focusin, scrollTop at the
  * pen-down, at the focusin and one frame later, and the first three stack
- * frames below the listener (empty when the browser focused it natively).
+ * frames below the listener (empty when the browser focused it natively);
+ * then the caret's line and top read at the pen-down, and scrollTop at the
+ * third frame and FOCUSIN_LATE_MS after the focusin, when the row is written.
  * With recording off nothing is armed, so no listener exists.
  */
 const FOCUSIN_ROW_MS = 1000;
+const FOCUSIN_LATE_MS = 500;
 const focusinRows = new WeakMap<HTMLElement, () => void>();
 
-function armFocusinRow(content: HTMLElement, scroller: HTMLElement | null, ev: PointerEvent): void {
+function armFocusinRow(content: HTMLElement, scroller: HTMLElement | null, ev: PointerEvent, caret: string): void {
 	focusinRows.get(content)?.();
 	const doc = content.ownerDocument;
 	const win = doc.defaultView;
@@ -118,16 +122,34 @@ function armFocusinRow(content: HTMLElement, scroller: HTMLElement | null, ev: P
 		const topAtFocusin = scroller ? scroller.scrollTop : null;
 		const activeNow = describeEl(doc.activeElement);
 		const stack = focusStackNote(new Error().stack ?? "");
+		const read = () => (scroller ? scroller.scrollTop : null);
+		let nextFrame: number | null = null;
+		let thirdFrame: number | null | "pending" | "none" = "pending";
+		let late: number | null | "none" = "none";
 		const write = () =>
 			tr(
 				"guard",
 				ev,
 				`focusin after pen-down: active before=${activeBefore} now=${activeNow}, ` +
-					`scrollTop at down=${topAtDown} at focusin=${topAtFocusin} next frame=${scroller ? scroller.scrollTop : null}, ` +
-					`stack: ${stack || "(none)"}`
+					`scrollTop at down=${topAtDown} at focusin=${topAtFocusin} next frame=${nextFrame}, ` +
+					`stack: ${stack || "(none)"}; caret at pen-down ${caret}, ` +
+					`scrollTop after focusin at 3 frames=${thirdFrame} at ${FOCUSIN_LATE_MS}ms=${late}` +
+					(win ? `, row time is the ${FOCUSIN_LATE_MS}ms read` : "")
 			);
-		if (win) win.requestAnimationFrame(write);
-		else write();
+		if (!win) {
+			nextFrame = read();
+			thirdFrame = "none";
+			write();
+			return;
+		}
+		win.requestAnimationFrame(() => {
+			nextFrame = read();
+			win.requestAnimationFrame(() => win.requestAnimationFrame(() => (thirdFrame = read())));
+		});
+		win.setTimeout(() => {
+			late = read();
+			write();
+		}, FOCUSIN_LATE_MS);
 	};
 	// The note's own window's timer: a popout's clock and lifetime are its own.
 	const timer = win?.setTimeout(() => disarm(), FOCUSIN_ROW_MS);

@@ -15,6 +15,7 @@ import { computeCanvasSize } from "../diag/Raster";
 import { MAX_VIEWPORT_LAYOUT } from "./PinchScale";
 import { backingScale, canvasLayerBox, fontZoomFactor, ownedEffectiveScale, rasterScale } from "./ZoomScale";
 import { scrollProbeExtent } from "./ScrollProbe";
+import { paperRowPx } from "./PaperPlan";
 import { installMethods } from "./InstallMethods";
 import { CONTENT_ORIGIN_EPSILON, SCALE_EPSILON, bumpCanvasReallocs, inlineInk, type InkOverlayPlugin } from "./InkOverlay";
 
@@ -163,6 +164,8 @@ declare module "./InkOverlay" {
 		// The current/mount-time font ratio is the missing zoom factor.
 		this.contentStyle ??= this.winRef.getComputedStyle(this.view.contentDOM);
 		this.lastFontStr = this.contentStyle.fontSize;
+		const rowMoved = this.contentStyle.lineHeight !== this.lastLineHeightStr;
+		this.lastLineHeightStr = this.contentStyle.lineHeight;
 		const fontPx = Number.parseFloat(this.lastFontStr);
 		if (this.refFontPx <= 0 && Number.isFinite(fontPx) && fontPx > 0) {
 			this.refFontPx = fontPx;
@@ -199,13 +202,26 @@ declare module "./InkOverlay" {
 			this.cssScale = measuredCssScale;
    if(this.viewportLayout && Math.abs(measuredCssScale/this.pinchScaleNow-this.viewportLayout.externalScale)>SCALE_EPSILON) this.viewportLayout.externalScale=measuredCssScale/this.pinchScaleNow;
 			// A font change: the line anchors' signature is read again.
-			if (measuredFontZoom !== this.fontZoom) this.requestLineSignature();
+			const fontMoved = measuredFontZoom !== this.fontZoom;
+			if (fontMoved) this.requestLineSignature();
 			this.fontZoom = measuredFontZoom;
 			this.scale = this.cssScale * this.fontZoom;
-			// The paper follows the text's size as just read, and the thickness the
-			// scale just measured.
+			// The paper follows the text's size and row height as just read, and the
+			// thickness the scale just measured.
 			this.paperFontPx = fontPx;
+			this.paperRowPx = paperRowPx(this.lastLineHeightStr, this.view.defaultLineHeight);
 			this.paperRestZoom = Number.NaN;
+			this.updatePaperSpacing();
+			// The held column is the note's width times this ratio: asked again
+			// under the new one. Never with a stroke in flight (this branch is
+			// unlocked only): the first sync after the lift asks it.
+			if (fontMoved) this.applyColumnHold();
+		} else if (rowMoved) {
+			// The row height moved under a stroke. The paper is not the stroke's frame, and the line height was
+			// recorded above, so no later update asks again. A font change re-plans the paper at the first camera sync
+			// after pen-up (the sync returns while a stroke owns the frame, and its own font record still differs then);
+			// a row change alone has no such later route, so its re-plan runs in this refresh. The row only: the scale waits.
+			this.paperRowPx = paperRowPx(this.lastLineHeightStr, this.view.defaultLineHeight);
 			this.updatePaperSpacing();
 		}
 		// A canvas-off reset refused while the tab had no box runs now the geometry is back. Its commit has already
@@ -239,7 +255,11 @@ declare module "./InkOverlay" {
 		// the text and moves this.scale WITHOUT touching the canvas size,
 		// and skipping its repaint left ink painted at the old zoom (the
 		// 1.0.9 regression this guard shipped with).
+		// A canvas given back blank (watchBackingRestore) is not unchanged: the arm below runs at the same size, once, as the one
+		// place the layers get their scale back. The flag outlives every return above, so a pass that stops early leaves it set.
+		const restored = this.backingRestored === true;
 		const unchanged =
+			!restored &&
 			this.scale === prevScale &&
 			this.committedCanvas.width === size.backingW &&
 			this.committedCanvas.height === size.backingH &&
@@ -281,7 +301,11 @@ declare module "./InkOverlay" {
 			}
 			return;
 		}
-		this.takeStandIn(paintedDpr, backing);
+		this.backingRestored = false;
+		// After a restore the layers are blank: a stand-in copied from them would be shown blank, and every picture held on a
+		// detached canvas was given back blank with them.
+		if (restored) this.dropRestoredPictures();
+		else this.takeStandIn(paintedDpr, backing);
 		for (const c of [
 			this.committedCanvas,
 			this.wetCanvas,
@@ -316,6 +340,7 @@ declare module "./InkOverlay" {
 			const box = canvasLayerBox(size.cssW, size.cssH, raster, this.zoomFormAt(this.pinchScaleNow));
 			for (const c of [layer.pen, layer.hl]) c.setCssStyles({ width: `${box.width}px`, height: `${box.height}px`, transform: box.transform, transformOrigin: box.transform ? "0 0" : "" });
 			layer.invalidate("layout");
+			if (restored) layer.canvasesRestored();
 		}
 		// The backing just allocated against the device pixels the container
 		// really occupies. `rect` is the read this method already made and
@@ -342,6 +367,23 @@ declare module "./InkOverlay" {
 		this.tail.configureInlineBacking(size.cssW, size.cssH, backing, raster, this.zoomFormAt(this.pinchScaleNow));
 		this.wet.tileTranslate = this.translateSupported();
 		this.wet.configureWetTile?.(this.wetTileCanvas, size.cssW, size.cssH, backing, raster, this.zoomFormAt(this.pinchScaleNow));
+		// A stroke in flight: its strip so far was on the wet canvas just blanked, and the renderer only appends, so it stayed
+		// blank until the lift while the tip kept drawing. Draw it again here, in this task, from the stroke's own points
+		// through the same calls the pen made, at the camera the next piece draws with: the same strip, and the same last
+		// ribbon point for the next piece to start from. Only on this arm, where a reallocation blanked it.
+		const live = this.builder;
+		const liveWet = this.activeWet;
+		const liveCount = live?.pointCount ?? 0;
+		const liveSized = liveWet === this.wet ? !this.wetDeferred : liveWet === this.highlightWet && !this.highlightPairDeferred;
+		if (live && liveCount > 0 && liveSized) {
+			const sofar = live.finish();
+			if (sofar) {
+				const pts = sofar.points.slice(0, liveCount);
+				const cam = this.camera.snapshot;
+				liveWet.beginStroke(pts[0]!, this.activeStyle, sofar.tool === "highlighter", live.resolvedPressureProfile);
+				for (let i = 1; i < pts.length; i++) liveWet.appendPoint(cam, this.activeStyle, pts[i]!);
+			}
+		}
 		this.committedBlank = this.highlightBlank = true;
 		// Same guard as the unchanged arm's: re-basing the router's rect
 		// mid-stroke shifts every sample after it while the camera stays
@@ -366,7 +408,9 @@ declare module "./InkOverlay" {
 		// so no frame is presented blank.
 		if ((this.commitDepth || 0) > 0) {
 			this.commitRepaintOwed = true;
-		} else if (this.builder === null && this.mode === "ink") {
+		} else if (this.builder === null && this.mode === "ink" && !this.inkPaintAwaitsMeasure) {
+			// Arrived ink not yet painted waits for its queued paint (inkPaintAwaitsMeasure): painted here it would show at the
+			// place the line anchors give before the editor has measured the text under the column held for it.
 			this.repaint();
 		} else {
 			this.scheduleRepaint("resize");

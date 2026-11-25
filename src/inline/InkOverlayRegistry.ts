@@ -19,6 +19,7 @@ import { armMouseInkQuietly, mouseInkEnabled, toolPickedHere } from "./MouseInk"
 import { surfaceExtents } from "./SurfaceExtent";
 import { tipModeHeld, releaseTipModes, repaintSurfaces, hideCursorSurfaces, endStrokeSurfaces, refreshStripSurfaces } from "./InkOverlayToolState";
 import { rasterProbeLine } from "./RasterProbe";
+import { onInkReread } from "./InkEvents";
 import type { InkOverlayPlugin } from "./InkOverlay";
 
 const sessionStartMs = Date.now();
@@ -353,6 +354,11 @@ export function repaintAllInkOverlays(): void {
 	for (const repaint of repaintSurfaces) repaint();
 }
 
+/** A theme or snippet switch: each overlay's paper pitch a stylesheet refused is tried again (paperCssChanged). */
+export function paperCssChangeAll(): void {
+	for (const p of instances) p.paperCssChanged();
+}
+
 /** Everything the A/B comparison against the canvas view needs, as text. */
 export function copyInlineInkMetrics(): string {
 	let downs = 0;
@@ -398,6 +404,12 @@ export function copyInlineInkMetrics(): string {
 export function inkExternallyReloaded(path: string, strokesChanged = true): void {
 	for (const p of instances) p.noteExternallyReloaded(path, strokesChanged);
 }
+
+// The store read a note's file again under its open session (a duplicate lock cleared on a copy) and its ink changed: the
+// panes on it repaint and find its groups again, as after an outside reload. The strokes this note changed itself are its
+// own objects still, so a selection or a drag in hand stays; strokes the read took away leave the selection by the prune on
+// the ink change heard just before.
+onInkReread((path) => inkExternallyReloaded(path, false));
 
 export interface InlineReloadBinding {
 	pane: object;

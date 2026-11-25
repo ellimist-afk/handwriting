@@ -208,6 +208,7 @@ async function rig(raw: Record<string, unknown>, pageColour: string, strokes: In
 				remove: () => {
 					c.parentElement = null;
 				},
+				addEventListener: () => {},
 			};
 			return c;
 		},
@@ -498,8 +499,12 @@ describe("the PDF snip paints its ink for the page the user declares", () => {
 		const before = JSON.stringify(r.strokes);
 		r.selectAll();
 		const ink = inkColours((await snip(r)).calls);
-		// It really did adjust something, or "untouched" would be vacuous.
-		expect(ink.some((c) => c !== FAINT && c !== BLACK)).toBe(true);
+		// It really did adjust something, or "untouched" would be vacuous. The
+		// faint grey pen is painted the palette's black on a white page
+		// (FOLLOWUPS 378), the same colour as the black stroke beside it.
+		expect(ink.length).toBeGreaterThan(0);
+		expect(ink).not.toContain(FAINT);
+		expect(new Set(ink)).toEqual(new Set([BLACK]));
 		expect(JSON.stringify(r.strokes)).toBe(before);
 		expect(r.strokes.map((s) => s.color)).toEqual([FAINT, BLACK]);
 		expect(r.writes).toEqual([]);

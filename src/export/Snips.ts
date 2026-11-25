@@ -8,6 +8,7 @@ import { normalizePath, Notice, TFile } from "obsidian";
 import { InkOverlayPlugin } from "../inline/InkOverlay";
 import { stripMarkdownExtension } from "../util/MarkdownPath";
 import { appendInkToPdf, flattenedPdfPath } from "../ink/InkPdfAppend";
+import { ENCRYPTED_REASON, XFA_REASON } from "../pdf/PdfSyntax";
 import { createFreshFile } from "./CreateFreshFile";
 import { PdfInkController } from "../pdf/PdfInkController";
 import { installMethods } from "../inline/InstallMethods";
@@ -202,14 +203,18 @@ ${this.snipBacklink(file, `#page=${snip.pageNumber}`, `${file.basename} p.${snip
 	 * than flattened into "it did not work".
 	 */
 	async function flattenPdf(this: HandwritingPlugin, file: TFile, id: string): Promise<void> {
+		// The ink the command checked, taken before the read and as a copy. The
+		// read can wait seconds on a phone, and a pane closed or switched in
+		// that wait forgets the record: read after it, the list is empty and
+		// the copy is the PDF's own bytes, called exported. Ink drawn or erased
+		// while the file is read does not change this copy.
+		const strokes = [...this.pdfStore.strokes(id)];
 		const bytes = new Uint8Array(await this.app.vault.readBinary(file));
-		const result = appendInkToPdf(
-			bytes,
-			this.pdfStore.strokes(id),
-			this.settings.inkPdfColorMode
-		);
+		const result = appendInkToPdf(bytes, strokes, this.settings.inkPdfColorMode);
 		if (!result.ok) {
-			new Notice(`Handwriting: this PDF cannot be flattened - ${result.reason}`);
+			// These two say why in a full clause; every other reason keeps its dash.
+			const why = result.reason === ENCRYPTED_REASON || result.reason === XFA_REASON ? "because" : "-";
+			new Notice(`Handwriting: this PDF cannot be flattened ${why} ${result.reason}`);
 			return;
 		}
 		// Counted, not overwritten - the snip's bargain, now this one's too:

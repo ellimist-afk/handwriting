@@ -34,7 +34,7 @@
 
 /** Margin above and below the viewport, as a fraction of viewport height. */
 export const BAND_MARGIN_FRACTION = 0.25;
-/** Floor, so a short editor pane still has room to scroll into. */
+/** Floor, so a short editor pane still has room to scroll into. In the reader's px above 1.0 (`bandMarginMin`). */
 export const BAND_MARGIN_MIN = 120;
 /**
  * Ceiling, in the px the READER sees. The margin is raster area on five
@@ -65,12 +65,42 @@ export const BAND_MARGIN_MAX = 320;
  * sizes the canvases from `cssScale` and so charges for visual area, not
  * layout area.
  *
- * ONLY EVER UPWARDS. At 1.0 and above this returns BAND_MARGIN_MAX unchanged,
- * so nothing outside the zoomed-out regime moves at all - including every
- * caller that does not report a scale.
+ * ABOVE 1.0 the same holds the other way: the client box shrinks by the zoom,
+ * so 320 layout px would be 2560 visual px at 800%, a band that asks the
+ * canvases for eight times the area the same pane asks for at 100%, which the
+ * area cap then takes out of the ink's resolution. So the ceiling (and the
+ * floor, `bandMarginMin`) is divided by the scale there too, and rounded to
+ * the nearest whole px: a fractional margin is a fractional band box, and the
+ * overlay measures its scale from that box against a whole offsetWidth. Never
+ * a ceil or a floor, which flip at the exact scales the zoom steps land on.
+ *
+ * At 1.0, and for every caller that does not report a scale, this returns
+ * BAND_MARGIN_MAX unchanged.
+ *
+ * "Above 1.0" IS THE PINCH, the zoom the person set and reads on the zoom bar,
+ * not `scale`, which is the pinch times the pane's own outer CSS scale. With
+ * an outer scale of 1.25 and the pinch at 100%, a division by `scale` cut the
+ * margin from 320 to 256 and refused a settle's ease the base had eased, so
+ * the page jumped at the lift. So the division is by `zoomInDivisor`: the
+ * pinch when the outer scale is above 1 (the base's 100% band already holds
+ * that outer scale), the whole scale when it is below 1 (the zoomed-out branch
+ * above already divides by it, and dividing by the pinch alone would jump as
+ * the scale crosses 1). A caller that reports no pinch gets the scale.
  */
-export function bandMarginMax(scale = 1): number {
-	return scale > 0 && scale < 1 ? BAND_MARGIN_MAX / scale : BAND_MARGIN_MAX;
+export function bandMarginMax(scale = 1, pinch = scale): number {
+	if (scale > 0 && scale < 1) return BAND_MARGIN_MAX / scale;
+	const d = zoomInDivisor(scale, pinch);
+	return d > 1 ? Math.round(BAND_MARGIN_MAX / d) : BAND_MARGIN_MAX;
+}
+/** The floor in the scroller's layout px: BAND_MARGIN_MIN visual px above 1.0, rounded as the ceiling is. */
+export function bandMarginMin(scale = 1, pinch = scale): number {
+	const d = zoomInDivisor(scale, pinch);
+	return d > 1 ? Math.round(BAND_MARGIN_MIN / d) : BAND_MARGIN_MIN;
+}
+/** What the margin is divided by above a pinch of 1: the smaller of the scale and the pinch; 1 (no division) when the scale is not a finite number above 1. */
+function zoomInDivisor(scale: number, pinch: number): number {
+	if (!(scale > 1 && Number.isFinite(scale))) return 1;
+	return pinch > 0 && Number.isFinite(pinch) ? Math.min(scale, pinch) : scale;
 }
 /**
  * How far the wanted position must differ before the band is actually moved.
@@ -82,8 +112,11 @@ export function bandMarginMax(scale = 1): number {
  * stroke - on every scroll event, at the bottom of every note. Exactly the
  * failure `SCALE_EPSILON` exists for, one measurement over.
  *
- * A whole pixel, because the cost of NOT moving is bounded by the slack, which
- * is never smaller than 60px. Nothing that matters is filtered out.
+ * A whole pixel, because the cost of NOT moving is bounded by the slack, half
+ * the margin: never under 60 scroller px at a pinch at or below 100%, and never
+ * under 60 of the reader's px above it, which is 7.5 scroller px at 800% on a
+ * short pane. Either is well over this one px. Nothing that matters is
+ * filtered out.
  */
 export const BAND_MOVE_EPSILON = 1;
 
@@ -105,6 +138,12 @@ export interface BandViewport {
 	 * the PDF surface and the unit fixtures are untouched by it.
 	 */
 	scale?: number;
+	/**
+	 * The pinch: the zoom the person set, `scale` without the pane's outer CSS
+	 * scale. Above 1 the margin is divided by it, not by `scale` (bandMarginMax).
+	 * OPTIONAL: a caller that does not report it is read as having no outer scale.
+	 */
+	pinch?: number;
 }
 
 /** The band's box in the scroller's CONTENT coordinates. */
@@ -139,9 +178,9 @@ function reachable(reported: number, viewportEdge: number): number {
 	return Math.min(Math.max(reported, viewportEdge), reported + 1);
 }
 
-export function bandMargin(clientHeight: number, scale = 1): number {
+export function bandMargin(clientHeight: number, scale = 1, pinch = scale): number {
 	const want = Math.round(clientHeight * BAND_MARGIN_FRACTION);
-	return Math.min(bandMarginMax(scale), Math.max(BAND_MARGIN_MIN, want));
+	return Math.min(bandMarginMax(scale, pinch), Math.max(bandMarginMin(scale, pinch), want));
 }
 
 /**
@@ -169,7 +208,7 @@ export function bandFor(v: BandViewport): Band {
 	// band is what lets the canvases be released there instead of holding five
 	// full-size backings on an invisible surface.
 	if (v.clientWidth <= 0 || v.clientHeight <= 0) return emptyBand();
-	const margin = bandMargin(v.clientHeight, v.scale);
+	const margin = bandMargin(v.clientHeight, v.scale, v.pinch);
 	const height = v.clientHeight + margin * 2;
 	// `scrollHeight` is reported as a rounded integer while `scrollTop` is
 	// fractional, so a scroller can sit a fraction of a pixel past its own
@@ -215,7 +254,7 @@ export function bandNeedsMove(current: Band | null, v: BandViewport): boolean {
 	// A size change is a resize, not a scroll: always take it, or the canvases
 	// keep a stale box and the zero-size release never happens.
 	if (current.width !== want.width || current.height !== want.height) return true;
-	const slack = bandMargin(v.clientHeight, v.scale) / 2;
+	const slack = bandMargin(v.clientHeight, v.scale, v.pinch) / 2;
 	if (Math.abs(current.top - want.top) >= BAND_MOVE_EPSILON) {
 		const above = v.scrollTop - current.top;
 		const below = current.top + current.height - (v.scrollTop + v.clientHeight);

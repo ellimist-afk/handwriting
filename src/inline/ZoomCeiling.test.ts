@@ -156,8 +156,8 @@ function plusButtonCeiling(): string {
 
 describe("the note's zoom ceiling is one constant, referenced everywhere", () => {
 	describe("with MAX_PINCH_SCALE moved to 5 for the overlay", () => {
-		// 5 is neither today's ceiling (6) nor the old one (4), so a site that
-		// kept either number as a literal stops somewhere else.
+		// 5 is neither today's ceiling (8) nor an old one (6, 4), so a site that
+		// kept any of those numbers as a literal stops somewhere else.
 		const MOVED = 5;
 		beforeEach(() => {
 			ceiling.moved = MOVED;
@@ -195,8 +195,8 @@ describe("the note's zoom ceiling is one constant, referenced everywhere", () =>
 		expect(plusButtonCeiling(), "the plus button still disables at its own literal; MAX_PINCH_SCALE moved without it").toBe("MAX_PINCH_SCALE");
 	});
 
-	it("the ceiling is 600%, and the floor is still below it", () => {
-		expect(MAX_PINCH_SCALE).toBe(6);
+	it("the ceiling is 800%, and the floor is still below it", () => {
+		expect(MAX_PINCH_SCALE).toBe(8);
 		expect(MIN_PINCH_SCALE).toBeGreaterThan(0);
 		expect(MAX_PINCH_SCALE).toBeGreaterThan(MIN_PINCH_SCALE);
 	});

@@ -27,7 +27,8 @@
  * fraction before the product code is even in question, which is exactly the
  * confusion the units plant below is built to catch on the PRODUCT side.
  *
- * MEASURED (the x contract):
+ * MEASURED (the x contract), at the older 28 px pitch; the pitch is now one plain body row's height, read from
+ * the page, so device px figures below are from that pitch:
  *   - RED on the build before this fix, at external 0.8 and 1, on staged and
  *     settled readings alike: the paper had no x anchor there at all, so the
  *     vertical rules drift off the text column as soon as the pinch
@@ -94,7 +95,8 @@ import REAL_OBSIDIAN_CSS from "./obsidianReadableWidth";
 
 let realBrowser: Browser, script: string;
 const OBSIDIAN_CAMERA_CSS = readFileSync(fileURLToPath(new URL("./noteViewportCamera.css", import.meta.url)), "utf8");
-const DSF = 2, PITCH = 28, TOL_DEV = 2;
+/** The paper's pitch is one plain body row's height: every reading takes it from the page (the `--handwriting-paper-pitch` the overlay wrote on the editor, layout px), never from a constant here. */
+const DSF = 2, TOL_DEV = 2;
 const PAGE_GREY = 255, RULE_GREY = 0x77;
 /** The host's own CSS scale, set once before the gesture and never changed - Obsidian's window zoom, not the pinch. Both legs this arm runs. */
 const EXTERNALS = [0.8, 1] as const;
@@ -209,6 +211,7 @@ async function readPatch(p: Page, external: number) {
 		const line = (document.querySelector(".cm-line") as HTMLElement).getBoundingClientRect();
 		return { scrollerLeft: r.left, scrollerTop: r.top, zoom: (window as any).viewportFixture.snap("paper").state.zoom as number, sizerLeft: s.left, sizerTop: s.top,
 			lineLeft: line.left, lineTop: line.top, rule: Number.parseFloat(getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).getPropertyValue("--handwriting-paper-rule")) || 1,
+			pitch: Number.parseFloat(getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).getPropertyValue("--handwriting-paper-pitch")),
 			sizer: sizer.style.transform, scrollLeft: sc.scrollLeft, scrollTop: sc.scrollTop,
 			vars: ["--handwriting-paper-pitch", "--handwriting-paper-rule", "--handwriting-paper-dot", "--handwriting-paper-phase"].map(k => getComputedStyle(sc).getPropertyValue(k).trim()).join("|") };
 	});
@@ -222,35 +225,35 @@ async function readPatch(p: Page, external: number) {
 		rows[y] = rows[y]! + f / d.width; cols[x] = cols[x]! + f / d.height;
 	}
 	const after = await g();
-	const k = before.zoom * external;
+	const k = before.zoom * external, pitch = before.pitch;
 	const centres: Record<Axis, number[]> = { x: bandCentres(cols), y: bandCentres(rows) };
 	const edge: Record<Axis, number> = { x: (before.sizerLeft - clip.x) * DSF, y: (before.sizerTop - clip.y) * DSF };
 	const rel = (a: Axis) => {
 		const c = centres[a];
 		if (!c.length) return Number.NaN;
-		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % PITCH) + PITCH) % PITCH) / PITCH);
+		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % pitch) + pitch) % pitch) / pitch);
 		const m = Math.atan2(ang.reduce((s, v) => s + Math.sin(v), 0), ang.reduce((s, v) => s + Math.cos(v), 0));
-		return (((m / (2 * Math.PI)) * PITCH) + PITCH) % PITCH;
+		return (((m / (2 * Math.PI)) * pitch) + pitch) % pitch;
 	};
 	const tight = (a: Axis) => {
 		const c = centres[a];
 		if (!c.length) return 0;
-		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % PITCH) + PITCH) % PITCH) / PITCH);
+		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % pitch) + pitch) % pitch) / pitch);
 		return Math.hypot(ang.reduce((s, v) => s + Math.sin(v), 0), ang.reduce((s, v) => s + Math.cos(v), 0)) / c.length;
 	};
 	const pan = panXY(before.sizer);
-	const pDevHere = PITCH * k * DSF, ruleDev = before.rule * k * DSF;
+	const pDevHere = pitch * k * DSF, ruleDev = before.rule * k * DSF;
 	const anchor: Record<Axis, number> = { x: (before.lineLeft - clip.x) * DSF, y: (before.lineTop - clip.y) * DSF };
 	const markOffset = -ruleDev / 2;
 	const abs = (a: Axis) => centres[a].length ? Math.max(...centres[a].slice(0, 6).map(c => circ(c - (anchor[a] + markOffset), pDevHere))) : Number.NaN;
-	return { geo: before, stable: JSON.stringify(before) === JSON.stringify(after), abs: { x: abs("x"), y: abs("y") } as Record<Axis, number>,
+	return { geo: before, pitch, stable: JSON.stringify(before) === JSON.stringify(after), abs: { x: abs("x"), y: abs("y") } as Record<Axis, number>,
 		centres: { x: centres.x.slice(0, 5).map(v => Math.round(v * 10) / 10), y: centres.y.slice(0, 5).map(v => Math.round(v * 10) / 10) },
 		rel: { x: rel("x"), y: rel("y") } as Record<Axis, number>, tight: { x: tight("x"), y: tight("y") } as Record<Axis, number>, count: { x: centres.x.length, y: centres.y.length } as Record<Axis, number>,
 		pan: { x: pan.x * k * DSF, y: pan.y * k * DSF } as Record<Axis, number> };
 }
 
-/** Distance in device px, at the painted scale `k` (already external-adjusted), between two layout-px places modulo the pitch. */
-const relOffDev = (a: number, b: number, k: number) => circ(a - b, PITCH) * k * DSF;
+/** Distance in device px, at the painted scale `k` (already external-adjusted), between two layout-px places modulo the pitch (layout px, as read from the page). */
+const relOffDev = (a: number, b: number, k: number, pitch: number) => circ(a - b, pitch) * k * DSF;
 
 /** The re-centring of the text column against the scroller since `rest`, device px, at the painted scale (pinch x external). */
 const recentring = (now: Awaited<ReturnType<typeof readPatch>>, rest: Awaited<ReturnType<typeof readPatch>>, external: number) =>
@@ -338,7 +341,7 @@ it.each(EXTERNALS)("ZOOM IN grid, readable line length on, external scale %s: th
 		const last = readings.at(-1)!.r;
 		expect(last.geo.zoom, `premise: the preview reached 150 percent pinch scale ${JSON.stringify(last.geo)}`).toBeCloseTo(1.5, 1);
 		const moved = recentring(last, rest, external);
-		const pitchDevLast = PITCH * last.geo.zoom * external * DSF;
+		const pitchDevLast = last.pitch * last.geo.zoom * external * DSF;
 		const moveThreshold = Math.max(pitchDevLast, 10 * TOL_DEV);
 		expect(Math.abs(moved), `premise: the column re-centred by at least one painted pitch, device px (host external ${external}, threshold ${moveThreshold.toFixed(1)}) ${JSON.stringify(last.geo)}`).toBeGreaterThanOrEqual(moveThreshold);
 
@@ -365,7 +368,7 @@ it.each(EXTERNALS)("ZOOM IN grid, readable line length on, external scale %s: th
 			// PASS ON X ONLY: y is read and logged with every reading - r.abs.y, r.rel.y - but not asserted; see the
 			// header for the stray band that makes up the y reading at external 0.8.
 			for (const a of ["x"] as const) {
-				expect.soft(relOffDev(r.rel[a], rest.rel[a], r.geo.zoom * external), `ZOOM IN grid RLL=true EXT=${external} ${label} ${a}: the lattice against the text's box, device px from its at-rest place`).toBeLessThanOrEqual(TOL_DEV);
+				expect.soft(relOffDev(r.rel[a], rest.rel[a], r.geo.zoom * external, r.pitch), `ZOOM IN grid RLL=true EXT=${external} ${label} ${a}: the lattice against the text's box, device px from its at-rest place`).toBeLessThanOrEqual(TOL_DEV);
 				expect.soft(r.abs[a], `ZOOM IN grid RLL=true EXT=${external} ${label} ${a}: the marks against the column's left edge / the note's top, device px`).toBeLessThanOrEqual(TOL_DEV);
 			}
 		}

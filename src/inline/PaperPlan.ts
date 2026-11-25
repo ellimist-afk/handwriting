@@ -18,11 +18,12 @@
  *               the camera sync already read it. Absolute, not relative to the
  *               size the editor had when the overlay mounted: a note opened
  *               while the font is already enlarged, or a plugin reload then,
- *               still gets paper at the text's size. CodeMirror's measured
- *               default line height was the other source with no read of its
- *               own, but it is the theme's line-height (24 px at Obsidian's
- *               16 px and 1.5), not the paper's 28, so the ratio to the app's
- *               default text size is used instead.
+ *               still gets paper at the text's size. Sets the thickness; sets
+ *               the pitch only when there is no row height.
+ *   textRowPx   the height of one plain body row, in layout px, read where the
+ *               font is read (paperRowPx): the lines follow the text's rows, so
+ *               at Obsidian's 16 px and 1.5 they are 24 px apart. NaN when no
+ *               row height could be read.
  *   originY     the note origin's y in the gradient's positioning area (the
  *               scroller's padding box), in layout px; null when unknown, and
  *               then no phase is planned and the caller keeps the last one.
@@ -30,7 +31,8 @@
  *               meant to be at (the intended zoom, not a measured read-back).
  *
  * Scale  s = textFontPx / 16, 16 px being Obsidian's default text size.
- * Pitch  28 x s layout px, to 1/64 layout px: the note's 28 px grid at the
+ * Pitch  textRowPx, to 1/64 layout px: each rule's bottom edge on a plain
+ *        row's bottom edge. With no row height, 28 x s, the older grid at the
  *        text's size. Dots tile one pitch square, and the engine stores a
  *        tile's size in its 1/64 px layout unit, so a pitch that is no whole
  *        number of that unit (30.8 at 17.6 px text) put each dot row a little
@@ -60,7 +62,7 @@
  */
 
 export const BASE_PITCH = 28;
-/** Obsidian's default text size: the size at which the paper's pitch is 28 px. */
+/** Obsidian's default text size: the size at which the fallback pitch (no row height read) is 28 px. */
 export const BASE_FONT_PX = 16;
 
 /** The engine's layout unit: positions are stored to 1/64 px. */
@@ -102,10 +104,21 @@ export function paperThickness(mark: PaperMark, textScale: number, devicePx: num
 	return literal * devicePx >= 1 ? literal : RULE_FLOOR_DEVICE_PX / devicePx;
 }
 
-export function paperPlan(textFontPx: number, noteOriginY: number | null, devicePx: number, noteOriginX: number | null = null): PaperPlan | null {
+/**
+ * One plain body row's height in layout px: the editor content's computed line height when it is a px length (the
+ * content's own style is the body text's, so a heading on line 1 never sets it); CodeMirror's measured default line
+ * height when it is not ("normal"); NaN when neither is usable, and the plan falls back to 28 x font / 16.
+ */
+export function paperRowPx(lineHeight: string | undefined, defaultLineHeight?: number): number {
+	const px = lineHeight !== undefined && /px$/.test(lineHeight.trim()) ? Number.parseFloat(lineHeight) : Number.NaN;
+	if (Number.isFinite(px) && px > 0) return px;
+	return defaultLineHeight !== undefined && Number.isFinite(defaultLineHeight) && defaultLineHeight > 0 ? defaultLineHeight : Number.NaN;
+}
+
+export function paperPlan(textFontPx: number, noteOriginY: number | null, devicePx: number, noteOriginX: number | null = null, textRowPx = Number.NaN): PaperPlan | null {
 	if (!Number.isFinite(textFontPx) || textFontPx <= 0) return null;
 	const scale = textFontPx / BASE_FONT_PX;
-	const pitch = toLayoutUnit(BASE_PITCH * scale);
+	const pitch = toLayoutUnit(Number.isFinite(textRowPx) && textRowPx > 0 ? textRowPx : BASE_PITCH * scale);
 	return { pitch, rule: paperThickness("rule", scale, devicePx), dot: paperThickness("dot", scale, devicePx), phase: wrapPhase(noteOriginY, pitch, devicePx), phaseX: wrapPhase(noteOriginX, pitch, devicePx) };
 }
 

@@ -74,7 +74,12 @@ declare module "./InkOverlay" {
 		// again. A second end while it eases finishes in place.
 		if (this.pinchGive && !this.pinchGive.stepping) {
 			if (phase === "move") return;
-			if (phase === "end") { this.finishPinchGive(); return; }
+			// An ease paused for a pen contact is the lift's to resume: an end here would finish it into a settle the
+			// stroke's frame refuses, and the refusal clears the pan under the pen.
+			if (phase === "end") { if (!this.pinchGive.paused) this.finishPinchGive(); return; }
+			// A start under the pen that paused the ease is refused before it drops it (the note reads busy and refuses it
+			// below anyway): dropped, the preview stayed up under the pen with nothing to land it.
+			if (this.pinchGive.paused && this.getNoteViewportState().busy) return;
 			const give = this.pinchGive;
 			if (give.raf !== 0) { this.winRef.cancelAnimationFrame(give.raf); give.raf = 0; }
 			this.pinchGive = null;
@@ -207,6 +212,8 @@ declare module "./InkOverlay" {
 				this.pinchRefScale = null;
 				this.pinchAnchor = null;
 				this.pinchPreview = false;
+				// Canvases given back blank during the preview waited for its end; a settle that committed no scale runs no resize pass, so ask one.
+				if (this.backingRestored) this.askRestorePass();
 				this.pinchPaintedValid = false;
 				// A preview that ended without its settle (cancelled, refused, or thrown) takes its paper down here.
 				if (!this.previewPaperHandoff) this.endPreviewPaper("cancel");

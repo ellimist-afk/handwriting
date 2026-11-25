@@ -88,8 +88,9 @@ describe("Job1B_E_52: ink edits made under a duplicate lock are saved when it cl
 		expect(store.strokes("a.md")).toEqual([]);
 		expect(w.queued.size).toBe(0);
 		store.clearDuplicateLock("a.md");
-		expect(w.notices.some((n) => n.includes("saves again"))).toBe(true);
 		expect(await store.settle()).toBe(true);
+		// Told once the clear has read the file again.
+		expect(w.notices.some((n) => n.includes("saves again"))).toBe(true);
 		w.flush();
 		expect(await restartStrokes(disk), "erased-while-locked ink comes back at restart").toEqual([]);
 	});

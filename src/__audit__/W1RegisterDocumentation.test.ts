@@ -4,14 +4,14 @@ import { expect, it } from "vitest";
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), "utf8");
 
-it("R1-21-F1 does not label ordinary successful camera assertions as expected failures", () => {
+it("does not label ordinary successful camera assertions as expected failures", () => {
 	const test = source("test/render/MinimalCameraScale.test.ts");
 	expect(test).toContain('it("syncCamera alone keeps ink on its word');
 	expect(test).toContain("expect(Math.abs(stale.error)).toBeLessThan(SUBPIXEL)");
 	expect(test.includes("CONFIRMED DEFECT, not fixed on this branch")).toBe(false);
 });
 
-it("R2-002 privacy documentation describes the explicit diagnostic upload and its payload scope", () => {
+it("privacy documentation describes the explicit diagnostic upload and its payload scope", () => {
 	// The command registrations live in commands/RegisterCommands.ts and RegisterDiagCommands.ts, read here with main.ts.
 	const main = [source("src/main.ts"), source("src/commands/RegisterCommands.ts"), source("src/commands/RegisterDiagCommands.ts")].join("\n");
 	const security = source("SECURITY.md");
@@ -22,7 +22,7 @@ it("R2-002 privacy documentation describes the explicit diagnostic upload and it
 	expect.soft(readme.includes("coordinates and timings- nothing else")).toBe(false);
 });
 
-it("R2-003 contributor prerequisites and test-scope copy match the actual toolchain", () => {
+it("contributor prerequisites and test-scope copy match the actual toolchain", () => {
 	const contributing = source("CONTRIBUTING.md");
 	const manual = source("docs/manual.md");
 	const pkg = JSON.parse(source("package.json")) as { scripts: Record<string, string> };
@@ -32,7 +32,7 @@ it("R2-003 contributor prerequisites and test-scope copy match the actual toolch
 	expect.soft(manual.includes("npm test          # the full test suite")).toBe(false);
 });
 
-it("R2-004 site and manual diagnostic instructions use the registered commands and Copy ID control", () => {
+it("site and manual diagnostic instructions use the registered commands and Copy ID control", () => {
 	// The command registrations live in commands/RegisterCommands.ts and RegisterDiagCommands.ts, read here with main.ts.
 	const main = [source("src/main.ts"), source("src/commands/RegisterCommands.ts"), source("src/commands/RegisterDiagCommands.ts")].join("\n");
 	const site = source("docs/index.html");

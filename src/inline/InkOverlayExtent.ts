@@ -13,6 +13,25 @@ import { committedFloorFor, EXTENT_PIECE_MS, EXTENT_PIECE_RETRY_MS, EXTENT_SCROL
 /** The smallest side scale a shrunk stand-in is made at: under it the copy would upscale more than twice, and the build runs alone. */
 const STAND_IN_SHRINK_MIN = 0.5;
 
+/**
+ * The strokes each held picture (a build, the raster it finishes, a stand-in) pictures, in list order: the list's first `count`
+ * references as they were when the picture took them, grown as strokes added at the end are drawn in. Keyed by the picture
+ * object itself, so the record goes with the picture.
+ */
+const heads = new WeakMap<object, InkStroke[]>();
+
+	/**
+	 * Whether `list` is the picture's own strokes with strokes added at the end: longer than `count`, and each of its first `count`
+	 * references the one the picture holds at that place. A split, a trim or an undo that puts ink back mid-list can leave the list
+	 * longer too, with another stroke under `count`. A picture with no record is refused.
+	 */
+	function addedAtEnd(picture: object, count: number, list: readonly InkStroke[]): boolean {
+		const head = heads.get(picture);
+		if (!head || head.length !== count || list.length <= count) return false;
+		for (let i = 0; i < count; i++) if (list[i] !== head[i]) return false;
+		return true;
+	}
+
 declare module "./InkOverlay" {
 	interface InkOverlayPlugin {
 		extentBuildAllowed(): boolean;
@@ -83,7 +102,11 @@ declare module "./InkOverlay" {
 		}
 		// A zoom preview showing the old canvases takes them down before they are freed.
 		if (plugin.heldRaster?.src.pen === st.pen) plugin.takeDownHeldRaster();
-		plugin.standIn = { ...st, pen, hl, at: { ...at }, backing: backing * s, mark: null };
+		const next = { ...st, pen, hl, at: { ...at }, backing: backing * s, mark: null };
+		plugin.standIn = next;
+		// The same strokes, on a smaller grid: the new object keeps the old one's record.
+		const head = heads.get(st);
+		if (head) heads.set(next, head);
 		for (const c of [st.pen, st.hl]) {
 			if (!c) continue;
 			c.width = 0;
@@ -134,6 +157,7 @@ declare module "./InkOverlay" {
 			look: inkLookKey(), floor, strokes, count: strokes.length, generation: inlineInk.generation(path),
 			hasHl: strokes.some(s => s.tool === "highlighter"), pen: null, hl: null, next: 0, timer: 0, shownMoves: this.shownMoves,
 		};
+		heads.set(this.extentBuild, strokes.slice());
 		this.scheduleExtentPiece(0, true);
 	}
 
@@ -184,6 +208,8 @@ declare module "./InkOverlay" {
 	 * Whether the build still holds for the note as it is now. A pen commit's strokes added at the end of the same store array, inside
 	 * the raster's world rect, with a highlighter layer where one is needed (the test drawIntoExtent applies), extend its target and
 	 * the pieces reach them in store order; any other change to the note, the zoom, the backing, the device ratio or the ink look fails.
+	 * A longer list holds only when the strokes the build took are still its first ones (addedAtEnd): a cut behind the pieces'
+	 * place would otherwise finish a raster that shows the uncut stroke.
 	 */
 	function extentBuildHolds(this: InkOverlayPlugin, b: NonNullable<InkOverlayPlugin["extentBuild"]>): boolean {
 		const path = this.filePath(), cam = this.lastPaintCam;
@@ -192,12 +218,14 @@ declare module "./InkOverlay" {
 		if (now !== b.strokes) return false;
 		if (now.length === b.count) return generation === b.generation;
 		if (now.length < b.count) return false;
+		if (!addedAtEnd(b, b.count, now)) return false;
 		const w = b.world;
 		for (let i = b.count; i < now.length; i++) {
 			const s = now[i]!, bb = s.bbox;
 			if (!(bb.x >= w.x0 && bb.y >= w.y0 && bb.x + bb.width <= w.x1 && bb.y + bb.height <= w.y1)) return false;
 			if (s.tool === "highlighter" && !b.hasHl) return false;
 		}
+		heads.get(b)?.push(...now.slice(b.count));
 		b.count = now.length;
 		b.generation = generation;
 		return true;
@@ -263,6 +291,9 @@ declare module "./InkOverlay" {
 			path: b.path, pen: b.pen, hl: b.hl, kx: b.kx, ky: b.ky, cam0: b.cam0, at: b.at, world: b.world, backing: b.backing, dpr: b.dpr,
 			look: b.look, strokes: b.strokes, generation: b.generation, count: b.count, shownMoves: b.shownMoves,
 		};
+		// The raster pictures what the build drew: it takes the build's record.
+		const head = heads.get(b);
+		if (head) heads.set(this.extentRaster, head);
 		// An extent raster holds now: the overview picture a zoom out would have held is let go.
 		this.dropOverview();
 		// The sharp raster is whole: the next whole repaint copies it in and lets the stand-in go in the same step.
@@ -307,25 +338,30 @@ declare module "./InkOverlay" {
 
 	/**
 	 * Keep the extent raster as the stand-in when only its zoom or backing no longer match: same note, device ratio, ink look, and the
-	 * store as it was or with strokes added at the end. A stand-in already held stays (never a copy of a copy). At or above 100 percent
-	 * too: the raster was built below it, and usableStandIn decides whether its copy may be shown there.
+	 * store as it was or with strokes added at the end (addedAtEnd: the raster's own strokes still first). A stand-in already held
+	 * stays (never a copy of a copy). At or above 100 percent too: the raster was built below it, and usableStandIn decides whether its
+	 * copy may be shown there.
 	 */
 	function extentToStandIn(this: InkOverlayPlugin, strokes: readonly InkStroke[]): void {
 		if (!ZOOM_STAND_IN_ENABLED) return;
 		const ext = this.extentRaster, path = this.filePath();
 		if (!ext || this.standIn || !path || ext.path !== path || ext.dpr !== this.dpr || ext.look !== inkLookKey() || ext.strokes !== strokes ||
-			strokes.length < ext.count || (strokes.length === ext.count && ext.generation !== inlineInk.generation(path))) return;
+			(strokes.length === ext.count ? ext.generation !== inlineInk.generation(path) : !addedAtEnd(ext, ext.count, strokes))) return;
 		this.standIn = {
 			path, pen: ext.pen, hl: ext.hl, at: ext.at, backing: ext.backing, dpr: ext.dpr, look: ext.look, strokes: ext.strokes,
 			count: ext.count, generation: ext.generation, mark: null, shownMoves: ext.shownMoves, store: inlineInk.strokes(path),
 		};
+		// The same pictures: the stand-in takes the raster's record.
+		const head = heads.get(ext);
+		if (head) heads.set(this.standIn, head);
 		this.extentRaster = null;
 	}
 
 	/**
 	 * Just before a resize clears the layers: when no stand-in is held, keep the old whole raster as one (extentToStandIn), or else copy
 	 * the committed layers' own pixels, painted at lastPaintCam and the old backing, as one. With no stroke owning the frame, the whole
-	 * store painted, and the device ratio unchanged. At or above 100 percent (the new cssScale) no raster replaces the stand-in: the
+	 * store of the open note painted (the last whole paint's note and count, paintedPath and paintedStrokeCount), and the device ratio
+	 * unchanged. At or above 100 percent (the new cssScale) no raster replaces the stand-in: the
 	 * crisp picture is the by-path repaint retryStandInLater asks for, the copy factor is at most STAND_IN_MAX_FACTOR_AT_100, and a
 	 * layer copy must fit the extent raster's cap (on a phone, 8 million device px a layer).
 	 */
@@ -354,6 +390,10 @@ declare module "./InkOverlay" {
 			if (this.standIn) return;
 		}
 		if (!cam || !fits(cam, from)) return;
+		// The layers picture the note their last whole paint drew. A note switch adopts the new note's font size, whose resize lands
+		// here before the new note's first paint: the layers still hold the last note's pixels, and the count alone matches when
+		// both notes hold as many strokes.
+		if (this.paintedPath !== path) return;
 		if (this.committedBlank || !(from > 0) || this.committedCanvas.width === 0 || strokes.length === 0 || this.paintedStrokeCount !== strokes.length) return;
 		// Both layers are the same size. Below 100 percent the copy keeps no cap, as in 1.4.24.
 		if (above && !extentRasterFits(this.committedCanvas.width, this.committedCanvas.height)) return;
@@ -377,6 +417,7 @@ declare module "./InkOverlay" {
 			path, pen, hl, at: { ...cam }, backing: from, dpr: paintedDpr, look: inkLookKey(), strokes, count: strokes.length,
 			generation: inlineInk.generation(path), mark: null, shownMoves: this.paintedShownMoves, store: inlineInk.strokes(path),
 		};
+		heads.set(this.standIn, strokes.slice());
 		this.standInSnapshots++;
 	}
 
@@ -393,9 +434,11 @@ declare module "./InkOverlay" {
 		// still shows each stroke within a pixel of its place, on the moved list too, and the queued frame copies it. Only over the
 		// store list it was taken from, unedited: a replaced list (a sync adoption, a restore, a load) may hold other strokes at the same
 		// count, and the store edits its own list in place (an eraser cut takes a stroke and puts its pieces back), moving the generation.
+		// A longer list is shown only as the stand-in's own strokes with strokes added at the end (addedAtEnd): a cut, a trim or an undo
+		// can leave it longer too, so the count alone does not tell.
 		const near = st.shownMoves !== this.shownMoves && movesUnderOnePixel(this, st.shownMoves, cam);
-		if (path === st.path && st.dpr === this.dpr && st.look === inkLookKey() && (st.strokes === strokes || (near && inlineInk.strokes(path) === st.store && inlineInk.generation(path) === st.generation)) && strokes.length >= st.count &&
-			(strokes.length > st.count || inlineInk.generation(path) === st.generation) && (this.cssScale < 1 || standInCoversView(this, st, cam)) && !(st.hl && this.highlightPairDeferred) && !(this.pinchHeld() && !this.previewPaperSettling) &&
+		if (path === st.path && st.dpr === this.dpr && st.look === inkLookKey() && (st.strokes === strokes || (near && inlineInk.strokes(path) === st.store && inlineInk.generation(path) === st.generation)) &&
+			(strokes.length === st.count ? inlineInk.generation(path) === st.generation : addedAtEnd(st, st.count, strokes)) && (this.cssScale < 1 || standInCoversView(this, st, cam)) && !(st.hl && this.highlightPairDeferred) && !(this.pinchHeld() && !this.previewPaperSettling) &&
 			standInFactorFits((cam.zoom * (this.committedBacking ?? 0)) / (st.at.zoom * st.backing), this.cssScale >= 1) &&
 			// Shown places moved since it was painted: refused, except under one device pixel (near) or by a whole paint outside the queued
 			// frame, which only defers to that frame (paintCommittedWork); otherwise the queued frame refuses it here and paints by path.
@@ -580,6 +623,8 @@ declare module "./InkOverlay" {
 			ctx.setTransform(ext.backing, 0, 0, ext.backing, 0, 0);
 			drawStroke(ctx, ext.at, s, undefined, true, undefined, floor);
 		}
+		const head = heads.get(ext);
+		if (head && head.length === ext.count) head.push(...added);
 		ext.count = now.length;
 		ext.generation = inlineInk.generation(path);
 	}

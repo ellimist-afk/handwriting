@@ -30,7 +30,7 @@
  *
  * 0.002 and not the canvas router's 0.0015 (PointerRouter :130): that router
  * zooms a camera with no cap, where a slower curve costs nothing. Here the
- * range is 10%..600%, so a full sweep should cross it.
+ * range is 10%..800%, so a full sweep should cross it.
  */
 export const WHEEL_ZOOM_K = 0.002;
 

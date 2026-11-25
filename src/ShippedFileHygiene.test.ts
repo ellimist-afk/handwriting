@@ -98,6 +98,12 @@ function trackedFiles(): string[] {
 		.filter(l => l.length > 0 && !(l in CARVE_OUTS));
 }
 
+/**
+ * The walk reads every tracked file: about two seconds on a quiet machine, past
+ * the five second default beside the other suites. It asserts no time, so the
+ * limit only has to sit well clear of that; a walk that hangs still fails.
+ */
+const WALK_LIMIT_MS = 60_000;
 
 describe("nothing shipped names how it was built", () => {
 	it("no tracked source, doc or manifest mentions the tooling or the coordination files", () => {
@@ -125,7 +131,7 @@ describe("nothing shipped names how it was built", () => {
 			hits,
 			`${hits.length} line(s) name the tooling or a coordination file:\n${hits.join("\n")}`
 		).toEqual([]);
-	});
+	}, WALK_LIMIT_MS);
 
 	it("the pattern is live: it catches what it is for, and not ordinary code", () => {
 		// Without these the walk above passes just as well with a broken regex.

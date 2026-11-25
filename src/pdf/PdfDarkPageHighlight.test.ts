@@ -514,31 +514,40 @@ function penCanvasOf(r: Rig): El {
 	return a.canvas;
 }
 const fillsOf = (el: El) => (el.ctx?.paints ?? []).filter((p) => p.op === "fill");
-/** The plain wash on the pen canvas: a fill at the highlighter's alpha, and the pen ink at full strength. */
-function plainWash(r: Rig, what: string): void {
+/** The group's inline blend as last written to it: "" leaves the stylesheet's multiply. */
+const blendOf = (group: El) => group.css["mixBlendMode"] ?? "";
+/**
+ * A page read as dark since F1: a group on the page blending exactly normal, the highlight opaque inside it,
+ * nothing at the wash on the pen canvas, and the pen ink painted there at full strength.
+ */
+function normalLayer(r: Rig, what: string): void {
+	const layer = layerOf(r.page);
+	expect(layer, `${what}: no highlight group on the page`).not.toBeNull();
+	expect(blendOf(layer!.group), `${what}: the group does not blend normal`).toBe("normal");
+	expect(fillsOf(layer!.canvas).some((p) => p.alpha === 1), `${what}: the highlight is not painted opaque in the group`).toBe(true);
 	const fills = fillsOf(penCanvasOf(r));
-	expect(fills.some((p) => p.alpha === HIGHLIGHTER_ALPHA), `${what}: the pen canvas holds no highlight at the wash`).toBe(true);
+	expect(fills.some((p) => p.alpha === HIGHLIGHTER_ALPHA), `${what}: a highlight is at the wash on the pen canvas`).toBe(false);
 	expect(fills.some((p) => p.alpha === 1), `${what}: the pen ink was not painted`).toBe(true);
 }
 /** The highlight layer: a group on the page, the highlight opaque inside it, nothing translucent on the pen canvas. */
 function layered(r: Rig, what: string): void {
 	const layer = layerOf(r.page);
 	expect(layer, `${what}: no highlight group on the page`).not.toBeNull();
+	expect(blendOf(layer!.group), `${what}: the group does not keep the stylesheet's multiply`).toBe("");
 	expect(fillsOf(layer!.canvas).some((p) => p.alpha === 1), `${what}: the highlight is not painted in the group`).toBe(true);
 	expect(fillsOf(penCanvasOf(r)).every((p) => p.alpha === 1), `${what}: a highlight is still at the wash on the pen canvas`).toBe(true);
 }
 
-describe("K1: on a page the app made dark, a saved highlight is the plain wash on the pen canvas", () => {
-	it("container themed, body dark, default setting: no group; the pen canvas paints exactly what \"Lighten for dark pages\" paints", () => {
+describe("K1: on a page the app made dark, a saved highlight is on the layer, blending normal", () => {
+	it("container themed, body dark, default setting: the group blends normal; the pen canvas and the layer paint exactly what \"Lighten for dark pages\" paints", () => {
 		const r = rig({ themed: true, dark: true });
 		r.sync();
-		expect(layerOf(r.page), "K1 a highlight group on a page the app made dark").toBeNull();
-		expect(r.page.all().filter((c) => c.tag === "div"), "K1 a div of ours on the page").toEqual([]);
-		plainWash(r, "K1");
+		normalLayer(r, "K1");
 		const lighten = rig({ themed: true, dark: true, assumption: "lighten" });
 		lighten.sync();
-		expect(layerOf(lighten.page), "precondition: the lighten page has no group").toBeNull();
+		normalLayer(lighten, "precondition: the lighten page");
 		expect(penCanvasOf(r).ctx!.log, "K1 the pen canvas did not paint what the lighten path paints").toEqual(penCanvasOf(lighten).ctx!.log);
+		expect(layerOf(r.page)!.canvas.ctx!.log, "K1 the layer did not paint what the lighten path paints").toEqual(layerOf(lighten.page)!.canvas.ctx!.log);
 	});
 });
 
@@ -563,7 +572,7 @@ describe("K4: an open PDF follows the change with no reopen", () => {
 		r.page.insertBefore(new El("canvas"), r.page.children[0] ?? null);
 	}
 
-	it("the container turns themed and the pages render again: the group goes and the wash is on the pen canvas; back: the group returns", async () => {
+	it("the container turns themed and the pages render again: the group blends normal; back: it keeps the stylesheet's multiply", async () => {
 		const r = rig({ themed: false, dark: true });
 		r.priv.mount();
 		cleanups.push(() => r.priv.unmount());
@@ -576,9 +585,12 @@ describe("K4: an open PDF follows the change with no reopen", () => {
 		rerender(r);
 		await settle();
 		expect(r.drain(), "K4 nothing repainted after the container turned themed").toBeGreaterThan(0);
-		expect(layerOf(r.page), "K4 the group stayed after the container turned themed").toBeNull();
 		expect(penCanvasOf(r), "K4 the pen canvas was rebuilt").toBe(pen);
-		plainWash(r, "K4");
+		// Only the blend changes: the highlight canvas holds the same pixels either way, so the
+		// paint may skip; the pen canvas takes no wash.
+		expect(layerOf(r.page), "K4 the group went after the container turned themed").not.toBeNull();
+		expect(blendOf(layerOf(r.page)!.group), "K4 the group does not blend normal after the container turned themed").toBe("normal");
+		expect(fillsOf(pen).some((p) => p.alpha === HIGHLIGHTER_ALPHA), "K4 a highlight went onto the pen canvas at the wash").toBe(false);
 		pen.ctx!.paints = [];
 		r.container.classList.remove("mod-themed");
 		rerender(r);
@@ -588,7 +600,7 @@ describe("K4: an open PDF follows the change with no reopen", () => {
 		expect(penCanvasOf(r)).toBe(pen);
 	});
 
-	it("with the option on, a theme switch (the css-change fan-out refreshes every open PDF): light to dark the group goes; back it returns", () => {
+	it("with the option on, a theme switch (the css-change fan-out refreshes every open PDF): light to dark the group blends normal; back it keeps the stylesheet's multiply", () => {
 		const r = rig({ themed: true, dark: false });
 		r.sync();
 		layered(r, "precondition");
@@ -598,8 +610,7 @@ describe("K4: an open PDF follows the change with no reopen", () => {
 		r.body.classList.add("theme-dark");
 		r.priv.refresh();
 		expect(r.drain(), "K4 the refresh asked for no repaint").toBeGreaterThan(0);
-		expect(layerOf(r.page), "K4 the group stayed after the switch to dark").toBeNull();
-		plainWash(r, "K4 dark");
+		normalLayer(r, "K4 dark");
 		pen.ctx!.paints = [];
 		r.body.classList.remove("theme-dark");
 		r.body.classList.add("theme-light");
@@ -617,22 +628,22 @@ describe("K5: a highlighter on a page the app made dark", () => {
 		r.priv.penDown(sample(150, 400, 0), { pointerType: "pen" } as PointerEvent);
 		r.priv.penRaw([sample(200, 400, 16), sample(250, 400, 32), sample(300, 400, 48)]);
 	}
-	it("the live pair stays on the page at the wash alpha, and nothing changes at the lift", () => {
+	it("the live pair sits in the group blending normal at full opacity, and nothing changes at the lift", () => {
 		const r = rig({ themed: true, dark: true });
 		r.sync();
 		down(r);
 		const pair = r.priv.pair!;
-		expect(pair.wetCanvas.parentElement, "K5 the live highlighter went into a group").toBe(r.page);
-		expect(layerOf(r.page), "K5 a group appeared at pen-down").toBeNull();
-		expect(pair.wetCanvas.css.opacity, "K5 the live highlighter is not at the wash").toBe(String(HIGHLIGHTER_ALPHA));
-		expect(pair.headCanvas.css.opacity, "K5 the live head is not at the wash").toBe(String(HIGHLIGHTER_ALPHA));
+		const group = layerOf(r.page)?.group;
+		expect(group, "K5 no group at pen-down").toBeDefined();
+		expect(blendOf(group!), "K5 the group does not blend normal at pen-down").toBe("normal");
+		expect(pair.wetCanvas.parentElement, "K5 the live highlighter is not in the group").toBe(group);
+		expect(pair.wetCanvas.css.opacity, "K5 the live highlighter is not at full opacity in the group").toBe("1");
+		expect(pair.headCanvas.css.opacity, "K5 the live head is not at full opacity in the group").toBe("1");
 		r.priv.penUp();
 		r.drain();
-		expect(layerOf(r.page), "K5 a group appeared at the lift").toBeNull();
 		expect(r.strokes().filter((s) => s.tool === "highlighter").length, "precondition: the highlight was committed").toBe(2);
-		// The committed highlight takes the same wash the live one wore.
-		const washed = fillsOf(penCanvasOf(r)).filter((p) => p.alpha === HIGHLIGHTER_ALPHA);
-		expect(washed.length, "K5 the lifted highlight is not at the wash on the pen canvas").toBeGreaterThan(0);
+		// The committed highlight goes onto the layer the live one was drawn in.
+		normalLayer(r, "K5 after the lift");
 		// And the same as "Lighten for dark pages" after the same stroke.
 		const lighten = rig({ themed: true, dark: true, assumption: "lighten" });
 		lighten.sync();
@@ -640,6 +651,7 @@ describe("K5: a highlighter on a page the app made dark", () => {
 		lighten.priv.penUp();
 		lighten.drain();
 		expect(penCanvasOf(r).ctx!.log, "K5 after the lift the pen canvas differs from the lighten path's").toEqual(penCanvasOf(lighten).ctx!.log);
+		expect(layerOf(r.page)!.canvas.ctx!.log, "K5 after the lift the layer differs from the lighten path's").toEqual(layerOf(lighten.page)!.canvas.ctx!.log);
 	});
 });
 
@@ -660,19 +672,21 @@ describe("K6: the snip of a page the app made dark", () => {
 	const noStyle = (log: string[]) => log.map((l) => l.replace(/ f=\S+ s=\S+/, ""));
 	const penFills = (el: El) => fillsOf(el).filter((p) => p.alpha === 1 && p.composite === "source-over").map((p) => p.fill);
 
-	it("no multiply composite; the same snip as \"Lighten for dark pages\", the pen ink in the setting's colours", async () => {
+	it("the highlight layer laid on once at the wash, no multiply composite; the same snip as \"Lighten for dark pages\", the pen ink in the setting's colours", async () => {
 		const r = rig({ themed: true, dark: true });
 		r.sync();
 		const made = await snip(r);
-		expect(made.length, "K6 the snip made a canvas for a highlight layer").toBe(1);
+		expect(made.length, "K6 the snip made no canvas for a highlight layer").toBe(2);
 		const paints = made[0]!.ctx!.paints;
 		expect(paints.some((p) => p.composite === "multiply"), "K6 the snip multiplied a highlight onto the page").toBe(false);
-		expect(paints.some((p) => p.op === "fill" && p.alpha === HIGHLIGHTER_ALPHA), "K6 the snip has no highlight at the wash").toBe(true);
+		expect(paints.filter((p) => p.op === "drawImage" && p.alpha === HIGHLIGHTER_ALPHA && p.composite === "source-over").length, "K6 the layer is not laid on once at the wash, normal").toBe(1);
+		expect(paints.some((p) => p.op === "fill" && p.alpha === HIGHLIGHTER_ALPHA), "K6 a highlight is filled at the wash on the snip itself").toBe(false);
 		const lighten = rig({ themed: true, dark: true, assumption: "lighten" });
 		lighten.sync();
 		const lmade = await snip(lighten);
-		expect(lmade.length).toBe(1);
+		expect(lmade.length).toBe(2);
 		expect(noStyle(made[0]!.ctx!.log), "K6 the snip is not drawn as the lighten snip is").toEqual(noStyle(lmade[0]!.ctx!.log));
+		expect(noStyle(made[1]!.ctx!.log), "K6 the snip's layer is not drawn as the lighten snip's is").toEqual(noStyle(lmade[1]!.ctx!.log));
 		// The pen ink keeps the colours the setting gives it: the same as a light page's snip.
 		const light = rig({ themed: false, dark: false });
 		light.sync();
@@ -682,11 +696,10 @@ describe("K6: the snip of a page the app made dark", () => {
 });
 
 describe("K7: a PDF in a popout window reads that window's body", () => {
-	it("the popout dark, the main window light: no group", () => {
+	it("the popout dark, the main window light: the group blends normal", () => {
 		const r = rig({ themed: true, dark: true, mainDark: false });
 		r.sync();
-		expect(layerOf(r.page), "K7 the main window's body was read").toBeNull();
-		plainWash(r, "K7");
+		normalLayer(r, "K7 the popout's body read");
 	});
 	it("the popout light, the main window dark: the group stays", () => {
 		const r = rig({ themed: true, dark: false, mainDark: true });

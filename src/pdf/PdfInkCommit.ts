@@ -14,7 +14,7 @@ import { type Attached, INK_OVER_CLASS, type OpMode, OWN_CLASSES, OWN_TOOLBAR_SE
 
 declare module "./PdfInkController" {
 	interface PdfInkController {
-		penUp(ev?: PointerEvent): void;
+		penUp(ev?: PointerEvent, insideSync?: boolean): void;
 		dressWet(attached: Attached | undefined): void;
 		undressWet(attached: Attached | undefined): void;
 		addFinalPoint(ev: PointerEvent, frame: PenFrame): void;
@@ -31,11 +31,62 @@ declare module "./PdfInkController" {
 		dropOverlays(): void;
 		scheduleThrottled(): void;
 		schedule(): void;
+		follow(to: Window): void;
 	}
 }
 
+/**
+ * Panes whose undo and redo are refused, each with the ink file it is held on. The PDF changed on disk while the pane
+ * was busy, so the change check left it on the old file with its undo ring, and another pane took that file's ink to
+ * carry into the new version's. A step here would write the old file behind the carry, and this pane's own carry, once
+ * it is identified again, adds only what the new file lacks and was never given: the step was lost, or an undone
+ * erase came back over its own pieces. Refused instead, with the ink as it was, until the pane is identified again
+ * (PdfClaims releases it beside forgetHistory, which empties the ring). Keyed on the file, so a pane that shows
+ * another file meanwhile is never refused for this one.
+ */
+const historyHeld = new WeakMap<PdfInkController, string>();
 
-	function penUp(this: PdfInkController, ev?: PointerEvent): void {
+/** Refuse this pane's undo and redo while it shows the ink file `id`. */
+export function holdHistory(controller: PdfInkController, id: string): void {
+	historyHeld.set(controller, id);
+}
+
+/** The pane is identified again: its undo and redo act as before. */
+export function releaseHistory(controller: PdfInkController): void {
+	historyHeld.delete(controller);
+}
+
+
+	/**
+	 * The lift, whoever ends the contact: the router with its pointerup, the
+	 * router's finish with no event (blur, a hover-out, pen off, the app
+	 * hidden), the root observer at a zoom or a turn, a delete mid-drag, and
+	 * sync's own rebuild path.
+	 *
+	 * EVERY LIFT ASKS AGAIN. A tool picked while a contact is down is not
+	 * synced then (`syncForTool` stands down under a contact, and no page is
+	 * read under one), so the lift is where the pages are asked under the tool
+	 * picked: a stroke's lift by its own sync, every other lift - a pan, a
+	 * space move or press, a selection drag, a lasso, an erase - by
+	 * `syncForTool` here, once, after its teardown. Without it the first
+	 * highlighter stroke after such a lift went in the group, faint, on a page
+	 * the file draws dark. With no pick since the last sync that asked, the ask
+	 * is one lookup and runs nothing.
+	 *
+	 * Never from inside a sync. The rebuild path in `sync` ends a live contact
+	 * here and then reads the pages itself; a sync here would run a second one
+	 * inside it, which binds the new viewer twice and throws the inner one's
+	 * work away. That path says so with `insideSync`. Not read off `ev`: the
+	 * router's finish, the observer and a delete end a contact with no event,
+	 * and their lifts have to ask as much as a pointerup's.
+	 */
+	function penUp(this: PdfInkController, ev?: PointerEvent, insideSync = false): void {
+		if (endGesture.call(this, ev)) return;
+		if (!insideSync) this.syncForTool();
+	}
+
+	/** The gesture's teardown, every branch. True when it ran its own sync (a stroke's lift), false on every exit that ran none. */
+	function endGesture(this: PdfInkController, ev?: PointerEvent): boolean {
 		this.flushEditFrame(false);
 		const editTarget = this.editTarget;
 		this.editTarget = null;
@@ -74,7 +125,7 @@ declare module "./PdfInkController" {
 			// the gate in `showCursor` reads that field, so clearing first is
 			// what lets the next hover paint a ring again.
 			this.endPanDragCursor();
-			return;
+			return false;
 		}
 		if (this.spaceLineY !== null) {
 			// Same reasoning as the pan branch above and the erase branch
@@ -98,7 +149,7 @@ declare module "./PdfInkController" {
 			const spaceBox = this.frameBox(this.strokePageNumber);
 			const spacePair = this.wetOn(this.strokePageNumber);
 			if (spacePair && spaceBox) spacePair.wet.clear(spaceBox.widthPx, spaceBox.heightPx);
-			return;
+			return false;
 		}
 		// The lift itself. `pointerup` carries a position that never arrives
 		// through onPenRaw, so without this the stroke ends at the last
@@ -136,21 +187,21 @@ declare module "./PdfInkController" {
 			this.persistLive();
 			const box = this.frameBox(page);
 			if (box) this.drawLasso(box);
-			return;
+			return false;
 		}
 		if (this.lassoPts.length > 0) {
 			this.hideLassoCursor();
 			this.lassoUp(page);
-			return;
+			return false;
 		}
 		if (wasErasing) {
 			if (id && page > 0) this.recordErase(id);
 			this.eraseFrom = null;
 			// The gesture's ops were applied live; this is its one write.
 			this.persistLive();
-			return;
+			return false;
 		}
-		if (!builder || page <= 0 || !id) return;
+		if (!builder || page <= 0 || !id) return false;
 		const stroke = builder.finish();
 		// The committed layer takes over now, so the wet trail comes off. Done
 		// after `emit` below would leave both drawn for a frame; done here, the
@@ -163,7 +214,7 @@ declare module "./PdfInkController" {
 		// (`clearWetTrail`) rather than a block here and a copy there.
 		if (!stroke) {
 			this.clearWetTrail(page);
-			return;
+			return false;
 		}
 		// The page is the stroke's, from pen-down. Everything downstream - the
 		// store, the sidecar, the render filter - keys on this one field.
@@ -213,6 +264,7 @@ declare module "./PdfInkController" {
 			pair.tail.clear(box.widthPx, box.heightPx);
 		}
 		this.undressWet(attached);
+		return true;
 	}
 
 	/**
@@ -238,7 +290,8 @@ declare module "./PdfInkController" {
 		// the group while a highlighter is down, and back over the saved pen
 		// ink for everything else.
 		const layered = this.highlightLayered(this.wetHostPage);
-		const alpha = this.wetHighlighter && !layered ? String(HIGHLIGHTER_ALPHA) : "1";
+		const washed = this.wetHighlighter && !layered;
+		const alpha = washed ? String(HIGHLIGHTER_ALPHA) : "1";
 		const pageEl = attached?.canvas.parentElement;
 		if (this.pair && layered && pageEl && this.wetHostPage > 0 && this.overlays.get(this.wetHostPage) === attached) {
 			this.seatPair(pageEl, this.wetHostPage);
@@ -249,6 +302,8 @@ declare module "./PdfInkController" {
 			// the same wash or a highlighter's tip runs darker than its trail.
 			this.pair.headCanvas.setCssProps({ opacity: alpha });
 		}
+		// What the pair now wears, for drawHead's tip cut.
+		this.washedPair = washed ? this.pair : null;
 		// The raise is the COMMITTED canvas's, so it is per page and stays
 		// with the overlay; the pair being shared changes nothing about which
 		// page's ink has to come up over the wash (§5h/H1).
@@ -387,8 +442,10 @@ declare module "./PdfInkController" {
 	function historyStep(this: PdfInkController, redo: boolean): boolean {
 		// Ahead of the pop, not after it: a refusal further down would consume
 		// the entry and report a step that never happened. The ring can still
-		// hold ops recorded before the sources went synthetic.
+		// hold ops recorded before the sources went synthetic. A pane held on an
+		// ink file another pane carried from refuses here too (historyHeld).
 		if (!this.idle || this.syntheticSources()) return false;
+		if (historyHeld.get(this) === this.documentId()) return false;
 		this.clearSelection();
 		let op = redo ? this.history.redo() : this.history.undo();
 		if (!op) return false;
@@ -433,7 +490,9 @@ declare module "./PdfInkController" {
 
 	/** The viewer geometry, re-read only when it can have changed. */
 	function probe(this: PdfInkController): ProbedViewer | null {
-		const now = Date.now();
+		// The steady clock: on the wall clock, setting the PC clock back made
+		// the age negative and kept the backstop off for as long as it went back.
+		const now = performance.now();
 		if (this.probedValid && now - this.probedAt < PROBE_MAX_AGE_MS) {
 			this.probeServed++;
 			return this.probedCache;
@@ -529,7 +588,17 @@ declare module "./PdfInkController" {
 	 * rather than stuttering throughout.
 	 */
 	function scheduleThrottled(this: PdfInkController): void {
-		const now = Date.now();
+		// The pane is in another window and nobody has followed it: a trailing
+		// repaint may sit on a window that never runs it again. schedule
+		// follows first.
+		if (movedTo(this) !== null) {
+			this.schedule();
+			return;
+		}
+		// The steady clock, the one sync stamps lastSyncAt on. On the wall
+		// clock, setting the PC clock back made `since` negative, and the
+		// trailing sync waited the floor plus the whole set-back.
+		const now = performance.now();
 		const since = now - this.lastSyncAt;
 		if (since >= SYNC_MIN_GAP_MS) {
 			this.schedule();
@@ -542,12 +611,97 @@ declare module "./PdfInkController" {
 		}, SYNC_MIN_GAP_MS - since);
 	}
 	function schedule(this: PdfInkController): void {
-		if (!this.mounted || this.syncQueued) return;
+		if (!this.mounted) return;
+		// The pane is in another window and the host has not called: a pane
+		// moved while hidden (the host calls only for a node that is showing),
+		// a stroke lifted before the call, or a host without it. Followed here,
+		// unless a gesture is open: then the gesture's own code is what asked,
+		// and the follow waits for the frame below, asked of the pane's window.
+		const moved = movedTo(this);
+		if (moved !== null && this.frame === null && this.builder === null && !this.erasing) {
+			this.follow(moved);
+			return;
+		}
+		if (this.syncQueued) return;
 		this.syncQueued = true;
-		this.win.requestAnimationFrame(() => {
+		const win = moved ?? this.win;
+		win.requestAnimationFrame(() => {
+			const now = paneWindow(this) ?? this.win;
+			// A frame left on a window the pane and this controller have both
+			// left: the follow asked for its own, and this one must not clear it.
+			if (win !== this.win && win !== now) return;
 			this.syncQueued = false;
+			// Asked while a gesture held the follow off, or moved since with no
+			// call: follow now, out here, and sync on the frame it asks for.
+			if (now !== this.win) {
+				this.follow(now);
+				return;
+			}
 			this.sync();
 		});
+	}
+
+	/** The controllers inside follow now: a schedule from the gesture it ends is not a second move. */
+	const following = new WeakSet<PdfInkController>();
+
+	/** The window the pane's root is in now; null when it has none (a detached document, or a test fake with no root or no document). */
+	function paneWindow(controller: PdfInkController): Window | null {
+		const root = controller.root as HTMLElement | undefined;
+		return root?.ownerDocument?.defaultView ?? null;
+	}
+
+	/** The window the pane is in now when it is not the one the controller follows; null otherwise, and inside follow. */
+	function movedTo(controller: PdfInkController): Window | null {
+		const now = paneWindow(controller);
+		return now !== null && now !== controller.win && !following.has(controller) ? now : null;
+	}
+
+	/**
+	 * The pane moved to another window: its tab was dragged to a pop-out, or
+	 * back. Obsidian moves the same root and reloads the viewer into the same
+	 * scroller, so the controller stays, with its selection and undo ring, and
+	 * from here on everything it asks of a window is asked of the one the pane
+	 * is in now: frames, timers, the pixel ratio, the clipboard, the text
+	 * selection and the pen's window listeners. A pop-out closes with its last
+	 * tab and runs no frame again; a hidden main window runs none either.
+	 *
+	 * In this order. A gesture still open ends first, committed, on the window
+	 * it was drawn in, so its waiting edit frame is taken back where it was
+	 * asked. Then what is left waiting on the old window is taken back there
+	 * and forgotten: the trailing repaint, the reticle's hide, an edit frame,
+	 * a queued repaint, the pen probe. Then the window is swapped, a hide that
+	 * was armed is armed again here, and the pen is bound again on the same
+	 * scroller: the router's blur and touch listeners went on the old window
+	 * when it was built, and sync's rebind never runs, the scroller being the
+	 * same element. Last, one repaint from the new window, which puts the ink
+	 * back on the reloaded pages.
+	 *
+	 * Nothing after unmount: a call the host already had on its way, or one
+	 * meant for a controller since replaced, does nothing.
+	 */
+	function follow(this: PdfInkController, to: Window): void {
+		if (!this.mounted || to === this.win || following.has(this)) return;
+		following.add(this);
+		try {
+			const from = this.win;
+			if (this.frame !== null || this.builder !== null || this.erasing) this.penUp(undefined, true);
+			if (this.trailingSync !== null) from.clearTimeout(this.trailingSync);
+			this.trailingSync = null;
+			const hideArmed = this.cursorTimer !== null;
+			if (this.cursorTimer !== null) from.clearTimeout(this.cursorTimer);
+			this.cursorTimer = null;
+			if (this.editFrame !== null) from.cancelAnimationFrame(this.editFrame);
+			this.editFrame = null;
+			this.syncQueued = false;
+			this.presentProbePending = false;
+			this.win = to;
+			// The same hide, its own second again: PdfInkCursors' watchdog.
+			if (hideArmed) this.cursorTimer = to.setTimeout(() => this.hideCursor(), 1000);
+			if (this.boundScroller) this.bindTo(this.boundScroller);
+		} finally {
+			following.delete(this);
+		}
+		this.schedule();
 	}
 
 export function installPdfInkCommit(proto: PdfInkController): void {
@@ -569,5 +723,6 @@ export function installPdfInkCommit(proto: PdfInkController): void {
 		dropOverlays,
 		scheduleThrottled,
 		schedule,
+		follow,
 	});
 }

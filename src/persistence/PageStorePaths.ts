@@ -3,7 +3,7 @@
  * They are methods of PageStore, installed on its prototype when PageStore.ts loads.
  */
 import { normalizePath } from "obsidian";
-import { DEFAULT_INK_FOLDER, isLiveSidecarName, SYNCED_INK_FOLDER } from "./InkFolder";
+import { DEFAULT_INK_FOLDER, InkFolderListingFailed, isLiveSidecarName, SYNCED_INK_FOLDER } from "./InkFolder";
 import { isSafePageId, parsePage } from "../model/PageData";
 import { installMethods } from "../inline/InstallMethods";
 import { contentStamp, folderOf, type PageStore } from "./PageStore";
@@ -106,15 +106,54 @@ declare module "./PageStore" {
 	 * is for every other caller. Nothing is pinned here - enumerating a folder
 	 * is not evidence about a page the caller has not touched.
 	 *
-	 * A folder that will not enumerate is skipped rather than fatal, PER
-	 * FOLDER: a vault with only one ink folder has the other one throw ENOENT
-	 * on every call, so a single try around the whole sweep would have made
-	 * the ordinary case return nothing.
+	 * A folder that is not there is an empty one, PER FOLDER: a vault with
+	 * only one ink folder has the other one reject on every call, so a single
+	 * try around the whole sweep would have made the ordinary case return
+	 * nothing. Absence is asked of the adapter after a rejection, never read
+	 * from the listing's error: the folder's stat, then, only when that look
+	 * fails with a code it cannot read as "not found", the parent folder's
+	 * listing. Not `exists`: it answers false on any error, and a listing and
+	 * a look that failed together skipped a folder that was there. A folder
+	 * that is there and will not list is listed once more, then the whole listing
+	 * fails (InkFolderListingFailed). Skipped, it answered a partial list as
+	 * a whole one: an open handed out an id another copy's ink file already
+	 * had, a carry was dropped as owed for nothing, a deletion retired with
+	 * its ink still claiming the gone name.
 	 */
 	async function listIds(this: PageStore, prefix: string): Promise<string[]> {
 		const adapter = this.app.vault.adapter;
 		if (typeof adapter.list !== "function") return [];
 		const list = adapter.list.bind(adapter);
+		// A folder whose listing failed is looked at once more, as the load's second look at a file is taken
+		// (lookPastExists, PageStoreLoad.ts:96-108, copied here: that helper is not exported). `exists` cannot say: it
+		// answers false on any error. A stat that meets the folder: there. Null, not found, or no code (the mobile
+		// host's shape, which sets ENOENT only when its message says "does not exist"): not there. Any other error:
+		// unseen, and the parent folder's listing settles it.
+		const look = async (folder: string): Promise<"there" | "absent" | "unseen"> => {
+			try {
+				return (await adapter.stat(folder)) ? "there" : "absent";
+			} catch (err) {
+				const code = (err as { code?: unknown } | null)?.code;
+				return typeof code !== "string" || code === "ENOENT" ? "absent" : "unseen";
+			}
+		};
+		// The parent's listing, asked in the host's form: the vault's top folder as "", a nested folder's own parent,
+		// the names back as normalized vault paths in the disk's case. Compared without case: Windows and macOS find a
+		// folder typed in another case, and an exact miss would skip a folder that is there. A name in `files` is
+		// something at that path, taken as there as well. A parent listing that fails fails the listing.
+		const listedByParent = async (folder: string): Promise<boolean> => {
+			const name = normalizePath(folder);
+			const cut = name.lastIndexOf("/");
+			const parent = cut === -1 ? "" : name.slice(0, cut);
+			let listed: { files: string[]; folders: string[] };
+			try {
+				listed = await list(parent);
+			} catch (err) {
+				throw new InkFolderListingFailed(folder, err);
+			}
+			const key = name.toLowerCase();
+			return [...listed.folders, ...listed.files].some((n) => n.toLowerCase() === key);
+		};
 		const folders = this.searchFolders();
 		const seen = new Set<string>();
 		const ids: string[] = [];
@@ -123,7 +162,14 @@ declare module "./PageStore" {
 			try {
 				files = (await list(folder)).files;
 			} catch {
-				continue;
+				const found = await look(folder);
+				if (found === "absent") continue;
+				if (found === "unseen" && !(await listedByParent(folder))) continue;
+				try {
+					files = (await list(folder)).files;
+				} catch (again) {
+					throw new InkFolderListingFailed(folder, again);
+				}
 			}
 			for (const file of files) {
 				const n = file.split("/").pop() ?? "";

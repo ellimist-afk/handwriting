@@ -6,6 +6,7 @@ import { InkStroke } from "../ink/Stroke";
 import { inkSvgLayers, InkSvgRun } from "../ink/SvgExport";
 import { HIGHLIGHTER_ALPHA, shapeFor } from "../ink/PenStyle";
 import { anchorLayer, anchorSizer, columnWidthFor, diagnose, embedInkBounds, inkZoomOf, isNotColumn, layerOrigins, layers, MIN_HEIGHT_ATTR, placeStrokes, reserveLeft, strokesFor, SVG_NS, sweepDisconnected } from "./EmbedInk";
+import { armMobileExport, buildMobileExport, exportDivOf, mobileExportDiv } from "./EmbedInkMobileExport";
 
 /** Windows whose print swap is already wired; popouts each get their own. */
 const printArmed = new WeakSet<Window>();
@@ -41,6 +42,11 @@ let printSwaps = 0;
 
 export function embedInkPrintSwaps(): number {
 	return printSwaps;
+}
+
+/** A phone or tablet export built its ink (EmbedInkMobileExport.ts): it counts as a print swap, as a desktop print does. */
+export function countPrintSwap(): void {
+	printSwaps++;
 }
 
 /**
@@ -100,6 +106,9 @@ export function armPrintSwap(win: Window): void {
 	const onMq = (e: MediaQueryListEvent) => usePrintVector(e.matches, win);
 	mq?.addEventListener?.("change", onMq);
 	if (mq) disarms.push(() => mq.removeEventListener?.("change", onMq));
+	// The phone and tablet export fires neither: its own triggers (EmbedInkMobileExport.ts), on the mobile app only.
+	const mobile = armMobileExport(win);
+	if (mobile) disarms.push(mobile);
 	// A popout closing lets go of its window here, not at plugin unload.
 	// pagehide rather than unload: it fires on every close, and Chromium is
 	// retiring unload.
@@ -131,6 +140,8 @@ export function disarmPrintSwaps(): void {
 	const all = [...printDisarms.values()];
 	printDisarms.clear();
 	for (const disarms of all) for (const d of disarms) d();
+	releaseNoteFonts();
+	releaseEmbedHeights();
 }
 
 function usePrintVector(on: boolean, win?: Window): void {
@@ -141,6 +152,113 @@ function usePrintVector(on: boolean, win?: Window): void {
 	}
 	sweepDisconnected();
 	for (const [root, path] of layers) printVectorFor(root, path, on);
+	if (!on) {
+		releaseNoteFonts();
+		releaseEmbedHeights();
+	}
+}
+
+/**
+ * The app's value for a font override nobody chose (app.css 1.15.1: --font-text-override and --font-print-override are
+ * "??" until Appearance sets a font, and app.js writes a chosen text font to both).
+ */
+const APP_DEFAULT_FONT = "\"??\"";
+/** Export divs holding the note's font inline for the print now running. */
+const noteFonts = new Set<HTMLElement>();
+
+/**
+ * An export with ink prints its text in the font the note shows: the whole export, embedded notes too. The app's print
+ * media rule sets body --font-text to its print chain
+ * (Arial with no font chosen), so the text re-wraps under the ink, which was placed against the screen font. The screen
+ * value is read on the export div in screen media, before the fit measures the text, and set inline on the div, where
+ * it wins over the body's print value for everything inside.
+ *
+ * Nothing is written outside an export div (an open note keeps its font), when the div has its own inline --font-text,
+ * when a print font is chosen or set by a snippet (--font-print-override is not the app's default: that font prints, as
+ * before), or when the screen value is empty. Once per div: the first inked root writes it, every later one finds it held.
+ */
+function holdNoteFont(root: HTMLElement): void {
+	for (const held of noteFonts) if (!held.isConnected) noteFonts.delete(held);
+	const div = exportDivOf(root);
+	if (!div || noteFonts.has(div) || div.style.getPropertyValue("--font-text") !== "") return;
+	const win = div.ownerDocument?.defaultView;
+	if (!win || win.matchMedia?.("print").matches) return;
+	const style = win.getComputedStyle(div);
+	if (style.getPropertyValue("--font-print-override").trim() !== APP_DEFAULT_FONT) return;
+	const font = style.getPropertyValue("--font-text").trim();
+	if (!font) return;
+	div.style.setProperty("--font-text", font);
+	noteFonts.add(div);
+}
+
+/**
+ * The print is over: each held div's inline font comes off. Only a value this module wrote is held, so a div's own value
+ * is never touched. Not per root: the mobile build takes a root off before it builds it again.
+ */
+function releaseNoteFonts(): void {
+	for (const div of noteFonts) div.style.removeProperty("--font-text");
+	noteFonts.clear();
+}
+
+/** A PDF embed's span, as the app's print rule names it (app.css 1.15.1: `.pdf-embed:not(.canvas-node-content){max-height:80vh}`). */
+const PDF_EMBED_SEL = ".pdf-embed:not(.canvas-node-content)";
+
+/** PDF embeds held at their screen height for the print now running: the root that held each, its style attribute before and after. */
+const heldEmbeds = new Map<HTMLElement, { root: HTMLElement; before: string | null; ours: string | null }>();
+
+/**
+ * Where ink is at stake, a PDF embed prints at the height it shows. In print media the app caps a PDF embed at 80vh, so on
+ * US Letter (either way up) the embed prints shorter than the screen it was drawn on, and every word under it rises while
+ * the ink cut from the screen does not: the ink in its block (one strip per block, placed from the block's top), and with
+ * no strips cut (the one box) the ink in every block below it. Its max-height is read here in screen media, the value the
+ * screen shows, and set inline on its span, where it beats the print rule; the span keeps it in the phone and tablet
+ * export's string, the line written as a div included.
+ *
+ * Set at the screen call only (beforeprint on the desktop, the build on a phone or tablet), like the block holds: the print
+ * takes its page count as the media flips, so a height grown later would leave the foot of the note unprinted. A print
+ * that never ran a screen call is left as it was.
+ *
+ * Only in an export div, only where the root's drawn ink reaches below the embed's top (in any block: whether the strips are
+ * cut is known only at the print-media call), only where the span has no inline max-height of its own (a snippet's or a
+ * user's value prints, as before), and once per span: a span another root holds is left to that root. Every PDF embed in
+ * the root, nested ones too (a callout, a list, an embedded note).
+ */
+function holdEmbedHeights(root: HTMLElement, layer: SVGSVGElement, strokes: readonly InkStroke[], zoom: number, box: { y: number; h: number }): void {
+	for (const span of heldEmbeds.keys()) if (!span.isConnected) heldEmbeds.delete(span);
+	if (!exportDivOf(root) || printMedia(root) || strokes.length === 0 || !(box.h > 0)) return;
+	const spans = Array.from(root.querySelectorAll<HTMLElement>(PDF_EMBED_SEL));
+	if (spans.length === 0) return;
+	// The layer's px against the page's: the svg is `box.h` px tall and is drawn at the zoom it sits under.
+	const at = layer.getBoundingClientRect();
+	if (!(at.height > 0)) return;
+	const scale = at.height / box.h;
+	let foot = -Infinity;
+	for (const s of strokes) foot = Math.max(foot, drawnRowsOf(s).bottom * zoom);
+	const inkFoot = at.top + (foot - box.y) * scale;
+	const win = root.ownerDocument?.defaultView;
+	for (const span of spans) {
+		if (heldEmbeds.has(span) || span.style.maxHeight !== "") continue;
+		if (inkFoot <= span.getBoundingClientRect().top + DRAWN_SLACK_PX * scale) continue;
+		const value = win?.getComputedStyle(span).maxHeight ?? "";
+		if (!value) continue;
+		const before = span.getAttribute("style");
+		span.style.setProperty("max-height", value);
+		heldEmbeds.set(span, { root, before, ours: span.getAttribute("style") });
+	}
+}
+
+/**
+ * Each held span gets its style attribute back as it was, byte for byte; one root's (it is taken off or its ink went), or
+ * every one (the print is over). A span whose style changed since the hold loses only the max-height this module set.
+ */
+function releaseEmbedHeights(root?: HTMLElement): void {
+	for (const [span, held] of heldEmbeds) {
+		if (root && held.root !== root) continue;
+		heldEmbeds.delete(span);
+		if (span.getAttribute("style") !== held.ours) span.style.removeProperty("max-height");
+		else if (held.before === null) span.removeAttribute("style");
+		else span.setAttribute("style", held.before);
+	}
 }
 
 /**
@@ -148,8 +266,19 @@ function usePrintVector(on: boolean, win?: Window): void {
  * Called for every root when a print starts or ends, for a root whose ink
  * changes under a print that is running (its canvas is hidden then, so the
  * vector layer is the picture), and for a root that attaches mid-print.
+ *
+ * A root inside a phone or tablet export is built by `buildMobileExport`, a repaint's call included: that build cuts the
+ * strips at once (`mobileCut`), since the native side pages the layout after the page is taken and no print-media call
+ * follows to cut them.
  */
-export function printVectorFor(root: HTMLElement, path: string, on: boolean): void {
+export function printVectorFor(root: HTMLElement, path: string, on: boolean, mobileCut = false): void {
+	if (on && !mobileCut) {
+		const div = mobileExportDiv(root);
+		if (div) {
+			buildMobileExport(root, path, div);
+			return;
+		}
+	}
 	const canvas = root.querySelector<HTMLCanvasElement>(
 		":scope > canvas.handwriting-embed-ink"
 	);
@@ -159,6 +288,7 @@ export function printVectorFor(root: HTMLElement, path: string, on: boolean): vo
 	if (!on) {
 		existing?.remove();
 		releasePrintStrips(root);
+		releaseEmbedHeights(root);
 		printSpans.delete(root);
 		printFoots.delete(root);
 		releasePrintFit(root);
@@ -173,11 +303,14 @@ export function printVectorFor(root: HTMLElement, path: string, on: boolean): vo
 	const all = strokesFor ? strokesFor(path) : [];
 	const box = embedInkBounds(all);
 	if (all.length === 0 || box.w <= 0 || box.h <= 0) {
-		// The last stroke went while the print ran: the vector layer goes too.
+		// The last stroke went while the print ran: the vector layer goes too, and with no ink no embed is held for it.
 		existing?.remove();
 		releasePrintStrips(root);
+		releaseEmbedHeights(root);
 		return;
 	}
+	// This export has ink: its text prints in the note's font, set before anything below measures the text.
+	holdNoteFont(root);
 	// The ink at its text's size, as the canvas draws it (`inkZoomOf`): px per world unit. Read before the fit.
 	const zoom = inkZoomOf(root, path);
 	// The ink's side edges as it will be drawn: an attached group's member is placed sideways by its group's move (dx), so the
@@ -249,32 +382,35 @@ export function printVectorFor(root: HTMLElement, path: string, on: boolean): vo
 			growPrintContainer(root, svg, h);
 		}
 	}
-	// The print-media call is the one that has paged the layout: the ink is cut into one strip per block then.
-	const strips = fit ? buildPrintStrips(root, svg, { x, y, w, h }, strokes, zoom) : 0;
+	// At the screen call, the layer placed: a PDF embed above drawn ink keeps its screen height in print (`holdEmbedHeights`).
+	holdEmbedHeights(root, svg, strokes, zoom, { y, h });
+	// The print-media call is the one that has paged the layout: the ink is cut into one strip per block then. A phone or
+	// tablet export has no such call: its build cuts here, at the screen call, from the spans just held.
+	const strips = fit || mobileCut ? buildPrintStrips(root, svg, { x, y, w, h }, strokes, zoom, mobileCut) : 0;
 	canvas?.setCssStyles({ display: "none" });
 	// At the screen call (no fit yet), after the layer is placed from the unzoomed flow: the zoom for the page count.
 	const screened = fit ? null : holdScreenZoom(root, path, placedRight, onePage && foot !== null ? { reachLeft: placedReach, reachTop: Math.max(0, -y), foot } : undefined);
 	noteExport(root, path, fit ?? screened, spans, strips);
 }
 
-/** The foot of a note's text, px from its layer's top: the container's height, read once before a layer grows it and held to the print's end. */
+/** The foot of a note's text, px from its container's top: read once, before a reach pads the container, and held to the print's end. */
 const printFoots = new WeakMap<HTMLElement, number>();
 
 /**
- * The foot of a canvas note's text in a print container, px: the container's height before a layer grows it or a reach pads it,
- * read once and held to the print's end. The canvas paint has already grown the container to the foot of all the ink: the
- * text's own height is read with that room taken off, and put back. The box height, not the scroll height: the canvas the
- * paint laid out, as tall as the ink, overflows the box and would count in the scroll height. Null with no print container.
+ * The foot of a canvas note's text in a print container, px from the container's top: the bottom of its last laid-out block
+ * (the title's with no block, 0 with neither), read once and held to the print's end. The text's own, never the container's
+ * box: in the app the print container is a fixed height (800 px for any note) that a long text runs past, and the box also
+ * takes in the room grown for the ink. Not the scroll height either: the canvas the paint laid out, as tall as the ink,
+ * overflows the box and would count in it. Null with no print container.
  */
 function textFoot(root: HTMLElement): number | null {
 	if (!isPrintContainer(root) || !root.offsetParent) return null;
 	let foot = printFoots.get(root);
 	if (foot === undefined) {
-		const grown = root.getAttribute(MIN_HEIGHT_ATTR);
-		const ours = grown !== null && root.style.minHeight === grown;
-		if (ours) root.style.removeProperty("min-height");
-		foot = root.offsetHeight || 0;
-		if (ours && grown !== null) root.style.minHeight = grown;
+		foot = 0;
+		for (const block of printBlocks(root)) foot = Math.max(foot, block.offsetTop + block.offsetHeight);
+		const title = foot === 0 ? root.querySelector<HTMLElement>(":scope > h1") : null;
+		if (title?.offsetParent) foot = title.offsetTop + title.offsetHeight;
 		printFoots.set(root, foot);
 	}
 	return foot;
@@ -407,8 +543,7 @@ function wantsOnePage(root: HTMLElement, path: string, ink: { x: number; y: numb
 function inkReachOf(strokes: readonly InkStroke[], zoom: number): { x: number; y: number } {
 	let minX = 0, minY = 0;
 	for (const s of strokes) {
-		const shape = shapeFor(s.tool === "highlighter", s.pressureProfile);
-		const half = Math.max(0.5, (s.width * Math.max(shape.minWidthFactor, shape.maxWidthFactor, shape.pressureOffWidthFactor)) / 2);
+		const half = drawnHalfOf(s);
 		let left = Infinity, top = Infinity;
 		for (const p of s.points) {
 			left = Math.min(left, p.x - half);
@@ -418,6 +553,25 @@ function inkReachOf(strokes: readonly InkStroke[], zoom: number): { x: number; y
 		minY = Math.min(minY, Math.max(s.bbox.y, top) * zoom);
 	}
 	return { x: Math.floor(minX), y: Math.floor(minY) };
+}
+
+/** Half the width a stroke's pen can draw at most, world units: how far its drawn ink reaches past its points. */
+function drawnHalfOf(s: InkStroke): number {
+	const shape = shapeFor(s.tool === "highlighter", s.pressureProfile);
+	return Math.max(0.5, (s.width * Math.max(shape.minWidthFactor, shape.maxWidthFactor, shape.pressureOffWidthFactor)) / 2);
+}
+
+/** The rows a stroke's drawn ink covers, world units: its points widened by the half width, the tighter of that and its box. */
+function drawnRowsOf(s: InkStroke): { top: number; bottom: number } {
+	const boxTop = s.bbox.y, boxBottom = s.bbox.y + s.bbox.height;
+	if (s.points.length === 0) return { top: boxTop, bottom: boxBottom };
+	const half = drawnHalfOf(s);
+	let top = Infinity, bottom = -Infinity;
+	for (const p of s.points) {
+		top = Math.min(top, p.y - half);
+		bottom = Math.max(bottom, p.y + half);
+	}
+	return { top: Math.max(boxTop, top), bottom: Math.min(boxBottom, bottom) };
 }
 
 /** The width a fit has to hold: the container's padding, the room left of the text, and the column or the ink past it. */
@@ -715,15 +869,25 @@ const STRIP_CLS = "handwriting-embed-ink-strip";
 /** Class on the one ink box while strips stand in its place (the stylesheet hides it). */
 const STRIPPED_CLS = "is-stripped";
 
+/** Px of room kept round a stroke's drawn rows when a phone or tablet strip picks its strokes: the edge's anti-aliasing. */
+const DRAWN_SLACK_PX = 1;
+
 /**
  * One strip: an svg whose viewBox is the span [start, end) of the layer, drawn from the strokes whose vertical extent
  * meets that span, in their own order (a stroke across a break is in both strips, each clipped by its viewBox). Built
  * from the strokes rather than copied from the layer, so a note of many blocks does not carry every path in every strip.
  * The box and the span are px; the strokes and the viewBox are world units, drawn at `zoom` px each as the layer is.
  * Null when no stroke meets the span.
+ *
+ * `drawnOnly` (a phone or tablet export): a stroke is in the strip only when its drawn ink, not its padded box, meets the
+ * span. The div's zoom is written after the build, and at a deep downscale the zoomed blocks sit up to about half a page
+ * px off their scaled places, so a stroke kept in the block above for its padding showed past that strip's clip: ink
+ * twice. Ink that truly crosses a break stays in both strips.
  */
-function buildStrip(root: HTMLElement, strokes: readonly InkStroke[], box: { x: number; y: number; w: number; h: number }, start: number, end: number, zoom: number): SVGSVGElement | null {
-	const meeting = strokes.filter((s) => s.bbox.y * zoom <= end && (s.bbox.y + s.bbox.height) * zoom >= start);
+function buildStrip(root: HTMLElement, strokes: readonly InkStroke[], box: { x: number; y: number; w: number; h: number }, start: number, end: number, zoom: number, drawnOnly = false): SVGSVGElement | null {
+	const meeting = strokes.filter(drawnOnly
+		? (s) => { const r = drawnRowsOf(s); return r.top * zoom - DRAWN_SLACK_PX <= end && r.bottom * zoom + DRAWN_SLACK_PX >= start; }
+		: (s) => s.bbox.y * zoom <= end && (s.bbox.y + s.bbox.height) * zoom >= start);
 	if (meeting.length === 0) return null;
 	const doc = root.ownerDocument;
 	const strip = doc.createElementNS(SVG_NS, "svg");
@@ -762,9 +926,9 @@ function appendInk(root: HTMLElement, svg: SVGSVGElement, strokes: readonly InkS
  * gets no strip. The strip is an svg drawn from the strokes that meet the span, whose viewBox starts at the span and
  * whose box is placed at the span's start inside the block, left at the layer's own left. The layer itself is hidden while strips stand.
  * With no spans held (the print media came first), or a different block count, the layer stays as one box.
- * `box` is the layer's in px; `zoom` is the px per world unit it draws at. Returns the strips made.
+ * `box` is the layer's in px; `zoom` is the px per world unit it draws at. `drawnOnly`: see `buildStrip`. Returns the strips made.
  */
-function buildPrintStrips(root: HTMLElement, svg: SVGSVGElement, box: { x: number; y: number; w: number; h: number }, strokes: readonly InkStroke[], zoom: number): number {
+function buildPrintStrips(root: HTMLElement, svg: SVGSVGElement, box: { x: number; y: number; w: number; h: number }, strokes: readonly InkStroke[], zoom: number, drawnOnly = false): number {
 	dropStrips(root);
 	const spans = printSpans.get(root);
 	if (!spans) return 0;
@@ -778,7 +942,7 @@ function buildPrintStrips(root: HTMLElement, svg: SVGSVGElement, box: { x: numbe
 		const start = i === 0 ? box.y : Math.max(tops[i]!, box.y);
 		const end = i === blocks.length - 1 ? foot : Math.min(tops[i + 1]!, foot);
 		if (end - start <= 0.5) return;
-		const strip = buildStrip(root, strokes, box, start, end, zoom);
+		const strip = buildStrip(root, strokes, box, start, end, zoom, drawnOnly);
 		if (!strip) return;
 		strip.style.left = `${boxLeft - block.offsetLeft}px`;
 		strip.style.top = `${start - tops[i]!}px`;

@@ -674,7 +674,11 @@ export function contentMeasureFlagState(): string {
   const pane = this.view?.dom?.parentElement;
   if (!pane) return;
   const path = this.filePath();
-  const width = path ? inlineInk.columnRefPx(path) : null;
+  const ref = path ? inlineInk.columnRefPx(path) : null;
+  // At another text size the column is the note's width times the size ratio the ink is drawn at, so the words wrap as where
+  // the ink was drawn. Unrounded: css px may be fractional, and a rounded width drifts the wrap. At ratio 1, the stored width.
+  const z = this.fontZoom;
+  const width = ref !== null && typeof z === "number" && Number.isFinite(z) && z > 0 && z !== 1 ? ref * z : ref;
   const off = width !== null && !this.canvasMode;
   watchColumnFit(this, off);
   const fit = off ? this.columnFit : null;

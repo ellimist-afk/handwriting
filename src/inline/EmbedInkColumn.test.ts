@@ -179,6 +179,83 @@ describe("the painted layer starts at the text column", () => {
 	});
 });
 
+/**
+ * An embed's content box as Obsidian 1.15.1 builds it (span > content box > view), at 444.7, its view at 444.7 with the
+ * embed padding's 24 px left, the view's blocks at 468.7. `sizer`: the blocks sit in a sizer inside the view (the
+ * on-screen embed), else right in the view (the static embed, which an export draws). `where`: on screen; inside an
+ * export div (`div.print` right inside body, as both export paths build it); or inside a `.print` that is not right
+ * inside body.
+ */
+function appEmbed(where: "screen" | "export" | "print-deep", sizer: boolean) {
+	const attrs = new Map<string, string>();
+	let canvas: ReturnType<typeof fakeCanvas> | null = null;
+	const style = { position: "static", minHeight: "", removeProperty(): void {} };
+	const blocks = [block(468.7, 490)];
+	const sizerEl = sizer ? { classList: { contains: (c: string) => c === "markdown-preview-sizer" }, children: blocks, getBoundingClientRect: () => ({ left: 444.7, width: 514, right: 958.7, top: 227.6, height: 286, bottom: 513.6 }) } : null;
+	const view = {
+		classList: { contains: (c: string) => c === "markdown-preview-view" },
+		children: sizerEl ? [sizerEl] : blocks,
+		getBoundingClientRect: () => ({ left: 444.7, width: 514, right: 958.7, top: 227.6, height: 286, bottom: 513.6 }),
+	};
+	const body = { tagName: "BODY" };
+	const div = { tagName: "DIV", parentElement: where === "export" ? body : { tagName: "DIV" }, classList: { contains: (c: string) => c === "print" } };
+	const root = {
+		isConnected: true,
+		parentElement: null,
+		clientLeft: 0,
+		children: [view],
+		style,
+		classList: { contains: (c: string) => c === "markdown-embed-content" },
+		setCssStyles(s: Record<string, string>): void {
+			if ("position" in s) style.position = s.position ?? "";
+			if ("minHeight" in s) style.minHeight = s.minHeight ?? "";
+		},
+		getBoundingClientRect: () => ({ left: 444.7, width: 514, right: 958.7, top: 227.6, height: 286, bottom: 513.6 }),
+		querySelector: (sel: string) => {
+			if (sel.includes("canvas.handwriting-embed-ink")) return canvas;
+			if (sel === ".markdown-preview-sizer") return sizerEl;
+			if (sel === ":scope > .markdown-preview-view") return view;
+			return null;
+		},
+		closest: (sel: string) => (sel === ".print" && where !== "screen" ? div : null),
+		getAttribute: (k: string) => attrs.get(k) ?? null,
+		setAttribute: (k: string, v: string) => void attrs.set(k, v),
+		removeAttribute: (k: string) => void attrs.delete(k),
+		createEl: () => (canvas = fakeCanvas()),
+		ownerDocument: { body, defaultView: fakeWindow([]) },
+	};
+	return { root, layerLeft: () => canvas?.style.left };
+}
+
+describe("an embed's layer in an export starts at its text, as Obsidian builds the embed", () => {
+	it("U1 a static embed (no sizer) in an export div: the layer is 24 px in, on the view's blocks", () => {
+		const embed = appEmbed("export", false);
+		attach(embed.root);
+		expect(px(embed.layerLeft()), "the view's blocks at 468.7, the content box at 444.7").toBeCloseTo(24, 6);
+	});
+
+	it("U2 the same embed on screen, in no export: 0, the static embed's 24 px miss, left as it is", () => {
+		const embed = appEmbed("screen", false);
+		attach(embed.root);
+		expect(px(embed.layerLeft()), "on screen a static embed keeps its content box: the view's left").toBeCloseTo(0, 6);
+	});
+
+	it("U3 an embed with a sizer reads its sizer's blocks, in an export and on screen alike", () => {
+		for (const where of ["export", "screen"] as const) {
+			const embed = appEmbed(where, true);
+			attach(embed.root);
+			expect(px(embed.layerLeft()), `${where}: the sizer's blocks at 468.7`).toBeCloseTo(24, 6);
+			teardownEmbedInk();
+		}
+	});
+
+	it("U4 a static embed under a .print that is not right inside body is in no export: 0, as on screen", () => {
+		const embed = appEmbed("print-deep", false);
+		attach(embed.root);
+		expect(px(embed.layerLeft()), "a nested .print is not an export div").toBeCloseTo(0, 6);
+	});
+});
+
 describe("the column inset is in the base's own px", () => {
 	/** A base `inset` px in from a column block, drawn `ratio` of its layout width on screen (a CSS zoom on it). */
 	function zoomedBase(inset: number, ratio: number, offsetWidth: number | undefined = 764) {

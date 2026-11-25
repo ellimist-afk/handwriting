@@ -35,7 +35,7 @@ import exportCommandsSource from "./commands/RegisterExportCommands.ts?raw";
 import snipsSource from "./export/Snips.ts?raw";
 import { createFreshFile } from "./export/CreateFreshFile";
 import { inkToSvg } from "./ink/SvgExport";
-import { inkToPdf } from "./ink/InkPdf";
+import { inkToExportPdf, inkToPdf } from "./ink/InkPdf";
 import { bytesOf } from "./pdf/PdfSyntax";
 import { appendInkToPdf, flattenedPdfPath } from "./ink/InkPdfAppend";
 import type { InkStroke } from "./ink/Stroke";
@@ -269,6 +269,7 @@ describe("two overlapping exports keep both snapshots", () => {
 					inlineInk: { hasInk: () => true, strokes: () => strokes },
 					inkToSvg,
 					inkToPdf,
+					inkToExportPdf,
 					bytesOf,
 					appendInkToPdf,
 					flattenedPdfPath,

@@ -132,12 +132,20 @@ export function noteToVisual(distance: number, scale: number): number {
  * still rasterises 1:1 with physical pixels when the editor is scaled.
  */
 /**
- * How much of the ZOOM may be spent on resolution. Past this the ink is
- * rasterised below the painted size and upscaled by the transform: visibly
- * softer at high magnification, which is a far better failure than the
- * alternative below.
+ * How much of the ZOOM may be spent on resolution: all of it, up to the pinch
+ * ceiling (MAX_PINCH_SCALE in PinchScale.ts, which imports from this module,
+ * so the number is written twice and ZoomScale.test.ts holds them equal).
+ * Past it only an outer scale can push the product, and that part is
+ * rasterised below the painted size and upscaled by the transform.
+ *
+ * It was 2, and every zoom past 200% was stretched: ink at 600% was a 200%
+ * raster blown up three times. What keeps a tablet's canvases allocatable is
+ * the area cap below, not this number, and the band margin is in the reader's
+ * px above 100% (ScrollBand.ts), so a zoomed band asks for about what the
+ * same pane asks for at 100%.
+ * It follows the pinch ceiling: 6 for 600%, now 8 for 800%.
  */
-export const MAX_ZOOM_BACKING = 2;
+export const MAX_ZOOM_BACKING = 8;
 
 /**
  * Total device pixels ONE canvas may claim.
@@ -189,6 +197,19 @@ export const MAX_ZOOM_BACKING = 2;
  * is not on that machine. `backingScale` takes a `mobile` flag for this.
  */
 export const MAX_BACKING_AREA = 10_000_000;
+
+/**
+ * The budget a DESKTOP canvas trims against once zoom asks for more than its
+ * device ratio. A maximised pane on a 4K screen at 200% scaling holds a band
+ * of about 2400 x 1500 css px, 14.4M device px at full ratio. On the 10M
+ * budget that band lost a sixth of its linear resolution the moment it was
+ * zoomed, so zoomed ink was visibly softer than the same ink at 100%. This
+ * budget fits that band whole at every zoom. It stays under WebKit's ~16.7M
+ * per-canvas figure so a desktop canvas keeps a ceiling if a band path ever
+ * hands over a box much larger than the screen. Bigger desktop bands (5K, 6K)
+ * still trim against it, less than before. Mobile stays on MAX_BACKING_AREA.
+ */
+export const MAX_DESKTOP_BACKING_AREA = 16_000_000;
 
 /**
  * The css box an ink canvas is given, and the transform that keeps it on the
@@ -249,8 +270,9 @@ export function canvasLayerBox(cssW: number, cssH: number, cssScale: number, hos
  *
  * The platform arrives as a parameter rather than an `import { Platform }`
  * on purpose: this module has no imports and its tests are pure arithmetic,
- * and the one production call site (`InkOverlay.backingNow`) is already in a
- * file that imports Platform.
+ * and both production call sites (`InkOverlay.backingNow` and
+ * `InkOverlayLayout`) already have the platform to hand. Mobile trims against
+ * MAX_BACKING_AREA, desktop against MAX_DESKTOP_BACKING_AREA.
  */
 export function backingScale(
 	dpr: number,
@@ -263,14 +285,15 @@ export function backingScale(
 	let b = d * Math.min(coherentScale(scale), MAX_ZOOM_BACKING);
 	if (layoutW > 0 && layoutH > 0 && Number.isFinite(layoutW) && Number.isFinite(layoutH)) {
 		const area = layoutW * b * layoutH * b;
-		if (area > MAX_BACKING_AREA) {
+		const budget = mobile ? MAX_BACKING_AREA : MAX_DESKTOP_BACKING_AREA;
+		if (area > budget) {
 			// The scale at which this pane EXACTLY fills the budget.
 			//
 			// Written as a plain square root rather than `b * sqrt(MAX/area)`
 			// because with `area = layoutW * layoutH * b^2` that expression
 			// reduces to exactly this - the `b` cancels. Same number, one
 			// fewer place to get it wrong.
-			const trimmed = Math.sqrt(MAX_BACKING_AREA / (layoutW * layoutH));
+			const trimmed = Math.sqrt(budget / (layoutW * layoutH));
 			// ON MOBILE take it flat, which bounds the DEVICE ratio as well
 			// as the zoom. That is an iOS fact and not a preference: WebKit
 			// refuses a per-canvas allocation past ~16.7M device px and does

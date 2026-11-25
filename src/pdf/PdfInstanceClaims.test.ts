@@ -19,7 +19,7 @@ import { FakeAdapter } from "../persistence/FakeAdapter";
 import { PdfInkStore } from "./PdfInkStore";
 import type { InkStroke } from "../ink/Stroke";
 import { createFreshFile } from "../export/CreateFreshFile";
-import { inkToPdf } from "../ink/InkPdf";
+import { inkToExportPdf, inkToPdf } from "../ink/InkPdf";
 import { bytesOf } from "./PdfSyntax";
 import { isMarkdownPath, stripMarkdownExtension } from "../util/MarkdownPath";
 import { document } from "../../test/pdf-fixture";
@@ -57,6 +57,7 @@ expect(exportStop).toBeGreaterThan(exportAt);
 const registerExportPdf = new Function(
 	"inlineInk",
 	"inkToPdf",
+	"inkToExportPdf",
 	"bytesOf",
 	"stripMarkdownExtension",
 	"createFreshFile",
@@ -399,6 +400,7 @@ it("the plugin's own writes - flatten, snip, export - leave an open pane's docum
 			Object.assign(Object.create(s.plugin), { addCommand: (spec: typeof exportPdf) => (exportPdf = spec), exportedStrokes: () => [stroke(10, "note-ink")] }),
 			{ strokes: () => [stroke(10, "note-ink")] },
 			inkToPdf,
+			inkToExportPdf,
 			bytesOf,
 			stripMarkdownExtension,
 			createFreshFile,

@@ -10,18 +10,22 @@
  * move (penRaw's lasso branch); onPenUp the lasso lift, or the real penUp for a pointercancel or no event (a pen
  * landing while the finger holds the contact: the router's commitFingerInkForPenPreemption).
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { InlinePenRouter } from "./InlinePenRouter";
 import { InkOverlayPlugin } from "./InkOverlay";
 import { inlineInk } from "./InkOverlayRegistry";
 import { TAP_MAX_MOVE_PX } from "../input/PointerRouter";
 import { DEFAULT_PEN } from "../ink/PenStyle";
-import { doc, line, noteStrokes, tapRig, type RigOpts } from "./attachTapRig.test.util";
+import { doc, line, noteStrokes, strokeOf, tapRig, type RigOpts } from "./attachTapRig.test.util";
 import { fakeEl, installFakeWindow, penEvent, recorder } from "../../test/routerHarness";
 import { attachPinsOf } from "./AttachDecoration";
 import { attachButtonPoint } from "./LassoTransform";
 import { SELECTION_GRAB_PAD } from "./InkOverlayConstants";
-import { setTipMode } from "./TipMode";
+import { setTipMode, tipMode } from "./TipMode";
+import { StrokeIndex } from "../ink/StrokeIndex";
+import { fingerInkEligible } from "./FingerInk";
+import { invertInkOp, type InkOp } from "./InkHistory";
+import type { TransactionSpec } from "@codemirror/state";
 
 type Bounds = { x: number; y: number; width: number; height: number };
 
@@ -69,6 +73,8 @@ function dragRig(path: string, opts: RigOpts = {}) {
 		ensurePenTools: () => {}, probeSample: () => {}, showEraserCursor: () => {},
 		// The pointercancel teardown's reach past the selection (cancelFingerInkForPinch): none is the subject.
 		stopFrameTicker: () => {}, contactEndedWithoutLift: () => {}, releaseHeldFontRef: () => {}, hidePenCursor: () => {},
+		// The lasso lift's ring-alone hide (hideLassoCursor): not the subject.
+		hidePenRing: () => {},
 		hideEraserCursor: () => {}, endSpaceSnapshot: () => null, selectionDeleteKeys: { reset: () => {} }, erasePieces: new Set(),
 		erased: [], eraseFrom: [], snapChip: null,
 		// penUp's page resume after the gesture (a stranded pan easing back): not the subject.
@@ -89,7 +95,7 @@ function dragRig(path: string, opts: RigOpts = {}) {
 		lassoPts: unknown[];
 		mode: string;
 	};
-	const proto = InkOverlayPlugin.prototype as unknown as { penDown(s: object, ev: object): void; penUp(ev?: object): void };
+	const proto = InkOverlayPlugin.prototype as unknown as { penDown(s: object, ev: object): void; penUp(ev?: object): void; penRaw(s: object[], ev?: object): void };
 	const select = (ids: string[]) => {
 		r.selection.selectExactly(ids);
 		r.redraw();
@@ -101,8 +107,12 @@ function dragRig(path: string, opts: RigOpts = {}) {
 	return { ...r, o, proto, select, at, wetDowns, path };
 }
 
-/** The real router on a fake scroller, wired to the rig's overlay. `fingerInk` arms iPhone finger ink. */
-function routerOn(r: ReturnType<typeof dragRig>, opts: { fingerInk?: boolean } = {}) {
+/**
+ * The real router on a fake scroller, wired to the rig's overlay. `fingerInk` arms iPhone finger ink (or answers it per
+ * call). `realPath` sends every move to the overlay's real penRaw and every lift to its real penUp, as Lifecycle wires
+ * them, so an eraser contact erases on its moves and commits at its lift.
+ */
+function routerOn(r: ReturnType<typeof dragRig>, opts: { fingerInk?: boolean | (() => boolean); realPath?: boolean } = {}) {
 	const win = {
 		devicePixelRatio: 1,
 		addEventListener: () => {},
@@ -117,19 +127,20 @@ function routerOn(r: ReturnType<typeof dragRig>, opts: { fingerInk?: boolean } =
 	const downs: { x: number; y: number }[] = [], lifts: unknown[] = [], pinches: string[] = [];
 	const router = new InlinePenRouter(el as unknown as HTMLElement, el as unknown as HTMLElement, {
 		...rec.cb,
-		fingerInk: () => opts.fingerInk ?? false,
+		fingerInk: () => (typeof opts.fingerInk === "function" ? opts.fingerInk() : opts.fingerInk ?? false),
 		penOff: () => false,
 		claimTouch: (s: { x: number; y: number }) => r.o.selectionContactAt(r.camera.screenToWorld(s.x, s.y), "touch") !== null,
 		onPenDown: (s: { x: number; y: number }, ev: object) => {
 			downs.push({ x: s.x, y: s.y });
 			r.proto.penDown.call(r.overlay, s, ev);
 		},
-		onPenRaw: (samples: object[]) => {
-			if (r.o.mode === "lasso") r.o.lassoMove(samples);
+		onPenRaw: (samples: object[], ev?: object) => {
+			if (opts.realPath) r.proto.penRaw.call(r.overlay, samples, ev);
+			else if (r.o.mode === "lasso") r.o.lassoMove(samples);
 		},
 		onPenUp: (ev?: { type?: string }) => {
 			// A pointercancel, or no event (a pen landing takes the finger's contact): the real penUp, as Lifecycle wires it.
-			if (!ev || ev.type === "pointercancel") r.proto.penUp.call(r.overlay, ev);
+			if (opts.realPath || !ev || ev.type === "pointercancel") r.proto.penUp.call(r.overlay, ev);
 			else if (r.o.mode === "lasso") {
 				r.o.lassoUp();
 				r.o.mode = "ink";
@@ -724,4 +735,307 @@ describe("one hit test: the claim and the contact agree", () => {
 		const at = (x: number, y: number) => r.o.selectionContactAt(r.camera.screenToWorld(x, y), "touch");
 		expect([at(FREE.x, FREE.y), at(400, 500)]).toEqual(["box", null]);
 	});
+});
+
+/**
+ * P157-1: a palm on the selection. A touch that lands on the selection while the palm gate is cold is held, not
+ * claimed; past the tap limit the selection claims it. The gate a new touch meets was not asked again at the claim, so
+ * on Apple (where the contact size reads 0 and the size rule is off) a hand resting on the box when the Pencil comes
+ * near could still slide the box. At the claim the touch now meets that gate; blocked, it is swallowed to its lift. Same
+ * gate, same numbers: 250 ms after a lift, 300 ms after a hover, parole.
+ */
+describe("P157-1: the palm gate is asked again at the selection's claim", () => {
+	const PEN_NEAR = { x: 400, y: 500 };
+	const APPLE = { userAgent: "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X)", platform: "iPad", maxTouchPoints: 5 };
+	const OTHER = { userAgent: "Mozilla/5.0 (Windows NT 10.0)", platform: "Win32", maxTouchPoints: 10 };
+	const onPlatform = (nav: object, body: () => void) => {
+		vi.stubGlobal("navigator", nav);
+		try {
+			body();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	};
+	/** A Pencil hovering: a pen move with no button and no pressure. */
+	const hover = (h: ReturnType<typeof routerOn>, x: number, y: number) => {
+		const ev = penEvent("pointermove", performance.now(), { pointerId: 41, pointerType: "pen", x, y, pressure: 0, buttons: 0 }) as unknown as Record<string, unknown>;
+		ev.preventDefault = () => {};
+		ev.stopPropagation = () => {};
+		h.el.handlers.get("pointermove")!(ev as unknown as Event);
+	};
+	const swallowed = (h: ReturnType<typeof routerOn>, id = 31) => (h.router as unknown as { swallowedTouches: Set<number> }).swallowedTouches.has(id);
+	const gateBlocks = (h: ReturnType<typeof routerOn>) => (h.router as unknown as { anyGateBlocksNewTouch(n: number): boolean }).anyGateBlocksNewTouch(performance.now());
+
+	it("Apple: a touch held on the box with the gate cold, the Pencil comes near, the touch moves 20 px: the box stays, the touch is swallowed", () =>
+		onPlatform(APPLE, () => {
+			const r = dragRig("p157-red.md");
+			r.select(["free"]);
+			const before = r.at("free");
+			const h = routerOn(r);
+			try {
+				expect(gateBlocks(h), "precondition: the gate is cold at the down").toBe(false);
+				h.touch("pointerdown", FREE.x, FREE.y);
+				hover(h, PEN_NEAR.x, PEN_NEAR.y);
+				expect(gateBlocks(h), "precondition: the hover warmed the gate").toBe(true);
+				h.touch("pointermove", FREE.x + 20, FREE.y);
+				h.touch("pointermove", FREE.x + 40, FREE.y);
+				expect(h.downs, "the selection claimed the palm").toEqual([]);
+				expect(r.at("free"), "the palm slid the box").toEqual(before);
+				expect(swallowed(h), "the touch is swallowed to its lift").toBe(true);
+				h.touch("pointerup", FREE.x + 40, FREE.y);
+				expect(r.at("free"), "after the lift").toEqual(before);
+				expect(swallowed(h), "the lift lets it go").toBe(false);
+			} finally {
+				h.router.dispose();
+			}
+		}));
+
+	it("PIN, Apple: with the gate cold a finger drag still moves the box", () =>
+		onPlatform(APPLE, () => {
+			const r = dragRig("p157-pin-drag.md");
+			r.select(["free"]);
+			const before = r.at("free");
+			const h = routerOn(r);
+			try {
+				h.touch("pointerdown", FREE.x, FREE.y);
+				h.touch("pointermove", FREE.x + 30, FREE.y + 10);
+				expect(h.downs).toEqual([FREE]);
+				expect(r.at("free")).toEqual({ x: before.x + 30, y: before.y + 10 });
+			} finally {
+				h.router.dispose();
+			}
+		}));
+
+	it("PIN, Apple: a pen landing on a claimed finger drag puts the box back", () =>
+		onPlatform(APPLE, () => {
+			const r = dragRig("p157-pin-pen.md");
+			r.select(["free"]);
+			const before = r.at("free");
+			const h = routerOn(r);
+			try {
+				h.touch("pointerdown", FREE.x, FREE.y);
+				h.touch("pointermove", FREE.x + 30, FREE.y + 10);
+				expect(r.at("free"), "moving").toEqual({ x: before.x + 30, y: before.y + 10 });
+				h.pen("pointerdown", PEN_NEAR.x, PEN_NEAR.y);
+				expect(r.at("free"), "back").toEqual(before);
+			} finally {
+				h.router.dispose();
+			}
+		}));
+
+	it("PIN, off Apple: a wide contact on the box is still refused", () =>
+		onPlatform(OTHER, () => {
+			const r = dragRig("p157-pin-wide.md");
+			r.select(["free"]);
+			const before = r.at("free");
+			const h = routerOn(r);
+			try {
+				h.touch("pointerdown", FREE.x, FREE.y, { width: 80 });
+				h.touch("pointermove", FREE.x + 30, FREE.y, { width: 80 });
+				h.touch("pointerup", FREE.x + 30, FREE.y, { width: 80 });
+				expect(h.downs).toEqual([]);
+				expect(r.at("free")).toEqual(before);
+			} finally {
+				h.router.dispose();
+			}
+		}));
+});
+
+/**
+ * ERASER-FINGER (cases BR-1 to BR-5): a finger never erases, whatever tool is lit.
+ * The selection's claim reads no tool, so with the eraser lit it still hands a finger to the surface's pen-down; there
+ * the selection test was "!eraser &&", so the finger fell through to the erase branch: it cleared the selection and
+ * rubbed out what it crossed. With the eraser lit a finger the selection claims now does what it does with the nib: it
+ * moves the box, works a pin. The eraser stays lit.
+ *
+ * eraserRig: dragRig with the real stroke index the eraser asks (eraseAt runs for real) and penUp's reach past the
+ * gesture stood down, as AttachPin's penPath does. routerOn's realPath: every move goes to the real penRaw and every lift
+ * to the real penUp, as Lifecycle wires them, so a finger in the erase branch erases on its moves and commits at its lift.
+ */
+describe("ERASER-FINGER: with the eraser lit a finger on the selection moves it and never erases", () => {
+	/** g1's ring line, shown (AttachFingerSelect's ON_G1_LINE). */
+	const ON_G1_LINE = { x: 96, y: 82 };
+	const settle = async () => {
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+	};
+	const record = (r: ReturnType<typeof dragRig>) => JSON.stringify(inlineInk.attachments(r.path));
+	const ids = (r: ReturnType<typeof dragRig>) => inlineInk.strokes(r.path).map((s) => s.id).sort();
+	const ops = (spec: TransactionSpec): InkOp[] => [spec.effects ?? []].flat().map((e) => (e as { value: InkOp }).value);
+	/** The ink history steps sent, leaving out the text mark's effects (AttachPin's). */
+	const steps = (sent: TransactionSpec[]) => sent.filter((spec) => ops(spec).some((op) => typeof (op as { type?: unknown } | null)?.type === "string"));
+	const withTip = async (tip: "eraser" | "nib", fn: () => void | Promise<void>): Promise<void> => {
+		setTipMode(tip);
+		try {
+			await fn();
+		} finally {
+			setTipMode("nib");
+		}
+	};
+	const eraserRig = (path: string, opts: RigOpts = {}) => {
+		const r = dragRig(path, opts);
+		const index = new StrokeIndex();
+		Object.assign(r.overlay, {
+			strokeIndex: index, indexDirty: true, currentIndexes: () => [index],
+			noteZoomControls: null, hideLassoCursor: () => {}, retryCanvasOffReset: () => {}, replayDeferredResize: () => {},
+			scheduleViewportStyleRefresh: () => {}, updateExtent: () => {}, bandSyncDeferred: false, snapPreview: null,
+			viewportStyleDirty: false, leftReserveHeld: 0,
+		});
+		return r;
+	};
+	/** A free stroke added to the note, as a paste or a pen adds one. */
+	const add = (r: ReturnType<typeof dragRig>, ...strokes: ReturnType<typeof strokeOf>[]) => {
+		const n = inlineInk.strokes(r.path).length;
+		inlineInk.applyAddLive(r.path, strokes, strokes.map((_, i) => n + i));
+	};
+	/** The finger's moves from (x0, y0) to (x1, y1), `n` evenly spaced: dense, so an eraser on this path meets what it crosses. */
+	const drag = (h: ReturnType<typeof routerOn>, x0: number, y0: number, x1: number, y1: number, n = 16) => {
+		for (let i = 1; i <= n; i++) h.touch("pointermove", x0 + ((x1 - x0) * i) / n, y0 + ((y1 - y0) * i) / n);
+	};
+
+	// C1 (red first) and C3, its nib control (pin): the design's one-move repair, a finger on an unselected held pin.
+	for (const tip of ["eraser", "nib"] as const) {
+		const cell = tip === "eraser" ? "C1" : "C3 (PIN, nib control)";
+		it(`${cell}: ${tip} lit, a held group's pin, nothing selected: the finger drags the pin across a free line; the line is kept, the pin re-hooks, the ${tip} stays lit`, () =>
+			withTip(tip, async () => {
+				const r = eraserRig(`eraser-${tip}-pin.md`, { held: ["g1"] });
+				r.redraw();
+				const pin = attachPinsOf(r.overlay as never, inlineInk.attachments(r.path), inlineInk.strokes(r.path), inlineInk.generation(r.path))[0]!;
+				const land = { x: pin.at.x, y: pin.at.y - 13 }, end = { x: pin.at.x + 80, y: pin.at.y + 120 };
+				// S: a free line across the finger's path, half way along it.
+				add(r, line("S", land.x + 10, land.y + (end.y - land.y) / 2, 110));
+				const sAt = r.at("S"), saved = record(r);
+				expect(r.selected(), "premise: nothing selected").toEqual([]);
+				const h = routerOn(r, { realPath: true });
+				try {
+					h.touch("pointerdown", land.x, land.y);
+					drag(h, land.x, land.y, end.x, end.y);
+					expect(h.downs, "premise: the pin claimed the finger past the tap limit, from where it landed").toEqual([land]);
+					expect(ids(r), `${cell}: S kept (a finger never erases)`).toContain("S");
+					expect(r.at("S"), `${cell}: S where it was`).toEqual(sAt);
+					expect((r.o.pinPress as { moved?: boolean } | null)?.moved, `${cell}: the finger works the pin, past the pad`).toBe(true);
+					h.touch("pointerup", end.x, end.y);
+					await settle();
+					expect(record(r), `${cell}: the lifted drop re-hooks`).not.toBe(saved);
+					expect(ids(r), `${cell}: S kept after the lift`).toContain("S");
+					expect(tipMode(), `${cell}: the ${tip} stays lit`).toBe(tip);
+				} finally {
+					h.router.dispose();
+				}
+			}));
+	}
+
+	it("C2: two strokes pasted and selected with the eraser lit: a finger drag keeps both and moves both by its travel", () =>
+		withTip("eraser", () => {
+			// pasteInkHere's end state (InkOverlayClipboard: the strokes added, then selected exactly). The paste itself reads
+			// the clipboard and the editor's layout, too heavy for this rig: the end state is set by hand.
+			const r = eraserRig("eraser-c2.md");
+			add(r, line("p1", 300, 480, 120), line("p2", 300, 500, 120));
+			r.select(["p1", "p2"]);
+			const b1 = r.at("p1"), b2 = r.at("p2");
+			const h = routerOn(r, { realPath: true });
+			try {
+				h.touch("pointerdown", 350, 480);
+				drag(h, 350, 480, 390, 500);
+				expect(h.downs, "premise: claimed past the tap limit, from where the finger landed").toEqual([{ x: 350, y: 480 }]);
+				expect(ids(r), "C2: both pasted strokes kept").toEqual(expect.arrayContaining(["p1", "p2"]));
+				expect([r.at("p1"), r.at("p2")], "C2: both moved by the finger's travel").toEqual([{ x: b1.x + 40, y: b1.y + 20 }, { x: b2.x + 40, y: b2.y + 20 }]);
+				h.touch("pointerup", 390, 500);
+				expect(ids(r), "C2: both kept after the lift").toEqual(expect.arrayContaining(["p1", "p2"]));
+				expect(r.selected(), "C2: the selection stays").toEqual(["p1", "p2"]);
+				expect(tipMode(), "C2: the eraser stays lit").toBe("eraser");
+			} finally {
+				h.router.dispose();
+			}
+		}));
+
+	it("C5 (BR-3): eraser lit, a finger tap on attached ink selects its group; the next finger drag in the box keeps every stroke and moves the group", () =>
+		withTip("eraser", () => {
+			const r = eraserRig("eraser-c5.md");
+			const all = ids(r), c1 = r.at("c1"), c2 = r.at("c2");
+			const h = routerOn(r, { realPath: true });
+			try {
+				h.touch("pointerdown", ON_G1_LINE.x, ON_G1_LINE.y);
+				h.touch("pointerup", ON_G1_LINE.x, ON_G1_LINE.y);
+				expect(r.selected(), "premise: the tap on the ring's line selected g1 with the eraser lit").toEqual(G1);
+				h.touch("pointerdown", IN_G1.x, IN_G1.y);
+				drag(h, IN_G1.x, IN_G1.y, IN_G1.x + 40, IN_G1.y + 20);
+				expect(h.downs, "premise: the drag was claimed past the tap limit").toEqual([IN_G1]);
+				expect(ids(r), "C5: every stroke kept").toEqual(all);
+				expect([r.at("c1"), r.at("c2")], "C5: g1 moved by the finger's travel").toEqual([{ x: c1.x + 40, y: c1.y + 20 }, { x: c2.x + 40, y: c2.y + 20 }]);
+				h.touch("pointerup", IN_G1.x + 40, IN_G1.y + 20);
+				expect(ids(r), "C5: every stroke kept after the lift").toEqual(all);
+				expect(tipMode(), "C5: the eraser stays lit").toBe("eraser");
+			} finally {
+				h.router.dispose();
+			}
+		}));
+
+	it("BR-4 (PIN): eraser lit, a pen lands mid finger drag on T's starting place: the box goes back first, the pen erases T there, one step whose undo puts T back", () =>
+		withTip("eraser", () => {
+			const r = eraserRig("eraser-br4.md");
+			r.select(["free"]);
+			const before = r.at("free"), sent = r.sent.length;
+			const h = routerOn(r, { realPath: true });
+			try {
+				h.touch("pointerdown", FREE.x, FREE.y);
+				// 30 down as well as across: a put-back that ran after the pen's hit test would leave T 30 px under the pen.
+				drag(h, FREE.x, FREE.y, FREE.x + 30, FREE.y + 30, 8);
+				expect(ids(r), "premise: the finger erased nothing").toContain("free");
+				expect(r.at("free"), "premise: the finger moved the box").toEqual({ x: before.x + 30, y: before.y + 30 });
+				h.pen("pointerdown", FREE.x, FREE.y);
+				h.pen("pointerup", FREE.x, FREE.y);
+				expect(ids(r), "BR-4: the pen erased T at its starting place").not.toContain("free");
+				expect(r.selected(), "BR-4: the selection is gone").toEqual([]);
+				const step = steps(r.sent.slice(sent));
+				expect(step.map((s) => ops(s).map((op) => op.type)), "BR-4: one step, the pen's erase; the finger's drag recorded none").toEqual([["replace"]]);
+				(r.overlay as unknown as { applyInkOp(op: InkOp, docChanged?: boolean): void }).applyInkOp(invertInkOp(ops(step[0]!)[0]!));
+				expect(r.at("free"), "BR-4: its undo puts T back at its starting place").toEqual(before);
+			} finally {
+				h.router.dispose();
+			}
+		}));
+
+	it("PIN: eraser lit, a pointercancel mid finger drag puts the box back and records no step", () =>
+		withTip("eraser", () => {
+			const r = eraserRig("eraser-cancel.md");
+			r.select(["free"]);
+			const before = r.at("free");
+			const h = routerOn(r, { realPath: true });
+			try {
+				h.touch("pointerdown", FREE.x, FREE.y);
+				drag(h, FREE.x, FREE.y, FREE.x + 30, FREE.y + 10, 8);
+				expect(ids(r), "premise: the finger erased nothing").toContain("free");
+				expect(r.at("free"), "moving").toEqual({ x: before.x + 30, y: before.y + 10 });
+				const sent = r.sent.length;
+				h.touch("pointercancel", FREE.x + 30, FREE.y + 10);
+				expect(r.at("free"), "back").toEqual(before);
+				expect(r.sent.length, "no history step").toBe(sent);
+			} finally {
+				h.router.dispose();
+			}
+		}));
+
+	it("PIN: eraser lit, a finger off the selection with finger ink wired to its real rule on an iPhone makes no pen-down", () =>
+		withTip("eraser", () => {
+			const iphone = () => fingerInkEligible({ isIosApp: true, isPhone: true, toolPicked: true, penInkEnabled: true, tipMode: tipMode(), tool: "pen" });
+			expect(iphone(), "premise: no finger ink with the eraser lit").toBe(false);
+			const r = eraserRig("eraser-off.md");
+			r.select(["free"]);
+			const all = ids(r);
+			const h = routerOn(r, { fingerInk: iphone, realPath: true });
+			try {
+				h.touch("pointerdown", 400, 500);
+				drag(h, 400, 500, 440, 520, 8);
+				h.touch("pointerup", 440, 520);
+				expect(h.downs, "no pen-down").toEqual([]);
+				expect(ids(r), "nothing erased").toEqual(all);
+			} finally {
+				h.router.dispose();
+			}
+		}));
+
+	it("CONTROL: the same wiring with the nib lit answers finger ink on", () =>
+		withTip("nib", () => {
+			expect(fingerInkEligible({ isIosApp: true, isPhone: true, toolPicked: true, penInkEnabled: true, tipMode: tipMode(), tool: "pen" })).toBe(true);
+		}));
 });

@@ -20,7 +20,7 @@
  *
  * ONE DOOR AND THE ORDER. The bind file takes exactly the listed names from the
  * router. The constructor calls the four methods in the order the code ran when it
- * was inline, and a router built on a recording fake registers the same fifteen
+ * was inline, and a router built on a recording fake registers the same sixteen
  * listeners, on the same targets, in the same order. No other test registers or
  * fires the band claim, so this order is what notices a dropped band-root phase.
  */
@@ -54,6 +54,8 @@ const REGISTRATIONS = [
 	"window touchend true",
 	"window touchcancel true",
 	"scroller contextmenu true",
+	"scroller keydown true",
+	"window selectionchange true",
 ];
 
 const routerSrc = routerRaw.replace(/\r\n/g, "\n");
@@ -142,7 +144,7 @@ describe("listener install methods on the pen router prototype", () => {
 		}
 	});
 
-	it("a router built on a recording fake registers the fifteen listeners, on the same targets, in the same order", () => {
+	it("a router built on a recording fake registers the sixteen listeners, on the same targets, in the same order", () => {
 		const log: string[] = [];
 		const viewRoot = recording(log, "viewRoot", {});
 		const win = recording(log, "window", {});

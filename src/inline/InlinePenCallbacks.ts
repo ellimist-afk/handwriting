@@ -217,4 +217,21 @@ export interface InlinePenCallbacks {
 	 * the harnesses' answer and the pdf's until somebody rules on it there.
 	 */
 	onHandOnGlass?(): void;
+	/**
+	 * A pointer is over the surface that it paints no ring for: a plain mouse
+	 * moving (not the same-point move Windows sends for a pen), or a pen with
+	 * the pen tool off. The surface takes the ring down and its hover class
+	 * off, so the pointer is not left under `cursor: none`.
+	 *
+	 * Split from `onPenLeave` for GitHub issue 53: the note's leave now hides
+	 * the ring alone and keeps the class, because each add or remove restyles
+	 * the whole note. Called on every such row, as `onPenLeave` was for the
+	 * plain mouse.
+	 *
+	 * Optional, and NOT in `INLINE_PEN_CALLBACKS` (InkSurfaces.ts): note-only,
+	 * like `onHandOnGlass?`. With no member the plain mouse gets `onPenLeave`
+	 * as before, which is the pdf's full hide, and a pen with the tool off gets
+	 * nothing, as before.
+	 */
+	onForeignPointer?(): void;
 }

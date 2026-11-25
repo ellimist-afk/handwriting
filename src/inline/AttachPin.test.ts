@@ -183,7 +183,7 @@ describe("dragging the pin moves the hook, never the ink", () => {
 		const before = r.shown(), old = r.group("g1");
 		const head = { x: 6, y: 92 - 13 };
 		// "words" on line 10: characters 8 to 13, x 122 to 192; the row's middle y 380.
-		r.drag(head.x, head.y, 150, 380, "pen");
+		r.drag(head.x, head.y, 150, 367, "pen");
 		await settle();
 		const g = r.group("g1");
 		expect([g.id, [...g.strokeIds].sort()]).toEqual(["g1", G1]);
@@ -201,7 +201,7 @@ describe("dragging the pin moves the hook, never the ink", () => {
 		const r = pinRig("pin-drag-paragraph.md");
 		r.selection.selectExactly(G1);
 		r.redraw();
-		r.drag(6, 92 - 13, 500, 380, "mouse");
+		r.drag(6, 92 - 13, 500, 367, "mouse");
 		await settle();
 		expect(r.group("g1").target).toMatchObject({ kind: "paragraph", text: "line 10 words" });
 	});
@@ -211,7 +211,7 @@ describe("dragging the pin moves the hook, never the ink", () => {
 		r.redraw();
 		r.paint("all");
 		const pin = r.pins()[0]!;
-		r.drag(pin.at.x, pin.at.y - 13, 150, 380, "mouse");
+		r.drag(pin.at.x, pin.at.y - 13, 150, 367, "mouse");
 		await settle();
 		expect(r.group("g1").target).toMatchObject(wordOn(10, 8, "words"));
 		expect(r.anchors.follow.followsText("g1"), "it follows its new text").toBe(true);
@@ -250,7 +250,7 @@ describe("the pin through the pen path", () => {
 		p.down(pin.at.x, pin.at.y - 13, "mouse");
 		expect([p.o.mode, p.o.pinPress !== null], "[mode, pin press]").toEqual(["lasso", true]);
 		p.move(140, 300);
-		p.move(150, 380);
+		p.move(150, 367);
 		p.up({ type: "pointerup", pointerType: "mouse" });
 		await settle();
 		expect(r.group("g1").target).toMatchObject(wordOn(10, 8, "words"));
@@ -296,7 +296,7 @@ describe("the pin through the pen path", () => {
 		const p = penPath(r);
 		p.down(6, 92 - 13, "pen");
 		p.move(80, 200);
-		p.move(150, 380);
+		p.move(150, 367);
 		p.up({ type: "pointerup", pointerType: "pen" });
 		await settle();
 		expect(r.group("g1").target).toMatchObject(wordOn(10, 8, "words"));

@@ -140,7 +140,7 @@ describe("pen up and op emit methods on the pdf controller prototype", () => {
 		const settled = bareController({ win: throttleWin, lastSyncAt: 0, trailingSync: null, schedule });
 		settled.scheduleThrottled();
 		expect(schedule).toHaveBeenCalledTimes(1);
-		const busy = bareController({ win: throttleWin, lastSyncAt: Date.now(), trailingSync: null, schedule });
+		const busy = bareController({ win: throttleWin, lastSyncAt: performance.now(), trailingSync: null, schedule });
 		busy.scheduleThrottled();
 		expect(schedule).toHaveBeenCalledTimes(1);
 		expect(setTimeout).toHaveBeenCalledTimes(1);

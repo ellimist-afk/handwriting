@@ -38,6 +38,24 @@ function coversWithCarried(store: PageStore, pageId: string, data: PageData, cov
 /** A turn of the event loop: input, frames and timers queued meanwhile run first. */
 const nextTask = (): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, 0));
 
+/**
+ * The stamp of the bytes this session's own last write left in each page's file, per store. The save guard trusts a
+ * remembered stamp over a moved modified time only when it is this one: a sync tool that writes our last bytes back
+ * with a new time has handed us our own file. A stamp a load or an adoption recorded is never trusted that far: the
+ * load stats before it reads, so its stamp can be of bytes that landed after the time it recorded, and that file is
+ * kept as a conflict copy.
+ */
+const ownWriteStamps = new WeakMap<PageStore, Map<string, string>>();
+
+function ownWriteStamp(store: PageStore): Map<string, string> {
+	let stamps = ownWriteStamps.get(store);
+	if (stamps === undefined) {
+		stamps = new Map();
+		ownWriteStamps.set(store, stamps);
+	}
+	return stamps;
+}
+
 
 	/**
 	 * ADAPTER-LEVEL DURABILITY, and exactly no more than that. The write is
@@ -347,7 +365,9 @@ const nextTask = (): Promise<void> => new Promise((resolve) => window.setTimeout
 			// The stamp is taken in the same slices, not over the whole text after them.
 			const pause = this.penPause(yieldToPen, pageId);
 			const { text: serialized, stamp } = await serializePageSlicedStamped(effective, pause, beginContentStamp);
-			flight.stamp = stamp;
+			// Bytes merged with another writer's file hold strokes this document never had: no stamp, as for bytes not known
+			// yet, so a carrier written meanwhile cannot name them as a save of its own page.
+			flight.stamp = effective === data ? stamp : null;
 			if (!this.ownTmp.has(tmp) && (await adapter.exists(tmp))) {
 				const tst = await adapter.stat(tmp).catch(() => null);
 				const stranded = await this.freeConflictPath(final, tst?.mtime ?? 0);
@@ -386,8 +406,12 @@ const nextTask = (): Promise<void> => new Promise((resolve) => window.setTimeout
 				// no stat, identity has to come from the content, and a file
 				// whose identity cannot be established is preserved.
 				let external = st === null || st.mtime !== known;
-				if (st === null || !external) {
-					const knownHash = this.knownHash.get(pageId);
+				const knownHash = this.knownHash.get(pageId);
+				// A moved time alone does not make the file external when the stamp this session remembers is the one
+				// of its own last write: the bytes decide. A stamp from a load or an adoption is not trusted over a
+				// moved time, and the file is kept as before.
+				const ownStamp = knownHash !== undefined && ownWriteStamp(this).get(pageId) === knownHash;
+				if (st === null || !external || ownStamp) {
 					if (knownHash !== undefined) {
 						const readAt = diag ? performance.now() : 0;
 						const reading = adapter.read(aside);
@@ -444,6 +468,9 @@ const nextTask = (): Promise<void> => new Promise((resolve) => window.setTimeout
 			if (!found) this.provisional.add(pageId);
 			if (st) this.knownMtime.set(pageId, st.mtime);
 			this.knownHash.set(pageId, stamp);
+			ownWriteStamp(this).set(pageId, stamp);
+			// The page handed to this save is the file's now.
+			this.landedPages.add(data);
 			// The save has landed, so a flush carrier it supersedes is stale. A
 			// carrier written after this snapshot was taken holds newer ink and
 			// stays until the save that covers it lands.

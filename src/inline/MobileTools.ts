@@ -743,6 +743,66 @@ export class MobileTools {
 	pillTip!: HTMLElement;
 	tipTimer: number | null = null;
 
+	/**
+	 * The document the seven listeners of `listenOn` are on, or null once the strip is torn down. Kept rather than
+	 * read off `el` at teardown: a note dragged to another window takes its strip along, and `el.ownerDocument` then
+	 * names a window the listeners were never put on.
+	 */
+	listenDoc: Document | null = null;
+	/** Ends the host's window-move watches on the strip and the pill (`watchWindowMoves`). */
+	stopWindowWatches: Array<() => void> = [];
+
+	/**
+	 * Put the strip's seven document listeners on `doc`, taking them off the document they were on. Nothing when
+	 * they are on `doc` already, so a call with no move changes nothing. Capture, all seven, in this order: the
+	 * outside tap, Escape, the slider's release, the drag's end, the trace's click.
+	 */
+	listenOn(doc: Document): void {
+		if (this.listenDoc === doc) return;
+		this.stopListening();
+		doc.addEventListener("pointerdown", this.outsideTap, { capture: true });
+		doc.addEventListener("keydown", this.escapeKey, { capture: true });
+		doc.addEventListener("pointerup", this.releaseSlider, { capture: true });
+		doc.addEventListener("pointercancel", this.releaseSlider, { capture: true });
+		doc.addEventListener("pointerup", this.endDrag, { capture: true });
+		doc.addEventListener("pointercancel", this.endDrag, { capture: true });
+		doc.addEventListener("click", this.traceClick, { capture: true });
+		this.listenDoc = doc;
+	}
+
+	/** Take the seven off the document they are on, whichever window the strip is in now. */
+	stopListening(): void {
+		const doc = this.listenDoc;
+		if (!doc) return;
+		doc.removeEventListener("pointerdown", this.outsideTap, { capture: true });
+		doc.removeEventListener("keydown", this.escapeKey, { capture: true });
+		doc.removeEventListener("pointerup", this.releaseSlider, { capture: true });
+		doc.removeEventListener("pointercancel", this.releaseSlider, { capture: true });
+		doc.removeEventListener("pointerup", this.endDrag, { capture: true });
+		doc.removeEventListener("pointercancel", this.endDrag, { capture: true });
+		doc.removeEventListener("click", this.traceClick, { capture: true });
+		this.listenDoc = null;
+	}
+
+	/**
+	 * A note dragged out to its own window (or back) can take this strip along with its editor, and every tap, key
+	 * and lift there reaches only that window's document. Obsidian calls back on a node that has moved window, and
+	 * the seven follow the strip there. If the host builds a new editor instead, this strip is torn down where it
+	 * was and the call never comes. Both the strip and the pill are watched: the host hears only a node that is showing,
+	 * and the strip is hidden while folded to its pill. A host without the call leaves the strip as it always was.
+	 * After teardown a late call puts nothing back.
+	 */
+	watchWindowMoves(): void {
+		for (const node of [this.el, this.pill]) {
+			if (!("onWindowMigrated" in node)) continue;
+			this.stopWindowWatches.push(
+				node.onWindowMigrated(() => {
+					if (this.listenDoc) this.listenOn(this.el.ownerDocument);
+				})
+			);
+		}
+	}
+
 	destroy(): void {
 		this.stopModeWatch?.();
 		this.stopModeWatch = null;
@@ -768,15 +828,9 @@ export class MobileTools {
 		if (eraserEdge.owner === this) eraserEdge.owner = null;
 		this.resizeWatch?.disconnect();
 		this.resizeWatch = null;
-		this.el.ownerDocument.removeEventListener("pointerdown", this.outsideTap, { capture: true });
-		this.el.ownerDocument.removeEventListener("keydown", this.escapeKey, { capture: true });
-		this.el.ownerDocument.removeEventListener("pointerup", this.releaseSlider, { capture: true });
-		this.el.ownerDocument.removeEventListener("pointercancel", this.releaseSlider, {
-			capture: true,
-		});
-		this.el.ownerDocument.removeEventListener("pointerup", this.endDrag, { capture: true });
-		this.el.ownerDocument.removeEventListener("pointercancel", this.endDrag, { capture: true });
-		this.el.ownerDocument.removeEventListener("click", this.traceClick, { capture: true });
+		for (const stop of this.stopWindowWatches) stop();
+		this.stopWindowWatches = [];
+		this.stopListening();
 		this.heldSlider = null;
 		this.el.remove();
 		this.pill.remove();

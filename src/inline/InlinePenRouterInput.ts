@@ -37,10 +37,41 @@ function noteTapStart(router: InlinePenRouter, e: PointerEvent, caught: boolean)
  * A finger that landed alone on the selection (its padded box, a handle, the Attach button or a pin: the surface's
  * claimTouch). Nothing claims it at the down: no ink, no pan, no lasso. Past TAP_MAX_MOVE_PX from `x, y` the selection
  * claims it with `down`, the sample where it landed, so the drag counts from there. A lift inside the limit is the tap
- * it is today (onTapLift).
+ * it is today (onTapLift). `settled`: a zoom that ended by its own quiet time during the wait moved the page, and `down`
+ * was handed back in the page as it stands since (rebaseSelectionTouch).
  */
-type SelectionTouch = { pointerId: number; x: number; y: number; down: PenSample };
+type SelectionTouch = { pointerId: number; x: number; y: number; down: PenSample; settled?: boolean };
 const selectionTouches = new WeakMap<InlinePenRouter, SelectionTouch>();
+
+/**
+ * A wheel or touchpad zoom ended by its own quiet time under a finger waiting on the selection, and moved the page. `map`
+ * hands the landing back in the page as it stands now, so the claim's ask and the surface's pen-down read the point the
+ * finger landed on, and the claim counts the drag from where the finger rests, as when the claim's own hook ends the
+ * zoom. No finger waiting: nothing to do.
+ */
+export function rebaseSelectionTouch(router: InlinePenRouter | null | undefined, map: (s: PenSample) => PenSample): void {
+	const t = router ? selectionTouches.get(router) : undefined;
+	if (!t) return;
+	t.down = map(t.down);
+	t.settled = true;
+}
+
+/**
+ * Where a claimed selection finger rests now: its landing client point, mapped after the claim's pre-down hook. A wheel
+ * or touchpad zoom the hook ends can move the page under a resting finger; the surface takes the selection with the
+ * landing sample `down` (the page the finger landed on) and counts the drag from this one, so the first step is the
+ * finger's own travel. Set at the claim, taken once by the surface's pen-down. `settled` carries the wait's.
+ */
+type SelectionClaimAnchor = { at: PenSample; settled: boolean };
+const selectionClaimAnchors = new WeakMap<InlinePenRouter, SelectionClaimAnchor>();
+
+/** The resting point of the selection finger this pen-down claims, once; null for every other contact. */
+export function takeSelectionClaimAnchor(router: InlinePenRouter | null | undefined): SelectionClaimAnchor | null {
+	if (!router) return null;
+	const a = selectionClaimAnchors.get(router) ?? null;
+	selectionClaimAnchors.delete(router);
+	return a;
+}
 
 /** Does the surface's selection take this lone finger? Only a finger the palm rule would not call a palm by its size. */
 function selectionTakesTouch(router: InlinePenRouter, e: PointerEvent): boolean {
@@ -100,7 +131,7 @@ function eatTapFallout(router: InlinePenRouter, e: PointerEvent): void {
 declare module "./InlinePenRouter" {
 	interface InlinePenRouter {
 		pointerDown(e: PointerEvent): void;
-		claimFingerInk(e: PointerEvent, down?: PenSample): void;
+		claimFingerInk(e: PointerEvent, down?: PenSample, landed?: { x: number; y: number }): void;
 		cancelFingerInkForPinch(): void;
 		commitFingerInkForPenPreemption(): void;
 		traceHover(e: PointerEvent): void;
@@ -484,40 +515,53 @@ declare module "./InlinePenRouter" {
 		this.inkFeed.strokeStart(e.timeStamp);
 		this.armOwnership();
 		// Pen signal: the standing guard (re-)arms and cancels any pending
-		// touch-window re-arm timer. A touch the assist was carrying is
+		// touch-window re-arm timer. A touch an assist was carrying is
 		// reclassified as palm. The hand's edge reached the glass just ahead
 		// of the tip on a cold slam, and it must not pan under the writing hand.
-		if (this.assistPointerId !== null) {
-			tr("guard", e, `assist cancelled: leading touch ${this.assistPointerId} reclassified as palm`);
-			this.assistPointerId = null;
-			this.assistEngaged = false;
-		}
 		// Same for a pinch: fingers still down when the tip lands belong to the
 		// writing hand now, so the note must stop resizing under it.
-		if (this.pinchLive) {
-			this.pinchLive = false;
-			this.cb.onPinch("end", 1, this.pinchCentroid());
-			this.rebasePinch();
-			tr("guard", e, "pinch cancelled: pen claimed the surface");
-		}
 		// A swallowed contact still down when the pen lands is the hand that
 		// follows the pen; it can never earn parole afterwards. Eraser
 		// scrubbing lifts and re-lands the nib every few hundred ms with the
 		// hand's edge sliding in between. Judged by motion alone, that slide
 		// became an assist pan and walked the viewport (RC3).
-		// In ANY pane: one hand writes across a split, so the palm resting in
-		// the other pane is the same hand. And the pen cannot be down in two
-		// panes: a stroke another pane still holds open stopped without any
-		// lift reaching it, and is ended here, ink kept.
+		// In ANY pane: one hand writes across a split, so the hand resting or
+		// sliding in the other pane is the same hand. Its pan stops and its
+		// pinch ends here too; left running, the next pane scrolled or zoomed
+		// under the writing hand and flung at the lift. A give past an end
+		// that pan was holding is handed back with it: the pane's own lift can
+		// no longer match the dropped pointer, so nothing else would (in this
+		// pane pointerDown's cancelFling already handed it back). The pointer
+		// capture the pan took stays, so that finger's later moves keep off
+		// the editor. And the pen cannot be down in two panes: a stroke
+		// another pane still holds open stopped without any lift reaching it,
+		// and is ended here, ink kept.
 		for (const r of liveRouters) {
+			if (r.assistPointerId !== null) {
+				tr("guard", e, `assist cancelled: leading touch ${r.assistPointerId} reclassified as palm`);
+				r.assistPointerId = null;
+				r.assistEngaged = false;
+				r.assistSamples = [];
+				r.releaseOverscrollPull();
+			}
+			if (r.pinchLive) {
+				r.pinchLive = false;
+				r.cb.onPinch("end", 1, r.pinchCentroid());
+				r.rebasePinch();
+				tr("guard", e, "pinch cancelled: pen claimed the surface");
+			}
 			if (r !== this) r.finishStrandedPenStroke();
 			r.voidParoleOnPenDown(e);
+			// The other pane's guard hears it too, as a pen in that pane would tell it: its fingers are palm now. Left
+			// in its finger state, their lift opened that pane's native window and the writing hand's edge panned it.
+			// Only a pane whose fingers are under the guard ("armed-assist": a pan, a pinch, a pair watched for one);
+			// a pane with its window open keeps it. Its panned mark is left as it is, so the lift is never a tap.
+			if (r !== this && r.manip.current === "armed-assist") r.applyGuard(r.manip.penSignal(), "pen-down in another pane");
 		}
 		this.gesturePanned = false;
 		this.applyGuard(this.manip.penSignal(), "pen-down");
 		e.preventDefault();
 		e.stopPropagation();
-		this.refreshRect();
 		this.activePenId = e.pointerId;
 		// Beside the id it is only ever read with, so the two cannot drift.
 		this.activeIsPen = e.pointerType === "pen";
@@ -525,8 +569,8 @@ declare module "./InlinePenRouter" {
 		telemetry.bump("inline.penDown");
 		this.armEndBackstop();
 		this.gate.penStrokeStarted();
-		// Whatever fingers were already down get to finish their gesture; see
-		// touchesPredateStroke.
+		// The fingers down at the claim, kept as a record of the contact only: they
+		// are the writing hand (above), and nothing exempts them from the pinch gate.
 		this.touchesAtStrokeStart = new Set(this.liveTouchIds);
 		try {
 			this.scrollEl.setPointerCapture(e.pointerId);
@@ -546,6 +590,8 @@ declare module "./InlinePenRouter" {
 		// it before the first sample, retaining the pan it already painted.
 		this.cb.onViewportInput?.();
 		this.cb.onBeforePenDown?.();
+		// Read after the hook: ending a wheel or touchpad zoom there can write the scroll and leave the band's place moved.
+		this.refreshRect();
 		// GH-32: an offset-after-zoom report has client x,y only - no rect, no
 		// scale, no pan, so a stale one of the three can't be told apart from
 		// the others. One row, the same sample onPenDown gets, so this can
@@ -572,7 +618,7 @@ declare module "./InlinePenRouter" {
 	}
 
 	/** Claim one eligible touch without impersonating pen hardware or its palm gate. */
-	function claimFingerInk(this: InlinePenRouter, e: PointerEvent, down?: PenSample): void {
+	function claimFingerInk(this: InlinePenRouter, e: PointerEvent, down?: PenSample, landed?: { x: number; y: number; settled?: boolean }): void {
 		this.strokeDownAt = performance.now();
 		this.firstRawTraced = false;
 		// The feed's floor is the down's time. A selection finger is claimed on a move (`down` is where it landed), and
@@ -580,7 +626,6 @@ declare module "./InlinePenRouter" {
 		this.inkFeed.strokeStart(down ? down.timestamp : e.timeStamp);
 		e.preventDefault();
 		e.stopPropagation();
-		this.refreshRect();
 		this.activePenId = e.pointerId;
 		this.activeIsPen = false;
 		this.activeIsFinger = true;
@@ -597,6 +642,14 @@ declare module "./InlinePenRouter" {
 		// it before the first sample, retaining the pan it already painted.
 		this.cb.onViewportInput?.();
 		this.cb.onBeforePenDown?.();
+		// Read after the hook, as the pen claim does: ending a zoom there can move the band's place.
+		this.refreshRect();
+		// A selection finger: where it rests now, through the mapping after the hook (selectionClaimAnchors). The surface's
+		// pen-down, called next, takes it.
+		if (down && landed) {
+			const at = this.sampleFrom({ clientX: landed.x, clientY: landed.y, pointerType: e.pointerType, pressure: e.pressure, timeStamp: down.timestamp, tiltX: down.tiltX, tiltY: down.tiltY } as PointerEvent);
+			selectionClaimAnchors.set(this, { at: { ...down, x: at.x, y: at.y }, settled: landed.settled === true });
+		}
 		this.cb.onPenDown(down ?? this.sampleFrom(e), e);
 	}
 
@@ -687,7 +740,10 @@ declare module "./InlinePenRouter" {
 				penY: this.lastPenHoverY,
 			})
 		) {
-			this.cb.onPenLeave();
+			// Ring and hover class both (GitHub issue 53: the note's leave keeps the class now, and this mouse is over the
+			// note with no ring). A surface with no such member gets its leave, as before.
+			if (this.cb.onForeignPointer) this.cb.onForeignPointer();
+			else this.cb.onPenLeave();
 		}
 		if (e.pointerType === "touch" && !ownedFinger) {
 			this.lastTouchAt = performance.now();
@@ -699,17 +755,24 @@ declare module "./InlinePenRouter" {
 				this.touchPos.set(e.pointerId, { x: e.clientX, y: e.clientY });
 				if (Math.hypot(e.clientX - waiting.x, e.clientY - waiting.y) <= TAP_MAX_MOVE_PX) return;
 				selectionTouches.delete(this);
-				// Asked again at the claim: a pen that landed during the wait owns the contact, and a selection gone since the
-				// down has nothing to take. Either way the finger is a palm's to the lift: no claim, no ink, no pan.
-				if (this.activePenId !== null || this.fingerInkBlockedUntilAllLift || !(this.cb.claimTouch?.(waiting.down) ?? false)) {
+				// Asked again at the claim: a pen that landed during the wait owns the contact, a pen that came near since the
+				// down makes it what the palm gate would call a new touch now (a hand resting on the box when the Pencil
+				// hovers: on Apple the size reads 0, so nothing else tells it from a finger), and a selection gone since the
+				// down has nothing to take. Each way the finger is a palm's to the lift: no claim, no ink, no pan.
+				if (
+					this.activePenId !== null ||
+					this.fingerInkBlockedUntilAllLift ||
+					this.anyGateBlocksNewTouch(performance.now()) ||
+					!(this.cb.claimTouch?.(waiting.down) ?? false)
+				) {
 					this.swallowedTouches.add(e.pointerId);
-					tr("pointermove", e, "touch on the selection passed the tap limit: the pen or the selection went, swallowed");
+					tr("pointermove", e, "touch on the selection passed the tap limit: the pen, the palm gate or the selection said no, swallowed");
 					e.preventDefault();
 					e.stopPropagation();
 					return;
 				}
 				tr("pointermove", e, "touch on the selection passed the tap limit: claimed");
-				this.claimFingerInk(e, waiting.down);
+				this.claimFingerInk(e, waiting.down, waiting);
 				this.pointerMove(e);
 				return;
 			}
@@ -806,7 +869,13 @@ declare module "./InlinePenRouter" {
 			//
 			// Only here, where no stroke is live. A claimed stroke runs to its
 			// own lift; see `InlinePenCallbacks.penOff`.
-			if (e.pointerType === "pen" && this.penOff()) return;
+			//
+			// Its pointer back by its first row: a hover class this pen left on before the tool went off is `cursor:
+			// none` with no ring (GitHub issue 53).
+			if (e.pointerType === "pen" && this.penOff()) {
+				this.cb.onForeignPointer?.();
+				return;
+			}
 			// The tip landing after a button pressed in the air (GitHub issue 41, see pointerDown): the same pointer,
 			// the tip bit set and pressure above 0. This row is the contact, claimed as a pointerdown would be, so the
 			// overlay reads its buttons (3: the side button held) and starts the lasso. Only after that air press, so

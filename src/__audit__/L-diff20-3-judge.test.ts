@@ -39,6 +39,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 	}
 }
 
+import { EditorState } from "@codemirror/state";
 import { ViewPlugin } from "@codemirror/view";
 import { type App, type CachedMetadata, type Plugin, TFile } from "obsidian";
 import { InkOverlayPlugin, inkOverlayExtension, inlineInk } from "../inline/InkOverlay";
@@ -327,7 +328,8 @@ describe("L-diff20-3 judge: the rename route (J0) and the note-switch branch (J1
 		// FileView/MarkdownView.onRename only retitle - no setState, so CodeMirror keeps this instance.
 		inlineInk.handleRename(A, RENAMED);
 		ed.owner.file.path = RENAMED;
-		(a as unknown as { update(u: unknown): void }).update({ transactions: [], docChanged: false, geometryChanged: false, viewportChanged: false });
+		// CodeMirror's own update always carries the editor's state: here the rig's note, which is empty, cursor at 0.
+		(a as unknown as { update(u: unknown): void }).update({ transactions: [], docChanged: false, geometryChanged: false, viewportChanged: false, state: EditorState.create({ doc: "" }) });
 		// A rename is not a note switch: the kept instance follows the new path and keeps its camera, so the margin
 		// baseline and remainder still describe the page on screen and stay.
 		expect(f(a).lastPath, "the kept instance follows the new path").toBe(RENAMED);

@@ -76,7 +76,7 @@ import { installExtent } from "./InkOverlayExtent";
 import { installOverview } from "./InkOverlayOverview";
 import { installBand } from "./InkOverlayBand";
 import { installPenSupport } from "./InkOverlayPenSupport";
-import { installPenPath } from "./InkOverlayPenPath";
+import { installPenPath, keepCameraBeforePenDown, selectionTouchAfterSettle } from "./InkOverlayPenPath";
 import { holdKeyboardForEveryPen } from "./InlineFocus";
 import { penInkEnabled } from "./PenInk";
 import { installInkOverlayCamera } from "./InkOverlayCamera";
@@ -251,6 +251,7 @@ export {
 	bindInkEscapeWindow,
 	armMouseInkQuietlyEverywhere,
 	repaintAllInkOverlays,
+	paperCssChangeAll,
 	copyInlineInkMetrics,
 	inkExternallyReloaded,
 	inlineReloadBindings,
@@ -403,8 +404,14 @@ export class InkOverlayPlugin {
 	strokeIndex = new StrokeIndex();
 	indexDirty = true;
 	lastPaintCam: { x: number; y: number; zoom: number } | null = null;
-	/** How many strokes the store held at the last committed paint, full or partial. A band carry trusts the raster only while the store still holds that many. */
+	/** How many strokes the store held at the last whole committed paint (a partial paint leaves it). A band carry trusts the raster only while the store still holds that many. */
 	paintedStrokeCount = -1;
+	/**
+	 * The note the last whole committed paint drew, whose strokes paintedStrokeCount counts; null before one. The count says
+	 * nothing for another note: after a note switch the layers hold the last note's pixels until the new note's first paint, and
+	 * two notes can hold as many strokes. A rename of the open note carries it, as the layers still picture that note.
+	 */
+	paintedPath: string | null = null;
 	/**
 	 * Moves of the shown strokes (lineAnchorsMoved) so far. The store's array, count and generation stay the same when the line
 	 * anchors move the shown copies, so every kept picture of the ink (the extent raster, its build, the stand-in, the stand-in mark)
@@ -696,6 +703,12 @@ export class InkOverlayPlugin {
 	/** The element `originLineObserver` is currently watching, if any. */
 	originLine: Element | null = null;
 	repaintQueued = false;
+	/**
+	 * The note's ink arrived and is not painted yet: its first queued paint has the editor measure first, in that frame, so the
+	 * line anchors are read against the measured heights, never the height map's estimate (scheduleRepaint); until then a
+	 * resize paints nothing (handleResize).
+	 */
+	inkPaintAwaitsMeasure = false;
 	/**
 	 * Did nothing but scrolling ask for the queued frame? The purged-canvas
 	 * probe (PurgeSentinel.ts) fires on that frame and no other, because it is
@@ -1005,10 +1018,16 @@ export class InkOverlayPlugin {
 	paperOriginLeft: number | null = null;
 	/** The editor text's font size the paper was last planned at, as the refresh path or the camera sync read it. */
 	paperFontPx = Number.NaN;
+	/** One plain body row's height the paper's pitch was last planned at, read beside paperFontPx (NaN: none read). */
+	paperRowPx = Number.NaN;
 	/** The zoom at rest right after a release (the external scale alone), until the refresh path measures one. */
 	paperRestZoom = Number.NaN;
 	/** The paper values the overlay itself last wrote, so a takeover can tell its own plan from the host's. */
 	paperWritten = new Map<string, string>();
+	/** A planned pitch a host stylesheet rule with a priority kept from painting, taken back off; not tried again until the plan changes. */
+	paperPitchRefused: string | null = null;
+	/** A css-change owes the next at-rest plan one check that the recorded pitch still paints (writePaperVars). */
+	paperPitchCheckOwed = false;
 	/** The column in host-local px as of the last preview frame's one read. */
 	previewColumnLocal: number | null = null;
 	/** `.cm-sizer`, cached: `writeViewportPan` runs once per preview frame. */
@@ -1091,6 +1110,8 @@ export class InkOverlayPlugin {
 	refFontPx = 0;
 	/** The font `update()` last saw. Written by `handleResize` only. */
 	lastFontStr = "";
+	/** The line height `update()` last saw, beside `lastFontStr`: a theme or snippet can move it with the font unchanged. Written by `handleResize` only. */
+	lastLineHeightStr = "";
 	/**
 	 * The font `syncCamera` last saw, which is a DIFFERENT question.
 	 *
@@ -1288,7 +1309,7 @@ export class InkOverlayPlugin {
 	 * A precision touchpad's pinch arrives here on Windows - Chromium reports
 	 * it as a wheel with `ctrlKey`, the same shape a mouse's ctrl+wheel has -
 	 * and Obsidian's quick font size is the handler that used to consume it.
-	 * Every frame goes through `pinch`, so the floor, the 400% cap and its
+	 * Every frame goes through `pinch`, so the floor, the cap and its
 	 * give, the focal hold about the cursor, the constraint reducer and the
 	 * single settle at the end are the same ones two fingers on glass get.
 	 * Nothing about the zoom is decided here; only whether this event is ours.
@@ -1342,7 +1363,10 @@ export class InkOverlayPlugin {
 			this.wheelZoomTimer = 0;
 			const end = this.wheelZoomRun.endIfQuiet(performance.now());
 			if (end) {
+				// A finger resting on the selection keeps the point it landed on, read through the camera before this end.
+				const before = this.camera.snapshot;
 				this.pinch(end.phase, end.ratio, end.centroid);
+				selectionTouchAfterSettle(this, before);
 				return;
 			}
 			if (this.wheelZoomRun.isLive) this.armWheelZoomQuiet();
@@ -1351,6 +1375,8 @@ export class InkOverlayPlugin {
 
 	/** The router is about to hand this overlay a pen contact: the page stops moving under it first. */
 	beforePenDown(): void {
+		// The camera before the lines below move it: a claimed selection finger is tested where it landed (selectionClaimAfterHook).
+		keepCameraBeforePenDown(this);
 		// A ctrl+wheel or touchpad zoom has no lift; its run ends on a quiet timer. The pen ends it now,
 		// as the router ends a finger pinch, or the timer ends it later under the stroke and the page
 		// jumps mid-stroke. First, so a give the end starts is paused by the line below.
@@ -1606,12 +1632,20 @@ export class InkOverlayPlugin {
 	paperGridBoxSize: string | null = null;
 	paperGridBoxPanX = "";
 	/**
-	 * PAGE GUIDES' BOX (Infinite Canvas on only): faint lines at every page height from the note's top edge, one
-	 * repeating gradient behind the text, screen only. Null with the canvas off or no column measured. Its written
-	 * geometry, `w,h,top,pitch` in layout px, so nothing is written again unchanged.
+	 * PAGE GUIDES' BOX (Infinite Canvas on only): a faint dashed page outline behind the text, screen only: side lines
+	 * at the column's left edge and one page width away, page ends between them. Null with the canvas off or no column
+	 * or column edge measured. Its written geometry, `left,width,open,h,top,pitch` in layout px, so nothing is written
+	 * again unchanged.
 	 */
 	pageGuideBox: HTMLElement | null = null;
 	pageGuideBoxKey: string | null = null;
+	/**
+	 * The guides' box under a standing pan (writePageGuidePan): the area its last sync allowed, layout px (`x` its left,
+	 * `full` the outline's width, `w` the area's right edge, `top` and `h` its top and bottom), and what the pan write
+	 * last put on the box, so a pan that changes nothing writes nothing. Both null with no box.
+	 */
+	pageGuideArea: { x: number; full: number; w: number; top: number; h: number } | null = null;
+	pageGuidePanWritten: { transform: string; width: string; height: string; open: boolean } | null = null;
 	/**
 	 * A preview lives, as far as the guides go: set where the preview paper begins and cleared where it ends, on every
 	 * paper, `none` included, where the scroller's previewing class never comes on. The box carries it as its own class.
@@ -1773,14 +1807,14 @@ export function viewportScrollLifetime(view: EditorView): ViewportScrollLifetime
 	return lifetime;
 }
 
-export const consumeViewportScroll = (view: EditorView, range: SelectionRange): boolean => {
+export const consumeViewportScroll = (view: EditorView, range: SelectionRange, request?: object): boolean => {
 	const lifetime = viewportScrollLifetimes.get(view);
 	// CM has one pending target. A foreign target reaching this handler also
 	// proves it replaced the old request; that discarded receipt will never
 	// get a separate completion. Recognition stays weak, preservation stops.
 	if (lifetime) lifetime.pending = null;
 	const overlay = view.plugin(inkOverlayPlugin);
-	return overlay ? overlay.consumeViewportScroll(range) : !!lifetime?.owners.has(range);
+	return overlay ? overlay.consumeViewportScroll(range, request) : !!lifetime?.owners.has(range);
 };
 
 export function inkOverlayExtension(): Extension {

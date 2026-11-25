@@ -29,6 +29,21 @@ const TAIL_TIP_TAPER = 0.5;
  */
 const COMPACT_TILE_CSS_PX = 256;
 
+/**
+ * The note zoom above which the compact tile stops growing on screen. Past
+ * it the tile keeps its 200% size in device px, so at 800% it stays smaller
+ * than the band instead of clamping to the full backing.
+ */
+const COMPACT_TILE_MAX_ZOOM = 2;
+
+/** Tile side in backing px before the grid round: 256 css px up to 200%, then the 200% size. */
+function compactTileSidePx(backing: number, dpr: number): number {
+	// The tolerance keeps exactly 200% on the first branch when backing and dpr come from a float ratio.
+	return backing <= COMPACT_TILE_MAX_ZOOM * dpr * (1 + 1e-9)
+		? COMPACT_TILE_CSS_PX * backing
+		: COMPACT_TILE_CSS_PX * COMPACT_TILE_MAX_ZOOM * dpr;
+}
+
 type LiveHead = {
 	cam: CameraState;
 	style: PenStyle;
@@ -57,11 +72,73 @@ type InlineBacking = {
 	tileH: number;
 };
 
+/**
+ * A ribbon point's round disc added to the current path, exactly as RibbonRenderer's paintRibbon adds it: screen
+ * centre (x - cam.x) x zoom, radius max(0.25, hw x zoom), a moveTo to its rightmost point, then an anticlockwise arc.
+ */
+function discPath(ctx: CanvasRenderingContext2D, cam: CameraState, p: Readonly<{ x: number; y: number; hw: number }>): void {
+	const r = Math.max(0.25, p.hw * cam.zoom);
+	const sx = (p.x - cam.x) * cam.zoom;
+	const sy = (p.y - cam.y) * cam.zoom;
+	ctx.moveTo(sx + r, sy);
+	ctx.arc(sx, sy, r, 0, Math.PI * 2, true);
+}
+
+/**
+ * How far past the strip's end disc the cut reaches behind the disc's centre, in screen px. Behind its start the tip's round back end shares the disc's edge, and the two anti-aliased edges
+ * there overlap: the wash showed twice in that last pixel ring. Behind the centre the strip lies under the tip, so the
+ * tail gives up its ink out to here; ahead of it the cut keeps the strip disc's own edge, where the tip carries on.
+ */
+const CUT_BACK_REACH_PX = 1.5;
+
+/** The tip's run on screen, the unit direction from its start to its front end; undefined when the two meet. */
+function runDir(cam: CameraState, run: Readonly<{ from: Point2; to: Point2 }> | undefined): { x: number; y: number } | undefined {
+	if (!run) return undefined;
+	const dx = (run.to.x - run.from.x) * cam.zoom, dy = (run.to.y - run.from.y) * cam.zoom, l = Math.hypot(dx, dy);
+	return l > 1e-6 ? { x: dx / l, y: dy / l } : undefined;
+}
+
+/**
+ * The cut, for an erase under the nonzero rule: the strip's end disc exactly as discPath adds it, and with the tip's run
+ * known, a second contour wound the same way: the half-disc of radius r + CUT_BACK_REACH_PX behind the centre. Same
+ * winding, so the fill is the union. No run: the strip disc alone.
+ */
+function cutPath(ctx: CanvasRenderingContext2D, cam: CameraState, end: Readonly<{ x: number; y: number; hw: number }>, dir: { x: number; y: number } | undefined): void {
+	discPath(ctx, cam, end);
+	if (!dir) return;
+	const R = Math.max(0.25, end.hw * cam.zoom) + CUT_BACK_REACH_PX;
+	const sx = (end.x - cam.x) * cam.zoom, sy = (end.y - cam.y) * cam.zoom;
+	const a = Math.atan2(dir.y, dir.x), q = Math.PI / 2;
+	ctx.moveTo(sx + R * Math.cos(a - q), sy + R * Math.sin(a - q));
+	ctx.arc(sx, sy, R, a - q, a - 3 * q, true);
+	ctx.closePath();
+}
+
+/**
+ * The same cut as ONE contour, for a clip under the even-odd rule beside a box (two overlapping contours would read as
+ * outside where they overlap): the strip disc's front half at radius r, its back half at r + CUT_BACK_REACH_PX. No run:
+ * the strip disc alone.
+ */
+function cutContour(ctx: CanvasRenderingContext2D, cam: CameraState, end: Readonly<{ x: number; y: number; hw: number }>, dir: { x: number; y: number } | undefined): void {
+	if (!dir) {
+		discPath(ctx, cam, end);
+		return;
+	}
+	const r = Math.max(0.25, end.hw * cam.zoom), R = r + CUT_BACK_REACH_PX;
+	const sx = (end.x - cam.x) * cam.zoom, sy = (end.y - cam.y) * cam.zoom;
+	const a = Math.atan2(dir.y, dir.x), q = Math.PI / 2;
+	ctx.moveTo(sx + r * Math.cos(a + q), sy + r * Math.sin(a + q));
+	ctx.arc(sx, sy, r, a + q, a - q, true);
+	ctx.lineTo(sx + R * Math.cos(a - q), sy + R * Math.sin(a - q));
+	ctx.arc(sx, sy, R, a - q, a - 3 * q, true);
+	ctx.closePath();
+}
+
 /** The one compact tile size for a configured band, or 0 x 0 when compact placement is off. */
-function compactTile(width: number, height: number, backing: number, grid: number | null): { tileW: number; tileH: number } {
+function compactTile(width: number, height: number, backing: number, grid: number | null, dpr: number): { tileW: number; tileH: number } {
 	if (!grid) return { tileW: 0, tileH: 0 };
 	const fullW = Math.round(width * backing), fullH = Math.round(height * backing);
-	const side = Math.ceil(COMPACT_TILE_CSS_PX * backing / grid) * grid;
+	const side = Math.ceil(compactTileSidePx(backing, dpr) / grid) * grid;
 	const tileW = Math.min(side, Math.floor(fullW / grid) * grid);
 	const tileH = Math.min(side, Math.floor(fullH / grid) * grid);
 	return tileW > 0 && tileH > 0 && tileW * tileH < fullW * fullH ? { tileW, tileH } : { tileW: 0, tileH: 0 };
@@ -267,7 +344,7 @@ export class TailRenderer {
 		const grid = backingGrid(backing, cssScale, dpr, hostZoom);
 		this.inlineBacking = {
 			width, height, backing, cssScale, hostZoom, grid,
-			...(this.translateSupported() ? compactTile(width, height, backing, grid) : { tileW: 0, tileH: 0 }),
+			...(this.translateSupported() ? compactTile(width, height, backing, grid, dpr) : { tileW: 0, tileH: 0 }),
 		};
 		this.backingScale = backing;
 		this.emptyBacking(this.inlineBacking);
@@ -279,10 +356,10 @@ export class TailRenderer {
 		if (config.cssScale !== cssScale || config.hostZoom !== hostZoom) {
 			config.cssScale = cssScale;
 			config.hostZoom = hostZoom;
-			config.grid = backingGrid(config.backing, cssScale,
-				this.canvas.ownerDocument?.defaultView?.devicePixelRatio ?? config.backing, hostZoom);
+			const dpr = this.canvas.ownerDocument?.defaultView?.devicePixelRatio ?? config.backing;
+			config.grid = backingGrid(config.backing, cssScale, dpr, hostZoom);
 			Object.assign(config, this.translateSupported()
-				? compactTile(config.width, config.height, config.backing, config.grid) : { tileW: 0, tileH: 0 });
+				? compactTile(config.width, config.height, config.backing, config.grid, dpr) : { tileW: 0, tileH: 0 });
 			if (this.backingMode === "compact") this.restoreFullSurface(true);
 			else if (this.backingMode === "empty") this.emptyBacking(config);
 		}
@@ -743,6 +820,53 @@ export class TailRenderer {
 		);
 		this.growDirty(x1, y1, x2, y2, hw * cam.zoom + 2);
 		this.untrackedPixels = untracked;
+	}
+
+	/**
+	 * Take a live highlighter's strip end disc off this canvas. The tip starts
+	 * at the strip's last point with the strip's half-width, so the tip behind its start lies inside the disc the strip
+	 * painted there; with both canvases washed that disc showed twice. The disc is the strip's own: same centre through
+	 * the same camera, radius max(0.25, hw x zoom), path built as RibbonRenderer builds it, so the edge this leaves is
+	 * the strip disc's complement. With the tip's run `run` (its start and front end) given, the cut also reaches
+	 * CUT_BACK_REACH_PX past that disc behind its centre (see cutPath), so the tip's round back end gives
+	 * up the anti-aliased ring it shares with the strip disc's edge. An erase only, inside the box the tip already marked
+	 * dirty (drawHead pads it by hw x zoom + 2, past the reach).
+	 */
+	cutDisc(cam: CameraState, end: Readonly<{ x: number; y: number; hw: number }>, run?: Readonly<{ from: Point2; to: Point2 }>): void {
+		const ctx = this.ctx;
+		ctx.save();
+		ctx.globalCompositeOperation = "destination-out";
+		ctx.fillStyle = "#000";
+		ctx.beginPath();
+		cutPath(ctx, cam, end, runDir(cam, run));
+		ctx.fill();
+		ctx.restore();
+	}
+
+	/**
+	 * drawHead with nothing painted inside the cut cutDisc takes for the strip's end disc `end` and the tip's run
+	 * from `from` to `to`: a clip, so whatever this canvas already holds there, selection chrome included, stays.
+	 */
+	drawHeadOutside(
+		cam: CameraState,
+		style: PenStyle,
+		from: Point2,
+		to: Point2,
+		pressure: number,
+		hwWorld: number,
+		end: Readonly<{ x: number; y: number; hw: number }>
+	): void {
+		const ctx = this.ctx;
+		const pad = Math.max(hwWorld, end.hw) * cam.zoom + 4;
+		const x0 = Math.min(from.x, to.x, end.x), y0 = Math.min(from.y, to.y, end.y);
+		const x1 = Math.max(from.x, to.x, end.x), y1 = Math.max(from.y, to.y, end.y);
+		ctx.save();
+		ctx.beginPath();
+		ctx.rect((x0 - cam.x) * cam.zoom - pad, (y0 - cam.y) * cam.zoom - pad, (x1 - x0) * cam.zoom + 2 * pad, (y1 - y0) * cam.zoom + 2 * pad);
+		cutContour(ctx, cam, end, runDir(cam, { from, to }));
+		ctx.clip("evenodd");
+		this.drawHead(cam, style, from, to, pressure, hwWorld);
+		ctx.restore();
 	}
 
 	private growDirty(

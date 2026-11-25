@@ -427,8 +427,21 @@ export default class HandwritingPlugin extends Plugin {
 	 * see the choice, or both files are handed one instance.
 	 */
 	pdfResolving?: Map<HTMLElement, { id: string; path: string }>;
-	/** Session ink for PDFs. Separate instance from the note store, by design. */
-	pdfStore = new PdfInkStore();
+	/**
+	 * Session ink for PDFs. Separate instance from the note store, by design.
+	 * The deletions it restores at load start their grace once the layout is
+	 * ready: the app lists the vault only then, and a grace timed from the
+	 * load could read every PDF as gone. The owed leaves restored at load run
+	 * then too, through the same one start (PdfInkStore.whenLayoutReady).
+	 */
+	pdfStore = new PdfInkStore({
+		afterLayout: (start) => {
+			this.app.workspace.onLayoutReady(() => {
+				if (this.unloaded) return;
+				start();
+			});
+		},
+	});
 	/** M1 only: draw calibration crosses instead of real ink. Off by default. */
 	pdfCalibration = false;
 	/** Page-id ownership ledger (duplicate detection, v0.13.6). */

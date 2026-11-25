@@ -38,8 +38,24 @@ export const pendingWaitPaths = new Map<() => void, { path: string }>();
 const bodyWatches = new Map<HTMLElement, { observer: MutationObserver; probes: Set<() => void> }>();
 const sizeWatches = new Map<HTMLElement, () => void>();
 
-/** Reading-view roots whose layer offset has to keep up with the pane. */
-const anchorWatches = new Map<HTMLElement, { stop(): void; sizer: HTMLElement | null }>();
+/** Roots whose layer has to keep up with their text: every Reading view, and an embed with ink on a word (`watchAnchor`). */
+const anchorWatches = new Map<HTMLElement, { stop(): void; sizer: HTMLElement | null; boxes: HTMLElement[] }>();
+
+/**
+ * The boxes straight inside an embed root, less our own layers: its blocks, or the view and sizer that hold them. Each
+ * sizes to the text it holds, which the root need not: paint grows the root's min-height to the ink, and a hover
+ * preview caps its height with its content scrolling inside it.
+ */
+function embedBoxes(root: HTMLElement): HTMLElement[] {
+	const out: HTMLElement[] = [];
+	const kids = root.children as ArrayLike<Element> | undefined;
+	if (!kids) return out;
+	for (let i = 0; i < kids.length; i++) {
+		const kid = kids[i] as HTMLElement | undefined;
+		if (kid && !kid.classList?.contains("handwriting-embed-ink")) out.push(kid);
+	}
+	return out;
+}
 
 export function embedInkAnchorWatchCount(): number {
 	return anchorWatches.size;
@@ -352,9 +368,16 @@ export function stopAllAnchorWatches(): void {
  * Both boxes are observed: toggling "readable line length" resizes the sizer
  * inside a view whose own box never changes, so watching the view alone sees
  * nothing while the ink drifts by the whole centring margin.
+ *
+ * An embed root (`.markdown-embed-content`) is watched once a stroke on it follows a word, that is once its root holds
+ * line sources: an image that loads after the paint, a broken image's box, a font, re-flow its text and move the word,
+ * and no section renders again. The root and the boxes straight inside it are observed (`embedBoxes`); a tick re-places
+ * the anchored strokes, and repaints only when one is shown somewhere else, so ink on no word stays where it was.
  */
 export function watchAnchor(root: HTMLElement): void {
-	if (!root.classList?.contains("markdown-preview-view") || anchorWatches.has(root)) return;
+	if (anchorWatches.has(root)) return;
+	const reading = root.classList?.contains("markdown-preview-view") === true;
+	if (!reading && !(lineSources.has(root) && root.classList?.contains("markdown-embed-content") === true)) return;
 	const RO = root.ownerDocument?.defaultView?.ResizeObserver ?? null;
 	if (!RO) return;
 	const sync = (): void => {
@@ -362,6 +385,15 @@ export function watchAnchor(root: HTMLElement): void {
 		if (!root.isConnected) {
 			stopAnchorWatch(root);
 			return;
+		}
+		if (!reading) {
+			// The boxes inside move as sections come and go: observe the ones there now.
+			const boxes = embedBoxes(root);
+			if (boxes.length !== watch.boxes.length || boxes.some((b, i) => b !== watch.boxes[i])) {
+				for (const b of watch.boxes) ro.unobserve(b);
+				watch.boxes = boxes;
+				for (const b of boxes) ro.observe(b);
+			}
 		}
 		const sizer = anchorSizer(root);
 		if (watch.sizer !== sizer) {
@@ -398,7 +430,7 @@ export function watchAnchor(root: HTMLElement): void {
 			if (anchorWatches.get(root) === watch && lineSources.has(root)) queueReplace(root);
 		})
 		: null;
-	const watch = { sizer: null as HTMLElement | null, stop: () => { ro.disconnect(); mo?.disconnect(); sections?.disconnect(); } };
+	const watch = { sizer: null as HTMLElement | null, boxes: [] as HTMLElement[], stop: () => { ro.disconnect(); mo?.disconnect(); sections?.disconnect(); } };
 	anchorWatches.set(root, watch);
 	ro.observe(root);
 	mo?.observe(root, { childList: true });

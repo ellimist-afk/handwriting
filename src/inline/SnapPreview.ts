@@ -3,6 +3,7 @@ import { DWELL_MS, snapKindOf, snapStroke, type SnappedKind } from "../ink/Shape
 import { drawStroke } from "../ink/StrokeRenderer";
 import { worldToScreen, type CameraState } from "../camera/coordinates";
 import { scaledTime, wallSlide } from "./LassoTransform";
+import { visualToNote } from "./ZoomScale";
 
 interface PreviewHost {
 	clock: Pick<Window, "setTimeout" | "clearTimeout">;
@@ -16,6 +17,11 @@ interface PreviewHost {
 	ended?(): void;
 	/** The next shown frame (requestAnimationFrame). Absent, each adjust shows at once. */
 	frame?: { request(draw: () => void): number; cancel(id: number): void };
+	/**
+	 * The note's scale, the one each sample was mapped into note px with (the router's provider). The hold and the drag
+	 * start read their slack through it, so it stays the same on screen at every zoom. Absent, 1.
+	 */
+	scale?(): number;
 }
 
 /** A drag starts past this many screen px from where the pen held, the same slack the dwell allows. */
@@ -114,7 +120,7 @@ export class SnapPreview {
 	move(x: number, y: number): boolean {
 		if (!this.check()) return false;
 		if (this.candidate) { this.adjust(x, y); return true; }
-		if (Math.hypot(x - this.x, y - this.y) <= 4) return false;
+		if (Math.hypot(x - this.x, y - this.y) <= this.slack()) return false;
 		this.x = x; this.y = y;
 		this.movedAt = Date.now();
 		if (this.timer === null && this.settleId === null) this.arm(DWELL_MS);
@@ -130,7 +136,7 @@ export class SnapPreview {
 	private adjust(x: number, y: number): void {
 		const base = this.candidate!;
 		if (!this.pivot) {
-			if (Math.hypot(x - this.x, y - this.y) <= ADJUST_SLOP) return;
+			if (Math.hypot(x - this.x, y - this.y) <= this.slack()) return;
 			const w = this.toWorld(x, y);
 			const cx = base.bbox.x + base.bbox.width / 2, cy = base.bbox.y + base.bbox.height / 2;
 			this.pivot = { cx, cy, r: Math.hypot(w.x - cx, w.y - cy), a: Math.atan2(w.y - cy, w.x - cx) };
@@ -167,6 +173,13 @@ export class SnapPreview {
 		const slide = wallSlide(base.bbox, resized.bbox);
 		const next = slide.x === 0 && slide.y === 0 ? resized : moved(resized, slide.x, slide.y);
 		this.shown = this.host.show(next) ? next : null;
+	}
+	/**
+	 * ADJUST_SLOP screen px in the samples' note px, through the same mapping the router gives each sample, so a scale that
+	 * is not finite or not above 0 reads as 1 here as it does there.
+	 */
+	private slack(): number {
+		return visualToNote(ADJUST_SLOP, this.host.scale?.() ?? 1);
 	}
 	private toWorld(x: number, y: number): { x: number; y: number } {
 		return this.host.world ? this.host.world(x, y) : { x, y };

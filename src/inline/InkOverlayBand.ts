@@ -67,6 +67,8 @@ declare module "./InkOverlay" {
 			// term the margin shrinks with the zoom and the band is re-pinned on
 			// every frame of a flick, each one a whole-world rasterisation.
 			scale: this.cssScale,
+			// Above 100% the margin is divided by the zoom the person set, not by the outer scale riding on it.
+			pinch: this.pinchScaleNow,
 		};
 		// AN EASE BACK TO THE PAGE'S EDGE SHOWS ROOM LEFT OF THE SCROLL. The bounce moves the layer by a translate, and
 		// the band is placed from the scroll alone, so while a page slides back from right of its edge the pane shows
@@ -190,7 +192,7 @@ declare module "./InkOverlay" {
 	 * size or scale, or a range that narrowed asks for some other size, which resizes as before.
 	 */
 	function sidewaysMarginCanWait(current: Band, v: BandViewport): boolean {
-		const want = bandFor(v), margin = bandMargin(v.clientHeight, v.scale);
+		const want = bandFor(v), margin = bandMargin(v.clientHeight, v.scale, v.pinch);
 		if (current.width !== v.clientWidth || want.height !== current.height || want.width !== current.width + 2 * margin) return false;
 		return bandCovers(current, v);
 	}

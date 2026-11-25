@@ -277,6 +277,16 @@ const PINCH_MEASURE_HOLD_MAX_MS = 10_000;
 	 * replaces.
 	 */
 	function rebasePinch(this: InkOverlayPlugin): void {
+		// UNDER A PEN CONTACT THE WATCHDOG MOVES NOTHING. A pen that lands on a lift's ease pauses it, and the lift resumes
+		// it to the cap. Finishing it here jumped the page under the pen: the settle is refused while a stroke owns the
+		// frame, and the refusal clears the pan; under the pan tool, which leaves the frame live, the page stepped to the
+		// cap mid-drag. The contact is what penDown leaves for every gesture: the frame locked, a stroke building, or a mode
+		// other than ink (the pan). The bound is re-armed, not dropped, so the hold still ends 10 s after the contact does.
+		if (this.frame.locked || this.builder !== null || this.mode !== "ink") {
+			const held = this.measureHold ?? null;
+			if (held) held.timer = this.winRef.setTimeout(() => this.rebasePinch(), PINCH_MEASURE_HOLD_MAX_MS);
+			return;
+		}
 		// A give easing back at the watchdog's deadline finishes in place; no fingers are on the glass to re-anchor.
 		if (this.pinchGive) { this.finishPinchGive(); return; }
 		const anchor = this.pinchAnchor;

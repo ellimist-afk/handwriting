@@ -31,7 +31,12 @@ expect(hostBlock.length, "the PDF host slice is empty or too small to hold the h
 expect(hostBlock, "the PDF host slice lost its adoption wiring").toContain("acceptExternalAdoption");
 const installPdfHost = new Function("Notice", "blockNotice", hostBlock);
 
-const renameStart = '\t\t\t\tif (file instanceof TFile && file.extension === "pdf") {\n\t\t\t\t\tfor (const [root, p] of this.pdfFiles) {';
+const renameStart =
+	'\t\t\t\tif (file instanceof TFile && file.extension === "pdf") {\n' +
+	"\t\t\t\t\t// The deletion waiting at the old name as the rename is heard, before any claim moves: a pane still being\n" +
+	"\t\t\t\t\t// identified moves its own claim at the end, and tells a later deletion there from this one.\n" +
+	"\t\t\t\t\tconst atRename = this.pdfStore.deletionAt(oldPath);\n" +
+	"\t\t\t\t\tfor (const [root, p] of this.pdfFiles) {";
 expect(source.split(renameStart)).toHaveLength(2);
 const renameAt = source.indexOf(renameStart);
 const renameEnd = source.indexOf("\n\t\t\t\t}\n", renameAt);

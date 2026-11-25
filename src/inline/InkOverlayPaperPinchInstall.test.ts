@@ -35,6 +35,7 @@ const MOVED = [
 	"syncGridPaperBox",
 	"removeGridPaperBox",
 	"syncPageGuideBox",
+	"writePageGuidePan",
 	"removePageGuideBox",
 	"markPageGuidesPreview",
 	"stopPaperKindWatch",

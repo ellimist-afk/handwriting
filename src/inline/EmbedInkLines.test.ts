@@ -76,7 +76,7 @@ describe("a line's top in the rendered view", () => {
 	});
 });
 
-describe("blank lines ride the nearest block", () => {
+describe("a blank line rides the block below only when it is the line right above it (issue 67)", () => {
 	it("of two blank lines between paragraphs, the first rides the one above and the second the one below", () => {
 		// 0-based 7 is one line below the middle paragraph and two above the third: the middle one's bottom.
 		expect(lineTopIn(SPANS, 7)).toBe(60 + 24);
@@ -86,14 +86,21 @@ describe("blank lines ride the nearest block", () => {
 		expect(embedInkDy(anchored(9), SPANS)).toBe(96 - editorTop(9));
 	});
 
-	it("a tie goes down", () => {
-		// 0-based 15 is two lines below the list and two above the last paragraph.
-		expect(lineTopIn(SPANS, 15)).toBe(300 - 2 * LINE);
+	it("a blank line two lines above the block below keeps its distance under the block above (was: a tie goes down)", () => {
+		// 0-based 15 is two lines below the list and two above the last paragraph: one line under the list's bottom.
+		// Until issue 67 this was a tie and rode the last paragraph, 300 - 2 * 24.
+		expect(lineTopIn(SPANS, 15)).toBe(180 + 72 + LINE);
+		// 0-based 16, right above the last paragraph, still rides it.
+		expect(lineTopIn(SPANS, 16)).toBe(300 - LINE);
 	});
 
-	it("frontmatter lines are crossed as blank", () => {
-		// 0-based 1 is inside the frontmatter: the first paragraph, two lines below.
-		expect(lineTopIn(SPANS, 1)).toBe(0 - 2 * LINE);
+	it("frontmatter lines are crossed as blank and not counted", () => {
+		// 0-based 1 is inside the frontmatter, two lines above the first paragraph and not right above it: no block above,
+		// so the run counts down from the first paragraph's top, the frontmatter lines not counted. Until issue 67 it rode
+		// the paragraph, 0 - 2 * 24. No anchor reaches this line (anchoredDy turns frontmatter away first).
+		expect(lineTopIn(SPANS, 1)).toBe(0);
+		// 0-based 2, the closing fence, is right above it.
+		expect(lineTopIn(SPANS, 2)).toBe(0 - LINE);
 	});
 
 	it("a blank line whose way to a block crosses text with no block has no top", () => {

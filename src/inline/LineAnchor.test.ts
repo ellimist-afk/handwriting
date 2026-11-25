@@ -140,7 +140,10 @@ describe("line anchors", () => {
 		const half = { ...SIG, width: SIG.width + SIG.charWidth / 2 }, two = { ...SIG, width: SIG.width + 2 * SIG.charWidth };
 		expect(anchorHolds(a, s, layout, half), "half a character wider: the same wrap").toBe(true);
 		expect(anchorHolds(a, s, layout, two), "two characters wider: another wrap").toBe(false);
-		expect(anchorHolds(a, s, layout, { ...half, fontPx: 26.5 }), "the font size compares exact").toBe(false);
+		// At another text size the width compares moved by the ratio of the two sizes: the column held at the note's width
+		// times that ratio wraps the same; the same width at a size far off does not.
+		expect(anchorHolds(a, s, layout, { ...SIG, width: Math.round(SIG.width * 30 / 26), fontPx: 30 }), "another size, the width moved by its ratio").toBe(true);
+		expect(anchorHolds(a, s, layout, { ...half, fontPx: 30 }), "another size, the width not moved").toBe(false);
 		// A surface whose first measure reads half a character wider (a reload, a scrollbar) shows the anchor's correction.
 		s.lineAnchor = a;
 		const state = { layout: layoutOf(doc, [20, 40, 40, 40, 40, 40]) };

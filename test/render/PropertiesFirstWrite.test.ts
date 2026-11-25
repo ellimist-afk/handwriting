@@ -12,8 +12,8 @@
  * the block, and the shipped styles.css that hides it. It samples every frame after paint.
  *  - blockInFrame: the block with its id row inserted from inside the next animation callback, as in Obsidian. No frame
  *    after the claim may show the block, and the text and the O must stay within 1 px of where they settle.
- *  - userRow (plant): a block that also holds a user row must stay shown and push the text down by its height. A read
- *    that sees no shown block here cannot see one in the cell above either.
+ *  - userRow (plant): a block that also holds a user row must stay shown with its height in the layout: the scroll top
+ *    change plus the text's move is the block's height. A read that sees no shown block here cannot see one above either.
  *
  * Run: npx vitest run --config vitest.render.mts PropertiesFirstWrite
  */
@@ -31,7 +31,7 @@ const PANE = { w: 900, h: 700 };
 const PROPERTIES_PX = 46;
 const STEPS = { onBody: 1, gapMs: 500, holdMs: 200, tailMs: 1000 };
 
-type Sample = { t: number; mark: string; display: string; height: number; idOnly: boolean; rows: number; contentTop: number; oTop: number | null };
+type Sample = { t: number; mark: string; display: string; height: number; idOnly: boolean; rows: number; contentTop: number; scrollTop: number; oTop: number | null; topLineTop: number | null };
 type Run = { samples: Sample[]; times: Record<string, number>; strokes: number; frontmatterEnd: number };
 
 let browser: Browser;
@@ -47,7 +47,7 @@ beforeAll(async () => {
 }, 180_000);
 afterAll(async () => { await browser?.close(); });
 
-async function runOrder(order: Order): Promise<Run> {
+async function runOrder(order: Order, o: { text?: string; topLine?: number; onBody?: number } = {}): Promise<Run & { top?: { line: number; text: string; scrollTop: number } }> {
 	const page: Page = await browser.newPage({ viewport: { width: PANE.w, height: PANE.h }, deviceScaleFactor: 1 });
 	page.on("pageerror", (e) => errors.push(e.message));
 	await page.setContent("<!doctype html><html><body></body></html>");
@@ -55,15 +55,15 @@ async function runOrder(order: Order): Promise<Run> {
 	await page.addStyleTag({ content: hostCss });
 	await page.addStyleTag({ content: css });
 	await page.addScriptTag({ content: bundle });
-	const mount = await page.evaluate((o) => (window as any).ofMount(o), { text: BODY, paneW: PANE.w, paneH: PANE.h, order });
+	const mount = await page.evaluate((m) => (window as any).ofMount(m), { text: o.text ?? BODY, paneW: PANE.w, paneH: PANE.h, order, topLine: o.topLine });
 	expect(mount.error, `${order}: mounted`).toBeUndefined();
-	const run = await page.evaluate((o) => (window as any).ofRun(o), STEPS) as Run;
+	const run = await page.evaluate((s) => (window as any).ofRun(s), { ...STEPS, onBody: o.onBody ?? STEPS.onBody }) as Run;
 	await page.close();
 	expect(errors, "page errors").toEqual([]);
 	expect(run.times.claimAt, `${order}: the first stroke wrote the page id`).toBeGreaterThan(0);
 	expect(run.frontmatterEnd, `${order}: the id frontmatter is in the editor text`).toBe(3);
 	expect(run.strokes, `${order}: both strokes kept`).toBe(2);
-	return run;
+	return { ...run, top: mount.top };
 }
 
 const shown = (x: Sample) => x.display !== "none" && x.display !== "absent" && x.height > 0;
@@ -83,12 +83,28 @@ it("a new note's first stroke: the Properties block for the page id never paints
 	expect(jumped.map(row), "frames where the text or the O sat 1 px or more off where it settles").toEqual([]);
 }, 120_000);
 
-it("plant: a block holding a user row stays shown and pushes the text down by its height", async () => {
+it("plant: a block holding a user row stays shown, its height in the layout (scroll top change plus text move)", async () => {
 	const run = await runOrder("userRow");
 	const rest = [...run.samples].reverse().find((x) => x.mark === "rest")!;
 	const settled = run.samples[run.samples.length - 1]!;
 	expect(shown(settled), `the block with a user row is shown at the end: ${row(settled)}`).toBe(true);
 	expect(after(run).filter(shown).length, "the frames after the write read the block shown").toBeGreaterThan(0);
-	expect(Math.abs(settled.contentTop - rest.contentTop - PROPERTIES_PX),
-		`the text ends ${PROPERTIES_PX} px lower (rest ${rest.contentTop}, settled ${settled.contentTop})`).toBeLessThanOrEqual(1);
+	expect(Math.abs(settled.scrollTop - rest.scrollTop + settled.contentTop - rest.contentTop - PROPERTIES_PX),
+		`scroll top change plus text move is ${PROPERTIES_PX} px (scroll ${rest.scrollTop} -> ${settled.scrollTop}, text ${rest.contentTop} -> ${settled.contentTop})`).toBeLessThanOrEqual(1);
+}, 120_000);
+
+/** A long note scrolled so a blank line sits at the view's top edge: there the editor's own read of the line is not its plain box. */
+const TEXT_LINE = "All the materials we use are made of atoms, held together in ways that decide how they behave.";
+const BLANK_TOP_LINE = 31;
+const BLANK_TOP_BODY = `${Array.from({ length: BLANK_TOP_LINE - 1 }, (_, i) => `${i + 1}. ${TEXT_LINE}`).join("\n")}\n\n${Array.from({ length: 30 }, (_, i) => `${i + BLANK_TOP_LINE + 1}. ${TEXT_LINE}`).join("\n")}\n`;
+
+it("the view's top on a blank line, the note scrolled: that line settles within 1 px of its place through the first stroke's page id write", async () => {
+	const run = await runOrder("blockInFrame", { text: BLANK_TOP_BODY, topLine: BLANK_TOP_LINE, onBody: BLANK_TOP_LINE + 1 });
+	expect(run.top, "precondition: a blank line at the view's top, the note scrolled").toEqual({ line: BLANK_TOP_LINE, text: "", scrollTop: expect.any(Number) });
+	expect(run.top!.scrollTop, "precondition: the note scrolled").toBeGreaterThan(100);
+	const rest = [...run.samples].reverse().find((x) => x.mark === "rest")!;
+	const settled = run.samples[run.samples.length - 1]!;
+	expect(rest.topLineTop, "precondition: the top line is drawn before the stroke").not.toBeNull();
+	expect(settled.topLineTop, `the top line is drawn at the end: ${row(settled)}`).not.toBeNull();
+	expect(Math.abs(settled.topLineTop! - rest.topLineTop!), `the top line settles where it was: ${rest.topLineTop} -> ${settled.topLineTop}, ${row(settled)}`).toBeLessThan(1);
 }, 120_000);

@@ -1,7 +1,7 @@
 /**
- * When retakeMembers deletes a moved group's member anchors, or anchors them again, the surface's own list of anchored
- * strokes is made again from itself in the same call (LineAnchor.ts retakeMembers): the strokes without an anchor leave
- * it with their places, and the strokes on its first and last anchored lines are found again. The list is then what a
+ * When retakeMembers carries a moved group's member anchors, or anchors them again, the surface's own list of anchored
+ * strokes is made again from itself in the same call (LineAnchor.ts retakeMembers): a stroke without an anchor would leave
+ * it with its place, and the strokes on its first and last anchored lines are found again. The list is then what a
  * build from the store's list returns, and the next strokesFor reads it as it is, with no build. A list that is not
  * current when the call runs is built again at its next read, as before.
  *
@@ -94,7 +94,7 @@ function onePane(path: string, strokes: InkStroke[], members: string[], old: str
 /**
  * An Enter at the end of line `enterAt`, typed in the pane: updateLineAnchors' docChanged, then followDocChanged: the group
  * moved, the list shared, retakeMembers with the snapshot. The Enter goes on the pane's log and opens the rebase window, so
- * the members are not anchored again but lose their anchors.
+ * the members are not anchored again from a measure: their anchors are carried.
  */
 function enter(path: string, p: ReturnType<typeof onePane>, enterAt: number, top = topOf(1, 0)) {
 	const { before, st, a, src } = p;
@@ -131,7 +131,7 @@ function wrapAbove(path: string, p: ReturnType<typeof onePane>, noRead = false, 
 }
 
 describe("retakeMembers keeps the surface's own anchored list as a build makes it", () => {
-	it("members' anchors deleted: the list drops them with their places, its last line's stroke is found again, and it equals a build", () => {
+	it("members' anchors carried: the list keeps them with their places, its last line's stroke is found again, and it equals a build", () => {
 		const path = "retake-repair-delete.md";
 		// The free stroke sits on line 2, above the Enter; the members on lines 8 and 10, the last line's stroke a member.
 		const p = onePane(path, [strokeAt("f", 10, 1 * LH + 5), strokeAt("m1", 10, 7 * LH + 5), strokeAt("m2", 40, 9 * LH + 5), strokeAt("m3", 70, 9 * LH + 5)], ["m1", "m2", "m3"]);
@@ -141,8 +141,8 @@ describe("retakeMembers keeps the surface's own anchored list as a build makes i
 		const e = enter(path, p, 5);
 		const kept = shape(inner(p.a).anchored);
 		const info = JSON.stringify({ e, kept });
-		expect([e.edit, e.windowOpen, e.cleared, e.lost, e.groupDy], `premise: the Enter moved the group with the window open and every member anchor was deleted ${info}`).toEqual([true, true, 3, ["m1", "m2", "m3"], LH]);
-		expect(kept, `the list after the call ${info}`).toEqual({ ids: ["f"], at: [0], top: "f", bottom: "f", stale: false });
+		expect([e.edit, e.windowOpen, e.cleared, e.lost, e.groupDy], `premise: the Enter moved the group with the window open and every member anchor was carried ${info}`).toEqual([true, true, 3, [], LH]);
+		expect(kept, `the list after the call ${info}`).toEqual({ ids: ["f", "m1", "m2", "m3"], at: [0, 1, 2, 3], top: "f", bottom: "m2", stale: false });
 		expect(rebuilt(p.a, p.src), `a build ${info}`).toEqual(kept);
 	});
 
@@ -162,7 +162,7 @@ describe("retakeMembers keeps the surface's own anchored list as a build makes i
 		expect(rebuilt(p.a, p.src), `a build ${info}`).toEqual(kept);
 	});
 
-	it("after the delete, the next strokesFor reads the members only and builds no list", () => {
+	it("after the carry, the next strokesFor reads the members only and builds no list", () => {
 		const path = "retake-repair-next-read.md";
 		const p = onePane(path, [strokeAt("f", 10, 1 * LH + 5), strokeAt("m1", 10, 7 * LH + 5), strokeAt("m2", 40, 9 * LH + 5), strokeAt("m3", 70, 9 * LH + 5)], ["m1", "m2", "m3"]);
 		p.a.strokesFor(path, p.src);
@@ -172,7 +172,7 @@ describe("retakeMembers keeps the surface's own anchored list as a build makes i
 		p.a.strokesFor(path, p.src);
 		const seen = { e, calls: n.calls - c0, visited: n.visited - v0, fullReads: n.fullReads - f0, sameRecord: inner(p.a).anchored === rec, list: shape(inner(p.a).anchored) };
 		const info = JSON.stringify(seen);
-		expect([e.edit, e.cleared, e.lost], `premise: the Enter deleted every member anchor ${info}`).toEqual([true, 3, ["m1", "m2", "m3"]]);
+		expect([e.edit, e.cleared, e.lost], `premise: the Enter carried every member anchor ${info}`).toEqual([true, 3, []]);
 		expect(seen.calls, `premise: one strokesFor ${info}`).toBe(1);
 		expect({ sameRecord: seen.sameRecord, visited: seen.visited, fullReads: seen.fullReads }, `the read after the call ${info}`).toEqual({ sameRecord: true, visited: 3, fullReads: 0 });
 	});
@@ -202,31 +202,31 @@ describe("retakeMembers keeps the surface's own anchored list as a build makes i
 		return { premise: p.premise, e, kept, build: rebuilt(p.a, p.src) };
 	};
 
-	it("every anchored stroke a member and every anchor deleted: the list is empty, with no first or last line's stroke, and equals a build", () => {
+	it("every anchored stroke a member and every anchor carried: the list keeps them all, with its first and last line's strokes, and equals a build", () => {
 		const r = afterDelete("retake-repair-all.md", [strokeAt("m1", 10, 7 * LH + 5), strokeAt("m2", 40, 9 * LH + 5), strokeAt("m3", 70, 9 * LH + 5)], ["m1", "m2", "m3"]);
 		const info = JSON.stringify(r);
-		expect([r.premise.list, r.e.edit, r.e.windowOpen, r.e.lost], `premise: every stroke listed, the Enter deleted every anchor ${info}`).toEqual([["m1", "m2", "m3"], true, true, ["m1", "m2", "m3"]]);
-		expect(r.kept, `the list after the call ${info}`).toEqual({ ids: [], at: [], top: null, bottom: null, stale: false });
+		expect([r.premise.list, r.e.edit, r.e.windowOpen, r.e.lost], `premise: every stroke listed, the Enter carried every anchor ${info}`).toEqual([["m1", "m2", "m3"], true, true, []]);
+		expect(r.kept, `the list after the call ${info}`).toEqual({ ids: ["m1", "m2", "m3"], at: [0, 1, 2], top: "m1", bottom: "m2", stale: false });
 		expect(r.build, `a build ${info}`).toEqual(r.kept);
 	});
 
-	it("the list's first and last strokes both deleted: the stroke between keeps its place and is the first and last line's stroke, as a build makes it", () => {
+	it("the list's first and last strokes both carried: every stroke keeps its place, the free one the first line's stroke, as a build makes it", () => {
 		const r = afterDelete("retake-repair-ends.md", [strokeAt("m1", 10, 7 * LH + 5), strokeAt("f", 10, 1 * LH + 5), strokeAt("m2", 40, 9 * LH + 5)], ["m1", "m2"]);
 		const info = JSON.stringify(r);
-		expect([r.premise.list, r.e.edit, r.e.windowOpen, r.e.lost], `premise ${info}`).toEqual([["m1", "f", "m2"], true, true, ["m1", "m2"]]);
-		expect(r.kept, `the list after the call ${info}`).toEqual({ ids: ["f"], at: [1], top: "f", bottom: "f", stale: false });
+		expect([r.premise.list, r.e.edit, r.e.windowOpen, r.e.lost], `premise ${info}`).toEqual([["m1", "f", "m2"], true, true, []]);
+		expect(r.kept, `the list after the call ${info}`).toEqual({ ids: ["m1", "f", "m2"], at: [0, 1, 2], top: "f", bottom: "m2", stale: false });
 		expect(r.build, `a build ${info}`).toEqual(r.kept);
 	});
 
 	it("two strokes on the first anchored line and two on the last: the first of each in the list's order is that line's stroke, as a build finds it", () => {
 		const r = afterDelete("retake-repair-ties.md", [strokeAt("f1", 10, 1 * LH + 5), strokeAt("f2", 60, 1 * LH + 5), strokeAt("m1", 10, 7 * LH + 5), strokeAt("m2", 40, 9 * LH + 5), strokeAt("g1", 10, 14 * LH + 5), strokeAt("g2", 60, 14 * LH + 5)], ["m1", "m2"]);
 		const info = JSON.stringify(r);
-		expect([r.e.edit, r.e.windowOpen, r.e.lost], `premise ${info}`).toEqual([true, true, ["m1", "m2"]]);
-		expect(r.kept, `the list after the call ${info}`).toEqual({ ids: ["f1", "f2", "g1", "g2"], at: [0, 1, 4, 5], top: "f1", bottom: "g1", stale: false });
+		expect([r.e.edit, r.e.windowOpen, r.e.lost], `premise ${info}`).toEqual([true, true, []]);
+		expect(r.kept, `the list after the call ${info}`).toEqual({ ids: ["f1", "f2", "m1", "m2", "g1", "g2"], at: [0, 1, 2, 3, 4, 5], top: "f1", bottom: "g1", stale: false });
 		expect(r.build, `a build ${info}`).toEqual(r.kept);
 	});
 
-	it("one call deletes one member's anchor and anchors another again, the measured lines ending inside the group: the list drops the one and keeps the other, as a build makes it", () => {
+	it("one call carries one member's anchor and anchors another again, the measured lines ending inside the group: the list keeps both, as a build makes it", () => {
 		const path = "retake-repair-mixed.md";
 		const p = onePane(path, [strokeAt("f", 10, 1 * LH + 5), strokeAt("m1", 40, 7 * LH + 5), strokeAt("m2", 40, 9 * LH + 5), strokeAt("m4", 70, 11 * LH + 5)], ["m1", "m2", "m4"]);
 		// Lines 9 and 11 each take a second row; the lines from 11 down are drawn and read but not measured, so the measured
@@ -235,8 +235,8 @@ describe("retakeMembers keeps the surface's own anchored list as a build makes i
 		const w = wrapAbove(path, p, false, top, (x) => { x.drawn(11, 20); x.drawn(1, 10); x.drawn(1, 10, true, true); });
 		const kept = shape(inner(p.a).anchored);
 		const info = JSON.stringify({ premise: p.premise, w, lines: p.src.map((s) => anchorLine(s)), kept });
-		expect([w.windowOpen, w.cleared, w.lost, w.groupDy, anchorLine(p.src[1]), anchorLine(p.src[2])], `premise: no window open, m4 deleted, m1 anchored again on line 9, m2 kept on line 10 ${info}`).toEqual([false, 1, ["m4"], LH, 9, 10]);
-		expect(kept, `the list after the call ${info}`).toEqual({ ids: ["f", "m1", "m2"], at: [0, 1, 2], top: "f", bottom: "m2", stale: false });
+		expect([w.windowOpen, w.cleared, w.lost, w.groupDy, anchorLine(p.src[1]), anchorLine(p.src[2])], `premise: no window open, m4 carried, m1 anchored again on line 9, m2 kept on line 10 ${info}`).toEqual([false, 1, [], LH, 9, 10]);
+		expect(kept, `the list after the call ${info}`).toEqual({ ids: ["f", "m1", "m2", "m4"], at: [0, 1, 2, 3], top: "f", bottom: "m4", stale: false });
 		expect(rebuilt(p.a, p.src), `a build ${info}`).toEqual(kept);
 	});
 

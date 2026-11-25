@@ -92,11 +92,12 @@ describe("InlineStore-2: ink drawn during a duplicate lock survives the unlock a
 		// User deletes the copy (or its id line): main.ts calls clearDuplicateLock(A).
 		store.clearDuplicateLock("a.md");
 		expect(store.isDuplicateLocked("a.md")).toBe(false);
-		expect(w.notices.some((n) => n.includes("saves again"))).toBe(true);
 
 		// Quit without drawing again: finishPersistence = settle, then flush.
 		const drained = await store.settle();
 		expect(drained).toBe(true);
+		// Told once the clear has read the file again.
+		expect(w.notices.some((n) => n.includes("saves again"))).toBe(true);
 		w.flush();
 
 		// CORRECT: the lock-era stroke is on disk.

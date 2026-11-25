@@ -289,7 +289,7 @@ it(`wet tile pixels at ratio ${ODD_DPR}: tile on equals tile off per backing px`
 		expect(r.tile, "the wet tile is off").toEqual({ width: 468, height: 468 });
 		expect(r.origin, "the tile was never placed").not.toBeNull();
 		expect(r.offInk).toBeGreaterThan(0);
-		expect(r.over, `tile on differs from tile off (max channel difference ${r.maxDiff})`).toBe(0);
+		expect(r.over, `tile on differs from tile off (max difference seen over paper ${r.maxDiff})`).toBe(0);
 	} finally {
 		await page.context().close();
 	}
@@ -333,6 +333,27 @@ async function armMismatch(page: Page): Promise<number> {
 	}
 	return mismatch;
 }
+/** Where the two arms differ on screen, and how each arm's canvases sit, for the note zoom rows' log. */
+async function armMismatchDetail(page: Page): Promise<string> {
+	const a = await armShot(page, "full");
+	const b = await armShot(page, "compact");
+	let n = 0, maxD = 0, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+	for (let i = 0; i < a.px.length; i += a.channels) {
+		let d = 0;
+		for (let c = 0; c < a.channels; c++) d = Math.max(d, Math.abs(a.px[i + c]! - b.px[i + c]!));
+		if (!d) continue;
+		n++; maxD = Math.max(maxD, d);
+		const p = i / a.channels, x = p % a.width, y = Math.floor(p / a.width);
+		x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+	}
+	const boxes = await page.evaluate(() => Array.from(document.querySelectorAll("[data-arm] canvas")).map(el => {
+		const c = el as HTMLCanvasElement, r = c.getBoundingClientRect(), s = c.style;
+		return { arm: (c.closest("[data-arm]") as HTMLElement).dataset.arm, bitmap: [c.width, c.height],
+			rect: [r.left, r.top, r.width, r.height], devW: r.width * devicePixelRatio, devH: r.height * devicePixelRatio,
+			css: [s.width, s.height, s.translate, s.transform, s.left, s.top] };
+	}));
+	return `screen mismatch ${n} max ${maxD} box ${JSON.stringify([x0, y0, x1, y1])} shot ${a.width}x${a.height} canvases ${JSON.stringify(boxes)}`;
+}
 
 for (const tc of TAIL_CASES) it(`tail and carry, ${tc.name}: the compact tail equals the full-size tail on screen, before and after a band carry under a live head`, async () => {
 	const page = await pageAt(tc.dsf);
@@ -348,6 +369,57 @@ for (const tc of TAIL_CASES) it(`tail and carry, ${tc.name}: the compact tail eq
 		// eslint-disable-next-line no-console
 		console.log(`GRID TAIL [real flag] ${tc.name}: full ${JSON.stringify(s.full.layers.tail)} compact ${JSON.stringify(s.compact.layers.tail)} mismatch ${s.mismatch}`);
 		expect(s.compact.layers.tail.width * s.compact.layers.tail.height, "the compact tail is full size: no grid")
+			.toBeLessThan(s.full.layers.tail.width * s.full.layers.tail.height);
+		expect(s.tailInk).toBeGreaterThan(0);
+		expect(s.mismatch, "compact tail backing differs from full").toBe(0);
+		expect(await armMismatch(page), "compact tail differs from full on screen").toBe(0);
+		await call("carry", 10.25, 5.5);
+		const c = await call<Snap>("read");
+		expect(c.tailInk).toBeGreaterThan(0);
+		expect(c.mismatch, "the carry shifted one bitmap differently").toBe(0);
+		expect(await armMismatch(page), "on screen after the carry, compact differs from full").toBe(0);
+	} finally {
+		await page.context().close();
+	}
+}, 120_000);
+
+/**
+ * The compact tail against the full-size tail above 200 percent note zoom, where the backing is large. The band is
+ * ZOOM_TAIL_BAND backing px at every row, wider than the compact tile on both axes, so the tile is on where its size law
+ * lets it be. The head and prediction are the cases above scaled by 2 / zoom, so on screen they span what they span
+ * at 200 percent and fit the tile there. Each arm carries the note zoom as a CSS zoom, as the host applies it, so the
+ * screen shot is at one device px per backing px. Same contract as the cases above: mismatch 0, in the backing and
+ * on screen.
+ */
+/** Backing px. With the host zoom on, the arm is this many device px, so it must fit the 1300 x 900 window. */
+const ZOOM_TAIL_BAND = [1800, 1400] as const;
+const ZOOM_TAIL_ROWS: { dsf: number; zoom: number }[] = [
+	{ dsf: 2, zoom: 2.5 }, { dsf: 2, zoom: 6 }, { dsf: 2, zoom: 8 }, { dsf: ODD_DPR, zoom: 8 },
+];
+for (const row of ZOOM_TAIL_ROWS) it(`tail and carry, ratio ${row.dsf}, note zoom ${row.zoom}: the compact tail equals the full-size tail on screen, before and after a band carry under a live head`, async () => {
+	const backing = row.dsf * row.zoom, k = 2 / row.zoom;
+	const config = { width: ZOOM_TAIL_BAND[0] / backing, height: ZOOM_TAIL_BAND[1] / backing, backing, cssScale: row.zoom, hostZoom: true };
+	const head = { from: { x: little.from.x * k, y: little.from.y * k }, to: { x: little.to.x * k, y: little.to.y * k }, hw: little.hw * k };
+	const prediction = { fromX: longPrediction.fromX * k, fromY: longPrediction.fromY * k,
+		points: longPrediction.points.map(p => ({ x: p.x * k, y: p.y * k })), width: longPrediction.width * k };
+	const page = await pageAt(row.dsf);
+	const call = <T>(name: string, ...args: unknown[]) => page.evaluate(({ name, args }) => (window as any).tailBackingPage[name](...args), { name, args }) as Promise<T>;
+	try {
+		await page.setContent("<!doctype html><html><body style='margin:0'></body></html>");
+		await page.addScriptTag({ content: tailBundle });
+		await call("setup", config);
+		// The host zoom the overlay reports above 100% (hostZoom true, backing = ratio x zoom): the page applies it
+		// only below 100%, so the rows apply it here, and a backing px shows as one device px, as in the app.
+		await page.evaluate(z => { for (const el of document.querySelectorAll("[data-arm]")) (el as HTMLElement).style.zoom = String(z); }, row.zoom);
+		await stackArms(page);
+		await call("event", head, prediction);
+		type Snap = { full: { layers: { tail: { width: number; height: number } } }; compact: { layers: { tail: { width: number; height: number } } }; mismatch: number; tailInk: number };
+		const s = await call<Snap>("read");
+		// eslint-disable-next-line no-console
+		console.log(`GRID TAIL ZOOM [real flag] ratio ${row.dsf} zoom ${row.zoom} backing ${backing}: full ${JSON.stringify(s.full.layers.tail)} compact ${JSON.stringify(s.compact.layers.tail)} mismatch ${s.mismatch}`);
+		// eslint-disable-next-line no-console
+		console.log(`GRID TAIL ZOOM SCREEN ratio ${row.dsf} zoom ${row.zoom}: ${await armMismatchDetail(page)}`);
+		expect(s.compact.layers.tail.width * s.compact.layers.tail.height, `the compact tail is full size at ${row.zoom}`)
 			.toBeLessThan(s.full.layers.tail.width * s.full.layers.tail.height);
 		expect(s.tailInk).toBeGreaterThan(0);
 		expect(s.mismatch, "compact tail backing differs from full").toBe(0);

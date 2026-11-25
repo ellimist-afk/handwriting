@@ -151,11 +151,42 @@ export function snipViewport(
 	pxPerPt: number,
 	capPx: number
 ): { x0: number; y0: number; x1: number; y1: number; scale: number } | null {
-	if (!(wPt > 0) || !(hPt > 0) || !(pxPerPt > 0) || !(capPx > 0)) return null;
-	const x0 = Math.max(0, b.x - padPt);
-	const y0 = Math.max(0, b.y - padPt);
-	const x1 = Math.min(wPt, b.x + b.width + padPt);
-	const y1 = Math.min(hPt, b.y + b.height + padPt);
+	if (!(wPt > 0) || !(hPt > 0)) return null;
+	return cappedCrop(
+		Math.max(0, b.x - padPt),
+		Math.max(0, b.y - padPt),
+		Math.min(wPt, b.x + b.width + padPt),
+		Math.min(hPt, b.y + b.height + padPt),
+		pxPerPt,
+		capPx
+	);
+}
+
+/**
+ * The crop for a note snip: the selection's box padded on every side, with
+ * the same area cap as the page snip. A note has no page, so nothing clamps
+ * the crop: its ink can sit left of or above the note's origin, and the snip
+ * keeps all of it and its pad, whatever the sign of x or y.
+ */
+export function noteSnipViewport(
+	b: { x: number; y: number; width: number; height: number },
+	padPt: number,
+	pxPerPt: number,
+	capPx: number
+): { x0: number; y0: number; x1: number; y1: number; scale: number } | null {
+	return cappedCrop(b.x - padPt, b.y - padPt, b.x + b.width + padPt, b.y + b.height + padPt, pxPerPt, capPx);
+}
+
+/** The scale for a crop, capped so the output AREA stays within `capPx`; null for an empty crop or bad inputs. */
+function cappedCrop(
+	x0: number,
+	y0: number,
+	x1: number,
+	y1: number,
+	pxPerPt: number,
+	capPx: number
+): { x0: number; y0: number; x1: number; y1: number; scale: number } | null {
+	if (!(pxPerPt > 0) || !(capPx > 0)) return null;
 	if (!(x1 > x0) || !(y1 > y0)) return null;
 	let scale = pxPerPt;
 	const area = (x1 - x0) * scale * ((y1 - y0) * scale);

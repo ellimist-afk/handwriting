@@ -73,6 +73,7 @@ function fakeCanvas(parent: unknown): Record<string, unknown> {
 		setCssProps: () => {},
 		toggleClass: () => {},
 		classList: { add: () => {}, remove: () => {}, contains: () => false },
+		addEventListener: () => {},
 	};
 	return c;
 }

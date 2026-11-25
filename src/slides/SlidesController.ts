@@ -212,9 +212,12 @@ export function slidesParkedInk(): boolean {
  * Commit the live deck's stroke in progress, the path a tool switch takes (SlidesDeck.finishGesture), so the
  * app going to the background writes it. That path records the stroke's end as "slide-change", and keeps the
  * navigation guard up until the real lift.
+ *
+ * Given the document of the window that hid, only a deck presenting in that document: a deck in another window
+ * keeps its gesture. With none, the live deck wherever it is (quit).
  */
-export function finishSlidesGesture(): void {
-	deck?.finishGesture();
+export function finishSlidesGesture(doc?: Document): void {
+	if (doc === undefined || deck?.ownerDocument === doc) deck?.finishGesture();
 }
 
 /**

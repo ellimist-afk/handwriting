@@ -159,7 +159,10 @@ describe("a document change re-takes a member's anchor at its group's dy", () =>
 		a.docChanged(PATH, [m], doc, changes, after);
 		expect(a.changePaths.eager, "precondition: the change took the eager path").toBe(eager + 1);
 		expect(a.dyOf(m), "precondition: the editor shows the member at its group's dy").toBe(ROW);
-		expect(anchorDy(state.layout, m), "the re-taken anchor lost its group's dy").toBe(ROW);
+		// The group follows its text one line down, as followDocChanged moves it after the change, read as readAt reads it.
+		a.follow.docChanged(changes, (pos) => after.lineAt(pos).number * ROW, 1);
+		const groupDy = a.follow.groupOffset("g1")?.dy ?? null;
+		expect(anchorDy(state.layout, m), `the re-taken anchor lost its group's dy (the group's dy after the change: ${groupDy})`).toBe(groupDy);
 	});
 
 	it("a change on the member's own line keeps its anchor at its group's dy", () => {

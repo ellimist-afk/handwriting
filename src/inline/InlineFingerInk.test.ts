@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
 	fakeEl,
 	fedTimestamps,
@@ -14,6 +14,13 @@ beforeAll(() => {
 	uninstallWindow = installFakeWindow();
 });
 afterAll(() => uninstallWindow());
+
+// Every router is live to every other until disposed: a cell that ends with a finger still down would otherwise hold
+// its stroke open for the cells after it, and a pane with a stroke open stops pinches in every pane.
+const routers: InlinePenRouter[] = [];
+afterEach(() => {
+	for (const r of routers.splice(0)) r.dispose();
+});
 
 function touch(type: string, ts: number, pointerId: number, x: number, y: number, pressure = 0, isPrimary = true) {
 	return penEvent(type, ts, {
@@ -47,6 +54,7 @@ function rig(enabled = true) {
 			onPinch: (phase) => void pinches.push(phase),
 		}
 	);
+	routers.push(router);
 	const fire = (ev: PointerEvent) => {
 		const handler = el.handlers.get(ev.type);
 		// No raw listener, no raw event: a browser sends none (the router binds raw per stroke).
@@ -81,7 +89,7 @@ describe("ordinary-note iPhone finger routing", () => {
 	it("leaves touch native when the callback is absent, as it is on PDF", () => {
 		const el = fakeEl();
 		const rec = recorder();
-		new InlinePenRouter(el as unknown as HTMLElement, el as unknown as HTMLElement, rec.cb);
+		routers.push(new InlinePenRouter(el as unknown as HTMLElement, el as unknown as HTMLElement, rec.cb));
 		const down = touch("pointerdown", 100, 1, 30, 40);
 		let prevented = false;
 		(down as unknown as { preventDefault(): void }).preventDefault = () => void (prevented = true);

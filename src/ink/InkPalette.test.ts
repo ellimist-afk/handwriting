@@ -101,17 +101,17 @@ describe("the live palette", () => {
 		expect(nextInkColor("highlighter", "#123456").hex).toBe("#fafafa");
 	});
 
-	it("two slots may hold the same colour; the cycle steps on from the first of them and still ends", () => {
+	it("two slots may hold the same colour; the cycle goes through every slot in order and wraps", () => {
 		const dup = ["#111111", "#222222", "#111111", "#333333", "#444444"];
 		setInkPalette("highlighter", dup);
 		expect(nextInkColor("highlighter", "#111111").hex).toBe("#222222");
 		let hex = "#222222";
-		const seen = new Set<string>();
+		const seen: string[] = [];
 		for (let i = 0; i < 10; i++) {
 			hex = nextInkColor("highlighter", hex).hex;
-			seen.add(hex);
+			seen.push(hex);
 		}
-		expect(seen).toEqual(new Set(["#111111", "#222222"]));
+		expect(seen).toEqual(["#111111", "#333333", "#444444", "#111111", "#222222", "#111111", "#333333", "#444444", "#111111", "#222222"]);
 	});
 });
 

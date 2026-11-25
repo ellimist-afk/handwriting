@@ -1,8 +1,9 @@
 /**
  * Render cells for the lined and grid paper background on the zoom host. The
- * paper scales with the text, like graph paper: the host's CSS zoom scales the
- * gradient with the note, so zooming out packs the rules together at 28 x z
- * screen px, and no pinch moves the pitch or the phase. The rules stay at least
+ * paper scales with the text, like graph paper: its pitch is one plain body
+ * row's height, and the host's CSS zoom scales the gradient with the note, so
+ * zooming out packs the rules together at row height x z screen px, and no
+ * pinch moves the pitch or the phase. The rules stay at least
  * one device px thick: a commit may re-plan their thickness, and nothing else,
  * and no preview frame writes a paper property at all.
  * The cells that measured the previous design's power-of-two levels were
@@ -85,6 +86,26 @@ async function mountPaper(p: Page, id = "paper", kind: "lines" | "grid" | "dots"
 }
 
 const PAGE_GREY = 255, RULE_GREY = 0x77;
+
+/** The engine's 1/64 px layout unit, which the paper's pitch is planned on. */
+const toLayoutPx = (px: number): number => Math.round(px * 64) / 64;
+
+/**
+ * One plain body row's height as the page shows it: the editor content's computed line height (a px length in this
+ * fixture), unrounded (`raw`) and on the 1/64 px layout unit the pitch is planned on (`pitch`). Read at rest at 100
+ * percent, before any zoom commit, so no zoom sits between the read and the text.
+ */
+async function readRow(p: Page): Promise<{ lineHeight: string; raw: number; pitch: number }> {
+	const lineHeight = await p.evaluate(() => getComputedStyle(document.querySelector(".cm-content") as HTMLElement).lineHeight);
+	expect(lineHeight, "premise: the content's line height is a px length").toMatch(/px$/);
+	const raw = Number.parseFloat(lineHeight);
+	return { lineHeight, raw, pitch: toLayoutPx(raw) };
+}
+
+/** The pixel cells read whole device rows, so each zoom is one where the row height x z x dsf is a whole number. */
+function expectWholeDeviceRows(pitch: number, z: number, dsf: number) {
+	expect(Number.isInteger(pitch * z * dsf), `premise: the row height ${pitch} x z ${z} x dsf ${dsf} is a whole number of device rows`).toBe(true);
+}
 
 /** Average grey (0..255) per DEVICE row of a narrow strip, from a real
  * screenshot decoded with the plugin's own PNG inflate (pngInk.ts) - the
@@ -181,19 +202,23 @@ function findRuleClusters(screenRowGreys: number[]): RuleCluster[] {
  */
 
 /**
- * SPACING: the rules are the note's 28 px grid, scaled by the zoom and nothing
- * else: 28 x z screen px at every zoom, never re-levelled, and anchored to the
- * note origin (each rule's bottom edge on it). Read in device rows on the real
- * DSF 2 browser at 100, 50 and 25 percent, where 28 x z x 2 is a whole number
- * of device rows; the rule is at least one device row at every zoom.
+ * SPACING: the rules sit one plain body row apart, scaled by the zoom and
+ * nothing else: row height x z screen px at every zoom, never re-levelled, and
+ * anchored to the note origin (each rule's bottom edge on it). The row height is
+ * read off the page at 100 percent before the first commit. Read in device rows
+ * on the real DSF 2 browser at 100, 50 and 25 percent, zooms picked so the row
+ * height x z x 2 is a whole number of device rows (24 px rows: 48, 24, 12; each
+ * arm checks it); the rule is at least one device row at every zoom.
  */
-it("SPACING: the rules' screen pitch is 28 x z at 100, 50 and 25 percent, anchored to the note origin", async () => {
+it("SPACING: the rules' screen pitch is the row height x z at 100, 50 and 25 percent, anchored to the note origin", async () => {
 	const p = await realPage();
 	const dsf = 2;
 	try {
 		await mountPaper(p);
+		const row = await readRow(p);
 		for (const z of [1, 0.5, 0.25]) {
-			const expectedPeriod = 28 * z * dsf;
+			expectWholeDeviceRows(row.pitch, z, dsf);
+			const expectedPeriod = row.pitch * z * dsf;
 			await p.evaluate(z => (window as any).edgeAudit.commit("paper", z), z);
 			const geo = await p.evaluate(() => {
 				const r = document.querySelector(".cm-scroller")!.getBoundingClientRect();
@@ -407,15 +432,19 @@ it("AT REST, UNCHANGED: after a settle, a paper pan write with the pan unchanged
 
 /**
  * PREVIEW ARM: the same stepped, no-commit gesture from 100 to 10 percent,
- * reading the paper properties on every frame. They stay the planned 28 px
- * pitch and 1 px rule throughout, so the screen spacing is 28 x z and the rule
- * z screen px on every frame: the gradient zooms with the note, unwritten.
+ * reading the paper properties on every frame. They stay the planned pitch
+ * (one row height, read off the page) and 1 px rule throughout, so the screen
+ * spacing is row height x z and the rule z screen px on every frame: the
+ * gradient zooms with the note, unwritten.
  */
 it("PREVIEW ARM: 1.0 -> 0.1 with no commit - the paper properties stay the planned ones on every frame", async () => {
 	const p = await browser.newPage();
 	try {
 		await mountPaper(p);
+		const row = await readRow(p);
 		await p.evaluate(() => (window as any).edgeAudit.commit("paper", 1));
+		const planned = await p.evaluate(() => (document.querySelector(".cm-editor") as HTMLElement).style.getPropertyValue("--handwriting-paper-pitch"));
+		expect(planned, `premise: the planned pitch is the row height (${row.lineHeight})`).toBe(`${row.pitch}px`);
 		const ratios = geometricRatios(0.1, 60);
 		const result = await p.evaluate(({ id, ratios }) => {
 			const host = document.querySelector(".cm-editor") as HTMLElement;
@@ -449,9 +478,9 @@ it("PREVIEW ARM: 1.0 -> 0.1 with no commit - the paper properties stay the plann
 				return { writes, samples };
 			})();
 		}, { id: "paper", ratios });
-		const off = result.samples.filter(s => s.pitch !== "28px" || s.rule !== "1px");
+		const off = result.samples.filter(s => s.pitch !== planned || s.rule !== "1px");
 		expect(result.samples.at(-1)!.zoom, "premise: the preview reached 10 percent").toBeCloseTo(0.1, 2);
-		expect(off.length, `frames whose paper properties were not the planned 28px / 1px: ${JSON.stringify(off.slice(0, 5))}`).toBe(0);
+		expect(off.length, `frames whose paper properties were not the planned ${planned} / 1px: ${JSON.stringify(off.slice(0, 5))}`).toBe(0);
 		expect(result.writes, "paper-property writes across the whole 1.0 -> 0.1 preview (no commit)").toBe(0);
 	} finally {
 		await p.close();
@@ -488,9 +517,11 @@ it("CALIBRATION: the pixel reader sees a soft, fractionally-positioned transitio
 });
 
 /**
- * EVENNESS: at the zooms where 28 x z x dsf is a whole number of device rows,
- * every consecutive rule spacing is that same count, and every arm shows at
- * least 10 rules: the rule is never under one device row, so none drops out.
+ * EVENNESS: at the zooms where the row height x z x dsf is a whole number of
+ * device rows (24 px rows: 24, 12, 6 at dsf 1 and 48, 24, 12 at dsf 2; each arm
+ * checks it on the row it reads), every consecutive rule spacing is that same
+ * count, and every arm shows at least 10 rules: the rule is never under one
+ * device row, so none drops out.
  */
 const EVENNESS_ARMS: { dsf: number; z: number; page: () => Promise<Page> }[] = [
 	{ dsf: 1, z: 1, page: () => browser.newPage() },
@@ -501,12 +532,14 @@ const EVENNESS_ARMS: { dsf: number; z: number; page: () => Promise<Page> }[] = [
 	{ dsf: 2, z: 0.25, page: () => realPage() },
 ];
 
-it("EVENNESS: at 100, 50 and 25 percent every consecutive rule spacing is the same 28 x z x dsf device rows", async () => {
+it("EVENNESS: at 100, 50 and 25 percent every consecutive rule spacing is the same row height x z x dsf device rows", async () => {
 	for (const { dsf, z, page } of EVENNESS_ARMS) {
-		const expectedPeriod = 28 * z * dsf;
 		const p = await page();
 		try {
 			await mountPaper(p);
+			const row = await readRow(p);
+			expectWholeDeviceRows(row.pitch, z, dsf);
+			const expectedPeriod = row.pitch * z * dsf;
 			await p.evaluate(z => (window as any).edgeAudit.commit("paper", z), z);
 			const geo = await p.evaluate(() => {
 				const r = document.querySelector(".cm-scroller")!.getBoundingClientRect();
@@ -548,15 +581,17 @@ it("PREVIEW ARM (GRID): the to-right layer shares the vars - no write on any fra
 	}
 });
 
-it("EVENNESS (GRID): both axes - horizontal rules' y-gaps AND vertical rules' x-gaps are the same 28 x z x dsf count", async () => {
+it("EVENNESS (GRID): both axes - horizontal rules' y-gaps AND vertical rules' x-gaps are the same row height x z x dsf count", async () => {
 	const p = await realPage();
 	const dsf = 2;
-	// z 0.25: 7 screen px = 14 device rows, the rule floored at one device row.
+	// z 0.25: a quarter row (6 screen px = 12 device rows at 24 px rows), the rule floored at one device row.
 	const ARMS = [1, 0.5, 0.25];
 	try {
 		await mountPaper(p, "paper", "grid");
+		const row = await readRow(p);
 		for (const z of ARMS) {
-			const expectedPeriod = 28 * z * dsf;
+			expectWholeDeviceRows(row.pitch, z, dsf);
+			const expectedPeriod = row.pitch * z * dsf;
 			await p.evaluate(z => (window as any).edgeAudit.commit("paper", z), z);
 			const geo = await p.evaluate(() => {
 				const r = document.querySelector(".cm-scroller")!.getBoundingClientRect();
@@ -624,12 +659,14 @@ it("SCROLL AT REST: scrolling without a zoom change writes no paper property and
 });
 
 /**
- * FAR-DOWN DRIFT (GRID): at 17.6 px text 28 x the text scale is 30.8 px, no
- * whole number of the engine's 1/64 px layout unit. A background tile's size is
- * stored in that unit, so a grid layer tiled one pitch tall put each rule
- * 0.003 px higher than the one before: 10 px off by 100000 px down the note.
- * The grid is untiled, and a repeating gradient keeps its period exactly (the
- * pitch itself is planned on a whole 1/64 px, 30.796875, for the dots). At
+ * FAR-DOWN DRIFT (GRID): at 17.6 px text the row height (1.5 x the text in this
+ * fixture) is 26.4 px, no whole number of the engine's 1/64 px layout unit (the
+ * cell checks that on the row it reads; it was 30.8 at the older 28 x font / 16
+ * pitch). A background tile's size is stored in that unit, so a grid layer tiled
+ * one pitch tall put each rule a little higher than the one before, adding up
+ * over 100000 px down the note. The grid is untiled, and a repeating gradient
+ * keeps its period exactly (the pitch itself is planned on a whole 1/64 px,
+ * 26.40625, for the dots). At
  * 100 percent on the real DSF 2 browser, with the note grown to 131072 px,
  * every rule's end must sit on phase + k x pitch within one device row near
  * the top and 100000 px down. The calibration reads the same rules against a
@@ -642,11 +679,13 @@ it("FAR-DOWN DRIFT (GRID): at 17.6 px text the rules 100000 px down the note sti
 	try {
 		await mountPaper(p, "paper", "grid");
 		await p.evaluate(async () => { await (window as any).viewportFixture.fontPx("paper", 17.6); await (window as any).viewportFixture.growTo("paper", 2000, 131072); });
+		const row = await readRow(p);
 		const vars = await p.evaluate(() => {
 			const host = document.querySelector(".cm-editor") as HTMLElement;
 			return { pitch: host.style.getPropertyValue("--handwriting-paper-pitch"), phase: host.style.getPropertyValue("--handwriting-paper-phase"), zoom: (window as any).viewportFixture.snap("paper").state.zoom as number };
 		});
-		expect(Number.parseFloat(vars.pitch), `premise: the pitch at 17.6 px text; ${JSON.stringify(vars)}`).toBeCloseTo(30.8, 1);
+		expect(Number.isInteger(row.raw * 64), `premise: the row height at 17.6 px text (${row.lineHeight}) is no whole number of 1/64 px, the case this cell is for`).toBe(false);
+		expect(Number.parseFloat(vars.pitch), `premise: the pitch at 17.6 px text is the row height (${row.lineHeight}) on the 1/64 px unit; ${JSON.stringify(vars)}`).toBe(row.pitch);
 		expect(vars.zoom, "premise: at 100 percent").toBeCloseTo(1, 6);
 		const pitch = Number.parseFloat(vars.pitch), phase = Number.parseFloat(vars.phase) || 0;
 		const residual = (y: number, period: number) => { const raw = (((y - phase) % period) + period) % period; return Math.min(raw, period - raw); };
@@ -681,10 +720,11 @@ it("FAR-DOWN DRIFT (GRID): at 17.6 px text the rules 100000 px down the note sti
 /**
  * FAR-DOWN DRIFT (DOTS): dots cannot be untiled - a dot is one radial gradient
  * per tile - so their tile is the pitch square, and each dot is centred in its
- * tile. At 17.6 px text a pitch of 30.8 px, stored as a 30.796875 px tile, put
- * each dot row 0.003 px above where the pitch said: 10 px off by 100000 px
- * down. The pitch is planned on a whole 1/64 px, so the tile is exactly the
- * pitch. Same note, reads and bound as the grid's cell; the strip runs down the
+ * tile. At 17.6 px text the row height is 26.4 px, no whole 1/64 px; an
+ * unrounded pitch stored as a 26.40625 px tile would put each dot row a little
+ * off where the pitch said, adding up over 100000 px down (at the older 28 x
+ * font / 16 pitch, 30.8 as a 30.796875 tile: 10 px). The pitch is planned on a
+ * whole 1/64 px, so the tile is exactly the pitch. Same note, reads and bound as the grid's cell; the strip runs down the
  * dots' own column (the tile's middle), and each dot's centre must sit on
  * phase + pitch / 2 + k x pitch. The calibration is again a pitch 0.01 px longer,
  * over the bound far down. Revised on record when the paper's origin became the
@@ -698,12 +738,14 @@ it("FAR-DOWN DRIFT (DOTS): at 17.6 px text the dot rows 100000 px down the note 
 	try {
 		await mountPaper(p, "paper", "dots");
 		await p.evaluate(async () => { await (window as any).viewportFixture.fontPx("paper", 17.6); await (window as any).viewportFixture.growTo("paper", 2000, 131072); });
+		const row = await readRow(p);
 		const vars = await p.evaluate(() => {
 			const host = document.querySelector(".cm-editor") as HTMLElement;
 			const read = (k: string) => Number.parseFloat(host.style.getPropertyValue(k));
 			return { pitch: read("--handwriting-paper-pitch"), phase: read("--handwriting-paper-phase") || 0, phaseX: read("--handwriting-paper-phase-x") || 0, rule: read("--handwriting-paper-rule"), zoom: (window as any).viewportFixture.snap("paper").state.zoom as number };
 		});
-		expect(vars.pitch, `premise: the pitch at 17.6 px text; ${JSON.stringify(vars)}`).toBeCloseTo(30.8, 1);
+		expect(Number.isInteger(row.raw * 64), `premise: the row height at 17.6 px text (${row.lineHeight}) is no whole number of 1/64 px, the case this cell is for`).toBe(false);
+		expect(vars.pitch, `premise: the pitch at 17.6 px text is the row height (${row.lineHeight}) on the 1/64 px unit; ${JSON.stringify(vars)}`).toBe(row.pitch);
 		expect(vars.zoom, "premise: at 100 percent").toBeCloseTo(1, 6);
 		const centreLine = vars.phase + vars.pitch / 2;
 		const residual = (y: number, period: number) => { const raw = (((y - centreLine) % period) + period) % period; return Math.min(raw, period - raw); };
@@ -744,9 +786,13 @@ it("FAR-DOWN DRIFT (DOTS): at 17.6 px text the dot rows 100000 px down the note 
  */
 it("WIDE NOTE (GRID): a grid on a 500000 x 600000 px note still paints its rules, down and across", async () => {
 	const p = await realPage();
-	const dsf = 2, expectedPeriod = 28 * dsf;
+	const dsf = 2;
 	try {
 		await mountPaper(p, "paper", "grid");
+		// One row height apart, read off the page at 100 percent; whole device rows at dsf 2 (48 at 24 px rows).
+		const row = await readRow(p);
+		expectWholeDeviceRows(row.pitch, 1, dsf);
+		const expectedPeriod = row.pitch * dsf;
 		await p.evaluate(() => (window as any).viewportFixture.growEmpty("paper"));
 		for (const target of [0, 20000]) {
 			const geo = await p.evaluate(async target => {
@@ -806,11 +852,16 @@ it("FRESH MOUNT: the first pinch after a note opens writes no paper property on 
  * percent (Reset commits at 1 and keeps the viewport taken over); (C) the same
  * view switching to another note, which releases the viewport. Each arm
  * asserts the state it names before it reads. The phase reads are soft, so
- * one run reports every arm. Rule END vs the note origin, as SPACING reads it.
+ * one run reports every arm. Rule END vs the note origin, as SPACING reads it,
+ * modulo the pitch each arm reads off the page (one row height, checked against
+ * the content's line height). The test sets no scroll: B and D read wherever
+ * Reset leaves the far-ink fixture (note origin at -2156, which happens to be a
+ * whole number of 28s, so the older 28 px pitch put the expected end at 0; at a
+ * 24 px row it is 4, off the scroller's top row).
  */
 it("AT REST: the rules are anchored to the note origin at 100 percent when fresh, after Reset, and after the view switches notes", async () => {
 	const p = await realPage();
-	const dsf = 2, pitch = 28;
+	const dsf = 2;
 	try {
 		await mountPaper(p);
 		const read = async (label: string) => {
@@ -822,15 +873,18 @@ it("AT REST: the rules are anchored to the note origin at 100 percent when fresh
 					scrollerTop: r.top, scrollerLeft: r.left, scrollerHeight: r.height, lineTop: line.getBoundingClientRect().top,
 					taken: host.classList.contains("handwriting-note-viewport"), zoom: (window as any).viewportFixture.snap("paper").state.zoom,
 					vars: ["--handwriting-paper-pitch", "--handwriting-paper-rule", "--handwriting-paper-phase"].map(k => host.style.getPropertyValue(k)).join("|"),
+					lineHeight: getComputedStyle(document.querySelector(".cm-content") as HTMLElement).lineHeight,
 				};
 			});
+			const pitch = Number.parseFloat(geo.vars.split("|")[0]!);
+			expect.soft(pitch, `[${label}] premise: the pitch is the row height (${geo.lineHeight}) on the 1/64 px unit; ${JSON.stringify(geo)}`).toBe(toLayoutPx(Number.parseFloat(geo.lineHeight)));
 			const clip = { x: Math.round(geo.scrollerLeft + 4), y: Math.round(geo.scrollerTop), width: 8, height: Math.min(400, Math.max(60, Math.floor(geo.scrollerHeight - 10))) };
 			const clusters = findRuleClusters(collapseToScreenRows(await deviceRowGreys(p, clip), dsf));
 			const origin = geo.lineTop - geo.scrollerTop;
 			const expected = ((origin % pitch) + pitch) % pitch;
 			const end = clusters.length ? (((clusters[0]!.start + clusters[0]!.length) % pitch) + pitch) % pitch : Number.NaN;
 			const raw = Math.abs(end - expected), off = Math.min(raw, pitch - raw);
-			return { label, geo, clusters: clusters.slice(0, 4), expected, end, off };
+			return { label, pitch, geo, clusters: clusters.slice(0, 4), expected, end, off };
 		};
 
 		const a = await read("fresh");
@@ -880,8 +934,9 @@ const readPaperVars = (host: HTMLElement): PaperVars => {
  * AFTER A RELEASE, FIRST FRAME: a note switch hands the viewport back and takes
  * the overlay's own paper values off the editor. The note it opens must still
  * paint its first frame with the paper at the text's size at rest, not the
- * stylesheet's 28 px fallback: at 24 px text a 42 px pitch before and after,
- * and the rule the 1.5 px literal at 100 percent (10 px at the 10 percent the
+ * stylesheet's 28 px fallback: at 24 px text a pitch of one row height (read
+ * off the page at 24 px text and 100 percent, 36 px at this fixture's 1.5 line
+ * height) before and after, and the rule the 1.5 px literal at 100 percent (10 px at the 10 percent the
  * previous note was left at, the one-device-px floor on this dpr 1 browser). Read inside the first animation
  * frame after the switch, and again once that frame's remaining work has run,
  * before the next frame.
@@ -890,10 +945,15 @@ it("AFTER A RELEASE: the first frame after a note switch paints the paper at the
 	const p = await browser.newPage();
 	try {
 		await mountPaper(p);
-		await p.evaluate(async () => { await (window as any).viewportFixture.fontPx("paper", 24); await (window as any).edgeAudit.commit("paper", 0.1); });
+		await p.evaluate(() => (window as any).viewportFixture.fontPx("paper", 24));
+		const row = await readRow(p);
+		const rowPitch = `${row.pitch}px`;
+		// The arm tells the planned row from the fallback only while the two differ.
+		expect(rowPitch, `premise: the row height at 24 px text (${row.lineHeight}) is not the stylesheet's fallback`).not.toBe("28px");
+		await p.evaluate(() => (window as any).edgeAudit.commit("paper", 0.1));
 		const before = await p.evaluate(`(${readPaperVars})(document.querySelector(".cm-editor"))`) as PaperVars;
 		expect(before.taken, `premise: the commit took the viewport over; ${JSON.stringify(before)}`).toBe(true);
-		expect([before.pitch, before.rule], `premise: the paper at 24 px text, 10 percent; ${JSON.stringify(before)}`).toEqual(["42px", "10.15625px"]);
+		expect([before.pitch, before.rule], `premise: the paper at 24 px text, 10 percent; ${JSON.stringify(before)}`).toEqual([rowPitch, "10.15625px"]);
 		const frames = await p.evaluate(`(async () => {
 			const read = ${readPaperVars};
 			const host = document.querySelector(".cm-editor");
@@ -910,7 +970,7 @@ it("AFTER A RELEASE: the first frame after a note switch paints the paper at the
 		const report = JSON.stringify({ before, ...frames });
 		expect(frames.settled.taken, `premise: switching notes released the viewport; ${report}`).toBe(false);
 		for (const at of ["inFrame", "afterFrame"] as const) {
-			expect.soft(frames[at].pitch, `${at}: pitch in the switched note's first frame; ${report}`).toBe("42px");
+			expect.soft(frames[at].pitch, `${at}: pitch in the switched note's first frame; ${report}`).toBe(rowPitch);
 			expect.soft(frames[at].rule, `${at}: rule in the switched note's first frame, at rest at 100 percent; ${report}`).toBe("1.5px");
 		}
 		// The return arm (issue 9): the switch above opened a note never seen this session, at 100
@@ -921,7 +981,7 @@ it("AFTER A RELEASE: the first frame after a note switch paints the paper at the
 			return { zoom: window.viewportFixture.snap("paper").state.zoom, vars: (${readPaperVars})(document.querySelector(".cm-editor")) };
 		})()`) as { zoom: number; vars: PaperVars };
 		expect(back.zoom, `RETURN: the first note comes back at the 10 percent it was left at; ${JSON.stringify(back)}`).toBeCloseTo(0.1, 6);
-		expect.soft([back.vars.taken, back.vars.pitch, back.vars.rule], `RETURN: its paper at 24 px text, 10 percent; ${JSON.stringify(back)}`).toEqual([true, "42px", "10.15625px"]);
+		expect.soft([back.vars.taken, back.vars.pitch, back.vars.rule], `RETURN: its paper at 24 px text, 10 percent; ${JSON.stringify(back)}`).toEqual([true, rowPitch, "10.15625px"]);
 	} finally {
 		await p.close();
 	}
@@ -931,28 +991,32 @@ it("AFTER A RELEASE: the first frame after a note switch paints the paper at the
  * AFTER A RELOAD: the paper properties live on the editor, which outlives the
  * overlay. A plugin reload destroys the overlay and mounts a new one on the
  * same editor. Four arms, each on its own page:
- * - reloaded at 20 px text: the new overlay plans 28 x 20 / 16 = 35 px, from
- *   the text's size, not from the size it happened to mount at;
+ * - reloaded at 20 px text: the new overlay plans the row height at 20 px text
+ *   (read off the page, 30 px at this fixture's 1.5 line height), not the row
+ *   it happened to mount at;
  * - the text changed from 20 px back to 16 px while the overlay was away: the
- *   new overlay plans 28 px, not the 35 px the old one left behind as if the
- *   host had set it;
+ *   new overlay plans the 16 px text's row height (24 px here), not the 30 px
+ *   the old one left behind as if the host had set it;
  * - a host's own pitch (inline, with a priority), reloaded at rest, and
  * - the same, reloaded while zoomed to 10 percent: the host's value survives
  *   byte for byte, so taking the overlay's values off never takes the host's.
  */
 it("AFTER A RELOAD: a new overlay on the same editor plans the paper at the text's size, and a host's own paper value survives", async () => {
 	const HOST_PITCH = "31px";
-	const arms: { label: string; fontPx: number; fontPxWhileAway?: number; hostOwned: boolean; zoomed: boolean; pitch: string; rule: string }[] = [
-		{ label: "reloaded at 20 px text", fontPx: 20, hostOwned: false, zoomed: false, pitch: "35px", rule: "1.25px" },
-		{ label: "text back to 16 px while the overlay was away", fontPx: 20, fontPxWhileAway: 16, hostOwned: false, zoomed: false, pitch: "28px", rule: "1px" },
-		{ label: "host-owned pitch, reloaded at rest", fontPx: 16, hostOwned: true, zoomed: false, pitch: HOST_PITCH, rule: "1px" },
-		{ label: "host-owned pitch, reloaded while zoomed", fontPx: 16, hostOwned: true, zoomed: true, pitch: HOST_PITCH, rule: "1px" },
+	// The pitch an arm expects is the row height read off the page at its text size (before the reload, and again after
+	// it); a host-owned arm expects the host's own value.
+	const arms: { label: string; fontPx: number; fontPxWhileAway?: number; hostOwned: boolean; zoomed: boolean; rule: string }[] = [
+		{ label: "reloaded at 20 px text", fontPx: 20, hostOwned: false, zoomed: false, rule: "1.25px" },
+		{ label: "text back to 16 px while the overlay was away", fontPx: 20, fontPxWhileAway: 16, hostOwned: false, zoomed: false, rule: "1px" },
+		{ label: "host-owned pitch, reloaded at rest", fontPx: 16, hostOwned: true, zoomed: false, rule: "1px" },
+		{ label: "host-owned pitch, reloaded while zoomed", fontPx: 16, hostOwned: true, zoomed: true, rule: "1px" },
 	];
-	for (const { label, fontPx, fontPxWhileAway, hostOwned, zoomed, pitch, rule } of arms) {
+	for (const { label, fontPx, fontPxWhileAway, hostOwned, zoomed, rule } of arms) {
 		const p = await browser.newPage();
 		try {
 			await mountPaper(p);
 			if (fontPx !== 16) await p.evaluate(px => (window as any).viewportFixture.fontPx("paper", px), fontPx);
+			const rowBefore = await readRow(p);
 			if (hostOwned) await p.evaluate(pitch => { (document.querySelector(".cm-editor") as HTMLElement).style.setProperty("--handwriting-paper-pitch", pitch, "important"); }, HOST_PITCH);
 			if (zoomed) await p.evaluate(() => (window as any).edgeAudit.commit("paper", 0.1));
 			const before = await p.evaluate(`(${readPaperVars})(document.querySelector(".cm-editor"))`) as PaperVars;
@@ -968,14 +1032,17 @@ it("AFTER A RELOAD: a new overlay on the same editor plans the paper at the text
 				};
 			}, fontPxWhileAway ?? null);
 			const after = await p.evaluate(`(${readPaperVars})(document.querySelector(".cm-editor"))`) as PaperVars;
-			const report = JSON.stringify({ label, before, reloaded, after });
+			const rowAfter = await readRow(p);
+			const report = JSON.stringify({ label, before, reloaded, after, rowBefore, rowAfter });
 			// Premises are soft, so one arm's failed premise cannot hide the other arms' results.
-			if (!hostOwned) expect.soft(before.pitch, `[${label}] premise: the paper at ${fontPx} px text before the reload; ${report}`).toBe(`${28 * fontPx / 16}px`);
+			if (!hostOwned) expect.soft(before.pitch, `[${label}] premise: the paper at ${fontPx} px text before the reload is its row height; ${report}`).toBe(`${rowBefore.pitch}px`);
+			// The text change while away must move the row, or the after-read could not tell the new plan from the old one.
+			if (fontPxWhileAway !== undefined) expect.soft(rowAfter.pitch, `[${label}] premise: the text change while away moved the row height; ${report}`).not.toBe(rowBefore.pitch);
 			expect.soft(reloaded.newInstance, `[${label}] premise: a new overlay instance is mounted on the same editor; ${report}`).toBe(true);
 			expect.soft(reloaded.zoom, `[${label}] premise: the new overlay is at 100 percent; ${report}`).toBeCloseTo(1, 6);
 			expect.soft(after.taken, `[${label}] premise: the new overlay has not taken the viewport over; ${report}`).toBe(false);
 			if (hostOwned) expect.soft([reloaded.inlinePitch, reloaded.inlinePitchPriority], `[${label}] the host's own pitch and its priority survive the reload; ${report}`).toEqual([HOST_PITCH, "important"]);
-			else expect.soft(after.pitch, `[${label}] pitch after the reload; ${report}`).toBe(pitch);
+			else expect.soft(after.pitch, `[${label}] pitch after the reload is the row height then; ${report}`).toBe(`${rowAfter.pitch}px`);
 			expect.soft(after.rule, `[${label}] rule after the reload; ${report}`).toBe(rule);
 		} finally {
 			await p.close();

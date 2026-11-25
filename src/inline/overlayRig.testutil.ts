@@ -42,6 +42,9 @@ import { StrokeIndex } from "../ink/StrokeIndex";
 import { DamageLedger } from "../ink/DamageLedger";
 import { DEFAULT_PEN } from "../ink/PenStyle";
 import type { BBox, InkStroke } from "../ink/Stroke";
+import { WetInkRenderer } from "../ink/WetInkRenderer";
+import { TailRenderer } from "../ink/TailRenderer";
+import { AttachedLayer } from "./InkOverlayAttachedLayer";
 
 let nextPath = 0;
 
@@ -76,6 +79,176 @@ export interface RepaintRig {
 	repaintNow(): number;
 	/** Deliver captured rAF callbacks synchronously and report their count. */
 	deliverPaintCallbacks(): number;
+	/** With `sized`: the overlay's canvases, each with what its context saw. */
+	canvases?: SizedCanvases;
+}
+
+/**
+ * Options for a rig whose resize arm runs. Without `sized` the rig is the one the purge cells use, unchanged: its canvases
+ * keep no context and its resize pass stops before the arm.
+ */
+export interface RigOptions {
+	/** The window's device pixel ratio, so the backing scale is not 1. Default 1. */
+	dpr?: number;
+	/**
+	 * Every canvas the overlay owns is a fake that keeps its own context, its listeners and its clones; wet, highlight wet and
+	 * tail are the real renderers on them; the pinch scale is 1, so the resize pass at open runs the arm, as mount's does.
+	 */
+	sized?: boolean;
+	/** With `sized`: an attached layer on fake canvases, its tile canvases kept in `tiles`. */
+	attached?: boolean;
+	/** With `sized`: the highlight pair left at 0x0, as mount leaves it for a note with no highlighter stroke. */
+	highlightDeferred?: boolean;
+}
+
+/** One fake canvas and what its context saw. */
+export interface FakeCanvas {
+	readonly el: HTMLCanvasElement;
+	/** Every setTransform its context took, in order. */
+	readonly transforms: number[][];
+	/** The horizontal scale in force at each drawing call. */
+	readonly drawScales: number[];
+	/** The horizontal scale in force at each clearRect: a clear in css px leans on it as a draw does. */
+	readonly clearScales: number[];
+	/** The source of each drawImage, in order: a copy from a kept picture, where a path draw makes none. */
+	readonly images: unknown[];
+	/** Whether anything was drawn since the backing was last blanked (a size write or a restore). */
+	readonly painted: boolean;
+	/** The browser gives the backing back blank: the context at its default state, no pixels, then `contextrestored`. */
+	restore(): void;
+	/** How many listeners it holds for `type`. */
+	listeners(type: string): number;
+}
+
+export interface SizedCanvases {
+	committed: FakeCanvas;
+	highlight: FakeCanvas;
+	highlightWet: FakeCanvas;
+	wet: FakeCanvas;
+	wetTile: FakeCanvas;
+	tail: FakeCanvas;
+	attachedPen: FakeCanvas | null;
+	attachedHl: FakeCanvas | null;
+	/** The attached layer's tile canvases, in the order it made them. */
+	tiles: FakeCanvas[];
+	/** Canvases made by cloning one of these (a stand-in copy, an extent raster layer). */
+	clones: FakeCanvas[];
+}
+
+/**
+ * A canvas whose 2d context keeps its transform as a browser does: a size write or a restore puts it back to the identity and
+ * empties the save stack. Drawing calls note the scale in force; any other call is taken and does nothing.
+ */
+export function fakeCanvas(clones: FakeCanvas[], onDraw?: () => void): FakeCanvas {
+	let w = 300;
+	let h = 150;
+	let m = [1, 0, 0, 1, 0, 0];
+	let stack: number[][] = [];
+	let painted = false;
+	const transforms: number[][] = [];
+	const drawScales: number[] = [];
+	const clearScales: number[] = [];
+	const images: unknown[] = [];
+	const listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+	const blank = (): void => {
+		m = [1, 0, 0, 1, 0, 0];
+		stack = [];
+		painted = false;
+	};
+	const drew = (): void => {
+		drawScales.push(m[0]!);
+		painted = true;
+		onDraw?.();
+	};
+	const methods: Record<string, (...a: number[]) => unknown> = {
+		setTransform: (...a: number[]) => {
+			m = a.slice(0, 6);
+			transforms.push([...m]);
+		},
+		resetTransform: () => {
+			m = [1, 0, 0, 1, 0, 0];
+		},
+		save: () => void stack.push([...m]),
+		restore: () => {
+			const top = stack.pop();
+			if (top) m = top;
+		},
+		scale: (x: number, y: number) => {
+			m = [m[0]! * x, m[1]! * x, m[2]! * y, m[3]! * y, m[4]!, m[5]!];
+		},
+		translate: (x: number, y: number) => {
+			m = [m[0]!, m[1]!, m[2]!, m[3]!, m[4]! + m[0]! * x + m[2]! * y, m[5]! + m[1]! * x + m[3]! * y];
+		},
+		stroke: drew,
+		fill: drew,
+		fillRect: drew,
+		strokeRect: drew,
+		fillText: drew,
+		drawImage: (...a: number[]) => {
+			images.push(a[0]);
+			drew();
+		},
+		putImageData: drew,
+		clearRect: () => void clearScales.push(m[0]!),
+		getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+		measureText: () => ({ width: 0 }),
+		getContextAttributes: () => ({ desynchronized: false }),
+		isContextLost: () => false,
+	};
+	const props: Record<string, unknown> = {};
+	const el = {
+		setCssStyles: () => undefined,
+		remove: () => undefined,
+		classList: { add: () => undefined, remove: () => undefined, toggle: () => undefined },
+		style: { removeProperty: () => undefined },
+		addEventListener: (type: string, fn: EventListenerOrEventListenerObject) => {
+			let set = listeners.get(type);
+			if (!set) listeners.set(type, (set = new Set()));
+			set.add(fn);
+		},
+		removeEventListener: (type: string, fn: EventListenerOrEventListenerObject) => void listeners.get(type)?.delete(fn),
+		// No layout in this rig: a box of no size, which the drag picture's window reads as "the canvas's own rows".
+		getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 }),
+		cloneNode: () => {
+			const c = fakeCanvas(clones);
+			clones.push(c);
+			return c.el;
+		},
+		getContext: () => ctx,
+	} as Record<string, unknown>;
+	const ctx = new Proxy(props, {
+		get(target, key) {
+			if (key === "canvas") return el;
+			if (typeof key === "string" && key in methods) return methods[key];
+			if (key in target) return target[key as string];
+			return () => undefined;
+		},
+		set(target, key, value) {
+			target[key as string] = value;
+			return true;
+		},
+	});
+	Object.defineProperties(el, {
+		width: { get: () => w, set: (v: number) => { w = v; blank(); } },
+		height: { get: () => h, set: (v: number) => { h = v; blank(); } },
+	});
+	return {
+		el: el as unknown as HTMLCanvasElement,
+		transforms,
+		drawScales,
+		clearScales,
+		images,
+		get painted() { return painted; },
+		restore() {
+			blank();
+			const ev = new Event("contextrestored");
+			for (const fn of [...(listeners.get("contextrestored") ?? [])]) {
+				if (typeof fn === "function") fn(ev);
+				else fn.handleEvent(ev);
+			}
+		},
+		listeners: (type: string) => listeners.get(type)?.size ?? 0,
+	};
 }
 
 function stroke(id: string, at: { x: number; y: number }): InkStroke {
@@ -120,7 +293,7 @@ function cmLine(left: number): Fields {
 	};
 }
 
-function makeRig(path: string, hooks: RigHooks): RepaintRig {
+function makeRig(path: string, hooks: RigHooks, opts: RigOptions = {}): RepaintRig {
 	const o = Object.create(InkOverlayPlugin.prototype) as Fields;
 	const proto = InkOverlayPlugin.prototype as unknown as Record<
 		string,
@@ -225,7 +398,7 @@ function makeRig(path: string, hooks: RigHooks): RepaintRig {
 	// ---- the scheduling boundary: no frame runs on its own in this rig
 	const paintCallbacks: Array<() => void> = [];
 	const win = {
-		devicePixelRatio: 1,
+		devicePixelRatio: opts.dpr ?? 1,
 		getComputedStyle: () => ({ fontSize: "16px", paddingTop: undefined, position: "relative" }),
 		cancelAnimationFrame: () => undefined,
 		// Inert: the idle index rebuild never fires here, so a paint that leaves the index dirty has it rebuilt at the next read.
@@ -316,6 +489,67 @@ function makeRig(path: string, hooks: RigHooks): RepaintRig {
 	o.lassoActive = false;
 	o.spaceLineY = null;
 
+	// ---- sized: the canvases mount makes, in mount's order, on fakes that keep their contexts
+	let canvases: SizedCanvases | undefined;
+	if (opts.sized) {
+		const clones: FakeCanvas[] = [];
+		const tiles: FakeCanvas[] = [];
+		const committedDraw = (): void => {
+			drawOps++;
+			if (armed) {
+				armed = false;
+				hooks.onCommittedDraw();
+			}
+		};
+		const highlight = fakeCanvas(clones, committedDraw);
+		const highlightWet = fakeCanvas(clones);
+		const attachedHl = opts.attached ? fakeCanvas(clones) : null;
+		const committed = fakeCanvas(clones, committedDraw);
+		const attachedPen = opts.attached ? fakeCanvas(clones) : null;
+		const wet = fakeCanvas(clones);
+		const wetTile = fakeCanvas(clones);
+		const tail = fakeCanvas(clones);
+		canvases = { committed, highlight, highlightWet, wet, wetTile, tail, attachedPen, attachedHl, tiles, clones };
+		o.highlightCanvas = highlight.el;
+		o.highlightWetCanvas = highlightWet.el;
+		o.committedCanvas = committed.el;
+		o.wetCanvas = wet.el;
+		o.wetTileCanvas = wetTile.el;
+		o.tailCanvas = tail.el;
+		o.tailWashed = false;
+		if (attachedPen && attachedHl) {
+			o.attachedLayer = new AttachedLayer(attachedPen.el, attachedHl.el, () => {
+				const t = fakeCanvas(clones);
+				tiles.push(t);
+				return t.el;
+			});
+		}
+		o.committedCtx = committed.el.getContext("2d");
+		o.highlightCtx = highlight.el.getContext("2d");
+		const wetRenderer = new WetInkRenderer(wet.el, false);
+		wetRenderer.smooth = true;
+		wetRenderer.shape = true;
+		const highlightWetRenderer = new WetInkRenderer(highlightWet.el, false);
+		highlightWetRenderer.smooth = true;
+		o.wet = wetRenderer;
+		o.highlightWet = highlightWetRenderer;
+		o.activeWet = wetRenderer;
+		o.tail = new TailRenderer(tail.el);
+		o.highlightPairDeferred = !!opts.highlightDeferred;
+		if (opts.highlightDeferred) {
+			for (const c of [highlight.el, highlightWet.el]) {
+				c.width = 0;
+				c.height = 0;
+			}
+			highlightWetRenderer.noteBackingCleared();
+		}
+		o.highlightBlank = true;
+		o.wetDeferred = false;
+		o.pinchScaleNow = 1;
+		// Mount's step before its resize observers: the restore listeners, where the overlay has them.
+		proto.watchBackingRestore?.call(o);
+	}
+
 	// ---- shadowed: needs an editor, the DOM or the file system; paints nothing
 	o.filePath = () => path;
 	o.updateHandwritingPageClass = () => undefined;
@@ -363,6 +597,7 @@ function makeRig(path: string, hooks: RigHooks): RepaintRig {
 			for (const fn of run) fn();
 			return run.length;
 		},
+		canvases,
 	};
 }
 
@@ -373,7 +608,10 @@ function makeRig(path: string, hooks: RigHooks): RepaintRig {
  */
 export async function openRepaintRig(
 	strokeCount: number,
-	hooks: RigHooks
+	hooks: RigHooks,
+	opts: RigOptions = {},
+	/** Which of the strokes are highlighter strokes, by index. */
+	highlighter: (i: number) => boolean = () => false
 ): Promise<RepaintRig> {
 	const path = "drawms-" + ++nextPath + ".md";
 	const pageId = "page-" + nextPath;
@@ -385,16 +623,17 @@ export async function openRepaintRig(
 			data.surface = "inline";
 			// Spread down the page, so a band move of a few hundred px still
 			// has ink to draw and a scrolled repaint is not silently empty.
-			data.strokes = Array.from({ length: strokeCount }, (_, i) =>
-				stroke("s" + i, { x: 100, y: 50 + i * 300 })
-			);
+			data.strokes = Array.from({ length: strokeCount }, (_, i) => {
+				const s = stroke("s" + i, { x: 100, y: 50 + i * 300 });
+				return highlighter(i) ? { ...s, tool: "highlighter" as const } : s;
+			});
 			return { data, recovered: false };
 		},
 		scheduleSidecar: () => undefined,
 		notify: () => undefined,
 	};
 	inlineInk.attachHost(host);
-	const rig = makeRig(path, hooks);
+	const rig = makeRig(path, hooks, opts);
 	(rig.overlay.loadInk as (p: string) => void)(path);
 	await inlineInk.ensureLoaded(path);
 	rig.deliverPaintCallbacks();

@@ -19,7 +19,7 @@
 
 import { validCameraScale } from "./ZoomScale";
 
-export const MAX_PINCH_SCALE = 6;
+export const MAX_PINCH_SCALE = 8;
 export const MIN_PINCH_SCALE = 0.1;
 
 /**

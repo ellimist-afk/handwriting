@@ -1,262 +1,81 @@
-# How Handwriting stores ink
+# how Handwriting stores ink
 
-Written against the code in `src/persistence/PageStore.ts`,
-`src/inline/InlineInkStore.ts`, `src/model/PageData.ts`,
-`src/model/MarkdownPage.ts`, `src/pdf/PdfIdentity.ts` and
-`src/pdf/PdfInkStore.ts`. Where this document and the code disagree, the code
-is right.
+### where ink is stored
 
-## the split
+your ink is one json file per note in /.handwriting/
 
-Your words stay in the Markdown file. Handwriting never puts ink in it.
+(your vault)/.handwriting/
 
-Ink and layout live in a sidecar: one JSON file per note, under
-`.handwriting/` at the vault root, named by the note's page id.
+sidecar is a digital photography term that refers to a small file besides a main file that holds information about the main file. this is a useful analogy
 
-```
-<vault>/
-  Some note.md                     your text, plus one frontmatter property
-  .handwriting/
-    3f2a....json                   the ink for that note
-    3f2a....json.tmp               only while a save is in flight
-    trash/
-      3f2a...-1755881041234.json   a copy kept from a delete
-```
+in this case, the sidecar stores your ink as coordinates - your note is linked to your ink by a single properties line in the properties field of your note (`handwriting-page-id`). this link + the json coordinates tells Obsidian where all the ink is
 
-## identity
+what this means practically is that no matter what happens to the ink, the text in your note will be safe, as the note itself is not modified (besides its frontmatter).
 
-The link between a note and its sidecar is one frontmatter property:
+disable the plugin and notes stay perfectly readable `.md`; the ink is in the sidecar and won't render.
 
-```yaml
----
-handwriting-page-id: 3f2a91c8-....
----
-```
+renaming or moving a note is fine because the id is tied to the sidecar, not the file name of the note. however if you move that note to a different vault you have to bring its json with it, otherwise its ink won't appear. 
 
-Handwriting writes it on the first stroke and never again. A note you never
-ink on is never modified. The property is hidden from the Properties panel,
-which is also what keeps the first stroke from making the note jump.
+if you duplicate a note, the copy gets its own id and its own copy of the ink
 
-The sidecar is keyed by that id rather than the filename, so renaming or
-moving a note keeps its ink. Move the note to another vault without `.handwriting/`
-and the ink does not follow; the id stays in the frontmatter, so putting the
-sidecar back later reconnects it.
+currently reviewing a solution + feature that will include the ability to export or "pack" ink into shareable notes/PDFs so others with the plugin can edit the ink on their own devices.
 
-A note's own paper background and Infinite Canvas choice are kept in its
-sidecar, not in its properties. Choosing one on a note you have never inked
-on writes the page id, the same one line the first stroke writes. Notes from
-earlier versions may still carry `handwriting-paper` or `handwriting-canvas`
-lines; they are still read, and each is removed the next time you change that
-choice on that note.
+### syncing
 
-Two other frontmatter keys exist and Handwriting does not add either on its
-own. `handwriting: page` marked a note for the canvas page view, which the
-plugin no longer has; a note carrying it opens as ordinary Markdown, and the
-key is left alone rather than stripped. `handwriting-version` appears only on
-notes that carry the same older block markers.
+the ink is literally json, it will sync between devices just like any other file. however on default settings Obsidian Sync, iCloud and Dropbox won't sync the .handwriting/ folder because it is hidden, and as these services don't sync hidden folders by default, your ink may not appear on your other device
 
-## pdfs
+try using Compatibility with Obsidian Sync, iCloud and Dropbox in the settings and hit Turn on. this will move ink into a visible handwriting/ folder so sync services will pick it up. you can Turn off to move it back to being hidden.
 
-PDF ink is stored exactly like note ink: one JSON file per PDF, under
-`.handwriting/`, through the same writes, the same conflict checks and the
-same trash.
+recommend starting first with the device with ink already on it. and do this on both devices.
 
-What differs is identity. A note carries its page id in its frontmatter. A
-PDF cannot: there is nowhere to put one, and writing into the PDF is the one
-thing this feature promises never to do. So the id comes from the file's
-content instead, and looks like this:
+Obsidian Sync also needs **Sync all other types** turned on (Settings > Sync > selective sync). as we covered earlier, your ink is saved as json files and Obsidian Sync skips those by default.
 
-```
-pdf-4c1f9a2b7e0d5836a1c4e9f20b7d8a63
-```
+if you quickly write on the same note on two separate, synced devices before they finish syncing (why are you doing this lol) you will end up with a sync conflict with two different versions of your ink. To resolve the sync conflict, open the command palette and run:
 
-That is a SHA-256 over the first 64 KiB of the file plus its exact byte
-length, kept to 32 hex characters. The head rather than the whole file
-because a hundred-megabyte scan should not be read end to end every time it
-opens. The length is in there so truncation cannot forge an identity: two
-documents sharing a 64 KiB prefix, like a template and a filled-in copy of
-it, differ in length, and that difference reaches the hash.
+Handwriting: fix ink de-sync
 
-Three things follow from keying on content:
+in that dialog box, choose either: Keep this device's ink, Take the other, or Keep both. no matter what you choose, nothing gets deleted; both ink files will be saved safely. i am always trying my best to make sure you cannot accidentally get rid of your ink permanently- i think i am always trying to leave at least an option to recover your ink
 
-- Renaming or moving a PDF costs nothing. The ink follows the bytes.
-- Two machines syncing the same file agree on the id by construction, with no
-  coordination. This is the only reason ink drawn on a tablet appears on a
-  desktop.
-- Two copies of the same PDF in one vault are separate INSTANCES: each vault
-  file gets its own sidecar, so a fresh copy of a document you already
-  annotated starts blank. Export the same source twice and the second file
-  is its own clean page, whatever its bytes.
+### pdfs
 
-Instances work by path claims. The content hash names a FAMILY; the first
-file opened in a family keeps the bare `pdf-<hash>` id (which is exactly the
-pre-instance id, so existing sidecars carry straight over), and each further
-copy gets `pdf-<hash>-2` and up. Every sidecar records the vault paths it
-belongs to, in the sidecar itself - so synced devices agree by reading the
-same files, with no coordination.
+a pdf doesn't have a properties field so theres not an obvious place to put an id. instead i combined the id from the file's contents with its size to create a unique signature. this serves as the "key" for the json coordinates.
 
-That is also what keeps renames working: a renamed or moved PDF turns up
-with no sidecar claiming its path, but one sidecar's claimed path has just
-vanished from the vault - the ink follows. A sidecar with no recorded paths
-is older data; the first file to open it adopts it.
+this abstraction enables you to rename or move a pdf around and ink won't break. another bonus is that using a hash is more conducive to the problem of sync; without almost any extra work, opening and viewing the same pdf on two separate devices will get you the same id and thus ink
 
-The ink is never inside the PDF. It is an overlay from the sidecar, exactly
-as on notes. Open the file in any other reader and it is clean; disable the
-plugin and it is clean. The file itself is never touched.
+one json per pdf. the ink is never written into the pdf file itself. you know the drill.
 
-**Re-exporting a PDF deliberately does not carry the ink over.** A file that
-has been through another editor is a different document, its pages may have
-reflowed, and old ink positions would be lies. The sidecar is orphaned rather
-than misapplied. The file is kept, nothing is overwritten, and you are told
-once.
+if you want a pdf with annotations saved, you have to "Flatten" the ink onto the page - this will make a pdf copy. the command is called: Flatten ink into a copy of this PDF
 
-Stored PDF ink carries `surface: "pdf"`. That marks a separate coordinate
-world - page-local CSS pixels at scale 1, measured from the corner of the
-page it was drawn on - which must never be read as note-surface geometry.
+finally: a duplicate of a pdf in the same vault starts with no ink
 
-## the sidecar format
+### saving and recovery
 
-JSON, one object, with `schemaVersion` first. This build writes version 1
-and reads up to version 2.
+I worked hard trying to guarantee that you wouldn't lose your ink no matter how hard you tried. i still didn't make it impossible so be careful. 😭
 
-Stable fields, safe to depend on:
+some things i did included:
 
-- `schemaVersion` (number)
-- `pageId` (string, matches the note's `handwriting-page-id`)
-- `surface` (`"inline"` for editor ink, `"pdf"` for ink on a PDF; absent in
-  sidecars written by the canvas page view, which the plugin no longer has)
-- `strokes` (array; each has `id`, `tool`, `color`, `width`, `createdAt`, and
-  points)
-- `textBoxes` and `images` (`id`, position, size, `z`) - written only by the
-  canvas page view, which the plugin no longer has. The format still reads
-  and writes both keys
-- `noteCanvas` (boolean, optional) and `notePaper` (`"none"`, `"lines"`,
-  `"grid"` or `"dots"`, optional): the note's own Infinite Canvas and paper
-  background choices. Absent means the note follows the global setting. A
-  value this build does not recognise is kept and written back as found
+before replacing the saved sidecar, Handwriting writes a complete temporary copy. if a save gets corrupted or interrupted, recovery is possible
 
-Internal, and subject to change without a schema bump:
+if an ink file is corrupted, damaged, or can't be read at all, Handwriting will refuse to overwrite it. this will stop you from loading a broken file and accidentally overwriting all the information
 
-- how stroke points are packed inside a stroke
-- rounding of stored coordinates
-- the exact spelling of tool and color values
-- the naming of conflict, damaged and trash files
+in addition, i added `Handwriting: Export ink as SVG (drawing only)` and `Handwriting: Export ink as PDF (drawing only)` commands so you can save your ink to possibly use in other programs. note: those commands only copy your handwriting.
 
-**Unknown fields survive.** Anything Handwriting does not recognise, at the
-top level or on an individual stroke or box, is preserved verbatim through a
-load and save. This is deliberate: an older Handwriting must not delete a
-newer Handwriting's data, and in a synced vault both versions are live at
-once. A sidecar written by a newer build that still declares a `schemaVersion`
-this build can read — 1 or 2 today — opens normally. A sidecar declaring 3
-or higher is never written to at all; the note opens read-only for ink so the
-newer build's data cannot be overwritten.
+for those who need text and ink export, i did a lot of wet work with Obsidian's native pdf export and viewer in 1.5.1 and beyond to ensure that `Export to PDF` worked like expected.
 
-Coordinates are note-space CSS pixels at zoom 1. Zoom is a view transform.
-No stroke is ever rewritten or rescaled when you zoom.
+`Handwriting: Delete all ink on this note` and `Handwriting: Delete all ink on this PDF` always make and save a recovery copy before clearing the page. if that copy can't be saved, the command will refuse to delete ink
 
-## when saves happen
+deleting a note doesn't delete its ink either. 'orphaned' ink gets moved to .handwriting/trash/ and Handwriting will never empty that folder. you can clear it out yourself if you want the space back. not recommended unless you know what you're doing.
 
-A save runs **700 ms after the most recent change**, so a burst of strokes
-becomes one write and each pause of that length commits what came before it.
+if your ink is still in the hidden .handwriting/ folder, check that your backup tool actually includes hidden folders
 
-A run of changes with no pause cannot defer a save forever. The first change
-of a batch starts a **five-second** clock that later changes do not reset.
-Whichever expires first writes the current state.
+finally: deleting the entire handwriting folder will take all its recovery copies with it so be careful with this nuclear option. and back up your vault!!
 
-Nothing is written on the pen path. The eraser, which fires at input rate,
-persists once per gesture at pen-up.
+### the json
 
-The first stroke on a note that has never been inked is a special case: the
-page id must be written into the Markdown before any sidecar keyed to it can
-exist, so that write is awaited, and the first sidecar write follows
-immediately rather than waiting another 700 ms.
+the json file formats are laid out like this:
 
-A quit before a pending write lands loses what that write was carrying.
-Handwriting flushes on unload, but Obsidian does not wait for the flush, so
-treat it as best effort.
+each file has schemaVersion, pageId, surface (inline = notes, pdf = pdfs) and strokes. 
 
-## how a write happens
+each stroke contains id, tool, color, width, createdAt and its points in this order: x, y, pressure, and time
 
-Every save writes to `<id>.json.tmp` and renames it over `<id>.json`. A
-rename is atomic on the filesystems Obsidian runs on, so an interrupted save
-leaves either the old complete file or the new complete file, never a
-half-written one.
-
-Writes for one page are serialized, so two saves cannot interleave their
-rename dance. A failed write keeps its state queued and retries up to three
-times, 1.5 seconds apart, before telling you once.
-
-## recovery
-
-**Interrupted save.** If `<id>.json` is missing but `<id>.json.tmp` is there,
-the temporary file is loaded and you are told it was recovered.
-
-**Corrupt main file with a good temporary file.** If `<id>.json` cannot be
-parsed and its own `.tmp` is a complete, readable-schema page (version 1 or 2) for the same id,
-the corrupt bytes are moved to `.handwriting/<id>.damaged-<mtime>.json`, the
-temporary file is promoted, and you are told what happened and where the
-damaged bytes went. Every condition is re-checked immediately before either
-file moves, so a file that changed while the recovery was queued is left
-alone. If the temporary file is missing, corrupt, for another page, or a
-newer schema, nothing moves and the read-only behaviour below applies.
-
-Handwriting never chooses between two readable files.
-
-**Corrupt sidecar with nothing to recover from.** The note opens read-only
-for ink. The file is not overwritten, so a backup or sync copy can still
-repair it. Fix the file and reopen the note, and saving resumes.
-
-**Changed by something else.** Before each write Handwriting checks whether
-the file on disk is still the one it last read or wrote, by modification time
-and then by a content stamp, because sync tools routinely preserve
-timestamps. If it changed, the other version is moved to
-`.handwriting/<id>.conflict-<mtime>.json`, your session's ink is written, and
-you are told, after the write lands rather than before.
-
-## duplicate notes
-
-A page id must belong to exactly one note. Copying a note copies its
-frontmatter, so both copies would read and write the same sidecar.
-
-Handwriting checks for that once Obsidian's metadata index is complete after
-startup, and again whenever a note's frontmatter changes. The copy gets a
-fresh id and its own copy of the ink; the original is never written.
-
-If Handwriting cannot tell which note is the original, it stops saving on
-both and tells you how to resolve it: delete the `handwriting-page-id` line
-from the copy, and its next stroke mints a new one.
-
-## deletion and trash
-
-When Obsidian reports that a note was deleted while Handwriting is loaded,
-its sidecar is **moved** into `.handwriting/trash/` rather than deleted.
-That covers deletion inside Obsidian and deletions Obsidian notices on disk
-while running. A file removed while Obsidian was closed is never reported, so
-nothing moves and the sidecar stays in `.handwriting/`, unreferenced.
-
-`Delete all ink on this note` copies the ink into the trash first, and
-refuses to wipe if that copy cannot be written.
-
-Trash files are named `<id>-<timestamp>.json`, with a counter appended if two
-land in the same millisecond. Nothing in `.handwriting/trash/` is ever
-overwritten, so repeated deletions keep every generation. A sidecar that is
-provably empty is deleted rather than adding a useless generation.
-
-**Handwriting never empties that folder.** It only grows. You can clear out
-that folder to get the space back. However, delete those files and your ink
-will be gone. So don't do it unless you know what you're doing.
-
-## what to back up
-
-`.handwriting/` and your Markdown files. Both.
-
-`.handwriting/` is hidden, and not every sync or backup tool includes hidden
-folders by default. Check yours. If it skips them, the backup is missing
-every sidecar.
-
-Plugin settings live in `.obsidian/plugins/handwriting/data.json`: per-note
-camera positions, the selected nib size and color, and the page-id ownership
-map used for duplicate detection. Losing it does not touch any ink.
-
-The atomic-write scheme covers an interrupted save. A failing disk still
-needs an ordinary backup.
+if you have any questions i will try to answer as best i can

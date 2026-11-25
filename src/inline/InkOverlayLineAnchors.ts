@@ -6,7 +6,7 @@ import { type BlockInfo, BlockType, EditorView, ViewUpdate } from "@codemirror/v
 import { type ChangeDesc, type Text } from "@codemirror/state";
 import { isolateHistory } from "@codemirror/commands";
 import { inkApplied, inkEffect, type InkOp } from "./InkHistory";
-import { ATTACHMENT_CONTEXT, attachGroup, attachmentSelection, detachGroup, insertSpaceMembers, isOpaqueAttachment, refindCollapsed, refreshTarget, resolveAttachments, resolveTarget, targetAt, wordRangeUnder, wordsIn, type AttachmentData, type AttachmentRecord, type AttachmentStatus, type AttachmentTarget, type AttachStep } from "./InkAttachments";
+import { ATTACHMENT_CONTEXT, alignShown, attachGroup, attachmentSelection, cellEdgeReached, cellStart, cellWords, detachGroup, insertSpaceMembers, isOpaqueAttachment, refindCollapsed, refindInTables, refreshTarget, resolveAttachments, resolveTarget, sameFileLinkSwaps, startsUndrawn, tableAround, tableCellIn, tableRows, targetAt, wordRangeUnder, wordsIn, type AttachmentData, type AttachmentRecord, type AttachmentStatus, type AttachmentTarget, type AttachStep, type TableCell, type TableRows, type WordPlace } from "./InkAttachments";
 import { GROUP_READS_PER_MEASURE, shownList, type AttachFollow, type FollowSnapshot } from "./AttachFollow";
 import { newId } from "../model/PageData";
 import { InkStroke, type BBox } from "../ink/Stroke";
@@ -19,6 +19,7 @@ import { Notice } from "obsidian";
 import { ATTACH_STRINGS } from "./AttachDecoration";
 import type { Point2 } from "../ink/Smoothing";
 import { anchorTop } from "./DocumentTop";
+import { embedInkChanged } from "./EmbedInk";
 import { SPRITE_PAD, type AttachedGroup } from "./InkOverlayAttachedLayer";
 import { committedFloorFor } from "./InkOverlayRegistry";
 import type { InkReach } from "./FrontierCache";
@@ -60,7 +61,7 @@ declare module "./InkOverlay" {
 		attachSelected(): boolean;
 		attachAt(path: string, id: string, ids: readonly string[], target: AttachmentTarget, ref: { x: number; y: number }): void;
 		followDocChanged(path: string, u: ViewUpdate): void;
-		followRefAt(pos: number): { x: number; y: number } | null;
+		followRefAt(pos: number, reader?: TableReader, legacy?: (t: TableRows, pos: number) => boolean): { x: number; y: number } | null;
 		requestFollowMeasure(): void;
 		detachAttachment(path: string, id: string): boolean;
 		detachSelected(): boolean;
@@ -81,6 +82,28 @@ declare module "./InkOverlay" {
 
 /** Each surface's follow measure request: one object, so CodeMirror runs it once per measure however often asked. */
 type FollowRead = { changed: boolean; more: boolean; before: FollowSnapshot };
+/** A Live Preview table widget as one read phase meets it: its source rows and each shown row's cells, as drawn. */
+interface TableDom {
+	src: TableRows;
+	cells: Element[][];
+	/** Each cell's drawn text matched to its source, built at its first read in this read phase; by row * ncol + col. */
+	texts: Map<number, CellText | null>;
+}
+/** One cell's drawn text, matched to its source text. */
+interface CellText {
+	cell: TableCell;
+	/** Each source character's index in the resting drawing (-1: not drawn). A word is placed one to one when all match. */
+	rest: Int32Array;
+	/** Each source character's index in the text shown now (the nested editor's while the cell is under edit), or -1. */
+	map: Int32Array;
+	/** The shown text's nodes, each with the index of its first character in the shown text. */
+	nodes: { node: CharacterData; start: number }[];
+}
+/**
+ * The table widgets one read phase meets, by their block's start: one walk of each table's DOM per read phase. And the
+ * note's whole text, built at most once per read phase (no document change within one).
+ */
+type TableReader = { table(block: { from: number; to: number }): TableDom | null; text(): string };
 /** The drag snapshot each surface's attached layer last painted under. */
 const attachedSnaps = new WeakMap<InkOverlayPlugin, object | null>();
 const followRequests = new WeakMap<InkOverlayPlugin, { key: object; read: () => FollowRead; write: (m: FollowRead) => void }>();
@@ -109,12 +132,31 @@ const boxRequests = new WeakMap<InkOverlayPlugin, { key: object; read: () => Box
 
 /** How long after the last editor update that drew lines before old ink on the measured lines is anchored, in ms (LineAnchor.ts). */
 const LINE_ANCHOR_QUIET_MS = 300;
+/** A stroke in no readable group, in the anchor pass's note of members' anchors before it ran. */
+const NOT_A_MEMBER = Symbol("not a member");
 /**
  * How far the content's painted scale (its box width over its layout width) may sit from the overlay's before the line box read
  * waits, relative. The layout width is an integer, so at a 107 px content box (600 percent) the quotient alone is good to 0.5
  * percent; a zoom step the overlay has not adopted yet is a quarter or more.
  */
 const BOX_SCALE_SLACK = 0.01;
+
+/** The lines of each selection range of `u`'s state, 1-based and inclusive, as the anchors take them (LineAnchors.selected). */
+function selectionLines(u: ViewUpdate): LineRange[] {
+	// A unit rig's update may carry a state with no selection.
+	const { doc, selection } = u.state as Partial<ViewUpdate["state"]>;
+	if (!doc || !selection) return [];
+	return selection.ranges.map((r) => ({ from: doc.lineAt(r.from).number, to: doc.lineAt(r.to).number }));
+}
+
+/**
+ * An update whose transactions move the selection and do nothing else: no document change, no effect, no reconfiguration.
+ * The heights it brings are the lines' own (a block drawn once the cursor leaves it); a fold, an unfold or a mode switch
+ * carries an effect or a reconfiguration, and its heights move ink as any layout change's do.
+ */
+function selectionAlone(u: ViewUpdate): boolean {
+	return u.selectionSet && u.transactions.length > 0 && u.transactions.every((tr) => !tr.docChanged && (tr.effects?.length ?? 0) === 0 && !tr.reconfigured);
+}
 
 	/** The write of the measure after a document change (lineWindowMeasure). */
 	function lineWindowMeasured(this: InkOverlayPlugin): void {
@@ -176,6 +218,11 @@ const BOX_SCALE_SLACK = 0.01;
 		if (!path) return;
 		const anchors = this.lineAnchors, src = inlineInk.strokes(path), measure = u.transactions.length === 0;
 		const tracked = anchors.tracks(path, src);
+		// `?.`: a unit rig's anchors may be a stand-in without it.
+		anchors.selected?.(selectionLines(u));
+		// A fold, an unfold or a mode switch whose own update changed no layout brings its heights at the next measure: the
+		// settling lines end at the transaction, so those heights move ink as today.
+		if (!measure && !u.docChanged && !selectionAlone(u)) anchors.transactionRead?.();
 		// The heights of the lines this update drew go on record, from the mount on, whether or not the ink has loaded: lines
 		// drawn before it lands are measured all the same. A height drawn in an update is the editor's estimate until its next
 		// measure, so the measured prefix takes it only once marked: an update from the measure loop carries no transaction,
@@ -190,7 +237,7 @@ const BOX_SCALE_SLACK = 0.01;
 				anchors.docChanged(path, src, u.startState.doc, u.changes, u.state.doc);
 				if (anchors.windowOpen) this.view.requestMeasure(this.lineWindowMeasure);
 			} else if (u.geometryChanged) {
-				if (anchors.layoutChanged(path, src, measure ? "measure" : "transaction")) this.lineAnchorsMoved(path);
+				if (anchors.layoutChanged(path, src, measure ? "measure" : selectionAlone(u) ? "selection" : "transaction")) this.lineAnchorsMoved(path);
 			} else if (measure && anchors.windowOpen && anchors.windowViewed(path, src)) this.lineAnchorsMoved(path);
 		} else if (u.geometryChanged) {
 			// No anchored ink and no window open: nothing to re-take or read again, but what was read is now old, and the measured
@@ -295,10 +342,20 @@ const BOX_SCALE_SLACK = 0.01;
 			// Old ink taken on its measured line shows on its words at once: where the editor's estimates hold those words away
 			// from the page position, the note's ink repaints where it now shows.
 			const gen = this.lineAnchors.generation;
+			// Each attached member's anchor before the pass. A read-only view (Reading view, an embed) draws a member by its
+			// anchor, and one painted while lines were typed above drew it with none, at its stored place.
+			const src = inlineInk.strokes(path), follow = this.lineAnchors.follow;
+			const wasAnchor = follow.any ? src.map((s) => (follow.offsetOf(s.id) ? s.lineAnchor : NOT_A_MEMBER)) : null;
 			// A note whose file carried no column width takes it from the first anchors taken here (ColumnRef.ts): the hold asked
 			// at open found none, and nothing else asks again. Asked before the repaint, so the ink is painted under the held width.
-			if (this.lineAnchors.anchorMeasured(path, inlineInk.strokes(path)) > 0) this.applyColumnHold();
+			if (this.lineAnchors.anchorMeasured(path, src) > 0) this.applyColumnHold();
 			if (this.lineAnchors.generation !== gen) this.lineAnchorsMoved(path);
+			// A member's anchor set or changed: the note's read-only views paint again, once, so they show it on its line at
+			// rest. Told to the views alone: the editors' ink-changed listeners would apply a column hold in another pane.
+			// Free ink anchored alone tells nothing.
+			let membersTook = 0;
+			if (wasAnchor) for (let i = 0; i < src.length; i++) if (wasAnchor[i] !== NOT_A_MEMBER && src[i]!.lineAnchor !== wasAnchor[i]) membersTook++;
+			if (membersTook > 0) embedInkChanged(path);
 			// Lines anchored now are read from their boxes from the next measure on.
 			this.requestLineBoxes();
 		}, ms);
@@ -330,7 +387,8 @@ const BOX_SCALE_SLACK = 0.01;
 	function followMoved(this: InkOverlayPlugin, path: string, before: FollowSnapshot): void {
 		const follow = this.lineAnchors.follow, layer = this.attachedLayer;
 		// The members' anchors go with their group's new dy, so Reading view and PDF draw them where the editor shows them; a
-		// member that lost its anchor is taken by the old-ink pass once the editor is quiet.
+		// member whose anchor was carried (no measure read its line) is taken again from a measure by the old-ink pass once
+		// the editor is quiet.
 		if (this.lineAnchors.retakeMembers(path, inlineInk.strokes(path), before) > 0 && !(this.lineAnchorPassTimer > 0))
 			this.armLineAnchorPass(path, LINE_ANCHOR_QUIET_MS);
 		// The store's list keeps the correction each group shows now, a move only the measure found too, so the page's next
@@ -708,15 +766,16 @@ const BOX_SCALE_SLACK = 0.01;
 	}
 
 	/**
-	 * The note's strokes for an export: each attached group's member where this surface shows
-	 * it (a group not read here yet at the correction its record kept), free ink as stored. No point settles at a write,
-	 * so the store keeps the place a group was attached at.
+	 * The note's strokes for an export, every stored stroke once, in store order, where this surface shows it: an attached
+	 * group's member at its group's correction (a group not read here yet at the correction its record kept), free ink at
+	 * its line's correction (the store's own object at none). Never the shown list: it leaves a pending group's members
+	 * out. No point settles at a write, so the store keeps the place each stroke was drawn or attached at.
 	 */
 	function exportStrokes(this: InkOverlayPlugin, path: string): readonly InkStroke[] {
-		const follow = this.lineAnchors.follow;
+		const anchors = this.lineAnchors, follow = anchors.follow;
 		follow.setList(inlineInk.attachments(path));
-		const strokes = inlineInk.strokes(path);
-		return follow.any ? strokes.map((s) => follow.exported(s)) : strokes;
+		const members = follow.memberMap;
+		return inlineInk.strokes(path).map((s) => (members.has(s.id) ? follow.exported(s) : anchors.shownOf(s)));
 	}
 
 	/** How far this surface shows a stroke below its page position, world units. */
@@ -818,12 +877,21 @@ const BOX_SCALE_SLACK = 0.01;
 			if (anchors.follow.seeded(op.after, this.view.lineBlockAt(op.after.target.from).top, carry)) {
 				if (!live) this.requestFollowMeasure();
 			} else if (st) o = anchors.follow.groupOffset(op.after.id) ?? o;
-		} else if (st && op.after) o = anchors.follow.groupOffset(op.after.id) ?? o;
+		} else if (st && op.after) {
+			// A group that does not move with its text yet. A live Attach places it at its new point with no correction
+			// (attachAt, follow.attached), so it ends a hold with every member stored where it is shown; any other step
+			// keeps the group shown by its last read.
+			o = live ? { dx: 0, dy: 0 } : anchors.follow.groupOffset(op.after.id) ?? o;
+		}
 		if (st) {
 			// Each kept member stored where it is shown less the group's correction, each freed one where it is shown. One
 			// store pass per distinct move, not per member: a Detach is one pass, an Attach one per correction it settles.
-			const byMove = new Map<string, { dx: number; dy: number; ids: string[] }>();
+			// A freed member another group of the new list holds is that group's and stays as it stores it: the undo of a
+			// group attach puts the absorbed groups back first, then takes the merged group back to its own members
+			// (the follow's map is the new list's, set just above).
+			const byMove = new Map<string, { dx: number; dy: number; ids: string[] }>(), holder = anchors.follow.memberMap;
 			st.strokeIds.forEach((id, i) => {
+				if (!kept.has(id) && holder.has(id)) return;
 				const c = kept.has(id) ? o : { dx: 0, dy: 0 };
 				const dx = shift[i]!.dx - c.dx, dy = shift[i]!.dy - c.dy, key = `${dx},${dy}`;
 				const m = byMove.get(key) ?? byMove.set(key, { dx, dy, ids: [] }).get(key)!;
@@ -832,7 +900,8 @@ const BOX_SCALE_SLACK = 0.01;
 			for (const m of byMove.values()) inlineInk.moveStrokes(path, m.ids, m.dx, m.dy);
 			for (const p of instances) if (p === this || p.filePath() === path) p.indexDirty = true;
 		}
-		inlineInk.setAttachments(path, list, false);
+		// Not counted as an edit (the save below writes it), but a user action on the group: Attach, Detach, its undo or redo.
+		inlineInk.setAttachments(path, list, false, true);
 		this.retakeLineAnchors(path, ids, ids.map((id, i) => shownY[i]! - byId.get(id)!.bbox.y));
 		inlineInk.save(path);
 		return true;
@@ -872,16 +941,24 @@ const BOX_SCALE_SLACK = 0.01;
 		return true;
 	}
 
-	/** A Detach's step made from the list as it stands and applied (applyAttachSettle): the step to record, or null. */
-	function detachApplied(overlay: InkOverlayPlugin, path: string, id: string): InkOp | null {
-		const list = inlineInk.attachments(path), { step } = detachGroup(list, id);
+	/**
+	 * A Detach's step made from `list`, not applied: every member settles by the group's correction, x and y. Null when
+	 * `list` holds no readable record of `id`.
+	 */
+	function detachStep(overlay: InkOverlayPlugin, path: string, list: readonly AttachmentData[], id: string): (AttachStep & { path: string }) | null {
+		const { step } = detachGroup(list, id);
 		if (!step?.before) return null;
 		overlay.lineAnchors.follow.setList(list);
 		const o = overlay.lineAnchors.follow.groupOffset(id) ?? { dx: 0, dy: 0 };
 		const members = settleMembers(path, step.before.strokeIds), strokeIds = members.map((s) => s.id);
 		const from = members.map((s) => ({ x: s.points[0]!.x, y: s.points[0]!.y }));
-		const op = { ...step, path, settle: { strokeIds, dx: strokeIds.map(() => o.dx), dy: strokeIds.map(() => o.dy), from } };
-		return overlay.applyAttachSettle(op) ? op : null;
+		return { ...step, path, settle: { strokeIds, dx: strokeIds.map(() => o.dx), dy: strokeIds.map(() => o.dy), from } };
+	}
+
+	/** A Detach's step made from the list as it stands and applied (applyAttachSettle): the step to record, or null. */
+	function detachApplied(overlay: InkOverlayPlugin, path: string, id: string): InkOp | null {
+		const op = detachStep(overlay, path, inlineInk.attachments(path), id);
+		return op && overlay.applyAttachSettle(op) ? op : null;
 	}
 
 	/**
@@ -931,11 +1008,14 @@ const BOX_SCALE_SLACK = 0.01;
 		view.requestMeasure({
 			read: () => {
 				const target = attachTargetIn(this, text, at, box, above);
+				if (!target) return "empty" as const;
 				const ref = this.followRefAt(target.from);
 				return ref ? { target, ref } : null;
 			},
 			write: (m) => {
-				if (m) queueMicrotask(() => {
+				// An empty table cell: nothing attaches, and Attach says so with today's words.
+				if (m === "empty") new Notice(ATTACH_STRINGS.noText);
+				else if (m) queueMicrotask(() => {
 					if (view.state.doc === doc && this.filePath() === path) this.attachAt(path, id, sel.expandedIds, m.target, m.ref);
 				});
 			},
@@ -949,12 +1029,14 @@ const BOX_SCALE_SLACK = 0.01;
 		const a = inlineInk.attachments(path).find((x) => x.id === id);
 		const px = view.scaleY * this.fontZoom;
 		if (!a || isOpaqueAttachment(a) || !(px > 0)) return false;
-		const h = w.y * px, block = view.lineBlockAtHeight(h);
-		if (h < block.top || h >= block.bottom || block.to <= block.from || isWidgetBlock(block)) {
+		const { h, block } = pinBlockAt(view, w.y * px, () => (rowPitch(this) / 2) * px), doc = view.state.doc, text = doc.toString();
+		// A table's line in Source mode (a row or its separator) refuses, as Live Preview's table widget does: there a pipe,
+		// the separator, a cell's padding or a word with markup would be read at the widget's edge, off its word.
+		if (h < block.top || h >= block.bottom || block.to <= block.from || isWidgetBlock(block) || sourceRowAt(text, block) !== null) {
 			new Notice(ATTACH_STRINGS.noText);
 			return false;
 		}
-		const doc = view.state.doc, text = doc.toString(), at = { from: block.from, to: block.to };
+		const at = { from: block.from, to: block.to };
 		view.requestMeasure({
 			read: () => {
 				const target = pinTargetAt(this, text, at, w);
@@ -978,23 +1060,61 @@ const BOX_SCALE_SLACK = 0.01;
 	}
 
 	/**
-	 * A pin drop's target, read in a measure: the word of `block` whose letters hold the drop across and whose row holds it
-	 * up and down, else the paragraph. A word broken across two rows is not taken. No read while a pinch owns the
-	 * viewport: the paragraph.
+	 * A pin drop's target, read in a measure, at the pin's point `w`: the visual row whose letters' top is nearest the
+	 * point, in `block` or the text line half a row above or below it, so under half a row of drift up or down keeps the
+	 * row and past it the next row is nearer; on that row the word whose letters hold the point across, else that row's
+	 * paragraph. No row within a row's height: `block`'s paragraph. A word broken across two rows is not taken. No read
+	 * while a pinch owns the viewport: the paragraph.
 	 */
 	function pinTargetAt(p: InkOverlayPlugin, text: string, block: { from: number; to: number }, w: Point2): AttachmentTarget {
-		const paragraph = () => targetAt(text, block.from, block.to, "paragraph");
+		const paragraph = (b: { from: number; to: number }) => targetAt(text, b.from, b.to, "paragraph");
 		const at = wordPlaceReader(p);
-		if (!at) return paragraph();
-		const zero = p.camera.screenToWorld(visualToNote(0, p.cssScale), visualToNote(0, p.cssScale));
-		const pitch = p.camera.screenToWorld(visualToNote(0, p.cssScale), visualToNote(p.view.defaultLineHeight, p.cssScale)).y - zero.y;
-		for (const word of wordsIn(text, block.from, block.to)) {
+		if (!at) return paragraph(block);
+		const pitch = rowPitch(p), px = p.view.scaleY * p.fontZoom, blocks: { from: number; to: number }[] = [block];
+		for (const y of [w.y - pitch / 2, w.y + pitch / 2]) {
+			const b = p.view.lineBlockAtHeight(y * px);
+			if (b.to > b.from && !isWidgetBlock(b) && sourceRowAt(text, b) === null && !blocks.some((x) => x.from === b.from)) blocks.push(b);
+		}
+		type Placed = { from: number; to: number; b: { from: number; to: number }; x0: number; x1: number; top: number; tall: number };
+		const placed: Placed[] = [];
+		for (const b of blocks) for (const word of wordsIn(text, b.from, b.to)) {
 			const s = at(word.from, 1), e = s ? at(word.to, -1) : null;
 			if (!s || !e || Math.abs(e.top - s.top) > (s.bottom - s.top) / 2) continue;
-			const c = (s.top + s.bottom) / 2, half = Math.max(pitch > 0 ? pitch : 0, s.bottom - s.top) / 2;
-			if (w.x >= s.x && w.x <= e.x && Math.abs(w.y - c) <= half) return targetAt(text, word.from, word.to, "range");
+			placed.push({ from: word.from, to: word.to, b, x0: s.x, x1: e.x, top: s.top, tall: s.bottom - s.top });
 		}
-		return paragraph();
+		let row: Placed | null = null;
+		for (const q of placed) {
+			const d = Math.abs(w.y - q.top);
+			if (d <= Math.max(pitch, q.tall) && (!row || d < Math.abs(w.y - row.top))) row = q;
+		}
+		if (!row) return paragraph(block);
+		const r = row;
+		const word = placed.find((q) => q.b === r.b && Math.abs(q.top - r.top) <= r.tall / 2 && w.x >= q.x0 && w.x <= q.x1);
+		return word ? targetAt(text, word.from, word.to, "range") : paragraph(r.b);
+	}
+
+	/** The editor's row pitch, world units: its default line height on screen. 0 when unknown. */
+	function rowPitch(p: InkOverlayPlugin): number {
+		const zero = p.camera.screenToWorld(visualToNote(0, p.cssScale), visualToNote(0, p.cssScale));
+		const pitch = p.camera.screenToWorld(visualToNote(0, p.cssScale), visualToNote(p.view.defaultLineHeight, p.cssScale)).y - zero.y;
+		return pitch > 0 ? pitch : 0;
+	}
+
+	/**
+	 * The line a pin drop at height `h` reads: the line there, or, when that is an empty line or above the note's first
+	 * line, the line half a row lower when it has text (the height read there; `half` is read only then). The pin's point
+	 * rests on its row's letters' top, a little below the row's top, so a point drifted up off a paragraph's first row is
+	 * over the empty line above it, yet that first row's letters' top is still the nearest. A block widget or a table line
+	 * is read where the point is.
+	 */
+	function pinBlockAt(view: EditorView, h: number, half: () => number): { h: number; block: BlockInfo } {
+		const block = view.lineBlockAtHeight(h);
+		const text = (b: BlockInfo, y: number) => y >= b.top && y < b.bottom && b.to > b.from && !isWidgetBlock(b);
+		if (text(block, h) || isWidgetBlock(block)) return { h, block };
+		const d = half();
+		if (!(d > 0)) return { h, block };
+		const below = view.lineBlockAtHeight(h + d);
+		return text(below, h + d) ? { h: h + d, block: below } : { h, block };
 	}
 
 	/**
@@ -1017,6 +1137,220 @@ const BOX_SCALE_SLACK = 0.01;
 	/** A block widget's block (Properties, a block embed): not a line of text. */
 	function isWidgetBlock(b: BlockInfo): boolean {
 		return typeof b.type === "number" && b.type !== BlockType.Text;
+	}
+
+	/** Screen px to world units, as followRefAt converts a point; null with no container or while a pinch owns the viewport. */
+	function screenToWorldOf(p: InkOverlayPlugin): ((x: number, y: number) => { x: number; y: number }) | null {
+		const container = p.container;
+		if (!container || p.pinchHeld()) return null;
+		const edge = container.getBoundingClientRect(), panX = p.inkInputPanX(), panY = p.inkInputPanY(), k = p.cssScale;
+		return (x, y) => p.camera.screenToWorld(visualToNote(x - edge.left - panX, k), visualToNote(y - edge.top - panY, k));
+	}
+
+	/** The first descendant element of `el` carrying class `cls`, walked by children (no selector query). */
+	function descendantWith(el: Element, cls: string): Element | null {
+		for (const c of Array.from(el.children)) {
+			if (c.classList.contains(cls)) return c;
+			const d = descendantWith(c, cls);
+			if (d) return d;
+		}
+		return null;
+	}
+
+	/** The text nodes under `el` in order; with `shown`, none under an element its own style hides (display none). */
+	function textNodesOf(el: Node, shown: boolean, out: CharacterData[] = []): CharacterData[] {
+		for (const c of Array.from(el.childNodes)) {
+			if (c.nodeType === 3) out.push(c as CharacterData);
+			else if (c.nodeType === 1 && !(shown && (c as HTMLElement).style?.display === "none")) textNodesOf(c, shown, out);
+		}
+		return out;
+	}
+
+	/**
+	 * A reader of the table widgets drawing blocks, for one read phase (no document change within it). A table is the
+	 * block's widget element when it carries cm-table-widget (Obsidian's Live Preview table, as recorded in the app),
+	 * its source read as a table, one tr per shown row and one th or td per column. DOM structure only, no layout read.
+	 */
+	function tableReader(view: EditorView): TableReader {
+		const seen = new Map<number, TableDom | null>();
+		const read = (block: { from: number; to: number }): TableDom | null => {
+			let el: Node | null;
+			try {
+				const at = view.domAtPos(block.from);
+				el = at.node.nodeType === 1 ? at.node.childNodes[at.offset] ?? null : at.node;
+			} catch {
+				return null;
+			}
+			if (!el || el.nodeType !== 1 || !(el as Element).classList.contains("cm-table-widget")) return null;
+			const src = tableRows(view.state.doc.sliceString(block.from, block.to), block.from);
+			if (!src) return null;
+			const trs = Array.from((el as Element).querySelectorAll("tr")), table = trs[0]?.closest("table") ?? null;
+			const rows = trs.filter((tr) => tr.closest("table") === table);
+			if (rows.length !== src.rows.length) return null;
+			const cells = rows.map((tr) => Array.from(tr.children).filter((c) => c.tagName === "TD" || c.tagName === "TH"));
+			if (cells.some((r) => r.length !== src.ncol)) return null;
+			return { src, cells, texts: new Map() };
+		};
+		let text: string | null = null;
+		return {
+			table(block) {
+				if (!seen.has(block.from)) seen.set(block.from, read(block));
+				return seen.get(block.from)!;
+			},
+			text: () => (text ??= view.state.doc.toString()),
+		};
+	}
+
+	/**
+	 * A cell's drawn text: the resting wrapper's (the first .table-cell-wrapper with no nested editor), and the one shown
+	 * now (the wrapper not hidden; under edit, the nested editor's content), each matched to the cell's source. Null for an
+	 * empty cell or one GFM does not draw.
+	 */
+	function cellTextOf(view: EditorView, t: TableDom, row: number, col: number): CellText | null {
+		const key = row * t.src.ncol + col;
+		if (t.texts.has(key)) return t.texts.get(key)!;
+		const cell = t.src.rows[row]?.[col], td = t.cells[row]?.[col];
+		let out: CellText | null = null;
+		if (cell && td && cell.to > cell.from) {
+			const wraps = Array.from(td.children).filter((e) => e.classList.contains("table-cell-wrapper"));
+			const resting = wraps.find((w) => !descendantWith(w, "cm-editor")) ?? null;
+			const shownWrap = wraps.find((w) => (w as HTMLElement).style?.display !== "none") ?? null;
+			const editor = shownWrap ? descendantWith(shownWrap, "cm-content") : null;
+			const src = view.state.doc.sliceString(cell.from, cell.to);
+			const shownNodes = editor ? textNodesOf(editor, true) : shownWrap ? textNodesOf(shownWrap, true) : [];
+			const nodes: { node: CharacterData; start: number }[] = [];
+			let at = 0;
+			for (const n of shownNodes) {
+				nodes.push({ node: n, start: at });
+				at += n.data.length;
+			}
+			const shown = shownNodes.map((n) => n.data).join("");
+			out = { cell, rest: resting ? alignShown(src, textNodesOf(resting, false).map((n) => n.data).join("")) : alignShown(src, shown), map: alignShown(src, shown), nodes };
+		}
+		t.texts.set(key, out);
+		return out;
+	}
+
+	/**
+	 * The screen box of the cell's source character `i` as drawn (one range rect read), or of the next drawn one when `i`
+	 * is markup the drawing does not show. Null when no character from `i` on is drawn.
+	 */
+	function cellCharBox(ct: CellText, i: number): { left: number; right: number; top: number; bottom: number } | null {
+		let j = -1;
+		for (let k = i; k < ct.map.length && j < 0; k++) j = ct.map[k]!;
+		if (j < 0) return null;
+		let n = ct.nodes[0];
+		for (const x of ct.nodes) if (x.start <= j) n = x;
+		if (!n || j - n.start >= n.node.data.length) return null;
+		const r = n.node.ownerDocument.createRange();
+		r.setStart(n.node, j - n.start);
+		r.setEnd(n.node, j - n.start + 1);
+		const b = r.getClientRects()[0];
+		return b ? { left: b.left, right: b.right, top: b.top, bottom: b.bottom } : null;
+	}
+
+	/**
+	 * `pos`'s place in a table widget, as followRefAt reads a point: the world top-left of its character as its cell draws
+	 * it. Undefined where no table widget draws `pos`, at the table's first position (the widget's corner, as today: ink
+	 * attached in a table before this fix took its reference there), and for a position where `legacy` says the targets
+	 * starting there are not inside one cell (attached before this fix): followRefAt reads those as today. Null where no
+	 * cell draws `pos`: a pipe, the separator row, padding, a cell GFM leaves out.
+	 */
+	function tableRefAt(p: InkOverlayPlugin, pos: number, reader: TableReader, legacy?: (t: TableRows, pos: number) => boolean): { x: number; y: number } | null | undefined {
+		const view = p.view, block = view.lineBlockAt(pos);
+		if (!isWidgetBlock(block) || pos <= block.from || pos > block.to) return undefined;
+		const t = reader.table(block);
+		if (!t || legacy?.(t.src, pos)) return undefined;
+		let cell: TableCell | null = null;
+		for (const row of t.src.rows) for (const c of row) if (pos >= c.from && pos < c.to) cell = c;
+		const ct = cell && cellTextOf(view, t, cell.row, cell.col), box = ct && cellCharBox(ct, pos - cell!.from), w = box && screenToWorldOf(p);
+		return box && w ? w(box.left, box.top) : null;
+	}
+
+	/**
+	 * Attach's target in a table widget, read in a measure: the box's centre picks one cell, the nearest
+	 * when it lies on a border or in no cell (a dead-even tie: the upper, then the left). In that cell, the words on the
+	 * centre's row whose middle lies inside the box, each placed where its cell draws it. The cell's text (from its first
+	 * drawn character, cellStart, the character every reader reads its reference point at) when none is, when
+	 * one of them is not drawn one to one (bold, a link, an embed), or when the box is taller than 1.5 rows. Null for an
+	 * empty cell: nothing attaches. Never the whole table, a pipe or two cells.
+	 */
+	function tableTargetIn(p: InkOverlayPlugin, text: string, t: TableDom, box: BBox, pitch: number): AttachmentTarget | null {
+		const w = screenToWorldOf(p);
+		if (!w) return null;
+		const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+		let best: { row: number; col: number } | null = null, bestD = Infinity;
+		t.cells.forEach((r, row) => r.forEach((td, col) => {
+			const b = td.getBoundingClientRect(), a = w(b.left, b.top), z = w(b.right, b.bottom);
+			const d = Math.hypot(Math.max(a.x - cx, 0, cx - z.x), Math.max(a.y - cy, 0, cy - z.y));
+			if (d < bestD - 1e-6) {
+				bestD = d;
+				best = { row, col };
+			}
+		}));
+		const at = best as { row: number; col: number } | null, cell = at ? t.src.rows[at.row]?.[at.col] : undefined;
+		if (!at || !cell || cell.to <= cell.from) return null;
+		const whole = () => targetAt(text, cellStart(text, cell), cell.to, "range");
+		const ct = cellTextOf(p.view, t, at.row, at.col);
+		if (!ct) return whole();
+		const placed: { from: number; to: number; left: number; right: number; top: number; bottom: number; plain: boolean; line: number }[] = [];
+		const words = cellWords(text, cell);
+		// A position's line in the cell: the <br>s before it.
+		const lineOf = (pos: number) => text.slice(cell.from, pos).match(/<br\s*\/?>/gi)?.length ?? 0;
+		for (const wd of words) {
+			let i0 = -1, i1 = -1, plain = true;
+			for (let i = wd.from - cell.from; i < wd.to - cell.from; i++) {
+				if (ct.map[i]! >= 0) { if (i0 < 0) i0 = i; i1 = i; }
+				if (ct.rest[i]! < 0) plain = false;
+			}
+			if (i0 < 0) continue;
+			const s = cellCharBox(ct, i0), e = i1 === i0 ? s : cellCharBox(ct, i1);
+			// A word broken across two rows is not placed.
+			if (!s || !e || Math.abs(e.top - s.top) > (s.bottom - s.top) / 2) continue;
+			const a = w(s.left, s.top), b = w(e.right, s.bottom);
+			placed.push({ from: wd.from, to: wd.to, left: a.x, right: b.x, top: a.y, bottom: b.y, plain, line: lineOf(wd.from) });
+		}
+		if (placed.length === 0) return whole();
+		const L = Math.max(pitch > 0 ? pitch : 0, ...placed.map((q) => q.bottom - q.top));
+		if (box.height > 1.5 * L) return whole();
+		// The centre's row: the band (as wordRangeUnder's) of a placed word that holds the centre, the nearest of two. When
+		// a line of the cell (a <br> starts the next) holds no placed word (inline math alone draws no text), the centre may
+		// be on that line, and a cell's lines sit closer than the band reaches: then only a placed word's own letters hold
+		// the centre, else the cell. A word not placed on a line that also holds a placed word keeps the band.
+		const held = new Set(placed.map((q) => q.line));
+		const every = words.every((wd) => held.has(lineOf(wd.from)));
+		let row = NaN, rd = Infinity;
+		for (const q of placed) {
+			const c = (q.top + q.bottom) / 2;
+			if (every ? cy < c - L / 2 || cy > c + L / 2 + L / 4 : Math.abs(cy - c) > (q.bottom - q.top) / 2) continue;
+			if (Math.abs(cy - c) < rd) { rd = Math.abs(cy - c); row = c; }
+		}
+		if (!Number.isFinite(row)) return whole();
+		const right = box.x + box.width;
+		const taken = placed.filter((q) => {
+			const mid = (q.left + q.right) / 2;
+			return Math.abs((q.top + q.bottom) / 2 - row) < (q.bottom - q.top) / 2 && mid > box.x && mid < right;
+		});
+		if (taken.length === 0 || taken.some((q) => !q.plain)) return whole();
+		return targetAt(text, taken[0]!.from, taken[taken.length - 1]!.to, "range");
+	}
+
+	/**
+	 * Whether a change touched a block widget holding a word or cell group: the widget's text was rewritten, so a column's
+	 * width or a row's height may have moved its words with no move of the block's top, even by an edit after them (a
+	 * later row typed wider, a cell beside wrapping). Height map only, no layout read.
+	 */
+	function tableGroupTouched(view: EditorView, list: readonly AttachmentData[], changes: ChangeDesc): boolean {
+		const ranges: number[] = [];
+		changes.iterChangedRanges((_fa, _ta, fb, tb) => { ranges.push(fb, tb); });
+		if (ranges.length === 0) return false;
+		for (const a of list) {
+			if (isOpaqueAttachment(a) || a.target.kind !== "range" || a.target.to <= a.target.from) continue;
+			const b = view.lineBlockAt(a.target.from);
+			if (!isWidgetBlock(b)) continue;
+			for (let i = 0; i < ranges.length; i += 2) if (ranges[i + 1]! >= b.from && ranges[i]! <= b.to) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -1089,46 +1423,145 @@ const BOX_SCALE_SLACK = 0.01;
 	 * taller than 2.5 line heights is an inline widget's whole rect (an embed), not letters, and is not read, so it never
 	 * takes the row. A heading's letters stay under that: in a wide interface font they run about 1.6 line heights.
 	 * With no pitch measured nothing is skipped. The box's own line keeps every place. No read while a pinch
-	 * owns the viewport: the paragraph, and followRefAt refuses after it.
+	 * owns the viewport: the paragraph, and followRefAt refuses after it. A table widget's block: its cell's word or text
+	 * (tableTargetIn, `above` not read), null for an empty cell. A table row's text line (Source mode): sourceRowTargetIn;
+	 * the table's separator line: null.
 	 */
-	function attachTargetIn(p: InkOverlayPlugin, text: string, block: { from: number; to: number }, box: BBox, above: { from: number; to: number } | null): AttachmentTarget {
+	function attachTargetIn(p: InkOverlayPlugin, text: string, block: { from: number; to: number }, box: BBox, above: { from: number; to: number } | null): AttachmentTarget | null {
 		const view = p.view, k = p.cssScale;
 		const paragraph = () => targetAt(text, block.from, block.to, "paragraph");
 		const at = wordPlaceReader(p);
 		if (!at) return paragraph();
 		const zero = p.camera.screenToWorld(visualToNote(0, k), visualToNote(0, k));
 		const pitch = p.camera.screenToWorld(visualToNote(0, k), visualToNote(view.defaultLineHeight, k)).y - zero.y;
-		const words = [...(above ? wordsIn(text, above.from, above.to) : []), ...wordsIn(text, block.from, block.to)];
+		const wb = view.lineBlockAt(block.from);
+		if (isWidgetBlock(wb)) {
+			const t = tableReader(view).table(wb);
+			if (t) return tableTargetIn(p, text, t, box, pitch);
+		}
 		const aboveTo = above ? above.to : -1;
-		const range = wordRangeUnder(words, box, (w) => {
+		const placeOf = (w: { from: number; to: number }) => {
 			const s = at(w.from, 1), e = s ? at(w.to, -1) : null;
 			// Spans on one row may sit a fraction apart; a word whose end is half a row lower wrapped.
 			if (!s || !e || Math.abs(e.top - s.top) > (s.bottom - s.top) / 2) return null;
 			if (w.to <= aboveTo && pitch > 0 && s.bottom - s.top > 2.5 * pitch) return null;
 			return { left: s.x, right: e.x, top: s.top, bottom: s.bottom };
-		}, pitch);
+		};
+		const row = sourceRowAt(text, block);
+		// A table's separator line is never a word and never a target: nothing attaches, as for an empty cell.
+		if (row === "separator") return null;
+		if (row) return sourceRowTargetIn(text, row, block, box, at, placeOf, pitch, paragraph);
+		const words = [...(above ? wordsIn(text, above.from, above.to) : []), ...wordsIn(text, block.from, block.to)];
+		const range = wordRangeUnder(words, box, placeOf, pitch);
 		return range ? targetAt(text, range.from, range.to, "range") : paragraph();
 	}
 
-	/** Attach, made: the record at `ref`, each member settled to where it is shown, one step. */
+	/**
+	 * The cells of the table row whose source line is `line`; "separator" for the table's separator line (the line after
+	 * its header); null when no table holds the line.
+	 */
+	function sourceRowAt(text: string, line: { from: number; to: number }): readonly TableCell[] | "separator" | null {
+		const t = tableAround(text, line.from);
+		if (!t) return null;
+		for (const r of t.rows) if (r.length > 0 && r.every((c) => c.from >= line.from && c.to <= line.to)) return r;
+		const nl = text.indexOf("\n", t.from);
+		return nl >= 0 && line.from === nl + 1 ? "separator" : null;
+	}
+
+	/**
+	 * A character that may be markup in a cell's source (emphasis, a highlight, code, math, a link or wikilink, a footnote,
+	 * a tag, an entity, a comment, an escape): a word holding one may not be drawn as the text has it, so it is not placed
+	 * one to one. Taken wide on purpose: a word it catches that is drawn as written still gets its cell's text, which every
+	 * view places.
+	 */
+	const SOURCE_MARKUP = /[*_~=`$^[\]()<>\\%&]/;
+
+	/**
+	 * Attach's target on a table row's text line (Source mode), as tableTargetIn reads a drawn table: the box's centre
+	 * picks one cell, the nearest when it lies on a pipe or in no cell (a dead-even tie: the left). A cell's place runs
+	 * from the pipe before it to the pipe after it (the line's ends for no outer pipe). In that cell, the words under the
+	 * box (wordRangeUnder over the cell's words only); the cell's text (from its first drawn character, cellStart) when
+	 * none is, or when one holds markup
+	 * (SOURCE_MARKUP), as tableTargetIn takes a word not drawn one to one. Null for an empty cell: nothing
+	 * attaches. Never a pipe or two cells. The paragraph when no cell can be placed. `above` is not read.
+	 */
+	function sourceRowTargetIn(
+		text: string, row: readonly TableCell[], line: { from: number; to: number }, box: BBox,
+		at: (pos: number, side: -1 | 1) => { x: number; top: number; bottom: number } | null,
+		placeOf: (w: { from: number; to: number }) => WordPlace | null, pitch: number, paragraph: () => AttachmentTarget,
+	): AttachmentTarget | null {
+		const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+		let best: TableCell | null = null, bestD = Infinity;
+		for (const c of row) {
+			const lp = text.lastIndexOf("|", c.from - 1), rp = text.indexOf("|", c.to);
+			const lo = lp + 1 >= line.from ? lp + 1 : line.from, hi = rp >= 0 && rp <= line.to ? rp : line.to;
+			const a = at(lo, 1), z = at(hi, -1);
+			if (!a || !z) continue;
+			const x0 = Math.min(a.x, z.x), x1 = Math.max(a.x, z.x), y0 = Math.min(a.top, z.top), y1 = Math.max(a.bottom, z.bottom);
+			const d = Math.hypot(Math.max(x0 - cx, 0, cx - x1), Math.max(y0 - cy, 0, cy - y1));
+			if (d < bestD - 1e-6) {
+				bestD = d;
+				best = c;
+			}
+		}
+		if (!best) return paragraph();
+		const cell: TableCell = best;
+		if (cell.to <= cell.from) return null;
+		const range = wordRangeUnder(cellWords(text, cell), box, placeOf, pitch);
+		if (!range || SOURCE_MARKUP.test(text.slice(range.from, range.to))) return targetAt(text, cellStart(text, cell), cell.to, "range");
+		return targetAt(text, range.from, range.to, "range");
+	}
+
+	/**
+	 * Attach, made: the record at `ref`, each member settled to where it is shown, one step. A selection over two groups
+	 * or more (group attach) takes in the others: each other group holding a member is detached as a Detach makes it,
+	 * then the record is attached, every op in one history step, one op per group id, the others' first (applyAttachSettle
+	 * keeps their members when the undo puts them back). The whole of it is worked out on a scratch list before any
+	 * write, so it lands whole or not at all. Every member's place is read where it is shown before any record goes.
+	 */
 	function attachAt(this: InkOverlayPlugin, path: string, id: string, ids: readonly string[], target: AttachmentTarget, ref: { x: number; y: number }): void {
 		const sig = this.lineAnchors.sig, members = settleMembers(path, ids);
 		if (!sig || members.length === 0) return;
-		this.lineAnchors.follow.setList(inlineInk.attachments(path));
+		const list = inlineInk.attachments(path), strokeIds = members.map((s) => s.id), memberIds = new Set(strokeIds);
+		this.lineAnchors.follow.setList(list);
 		const shown = members.map((s) => this.lineAnchors.shownOf(s).points[0]!);
-		const from = members.map((s) => ({ x: s.points[0]!.x, y: s.points[0]!.y }));
-		const strokeIds = members.map((s) => s.id);
 		const record: AttachmentRecord = {
 			v: 1, id, strokeIds, target, ref: { x: ref.x, y: ref.y }, layout: { width: sig.width, font: sig.fontPx },
 			probe: { id: strokeIds[0]!, x: shown[0]!.x, y: shown[0]!.y },
 		};
-		const { step } = attachGroup(inlineInk.attachments(path), record);
-		if (!step) return;
+		// The other groups the members belong to, each detached first; on the scratch list the record must then attach.
+		let scratch: readonly AttachmentData[] = list;
+		const drops: (AttachStep & { path: string })[] = [];
+		for (const a of list) {
+			if (isOpaqueAttachment(a) || a.id === id || !a.strokeIds.some((s) => memberIds.has(s))) continue;
+			const drop = detachStep(this, path, list, a.id);
+			if (!drop || !attachStands(drop)) return;
+			drops.push(drop);
+			scratch = detachGroup(scratch, a.id).list;
+		}
+		if (!attachGroup(scratch, record).step) return;
+		const applied: InkOp[] = [];
+		for (const drop of drops) {
+			if (this.applyAttachSettle(drop)) applied.push(drop);
+		}
+		// Each member as the store holds it now: an absorbed group's members are stored where they were shown.
+		const byId = new Map(inlineInk.strokes(path).map((s) => [s.id, s] as const));
+		const from = strokeIds.map((sid) => ({ x: byId.get(sid)!.points[0]!.x, y: byId.get(sid)!.points[0]!.y }));
+		const { step } = applied.length === drops.length ? attachGroup(inlineInk.attachments(path), record) : { step: null };
 		const settle = { strokeIds, dx: shown.map((p, i) => p.x - from[i]!.x), dy: shown.map((p, i) => p.y - from[i]!.y), from };
-		const op = { ...step, path, settle };
-		if (!this.applyAttachSettle(op, false, true)) return;
+		const op = step ? { ...step, path, settle } : null;
+		if (!op || !this.applyAttachSettle(op, false, true)) {
+			// Not reached once the scratch list allowed it; if it is, what was applied is still one step, so one undo
+			// puts it back: no group is lost with no history.
+			if (applied.length > 0) {
+				dispatchSteps(this, applied);
+				this.lineAnchorsMoved(path, false);
+			}
+			return;
+		}
 		this.lineAnchors.follow.attached(record, this.view.lineBlockAt(target.from).top);
-		this.dispatchInk(op);
+		if (applied.length > 0) dispatchSteps(this, [...applied, op]);
+		else this.dispatchInk(op);
 		this.lineAnchorsMoved(path, false);
 	}
 
@@ -1340,7 +1773,10 @@ const BOX_SCALE_SLACK = 0.01;
 	 */
 	function followDocChanged(this: InkOverlayPlugin, path: string, u: ViewUpdate): void {
 		const anchors = this.lineAnchors, follow = anchors.follow;
-		follow.carryLifted(u.changes);
+		// A picture's link replaced whole by a link to the same file (a resize, its undo, its redo): read once, first, for
+		// every pane, as each pane carries its own history's records (carryLifted) and the writer maps the list.
+		const swaps = u.startState && u.state ? sameFileLinkSwaps(u.changes, u.startState.doc, u.state.doc) : null;
+		follow.carryLifted(u.changes, swaps);
 		// A group held as new here against text one change behind the list is checked again on this text, first.
 		follow.recheckNew();
 		// A synced ink file can be adopted before its note's text reaches this pane: a sync writes the two files in its own
@@ -1371,7 +1807,7 @@ const BOX_SCALE_SLACK = 0.01;
 		const was = mappedInto.get(inlineInk.attachments(path));
 		if (was && u.state && was.length === u.state.doc.length && was.eq(u.state.doc)) return;
 		if (!anchors.writesAttachments) return;
-		const before = follow.snapshot();
+		const before = follow.snapshot(), prior = follow.attachments;
 		// With the line count unchanged, the end of the last changed line; groups below it are read again only
 		// if the changed lines' height changed.
 		let below: number | undefined;
@@ -1380,17 +1816,28 @@ const BOX_SCALE_SLACK = 0.01;
 			u.changes.iterChangedRanges((_fa, _ta, _fb, tb) => { if (tb > last) last = tb; });
 			if (last >= 0) below = u.state.doc.lineAt(last).to;
 		}
-		const view = this.view, mapped = follow.docChanged(u.changes, (pos) => view.lineBlockAt(pos).top, view.scaleY * this.fontZoom, below);
+		const view = this.view, mapped = follow.docChanged(u.changes, (pos) => view.lineBlockAt(pos).top, view.scaleY * this.fontZoom, below, swaps);
 		const edit = follow.takeEdited();
 		// A target whose text was deleted takes it back when the change puts the same words back with their context (an undo,
 		// a paste of the cut line): looked for only when some target is collapsed and the change inserts text.
 		let found = mapped;
-		if (u.state && mapped.some((a) => !isOpaqueAttachment(a) && a.target.from === a.target.to)) {
-			const inserted: string[] = [];
-			u.changes.iterChanges((_fa, _ta, _fb, _tb, text) => { if (text.length > 0) inserted.push(text.toString()); });
-			if (inserted.length > 0) found = refindCollapsed(mapped, inserted, () => u.state.doc.toString());
+		const collapsed = mapped.some((a) => !isOpaqueAttachment(a) && a.target.from === a.target.to);
+		// A cell target typed at its first or last letter stays its cell's (refindInTables): looked for only when the change
+		// reaches a target's edge on a line holding a pipe, read from that line alone.
+		const edged = !collapsed && !!u.startState && cellEdgeReached(prior, u.changes, (pos) => u.startState.doc.lineAt(pos));
+		if (u.state && (collapsed || edged)) {
+			// A word or cell in a table the change rewrote whole (every table edit the app writes): found in its cell again.
+			if (u.startState) found = refindInTables(prior, mapped, () => u.startState.doc.toString(), () => u.state.doc.toString(), u.changes);
+			// Each insert with its range in the new text: a target is found again only inside one, never on the same words
+			// left standing elsewhere in the note.
+			const inserted: { from: number; to: number; text: string }[] = [];
+			if (collapsed) u.changes.iterChanges((_fa, _ta, fb, tb, text) => { if (text.length > 0) inserted.push({ from: fb, to: tb, text: text.toString() }); });
+			if (inserted.length > 0) found = refindCollapsed(found, inserted, () => u.state.doc.toString());
 			if (found !== mapped) follow.setList(found);
 		}
+		// A table rewritten around a word or cell group moves its words with no move of the block's top (a column widened by
+		// a later row, a cell beside it wrapping): its groups are read again at the next measure.
+		if (u.state && tableGroupTouched(view, found, u.changes)) follow.layoutChanged();
 		// Timed only while the diagnostics switch is on (follow.onTime); off, no clock is read.
 		const onTime = follow.onTime, t0 = onTime ? performance.now() : 0;
 		const list = u.state ? refreshTouched(found, u.changes, u.state.doc, (id) => follow.followsText(id)) : found;
@@ -1400,7 +1847,9 @@ const BOX_SCALE_SLACK = 0.01;
 		const refreshed = list !== mapped;
 		if (refreshed) follow.setList(list);
 		if (list !== inlineInk.attachments(path)) {
-			inlineInk.setAttachments(path, list, edit || refreshed);
+			// Written as an edit, yet no user action on a group: the note's own text moved it, and at a duplicate lock's clear
+			// the file's record of it stands.
+			inlineInk.setAttachments(path, list, edit || refreshed, false);
 			if (u.state) mappedInto.set(list, u.state.doc);
 		}
 		anchors.shareAttachments(list);
@@ -1411,10 +1860,15 @@ const BOX_SCALE_SLACK = 0.01;
 	 * The world top-left of the character at `pos` as laid out now: a layout read, made only in a measure's read (never in
 	 * an update) and never while a pinch owns the viewport. The same conversion as the hit probe's. At a resting zoom the
 	 * read is made: the screen rect is divided by cssScale, which carries the zoom, so Attach and the follow work at any
-	 * zoom. Only a held pinch (its gesture or its live preview) refuses, as the raster then shows a preview frame.
+	 * zoom. Only a held pinch (its gesture or its live preview) refuses, as the raster then shows a preview frame. Inside a
+	 * table widget the character as its cell draws it (tableRefAt; `reader` one per read phase, `legacy` the targets
+	 * attached before this fix, read as today); the table's first position is the widget's corner, as today. On a
+	 * table's text line (Source mode) `pos` itself, as today: a cell target starts at a drawn character (cellStart).
 	 */
-	function followRefAt(this: InkOverlayPlugin, pos: number): { x: number; y: number } | null {
+	function followRefAt(this: InkOverlayPlugin, pos: number, reader?: TableReader, legacy?: (t: TableRows, pos: number) => boolean): { x: number; y: number } | null {
 		if (!this.container || this.pinchHeld()) return null;
+		const inTable = tableRefAt(this, pos, reader ?? tableReader(this.view), legacy);
+		if (inTable !== undefined) return inTable;
 		const rect = this.view.coordsAtPos(pos, 1);
 		if (!rect) return null;
 		const box = this.container.getBoundingClientRect();
@@ -1427,10 +1881,23 @@ const BOX_SCALE_SLACK = 0.01;
 	/** The follow measure's read: the groups in view not read in this layout, at most `cap`. Outside an update only. */
 	function followRead(p: InkOverlayPlugin, cap: number): FollowRead {
 		const follow = p.lineAnchors.follow, before = follow.snapshot();
-		const view = p.view, vp = view.viewport;
+		const view = p.view, vp = view.viewport, reader = tableReader(view), list = follow.attachments;
+		// Targets starting at `pos` none of which is a cell target made now: not inside one cell (the whole table, a pipe:
+		// attached before tables were read), or inside one but starting at a character it does not draw (1.5.1's Source
+		// Attach on a word with markup, startsUndrawn). Read as before, so their saved ink does not move.
+		const legacy = (t: TableRows, pos: number) => {
+			let any = false;
+			for (const a of list) {
+				if (isOpaqueAttachment(a) || a.target.from !== pos) continue;
+				const cell = a.target.kind === "range" && a.target.to > a.target.from ? tableCellIn(t, a.target.from, a.target.to) : null;
+				if (cell && !startsUndrawn(reader.text(), cell, a.target.from)) return false;
+				any = true;
+			}
+			return any;
+		};
 		const m = follow.measure({
 			inView: (pos) => pos >= vp.from && pos <= vp.to,
-			refAt: (pos) => p.followRefAt(pos),
+			refAt: (pos) => p.followRefAt(pos, reader, legacy),
 			blockTop: (pos) => view.lineBlockAt(pos).top,
 		}, cap);
 		return { ...m, before };

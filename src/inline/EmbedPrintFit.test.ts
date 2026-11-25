@@ -797,6 +797,9 @@ function heightFollowsMinHeight(root: FEl, text: number): void {
 	Object.defineProperty(root, "offsetHeight", { get: () => Math.max(text, Number.parseFloat(root.style.minHeight ?? "") || 0) });
 	// The canvas the paint laid out is as tall as all the ink and overflows the box: the scroll height reaches its foot.
 	Object.defineProperty(root, "scrollHeight", { get: () => Math.max(root.offsetHeight, 120_000) });
+	// The text ends where the box does: a container's one block reaches the text's foot.
+	const block = root.children.length === 1 ? root.children[0] : undefined;
+	if (block) Object.defineProperty(block, "offsetHeight", { get: () => Math.max(0, text - block.offsetTop) });
 }
 
 describe("without saved settings, an Infinite Canvas note is fitted in width alone", () => {

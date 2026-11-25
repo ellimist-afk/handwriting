@@ -19,6 +19,7 @@ import { clampInkSize, nextInkSize } from "../ink/InkSize";
 import {
 	backingScale,
 	MAX_BACKING_AREA,
+	MAX_DESKTOP_BACKING_AREA,
 	MAX_ZOOM_BACKING,
 	clampScale,
 	effectiveScale,
@@ -29,6 +30,8 @@ import {
 	validCameraScale,
 } from "./ZoomScale";
 import { MAX_PINCH_SCALE } from "./PinchScale";
+import { bandFor } from "./ScrollBand";
+import { nextZoomStep } from "./ZoomStep";
 
 describe("owned camera scale provenance", () => {
 	it("recombines external CSS with owned zoom without clamping the inverse", () => {
@@ -240,30 +243,74 @@ describe("backingScale — bounded so any canvas can still be allocated", () => 
 		}
 	});
 
-	it("stops following the zoom past the cap", () => {
-		// A 4x pinch on a dpr-2 tablet wanted 8x linear - 64x the pixels,
-		// across five canvases. WebKit refuses that and blanks the canvas.
-		expect(backingScale(2, 4, 100, 100)).toBe(2 * MAX_ZOOM_BACKING);
-		expect(backingScale(2, 2.5, 100, 100)).toBe(2 * MAX_ZOOM_BACKING);
+	it("follows the zoom up to the pinch ceiling, and stops there", () => {
+		// The zoom's share is capped at the pinch ceiling, so ink is rasterised at
+		// the size it is painted at every zoom a pinch can reach. Past it only an
+		// outer scale can push the product, and that is stretched, not paid for.
+		// The area cap below is what keeps a tablet's canvases allocatable.
+		expect(MAX_ZOOM_BACKING).toBe(MAX_PINCH_SCALE);
+		expect(backingScale(2, 2.5, 100, 100)).toBe(5);
+		expect(backingScale(2, 4, 100, 100)).toBe(8);
+		expect(backingScale(2, MAX_PINCH_SCALE, 100, 100)).toBe(2 * MAX_PINCH_SCALE);
+		expect(backingScale(2, MAX_PINCH_SCALE * 1.25, 100, 100)).toBe(2 * MAX_ZOOM_BACKING);
 	});
 
-	// MAXZOOM-6 (1.4.20): the pinch ceiling moved from 4 to 6 (MAX_PINCH_SCALE,
-	// PinchScale.ts), but MAX_ZOOM_BACKING was already saturating this function
-	// below the OLD ceiling - 2 < 4 < 6 - so the backing store's memory guard
-	// was never a function of where the pinch ceiling sits. This is the proof:
-	// 600% costs the canvas EXACTLY what 400% already did, on every pane shape,
-	// which is also the answer to "does 6x fit under the engine's canvas
-	// limit" - it fits iff 4x already did, and the tests above already show it
-	// does.
-	it("MAXZOOM-6: 600% claims exactly what 400% already did - the cap absorbed the raise", () => {
-		expect(MAX_PINCH_SCALE).toBe(6); // premise: this pin is only meaningful past the old ceiling
+	// The pinch ceiling is 800% (MAX_PINCH_SCALE, PinchScale.ts). The backing
+	// once stopped at 200%, so 600% cost what 400% did and both were stretched
+	// three times over. Now a pane with room under the area cap spends more at
+	// 800% than at 600% and 400%, and a pane without room stays on the cap.
+	it("800% spends more resolution than 600% and 400% where the area cap leaves room, and never passes the cap", () => {
+		expect(MAX_PINCH_SCALE).toBe(8);
+		expect(backingScale(2, MAX_PINCH_SCALE, 100, 100)).toBeGreaterThan(backingScale(2, 6, 100, 100));
+		expect(backingScale(2, 6, 100, 100)).toBeGreaterThan(backingScale(2, 4, 100, 100));
 		for (const [d, w, h] of [
-			[2, 100, 100],
-			[2, 1180, 820], // the iPad pane from "holds a zoomed pane inside the area budget" below
-			[3, 1400, 900], // the dpr-3 desktop pane from the WebKit-ceiling test below
+			[2, 1180, 820],
+			[3, 1400, 900],
+			[2, 239, 299], // the iPad band at 600% below; at 800% the cell below holds it
 		] as const) {
-			expect(backingScale(d, MAX_PINCH_SCALE, w, h)).toBe(backingScale(d, 4, w, h));
+			const b = backingScale(d, MAX_PINCH_SCALE, w, h, true);
+			expect(w * b * (h * b)).toBeLessThanOrEqual(MAX_BACKING_AREA + 1);
 		}
+	});
+
+	/**
+	 * THE IPAD BOX: a pane of 834 x 1194 css px at device ratio 2, scrolled
+	 * sideways, so the band spends its margin on both axes. Its band at each
+	 * zoom is what the overlay hands backingScale: the scroller's client box
+	 * (the pane over the zoom) plus the margin.
+	 */
+	function ipadBand(scale: number) {
+		const cw = Math.round(834 / scale), ch = Math.round(1194 / scale);
+		const band = bandFor({ scrollLeft: 0, scrollTop: 0, clientWidth: cw, clientHeight: ch, scrollWidth: cw * 4, scrollHeight: 200000, scale });
+		const b = backingScale(2, scale, band.width, band.height, true);
+		return { band, b, px: band.width * b * (band.height * b) };
+	}
+
+	it("rasterises the iPad band at 400%, 600% and 800% within 5% of the painted size", () => {
+		expect(MAX_PINCH_SCALE, "premise: the ceiling this cell is written against").toBe(8);
+		for (const scale of [4, 6, 8]) {
+			const { band, b } = ipadBand(scale);
+			expect(b, `backing ${b} at ${scale} on a ${band.width} x ${band.height} band`).toBeGreaterThanOrEqual(0.95 * 2 * scale);
+		}
+	});
+
+	it("asks no more device px of a canvas at 600% or 800% than at 200%, on the iPad band", () => {
+		const two = ipadBand(2).px;
+		expect(two, "premise: the iPad band at 200% sits on the area cap").toBeCloseTo(MAX_BACKING_AREA, -1);
+		for (const scale of [4, 6, MAX_PINCH_SCALE]) {
+			const { px } = ipadBand(scale);
+			expect(px, `device px at ${scale}`).toBeLessThanOrEqual(two * (1 + 1e-9));
+		}
+	});
+
+	it("leaves every 100% and 200% backing where it was", () => {
+		expect(backingScale(2, 1, 1000, 800)).toBe(2);
+		expect(backingScale(2, 1, 2540, 1990)).toBe(2);
+		expect(backingScale(2, 2, 100, 100)).toBe(4);
+		expect(backingScale(2, 2, 2540, 1990)).toBe(2);
+		expect(backingScale(3, 1, 1400, 900, true)).toBeCloseTo(2.817180849095055, 12);
+		expect(backingScale(2, 1, 3000, 2000, true)).toBeCloseTo(1.2909944487358056, 12);
+		expect(backingScale(2, 2, 3000, 2000, true)).toBeCloseTo(1.2909944487358056, 12);
 	});
 
 	it("still tracks the zoom below the cap", () => {
@@ -328,25 +375,68 @@ describe("backingScale — bounded so any canvas can still be allocated", () => 
 	it("holds a zoomed pane inside the area budget", () => {
 		const w = 1180; // an iPad pane, where the budget is the whole point
 		const h = 820;
-		const b = backingScale(2, 4, w, h);
+		const b = backingScale(2, 4, w, h, true);
 		expect(w * b * (h * b)).toBeLessThanOrEqual(MAX_BACKING_AREA + 1);
 		// ...while still spending more than unzoomed on the magnified ink.
 		expect(b).toBeGreaterThan(2);
 	});
 
-	// MAXZOOM-6 companion to the cell above: same pane, the new 600% ceiling.
-	// Identical result to the 4x cell, because MAX_ZOOM_BACKING already capped
-	// the zoom's contribution before either ceiling. Written as its own cell
+	// MAXZOOM-6 companion to the cell above: same pane, at the pinch ceiling
+	// (600% when written, 800% now). Identical result to the 4x cell, because
+	// the area cap binds this pane before either zoom. Written as its own cell
 	// rather than folded into a loop with the 4x one, so a future change that
-	// makes 600% behave differently from 400% fails a NAMED cell instead of an
-	// iteration nobody reads closely.
-	it("MAXZOOM-6: holds the SAME zoomed pane inside the area budget at 600%", () => {
+	// makes the ceiling behave differently from 400% fails a NAMED cell instead
+	// of an iteration nobody reads closely.
+	it("MAXZOOM-6: holds the SAME zoomed pane inside the area budget at the ceiling", () => {
 		const w = 1180;
 		const h = 820;
-		const b = backingScale(2, MAX_PINCH_SCALE, w, h);
-		expect(b).toBe(backingScale(2, 4, w, h));
+		const b = backingScale(2, MAX_PINCH_SCALE, w, h, true);
+		expect(b).toBe(backingScale(2, 4, w, h, true));
 		expect(w * b * (h * b)).toBeLessThanOrEqual(MAX_BACKING_AREA + 1);
 		expect(b).toBeGreaterThan(2);
+	});
+
+	/**
+	 * A MAXIMISED 4K DESKTOP PANE: a 1900 x 1000 css scroller at device ratio 2, scrolled sideways so the band spends
+	 * its margin on both axes. Its band at each zoom is what the overlay hands backingScale: the scroller's client box
+	 * (the pane over the zoom) plus the margin. On screen it is 2400 x 1500 css at every zoom past 100%, the band this
+	 * pane already holds at full ratio at 100%; at full ratio it asks 14.4M device px of each canvas.
+	 */
+	function fourKBand(scale: number) {
+		const cw = 1900 / scale, ch = 1000 / scale;
+		return bandFor({ scrollLeft: 0, scrollTop: 0, clientWidth: cw, clientHeight: ch, scrollWidth: cw * 4, scrollHeight: 200000, scale, pinch: scale });
+	}
+	const WEBKIT_FIGURE = 16_700_000; // WebKit's per-canvas figure, the one this file cites throughout
+	/** Every zoom the bar's + lands on from 100% to 800%, the same grid the user taps. */
+	function plusLadder(): number[] {
+		const out = [1];
+		for (let z = 1; z < MAX_PINCH_SCALE;) out.push(z = nextZoomStep(z, 1, 1, MAX_PINCH_SCALE));
+		return out;
+	}
+
+	it("a maximised 4K DESKTOP band draws at rect x ratio at every step from 100% to 800%, under the WebKit figure", () => {
+		const ladder = plusLadder();
+		expect(ladder.length, `ladder ${ladder.join(", ")}`).toBe(11);
+		expect(ladder[ladder.length - 1]).toBe(MAX_PINCH_SCALE);
+		for (const scale of [...ladder, 2]) { // 200% too: the render row's control zoom, off the + grid
+			const band = fourKBand(scale);
+			const full = 2 * scale;
+			expect(band.width * full * (band.height * full), `premise at ${scale}: past the 10M budget`).toBeGreaterThan(MAX_BACKING_AREA);
+			const b = backingScale(2, scale, band.width, band.height);
+			expect(b, `backing at ${scale} on a ${band.width} x ${band.height} band`).toBe(full);
+			expect(band.width * b * (band.height * b)).toBeLessThanOrEqual(MAX_DESKTOP_BACKING_AREA);
+			expect(band.width * b * (band.height * b)).toBeLessThan(WEBKIT_FIGURE);
+		}
+	});
+
+	it("the same 4K band on MOBILE stays on the 10M budget, as today", () => {
+		for (const scale of [2, MAX_PINCH_SCALE]) {
+			const band = fourKBand(scale);
+			const b = backingScale(2, scale, band.width, band.height, true);
+			expect(b).toBeLessThan(2 * scale);
+			expect(band.width * b * (band.height * b)).toBeLessThanOrEqual(MAX_BACKING_AREA + 1);
+			expect(band.width * b * (band.height * b)).toBeCloseTo(MAX_BACKING_AREA, 0);
+		}
 	});
 
 	it("trims a MOBILE pane that is over budget with no zoom at all", () => {
@@ -398,23 +488,23 @@ describe("backingScale — bounded so any canvas can still be allocated", () => 
 	// 1400x900 pane the cell above already uses" - actual device px, not just
 	// a pass/fail, so the numbers are on record rather than only the
 	// assertion. WebKit's per-canvas ceiling is ~16.7M device px (1.4.12-
-	// design.md §14, cited throughout this file); MAX_BACKING_AREA (10M) is
-	// deliberately under that, and this is the proof the ceiling raise cannot
-	// push a real pane past either number.
-	it("MAXZOOM-6: 600% at dpr 3 on a 1400px pane - the actual device px, against both ceilings", () => {
+	// design.md §14, cited throughout this file); MAX_BACKING_AREA (10M, mobile)
+	// and MAX_DESKTOP_BACKING_AREA (16M, desktop) are both under that, and this
+	// is the proof the ceiling raise cannot push a real pane past either number.
+	it("MAXZOOM-6: the pinch ceiling (600% when written, 800% now) at dpr 3 on a 1400px pane - the actual device px, against both ceilings", () => {
 		const w = 1400, h = 900, dpr = 3;
 		const WEBKIT_PER_CANVAS_CEILING = 16_700_000; // 1.4.12-design.md §14
 
-		// DESKTOP: the floor hands back what dpr 1 would have used unzoomed,
-		// same as the 400%/oldFloor cell above - the ceiling raise changes
-		// nothing here because that floor is not indexed by the pinch scale.
+		// DESKTOP: zoomed, this pane trims against the desktop budget, which
+		// sits above the floor (dpr 3 unzoomed), so it keeps every device pixel
+		// and spends the rest of the budget on magnification. 800% lands on the
+		// same scale 400% does, because the budget binds before either zoom.
 		const bDesktop = backingScale(dpr, MAX_PINCH_SCALE, w, h);
 		const desktopDevicePx = { width: w * bDesktop, height: h * bDesktop };
 		expect(bDesktop).toBe(backingScale(dpr, 4, w, h)); // identical to the old ceiling
-		expect(desktopDevicePx).toEqual({ width: 4200, height: 2700 });
-		expect(desktopDevicePx.width * desktopDevicePx.height).toBe(11_340_000);
+		expect(bDesktop).toBeGreaterThanOrEqual(dpr); // the floor still holds
+		expect(desktopDevicePx.width * desktopDevicePx.height).toBeLessThanOrEqual(MAX_DESKTOP_BACKING_AREA + 1);
 		expect(desktopDevicePx.width * desktopDevicePx.height).toBeLessThan(WEBKIT_PER_CANVAS_CEILING);
-		expect(desktopDevicePx.width * desktopDevicePx.height).toBeGreaterThan(MAX_BACKING_AREA); // the desktop floor deliberately exceeds the budget here (the TRIPWIRE above)
 
 		// MOBILE: the budget is a real ceiling here, so 600% lands on the same
 		// trimmed scale 400% already did - never the flat zoom multiple.

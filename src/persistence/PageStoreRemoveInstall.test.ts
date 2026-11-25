@@ -26,10 +26,10 @@ import { emptyPage } from "../model/PageData";
 import storeRaw from "./PageStore.ts?raw";
 import fileRaw from "./PageStoreRemove.ts?raw";
 
-const MOVED = ["clone", "discardPending", "remove", "recycleFailedWrite"] as const;
+const MOVED = ["clone", "discardPending", "remove", "recycleFailedWrite", "dropLiveMoveRetry", "dropLiveMoveRetries"] as const;
 
 /** Every name the new file takes from the store, and nothing else. */
-const FROM_STORE = ["PageStore", "WRITE_RETRY_MS", "contentStamp", "folderOf"];
+const FROM_STORE = ["PageStore", "WRITE_MAX_RETRIES", "WRITE_RETRY_MS", "contentStamp", "folderOf"];
 
 const storeSrc = storeRaw.replace(/\r\n/g, "\n");
 const fileSrc = fileRaw.replace(/\r\n/g, "\n");

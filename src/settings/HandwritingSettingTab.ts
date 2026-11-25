@@ -15,7 +15,7 @@ import { diagnosticsEnabled } from "../diag/DiagSwitch";
 import { normalizePaperStyle } from "../inline/Paper";
 import { setScrollExpansionEnabled } from "../inline/InkOverlay";
 import { InkTool } from "../ink/Stroke";
-import { normalizePdfPageAssumption } from "../ink/InkPdf";
+import { normalizeExportPage, normalizePdfPageAssumption } from "../ink/InkPdf";
 import { embedInkRepaintAll } from "../inline/EmbedInk";
 import { normalizePenToolsMode, setPenToolsMode } from "../inline/PenToolsMode";
 import { normalizeNoteZoomControlsMode, setNoteZoomControlsMode, setZoomBarCanvasEnabled } from "../inline/NoteZoomControlsMode";
@@ -41,6 +41,16 @@ export const SCRIBBLE_ERASE_SHIPS = false;
  */
 export const SYNC_ALL_TYPES_HINT =
 	`Obsidian Sync users: also turn on "Sync all other types" in Obsidian Sync's settings, or it leaves the ink files out.`;
+
+/**
+ * The export page row's words. One constant each, so a wording change is a
+ * one-line swap.
+ */
+export const EXPORT_PAGE_NAME = "Page color when exporting";
+export const EXPORT_PAGE_DESC = "Use a white or dark background for the drawing-only PDF export and note snips. Default white.";
+export const EXPORT_PAGE_WHITE = "White";
+export const EXPORT_PAGE_DARK_LABEL = "Dark";
+export const EXPORT_PAGE_THEME = "Match theme";
 
 type SettingKey = keyof HandwritingSettings;
 
@@ -257,7 +267,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Paper background",
-						desc: "Lined, grid, or dotted paper. Global setting. Default none.",
+						desc: "Choose lined, grid, or dotted paper. Global setting. Default none.",
 						control: {
 							type: "dropdown",
 							key: "paperStyle",
@@ -266,7 +276,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Page guides",
-						desc: "Faint lines where each page ends, on Infinite canvas notes. Not in exports. Default on.",
+						desc: "Show faint lines where each page ends, on Infinite canvas notes. Won't appear in exports. Default on.",
 						control: { type: "toggle", key: "pageGuides" },
 					},
 				],
@@ -297,7 +307,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Toolbar placement",
-						desc: "Where the toolbar sits. Default top right.",
+						desc: "Choose where the toolbar sits. Default top right.",
 						// "Corner" is what this row was called for two releases and
 						// what the setting is still named in data.json, so it stays
 						// searchable: the settings search indexes name, desc and
@@ -383,7 +393,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// the rest, and the mechanism lives in InkPdfAppend.ts
 						// where it belongs.
 						name: "Ink color on PDFs",
-						desc: "Darken, lighten, or leave it alone. Default darken.",
+						desc: "Darken, lighten, or leave ink color alone. Default darken.",
 						// Shipped in 1.4.18 as "Ink color when flattening PDFs".
 						// Search indexes name, desc and aliases only, so the old
 						// title stays findable here; see "Toolbar placement".
@@ -413,6 +423,16 @@ export class HandwritingSettingTab extends PluginSettingTab {
 							options: { auto: "Automatic readability", keep: "Keep original colors" },
 						},
 					},
+					{
+						// Only the PDF export and the note snip paint a page of
+						// their own; the row's words are the constants above.
+						name: EXPORT_PAGE_NAME,
+						desc: EXPORT_PAGE_DESC,
+						control: {
+							type: "dropdown", key: "exportPage",
+							options: { white: EXPORT_PAGE_WHITE, dark: EXPORT_PAGE_DARK_LABEL, theme: EXPORT_PAGE_THEME },
+						},
+					},
 				],
 			},
 			{
@@ -437,7 +457,7 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: "Pressure sensitivity",
-						desc: "Adjust line width with pen pressure, for new strokes. Ink already drawn keeps its look. Default on.",
+						desc: "Vary stroke width with pen pressure. Off draws every stroke at a constant width. Default on.",
 						// The ordinary control path, not 1.4.19's `render` one. That
 						// row carried a Recalibrate button beside the toggle, and a
 						// button can only reach a row through `render`; Recalibrate
@@ -492,13 +512,13 @@ export class HandwritingSettingTab extends PluginSettingTab {
 						// Draft copy, Alan to edit. `render`: a row of pickers has
 						// no toggle or dropdown shape.
 						name: "Pen colors",
-						desc: "Change any of the eight pen colors.",
+						desc: "Customize any of your eight pen colors.",
 						aliases: ["pen", "palette", "custom color"],
 						render: (setting) => this.renderPalette(setting, "pen"),
 					},
 					{
 						name: "Highlighter colors",
-						desc: "Change any of the five highlighter colors.",
+						desc: "Customize any of your five highlighter colors.",
 						aliases: ["pen", "palette", "custom color"],
 						render: (setting) => this.renderPalette(setting, "highlighter"),
 					},
@@ -640,6 +660,8 @@ export class HandwritingSettingTab extends PluginSettingTab {
 
 	getControlValue(key: string): unknown {
 		if (key === "inkReadableInExports") return this.plugin.settings.inkReadableInExports ? "auto" : "keep";
+		// Shown as the export reads it: a missing or unknown stored value is white.
+		if (key === "exportPage") return normalizeExportPage(this.plugin.settings.exportPage);
 		if (this.overriddenByBoox(key)) return this.BOOX_OVERRIDES[key as SettingKey];
 		return key in this.plugin.settings ? this.plugin.settings[key as SettingKey] : undefined;
 	}
@@ -751,6 +773,12 @@ export class HandwritingSettingTab extends PluginSettingTab {
 				// No repaint: this setting cannot change a pixel on screen. It is
 				// read only inside an export, a print swap or a snip, and every
 				// one of those paints from scratch when it runs.
+				break;
+			case "exportPage":
+				// No repaint, for the same reason: read at each PDF export and
+				// each note snip. Normalised on the way in, so the control
+				// cannot store a value the exports do not know.
+				s.exportPage = normalizeExportPage(str);
 				break;
 			case "shapeSnap":
 				s.shapeSnap = on;

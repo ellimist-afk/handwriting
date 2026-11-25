@@ -88,6 +88,13 @@ declare module "./MobileTools" {
 		// a second read of `eraserOn()` here for the common case where it
 		// was not the eraser that had anything open.
 		this.eraserPopClosed = true;
+		// The pop this closes must stay closed when the strip's deferred
+		// refresh runs late. That refresh reads the eraser's OFF-to-ON edge
+		// (MobileToolsPaint.ts) and reopens the pop on it, so an eraser pick
+		// answered by Escape or pen contact before the next frame came back
+		// open. Taking the edge here leaves the state the frame-first order
+		// ends in: the edge, then this close.
+		this.wasEraserOn = this.host.eraserOn();
 		// The eraser pop has no timer of its own (see eraserPopOpen), but
 		// `sliderHoverTimer` is shared with the pen/highlighter pops this
 		// same call just closed; cancel it here too so a hover-away already

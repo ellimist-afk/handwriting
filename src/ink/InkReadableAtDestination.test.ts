@@ -12,6 +12,7 @@ import {
 	setInkExportReadability,
 	withInkDestination,
 } from "./InkTheme";
+import { PEN_COLORS } from "./InkColor";
 import { inkSvgLayers, inkToSvg } from "./SvgExport";
 import { PDF_PAGE_WHITE, PdfPageAssumption, inkPdfContent, inkToPdf } from "./InkPdf";
 import { appendInkToPdf } from "./InkPdfAppend";
@@ -267,17 +268,40 @@ describe("the rule: readable at the destination", () => {
 		expect(readableInkColor(GREEN, WHITE)).toBe(GREEN);
 	});
 
-	it("stops at the target instead of crushing everything to black", () => {
-		// ACCEPTANCE 4. A page of annotations all driven to #000 is a different
-		// complaint arriving by the same route.
-		for (const c of [PEN_WHITE, YELLOW, "#dddddd", "#cccccc"]) {
-			const out = readableInkColor(c, WHITE);
-			expect(out, `${c} was crushed to black`).not.toBe("#000000");
-			expect(
-				contrastOn(out, WHITE),
-				`${c} -> ${out} overshot the target`
-			).toBeLessThan(EXPORT_MIN_CONTRAST + 1);
+	it("stops a hued pen at the target instead of crushing it to black", () => {
+		// ACCEPTANCE 4. A page of coloured annotations all driven to #000 is a
+		// different complaint arriving by the same route.
+		const out = readableInkColor(YELLOW, WHITE);
+		expect(out, `${YELLOW} was crushed to black`).not.toBe("#000000");
+		expect(contrastOn(out, WHITE), `${YELLOW} -> ${out} overshot the target`).toBeLessThan(
+			EXPORT_MIN_CONTRAST + 1
+		);
+	});
+
+	// FOLLOWUPS 378. A grey pen that fails on a light page used to stop at the
+	// target too, so the white pen, #dddddd and #cccccc all arrived as the same
+	// mid grey near #959595. Now a neutral pen there is the palette's black.
+	it.each([PEN_WHITE, "#dddddd", "#cccccc"])(
+		"a neutral %s pen that fails on a white page exports as the palette's black",
+		(c) => {
+			expect(contrastOn(c, WHITE), `premise: ${c} fails on white`).toBeLessThan(EXPORT_MIN_CONTRAST);
+			expect(readableInkColor(c, WHITE)).toBe("#000000");
 		}
+	);
+
+	it("the black a neutral pen exports as is the palette's black pen", () => {
+		expect(PEN_COLORS.find((c) => c.name === "black")?.hex).toBe("#000000");
+	});
+
+	it("a neutral pen keeps its alpha when it goes to black", () => {
+		expect(readableInkColor("#f4f4f280", WHITE)).toBe("#00000080");
+		expect(readableInkColor("rgba(244, 244, 242, 0.5)", WHITE)).toBe("rgba(0, 0, 0, 0.5)");
+	});
+
+	it("a neutral pen on a dark page still takes the smallest move toward white", () => {
+		const out = readableInkColor("#111111", NEAR_BLACK);
+		expect(out).not.toBe("#ffffff");
+		expect(contrastOn(out, NEAR_BLACK)).toBeLessThan(EXPORT_MIN_CONTRAST + 1);
 	});
 
 	it("points both ways: near-black ink lightens on a dark destination", () => {
@@ -395,6 +419,12 @@ describe("the five paint paths, each asserted on its own", () => {
 			`exported PDF wrote ${fills[0]}`
 		).toBeGreaterThanOrEqual(EXPORT_MIN_CONTRAST);
 		expect(PDF_PAGE_WHITE).toBe(WHITE);
+	});
+
+	it.each([PEN_WHITE, "#cccccc"])("PATH 3: the PDF writer fills a neutral %s pen with black", (c) => {
+		const text = inkToPdf([strokeOf(c)]);
+		expect(pdfFills(text)).toEqual(["#000000"]);
+		expect(text).toContain("0 0 0 rg");
 	});
 
 	it("PATH 1, the print/export vector layer: adapts when handed the page", () => {

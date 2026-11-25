@@ -81,10 +81,17 @@ export class FakeAdapter implements PageAdapterLike {
 		this.dirs.add(path);
 	}
 
-	/** The file's modified time and its size, as the vault adapter answers them (size in code units: the fixtures are ASCII). */
-	async stat(path: string): Promise<{ mtime: number; size?: number } | null> {
+	/**
+	 * The file's modified time and its size, as the vault adapter answers them (size in code units: the fixtures are
+	 * ASCII). A folder is answered too, as both hosts' adapters answer one: a path in `dirs`, or one that holds a file.
+	 * Null only for a path that is neither.
+	 */
+	async stat(path: string): Promise<{ type?: "folder"; mtime: number; size?: number } | null> {
 		const f = this.files.get(path);
-		return f === undefined ? null : { mtime: this.mtimes.get(path)!, size: f.length };
+		if (f !== undefined) return { mtime: this.mtimes.get(path)!, size: f.length };
+		const inside = `${path}/`;
+		if (this.dirs.has(path) || [...this.files.keys()].some((p) => p.startsWith(inside))) return { type: "folder", mtime: 0, size: 0 };
+		return null;
 	}
 
 	/** An external process or sync tool dropping bytes into the folder. */

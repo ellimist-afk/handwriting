@@ -44,6 +44,11 @@ function itHeld(name: string, fn: () => Promise<void>, timeout?: number): void {
 }
 /** The camera still bar in device px (InkOverlay CAMERA_STILL_BACKING_PX): the bar for where the soft frame's ink stands. */
 const PLACE_BAR_PX = 0.1;
+/**
+ * Cell 2-3's pixel bar, of 255: the sharp frame against the path redraw with the paper's rules hidden. Measured at 950a6215
+ * and 07db96ee, rules hidden: one pixel over 24, (622, 262), 26 at both with the same values; the bar is that value plus 2.
+ */
+const EXACT_CUT = 28;
 
 function seeded(seed: number): () => number {
 	let a = seed >>> 0;
@@ -118,10 +123,11 @@ const pathPts = (rs: Row[]) => rs.reduce((a, r) => a + (r.pts ?? 0), 0);
 type Shot = { toString(encoding: "base64"): string };
 /**
  * Where ink stands, as the centre of its pixel mass on two screens, in screenshot (device) px: what moved from the first to the
- * second, and how many pixels differ by more than 24 of 255 (PanBakeRepaint's place measure).
+ * second, and how many pixels differ by more than `cut` of 255 (24: PanBakeRepaint's place measure). `max` is the largest
+ * difference of any pixel; `overPx` lists every pixel over 24 (the first 400) as [x, y, difference, first rgb, second rgb].
  */
-async function inkShift(page: Page, a: Shot, b: Shot): Promise<{ dx: number; dy: number; mass: number; over: number }> {
-	return await page.evaluate(async ([x, y]) => {
+async function inkShift(page: Page, a: Shot, b: Shot, cut = 24): Promise<{ dx: number; dy: number; mass: number; over: number; max: number; over24: number; overPx: unknown[] }> {
+	return await page.evaluate(async ([x, y, cut]) => {
 		const load = async (s: string) => {
 			const bm = await createImageBitmap(await (await fetch("data:image/png;base64," + s)).blob());
 			const c = new OffscreenCanvas(bm.width, bm.height), g = c.getContext("2d")!;
@@ -141,12 +147,34 @@ async function inkShift(page: Page, a: Shot, b: Shot): Promise<{ dx: number; dy:
 			return { m, x: m ? sx / m : 0, y: m ? sy / m : 0 };
 		};
 		const cp = centre(p), cq = centre(q);
-		let over = 0;
+		let over = 0, max = 0, over24 = 0;
+		const overPx: unknown[] = [];
 		for (let i = 0; i < p.d.length; i += 4) {
-			if (Math.max(Math.abs(p.d[i]! - q.d[i]!), Math.abs(p.d[i + 1]! - q.d[i + 1]!), Math.abs(p.d[i + 2]! - q.d[i + 2]!)) > 24) over++;
+			const v = Math.max(Math.abs(p.d[i]! - q.d[i]!), Math.abs(p.d[i + 1]! - q.d[i + 1]!), Math.abs(p.d[i + 2]! - q.d[i + 2]!));
+			if (v > cut) over++;
+			if (v > max) max = v;
+			if (v > 24 && over24++ < 400) overPx.push([(i / 4) % p.w, Math.floor(i / 4 / p.w), v, [p.d[i], p.d[i + 1], p.d[i + 2]], [q.d[i], q.d[i + 1], q.d[i + 2]]]);
 		}
-		return { dx: cq.x - cp.x, dy: cq.y - cp.y, mass: Math.min(cp.m, cq.m) / 255, over };
-	}, [a.toString("base64"), b.toString("base64")] as const);
+		return { dx: cq.x - cp.x, dy: cq.y - cp.y, mass: Math.min(cp.m, cq.m) / 255, over, max, over24, overPx };
+	}, [a.toString("base64"), b.toString("base64"), cut] as const);
+}
+
+/**
+ * The paper's rules off (true) or back (false): the scroller's own background, the grid's second box and the pinch preview,
+ * the three places the paper paints. Two frames pass after. Returns the scroller's background-image as it then computes.
+ */
+async function paperRulesHidden(page: Page, hidden: boolean): Promise<string> {
+	return await page.evaluate(async (hidden) => {
+		document.getElementById("hide-paper-rules")?.remove();
+		if (hidden) {
+			const s = document.createElement("style");
+			s.id = "hide-paper-rules";
+			s.textContent = ".markdown-source-view .cm-scroller, .handwriting-paper-grid-column, .handwriting-paper-preview { background-image: none !important; }";
+			document.head.appendChild(s);
+		}
+		await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+		return getComputedStyle(document.querySelector(".markdown-source-view .cm-scroller") as HTMLElement).backgroundImage.slice(0, 60);
+	}, hidden);
 }
 
 /** Hold the pieces, commit 10 to 12 percent, and return the settle's whole-layer rows and the stand-in as the settle left it. */
@@ -183,18 +211,25 @@ itHeld("2-3: the stand-in frame puts the ink where the sharp frame does, the sha
 		await call("holdPieces", false);
 		const sharpAt = await call<{ whole: number; building: boolean; held: boolean }>("awaitSharp");
 		expect({ building: sharpAt.building, held: sharpAt.held }, "premise: the build finished and the stand-in went").toEqual({ building: false, held: false });
+		const sharpOnPaper = await page.screenshot({ clip });
+		// The sharp and path shots are read with the paper's rules hidden: a rule under a pixel hides or shows the redraw's
+		// antialias step by what lies under it, so with the paper in the shot the same step reads 13 over a rule and 26 over white.
+		const paperOff = await paperRulesHidden(page, true);
 		const sharp = await page.screenshot({ clip });
 		await call("pathRedraw");
 		const path = await page.screenshot({ clip });
-		const place = await inkShift(page, soft, sharp), exact = await inkShift(page, sharp, path);
+		const paperBack = await paperRulesHidden(page, false);
+		const place = await inkShift(page, soft, sharpOnPaper), exact = await inkShift(page, sharp, path, EXACT_CUT);
 		const v = await call<any>("extentVsOnePass");
-		console.log(`STANDIN place ${JSON.stringify({ softPlace, centroid: place, exact, whole: sharpAt.whole, raster: v })}`);
+		console.log(`STANDIN place ${JSON.stringify({ softPlace, centroid: { ...place, overPx: undefined }, exact, exactCut: EXACT_CUT, paper: { off: paperOff, back: paperBack }, whole: sharpAt.whole, raster: v })}`);
+		expect(paperOff, "premise: the paper's rules are hidden for the sharp and path shots").toBe("none");
+		expect(paperBack, "premise: the paper's rules are back after the path shot").not.toBe("none");
 		expect(softPlace.inked, "premise: the window holds ink").toBeGreaterThan(1000);
 		expect(Math.max(Math.abs(softPlace.dx), Math.abs(softPlace.dy)), `the stand-in frame's ink stands where the path draw puts it, within ${PLACE_BAR_PX} px (${JSON.stringify(softPlace)})`)
 			.toBeLessThanOrEqual(PLACE_BAR_PX);
-		// At a zoom the redraw differs from the raster copy by antialias steps under 24 of 255 (over 0), which move the centre by about
-		// 0.0005 px; two decimals keep any real shift (a 0.1 px misplacement moves it about 0.1 px).
-		expect({ over: exact.over, dx: Math.round(exact.dx * 100) / 100, dy: Math.round(exact.dy * 100) / 100 }, `the sharp frame is the path redraw at the same camera, pixel for pixel, and its ink centre within 0.005 px (${JSON.stringify(exact)})`)
+		// At a zoom the redraw differs from the raster copy by antialias steps of at most EXACT_CUT of 255 over a bare page (over 0),
+		// which move the centre by about 0.0005 px; two decimals keep any real shift (a 0.1 px misplacement moves it about 0.1 px).
+		expect({ over: exact.over, dx: Math.round(exact.dx * 100) / 100, dy: Math.round(exact.dy * 100) / 100 }, `the sharp frame is the path redraw at the same camera, pixel for pixel within ${EXACT_CUT} of 255 with the paper's rules hidden, and its ink centre within 0.005 px (${JSON.stringify(exact)})`)
 			.toEqual({ over: 0, dx: 0, dy: 0 });
 		expect(v && { pen: v.pen.differ, count: v.count }, `the raster is the one-pass reference (${JSON.stringify(v)})`).toEqual(v && { pen: 0, count: v.storeCount });
 		expect(sharpAt.whole, "the sharp raster is whole within 1000 ms of the pieces being let go").toBeLessThanOrEqual(1000);

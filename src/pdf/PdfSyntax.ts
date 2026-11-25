@@ -41,6 +41,13 @@ import { inflate, unpredict } from "./Flate";
  */
 export type PdfRead<T> = { ok: true; value: T } | { ok: false; reason: string; rowsTouched?: number };
 
+/**
+ * Two refusals the Flatten notice words with "because" rather than a dash
+ * (Snips.ts flattenPdf), so their text is named once, here.
+ */
+export const ENCRYPTED_REASON = "the document is encrypted";
+export const XFA_REASON = "it's an XFA document";
+
 /** Bytes as chars, one for one. Chunked: spreading megabytes blows the stack. */
 export function latin1(bytes: Uint8Array): string {
 	const CHUNK = 0x8000;
@@ -177,6 +184,25 @@ function stringEnd(src: string, i: number): number {
 	return src.length;
 }
 
+const HEX = "0123456789abcdefABCDEF";
+
+/**
+ * The end of a hex string starting at `i`, or -1 when the `<` there starts
+ * none. Inside a dictionary a single `<` is a hex string, and PDF needs no
+ * space between delimiters, so `/JS<00>>>` is a hex string and then a `>>`:
+ * its `>` must not be read as half of the dictionary's close. Only hex digits
+ * and whitespace may sit between the two, so a `<` that starts no hex string
+ * is left to the plain byte scan, as it always was.
+ */
+function hexStringEnd(src: string, i: number): number {
+	for (let j = i + 1; j < src.length; j++) {
+		const c = src[j]!;
+		if (c === ">") return j + 1;
+		if (!isWs(c) && !HEX.includes(c)) return -1;
+	}
+	return -1;
+}
+
 function bracketEnd(src: string, i: number, open: string, close: string): number {
 	let depth = 0;
 	let j = i;
@@ -187,8 +213,15 @@ function bracketEnd(src: string, i: number, open: string, close: string): number
 		} else if (src.startsWith(close, j)) {
 			j += close.length;
 			if (--depth === 0) return j;
+		} else if (src[j] === "%") {
+			// A comment runs to the end of its line and may hold a `(`, a `<`
+			// or a `>>` that means nothing there, as skipWs reads it.
+			while (j < src.length && src[j] !== "\n" && src[j] !== "\r") j++;
 		} else if (src[j] === "(") {
 			j = stringEnd(src, j);
+		} else if (src[j] === "<") {
+			const end = hexStringEnd(src, j);
+			j = end < 0 ? j + 1 : end;
 		} else {
 			j++;
 		}
@@ -265,6 +298,11 @@ export function dictEntries(dict: string): Map<string, string> {
  * model, and re-serializing from a parse would drop whatever it failed to
  * understand. Replacements run last-first so the earlier spans keep their
  * offsets.
+ *
+ * Added keys go just before the closing `>>`. When the last line kept holds
+ * a comment they start a line of their own: a comment runs to the end of its
+ * line, so keys written on it, and the `>>` after them, would be part of it
+ * and the dictionary would never close.
  */
 export function setEntries(dict: string, changes: ReadonlyMap<string, string>): string {
 	const spans = dictSpans(dict).filter((s) => changes.has(s.key));
@@ -275,7 +313,19 @@ export function setEntries(dict: string, changes: ReadonlyMap<string, string>): 
 	const seen = new Set(spans.map((s) => s.key));
 	const added = [...changes].filter(([k]) => !seen.has(k)).map(([k, v]) => `${k} ${v}`);
 	if (added.length === 0) return out;
-	return `${out.slice(0, out.length - 2).trimEnd()} ${added.join(" ")} >>`;
+	const head = out.slice(0, out.length - 2).trimEnd();
+	// A `%` inside a literal string starts no comment. A hex string cannot
+	// hold one, so it needs no case of its own.
+	let endsInComment = false;
+	for (let j = 0; j < head.length; ) {
+		if (head[j] === "%") {
+			while (j < head.length && head[j] !== "\n" && head[j] !== "\r") j++;
+			endsInComment = j === head.length;
+		} else {
+			j = head[j] === "(" ? stringEnd(head, j) : j + 1;
+		}
+	}
+	return `${head}${endsInComment ? "\n" : " "}${added.join(" ")} >>`;
 }
 
 /** The object number of `12 0 R`, or null for anything else. */
@@ -613,7 +663,7 @@ export function readPdf(input: string | Uint8Array): PdfRead<PdfDoc> {
 		if (!section.ok) return section;
 		take(section.value);
 		const trailer = section.value.trailer;
-		if (trailer.has("/Encrypt")) return { ok: false, reason: "the document is encrypted" };
+		if (trailer.has("/Encrypt")) return { ok: false, reason: ENCRYPTED_REASON };
 		if (rootNum < 0) rootNum = asRef(trailer.get("/Root")) ?? -1;
 		if (size === 0) size = Number(trailer.get("/Size") ?? 0);
 		if (trailerId === null) trailerId = trailer.get("/ID") ?? null;
@@ -744,6 +794,14 @@ export interface PdfPageInfo {
 	resources: string | null;
 	/** True when that value was inherited rather than written on the page. */
 	inherited: boolean;
+	/**
+	 * The `/Resources` of each level above the one `resources` came from,
+	 * nearest first, each as written. The format says the nearest level's
+	 * replaces the rest, but Obsidian's viewer merges them by key, the first
+	 * level holding a key winning, so a key the nearest level lacks may be one
+	 * a level above holds. Absent or empty when no level above has any.
+	 */
+	above?: readonly string[];
 }
 
 interface Inherited {
@@ -751,6 +809,7 @@ interface Inherited {
 	crop: string | null;
 	rotate: number;
 	resources: string | null;
+	above: readonly string[];
 }
 
 /** A box as written, normalized: either corner may be given first. */
@@ -780,6 +839,35 @@ function clip(
 }
 
 /**
+ * Does the viewer take this document's pages from an XFA form, not from its
+ * page tree?
+ *
+ * Obsidian's viewer has XFA on, and pdf.js then builds the pages from the
+ * form when the catalog says `/NeedsRendering true`, the form's `/XFA` holds
+ * data, and the form has no fields of its own. The page tree of such a file
+ * holds a stand-in page the viewer never shows, so ink written into it is ink
+ * nobody sees. A form with fields is shown from its page tree, and so is a
+ * file that does not ask to be rendered.
+ *
+ * Narrower than pdf.js in one place: a form whose only fields are invisible
+ * signatures counts as having fields here, so it flattens as before.
+ */
+function pagesFromXfa(doc: PdfDoc, catalog: string): boolean {
+	const cat = dictEntries(catalog);
+	if (deref(doc, cat.get("/NeedsRendering"))?.trim() !== "true") return false;
+	const form = deref(doc, cat.get("/AcroForm"));
+	if (form === null || !form.trimStart().startsWith("<<")) return false;
+	const entries = dictEntries(form);
+	const fields = deref(doc, entries.get("/Fields"))?.trim() ?? "";
+	if (/^\[\s*[^\s\]]/.test(fields)) return false;
+	const xfa = deref(doc, entries.get("/XFA"))?.trim() ?? "";
+	// A list of parts, at least one; or a stream, whose value here is its
+	// dictionary, empty only when it says its length is 0.
+	if (xfa.startsWith("[")) return /^\[\s*[^\s\]]/.test(xfa);
+	return xfa.startsWith("<<") && dictEntries(xfa).get("/Length")?.trim() !== "0";
+}
+
+/**
  * The page tree, flattened into the order the viewer shows.
  *
  * `/MediaBox`, `/Rotate` and `/Resources` are inheritable, so each is carried
@@ -789,6 +877,7 @@ function clip(
 export function pdfPages(doc: PdfDoc): PdfRead<PdfPageInfo[]> {
 	const catalog = objectBody(doc, doc.rootNum);
 	if (catalog === null) return { ok: false, reason: "the catalog is missing" };
+	if (pagesFromXfa(doc, catalog)) return { ok: false, reason: XFA_REASON };
 	const rootNum = asRef(dictEntries(catalog).get("/Pages"));
 	if (rootNum === null) return { ok: false, reason: "the catalog names no page tree" };
 
@@ -830,10 +919,27 @@ export function pdfPages(doc: PdfDoc): PdfRead<PdfPageInfo[]> {
 			crop: direct(d.get("/CropBox")) ?? from.crop,
 			rotate: d.has("/Rotate") ? (numbersIn(direct(d.get("/Rotate")) ?? "")[0] ?? 0) : from.rotate,
 			resources: d.get("/Resources") ?? from.resources,
+			above: d.has("/Resources") && from.resources !== null ? [from.resources, ...from.above] : from.above,
 		};
 		const kidsEntry = d.get("/Kids");
 		if (kidsEntry !== undefined) {
-			for (const ref of (direct(kidsEntry) ?? "").match(/\d+\s+\d+\s+R/g) ?? []) walk(asRef(ref)!, here, depth + 1);
+			// A comment runs to the end of its line and a viewer reads past it,
+			// so a reference written in one names no page. The line end is kept, so
+			// the tokens either side stay apart; a `%` inside a string starts none.
+			const kids = direct(kidsEntry) ?? "";
+			const visible: string[] = [];
+			let from = 0;
+			for (let j = 0; j < kids.length; ) {
+				if (kids[j] === "%") {
+					visible.push(kids.slice(from, j));
+					while (j < kids.length && kids[j] !== "\n" && kids[j] !== "\r") j++;
+					from = j;
+				} else {
+					j = kids[j] === "(" ? stringEnd(kids, j) : j + 1;
+				}
+			}
+			visible.push(kids.slice(from));
+			for (const ref of visible.join("").match(/\d+\s+\d+\s+R/g) ?? []) walk(asRef(ref)!, here, depth + 1);
 			return;
 		}
 		if (here.box === null) {
@@ -851,7 +957,11 @@ export function pdfPages(doc: PdfDoc): PdfRead<PdfPageInfo[]> {
 		const crop = boxOf(here.crop);
 		const view = crop === null ? media : (clip(crop, media) ?? media);
 		// A negative or over-turned rotation is legal and means the same turn.
-		const turn = ((Math.round(here.rotate / 90) * 90) % 360 + 360) % 360;
+		// A turn that is not a multiple of 90 is not one the spec allows; the
+		// viewer shows that page upright, as if the key said 0, so it reads as 0
+		// here too. Rounding it to the nearest quarter would place the copied
+		// ink a quarter or half turn away from where it is seen.
+		const turn = here.rotate % 90 === 0 ? ((here.rotate % 360) + 360) % 360 : 0;
 		pages.push({
 			num,
 			index: pages.length + 1,
@@ -859,10 +969,11 @@ export function pdfPages(doc: PdfDoc): PdfRead<PdfPageInfo[]> {
 			rotate: turn,
 			resources: here.resources,
 			inherited: !d.has("/Resources"),
+			above: here.above,
 		});
 	};
 
-	walk(rootNum, { box: null, crop: null, rotate: 0, resources: null }, 0);
+	walk(rootNum, { box: null, crop: null, rotate: 0, resources: null, above: [] }, 0);
 	if (failure !== null) return { ok: false, reason: failure };
 	if (pages.length === 0) return { ok: false, reason: "the document has no pages" };
 	return { ok: true, value: pages };

@@ -6,15 +6,16 @@ import HandwritingPlugin, { HandwritingSettingTab } from "./main";
 const contract = [
 	{"name": "Infinite canvas", "key": "extendCanvasWhileScrolling", "descriptions": ["Let the page grow as you write and scroll. Also turns on the zoom bar. Global setting. Default off."]},
 	{"name": "Hide status bar on handwriting notes", "key": "hideStatusBarOnInkedNotes", "descriptions": ["Hide Obsidian's status bar on notes with handwriting. Default off."]},
-	{"name": "Paper background", "key": "paperStyle", "descriptions": ["Lined, grid, or dotted paper. Global setting. Default none."]},
-	{"name": "Page guides", "key": "pageGuides", "descriptions": ["Faint lines where each page ends, on Infinite canvas notes. Not in exports. Default on."]},
+	{"name": "Paper background", "key": "paperStyle", "descriptions": ["Choose lined, grid, or dotted paper. Global setting. Default none."]},
+	{"name": "Page guides", "key": "pageGuides", "descriptions": ["Show faint lines where each page ends, on Infinite canvas notes. Won't appear in exports. Default on."]},
 	{"name": "Toolbar visibility", "key": "penTools", "descriptions": ["Show or hide the pen toolbar. Auto hides it while you write. Default auto."]},
 	{"name": "Zoom bar", "key": "noteZoomControls", "descriptions": ["Show or hide the zoom bar. Needs Infinite canvas on for the note. Auto hides it while you write. Default auto."]},
-	{"name": "Toolbar placement", "key": "toolbarCorner", "descriptions": ["Where the toolbar sits. Default top right."]},
-	{"name": "Ink color on PDFs", "key": "inkPdfColorMode", "descriptions": ["Darken, lighten, or leave it alone. Default darken."]},
+	{"name": "Toolbar placement", "key": "toolbarCorner", "descriptions": ["Choose where the toolbar sits. Default top right."]},
+	{"name": "Ink color on PDFs", "key": "inkPdfColorMode", "descriptions": ["Darken, lighten, or leave ink color alone. Default darken."]},
 	{"name": "Ink color when exporting", "key": "inkReadableInExports", "descriptions": ["Keep pen ink readable in exports, prints, and snips. Default automatic readability."]},
+	{"name": "Page color when exporting", "key": "exportPage", "descriptions": ["Use a white or dark background for the drawing-only PDF export and note snips. Default white."]},
 	{"name": "Ink prediction", "key": "strokePrediction", "descriptions": ["Reduce visible pen lag. Default on."]},
-	{"name": "Pressure sensitivity", "key": "pressureSensitivity", "descriptions": ["Adjust line width with pen pressure, for new strokes. Ink already drawn keeps its look. Default on."]},
+	{"name": "Pressure sensitivity", "key": "pressureSensitivity", "descriptions": ["Vary stroke width with pen pressure. Off draws every stroke at a constant width. Default on."]},
 	{"name": "Ink smoothing", "key": "inkSmoothing", "descriptions": ["Smooth and taper strokes. Default on."]},
 	{"name": "Pen reticle", "key": "penReticle", "descriptions": ["Show a dot at the pen tip. Default on."]},
 	{"name": "Shape snap", "key": "shapeSnap", "descriptions": ["Hold at the end of a stroke to snap it into a shape. Default on."]},
@@ -69,14 +70,14 @@ describe.each([true, false])("settings descriptions with command removal %s", (c
 		expect(definitions(canRemove).available).toBe(canRemove);
 	});
 
-	it("has exactly 17 unique controls and the device recalibration action", () => {
+	it("has exactly 18 unique controls and the device recalibration action", () => {
 		const rows = targets(definitions(canRemove).rows);
-		expect(rows).toHaveLength(18);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(18);
+		expect(rows).toHaveLength(19);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(19);
 		expect(rows.map((row) => row.name).sort()).toEqual(contract.map((row) => row.name).sort());
 		const controls = rows.filter((row) => row.control);
-		expect(controls).toHaveLength(17);
-		expect(new Set(controls.map((row) => row.control!.key)).size).toBe(17);
+		expect(controls).toHaveLength(18);
+		expect(new Set(controls.map((row) => row.control!.key)).size).toBe(18);
 		for (const expected of contract) {
 			const actual = uniqueRow(rows, expected.name);
 			expect(actual.control?.key ?? null, expected.name).toBe(expected.key);

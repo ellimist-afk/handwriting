@@ -147,7 +147,7 @@ describe("a pen landing inside a wheel zoom's quiet time", () => {
 		const pinches: string[] = [];
 		const cleared: number[] = [];
 		Object.assign(o, {
-			wheelZoomRun: run, wheelZoomTimer: 7,
+			wheelZoomRun: run, wheelZoomTimer: 7, camera: { snapshot: { x: 0, y: 0, zoom: 1 } },
 			view: { dom: { ownerDocument: { defaultView: { clearTimeout: (id: number) => void cleared.push(id) } } } },
 			pinch: (phase: string) => void pinches.push(phase),
 			pinchGive: null, cancelOverscrollBounce: noop, restorePinchLayers: noop, rasterPanNeedsBake: () => false,

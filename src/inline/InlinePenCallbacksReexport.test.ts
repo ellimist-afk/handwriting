@@ -45,6 +45,7 @@ const MEMBERS = [
 	"claimTouch",
 	"onFingerInkCancelled",
 	"onHandOnGlass",
+	"onForeignPointer",
 ] as const;
 
 const routerSrc = routerRaw.replace(/\r\n/g, "\n");

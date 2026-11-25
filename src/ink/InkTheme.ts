@@ -304,6 +304,22 @@ export const EXPORT_MIN_CONTRAST = 3;
  */
 const CONTRAST_MARGIN = 0.05;
 
+/**
+ * What a NEUTRAL pen that fails on a LIGHT page is painted instead: the
+ * palette's black pen (PEN_COLORS in InkColor.ts), whole, and not the mid
+ * grey the smallest passing move lands on. The palette's white pen, #dddddd
+ * and #cccccc all used to arrive on a white page as the same grey near
+ * #959595, which reads as faded pencil rather than as the writing.
+ *
+ * Only grey ink and only a light page. Hued ink still takes the smallest move,
+ * because it is the hue that is the user's choice; on a dark page the move
+ * still points toward white. The cost, written down: a stroke stores no
+ * record of what it was drawn over, so white ink written over a dark picture
+ * also leaves as black. "Keep original colors" keeps it white.
+ */
+const LIGHT_PAGE_NEUTRAL_INK = "#000000";
+const LIGHT_PAGE_NEUTRAL_INK_RGB: readonly [number, number, number] = [0, 0, 0];
+
 /** WCAG contrast between two relative luminances: (L1 + 0.05) / (L2 + 0.05). */
 export function contrastRatio(lumA: number, lumB: number): number {
 	const hi = Math.max(lumA, lumB);
@@ -377,12 +393,16 @@ function hexOf(r: number, g: number, b: number): string {
  * highlighter until it passes 3:1 against the page destroys what it is for:
  * it would stop being a wash you read through and become a bar you read over.
  *
- * THE ADJUSTMENT HAS A FLOOR. It stops at the first lightness that reaches
- * the target instead of continuing to maximum contrast, so a page of
- * annotations does not arrive uniformly crushed to #000 - a different
- * complaint arriving by the same route. The search bisects between the ink's
- * own lightness and the pole with the most headroom against the destination,
- * so what comes back is the SMALLEST move that satisfies the guarantee.
+ * THE ADJUSTMENT HAS A FLOOR, FOR HUES AND FOR DARK PAGES. It stops at the
+ * first lightness that reaches the target instead of continuing to maximum
+ * contrast, so a page of coloured annotations does not arrive uniformly
+ * crushed to #000 - a different complaint arriving by the same route. The
+ * search bisects between the ink's own lightness and the pole with the most
+ * headroom against the destination, so what comes back is the SMALLEST move
+ * that satisfies the guarantee.
+ *
+ * A neutral pen on a light page is the one case that skips the search: it is
+ * painted LIGHT_PAGE_NEUTRAL_INK, the palette's black. See that constant.
  */
 export function readableInkColor(
 	color: string,
@@ -405,6 +425,7 @@ export function readableInkColor(
 	// so the target is reachable for every destination and the bisection below
 	// always closes on a passing value.
 	const pole = contrastRatio(0, destLum) >= contrastRatio(1, destLum) ? 0 : 1;
+	if (pole === 0 && isNeutral(p)) return painted(p, LIGHT_PAGE_NEUTRAL_INK, LIGHT_PAGE_NEUTRAL_INK_RGB);
 	let fails = l;
 	let passes = pole;
 	// 20 halvings of a 0..1 range settle far below one 8-bit step.

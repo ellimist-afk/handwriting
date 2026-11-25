@@ -641,27 +641,49 @@ body [data-handwriting-paper][data-handwriting-paper="dots"] .markdown-source-vi
 	background-image: none !important;
 }
 
-/* PAGE GUIDES (InkOverlay.syncPageGuideBox), Infinite Canvas notes only: a faint line at every page height from the
-   note's top edge, so a note shows where its pages fall. Screen only: no export draws it. The overlay places the box
-   at the note origin and writes the pitch on it; the rule thickness is the paper's own, kept at least a device px.
-   One repeating gradient on its own box, the grid lesson above: a second gradient on the scroller degrades with area.
-   Each period is clear to the rule, so the first line is at the foot of page 1 and none at the note's top edge.
-   Faint: the border token at half strength, quieter than any paper rule it crosses. */
+/* PAGE GUIDES (InkOverlay.syncPageGuideBox), Infinite Canvas notes only: a faint dashed page outline, so a note shows
+   where its pages fall. Screen only: no export draws it. The overlay places the box at the text column's left edge and
+   the note origin, one page wide, and writes the pitch on it. Three background layers on its own box (the grid lesson
+   above: a second gradient on the scroller degrades with area), no border and no child:
+     the left side line, the right side line: a column the paper's rule wide at each edge, dashed down from the top;
+     the page ends: one tile a dash and a gap wide and a page tall, its dash in the tile's bottom left corner, so the
+     page ends run between the side lines only, dashed from the left, clear at the note's top edge.
+   THE LINE STYLE, in one place: the ink (the border token at half strength), the dash and the gap, the same on every
+   line; the rule thickness is the paper's own, kept at least a device px. */
 .handwriting-page-guides {
+	--handwriting-page-guide-ink: color-mix(in srgb, var(--background-modifier-border) 50%, transparent);
+	--handwriting-page-guide-dash: 4px;
+	--handwriting-page-guide-gap: 4px;
+	--handwriting-page-guide-side: repeating-linear-gradient(
+		to bottom,
+		var(--handwriting-page-guide-ink) 0px,
+		var(--handwriting-page-guide-ink) var(--handwriting-page-guide-dash),
+		transparent var(--handwriting-page-guide-dash),
+		transparent calc(var(--handwriting-page-guide-dash) + var(--handwriting-page-guide-gap))
+	);
+	--handwriting-page-guide-right: var(--handwriting-page-guide-side);
 	position: absolute;
 	left: 0;
 	z-index: -1;
 	pointer-events: none;
-	background-image: repeating-linear-gradient(
-		to bottom,
-		transparent 0px,
-		transparent calc(var(--handwriting-page-guide-pitch, 979.2px) - var(--handwriting-paper-rule, 1px)),
-		color-mix(in srgb, var(--background-modifier-border) 50%, transparent) calc(var(--handwriting-page-guide-pitch, 979.2px) - var(--handwriting-paper-rule, 1px)),
-		color-mix(in srgb, var(--background-modifier-border) 50%, transparent) var(--handwriting-page-guide-pitch, 979.2px)
-	);
-	background-repeat: repeat;
-	background-position: 0 0;
-	background-size: auto;
+	background-image:
+		var(--handwriting-page-guide-side),
+		var(--handwriting-page-guide-right),
+		conic-gradient(
+			from 180deg at var(--handwriting-page-guide-dash) calc(var(--handwriting-page-guide-pitch, 979.2px) - var(--handwriting-paper-rule, 1px)),
+			var(--handwriting-page-guide-ink) 0deg 90deg,
+			transparent 90deg
+		);
+	background-size:
+		var(--handwriting-paper-rule, 1px) 100%,
+		var(--handwriting-paper-rule, 1px) 100%,
+		calc(var(--handwriting-page-guide-dash) + var(--handwriting-page-guide-gap)) var(--handwriting-page-guide-pitch, 979.2px);
+	background-position: left top, right top, left top;
+	background-repeat: no-repeat, no-repeat, repeat;
+}
+/* The outline is wider than the note's area: the box stops at the area's edge and the right line, past it, is not drawn. */
+.handwriting-page-guides.handwriting-page-guides-open {
+	--handwriting-page-guide-right: none;
 }
 /* Not painted while a pinch or ctrl+wheel preview lives (measured: painted, the box more than doubled the preview's
    raster; blanked, it cost what no box costs). The box's own class, not the scroller's: paper none never sets that one.

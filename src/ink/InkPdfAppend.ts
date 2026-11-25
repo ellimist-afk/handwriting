@@ -42,8 +42,10 @@
 
 import { InkStroke } from "./Stroke";
 import { HIGHLIGHTER_ALPHA } from "./PenStyle";
-import { inkPdfContent, PdfPageAssumption, pdfPageDestination, pdfNum } from "./InkPdf";
+import { highlightFills, inkPdfContent, PdfPageAssumption, pdfPageDestination, pdfNum } from "./InkPdf";
+import { pageShade } from "./InkPdfPageShade";
 import {
+	PdfDoc,
 	PdfPageInfo,
 	asRef,
 	bytesOf,
@@ -70,6 +72,9 @@ export type AppendResult =
  */
 const GS_BASE = "HwAlpha";
 
+/** What we call a page's highlight group among its XObjects, for the same reason. */
+const GROUP_BASE = "HwHighlights";
+
 /**
  * The transform from what the viewer showed to what the page stores.
  *
@@ -81,8 +86,48 @@ const GS_BASE = "HwAlpha";
  * Written before the flip in the stream and applied after it: PDF
  * concatenates, so the last `cm` a coordinate meets is the first one written
  * after it.
+ *
+ * A page with a /UserUnit other than 1 is shown at its box times that unit,
+ * and its ink was stored in that larger frame. So the flip is the shown
+ * height, and the marks are brought back onto the box by the unit before the
+ * turn and the box's corner. A unit of 1 writes what it always wrote.
  */
-export function pageMatrix(page: PdfPageInfo): { cm: string | null; flipHeight: number } {
+export function pageMatrix(page: PdfPageInfo, userUnit = 1): { cm: string | null; flipHeight: number } {
+	const upright = turnOf(page);
+	if (userUnit === 1) return upright;
+	const k = unitNum(1 / userUnit);
+	const scale = `${k} 0 0 ${k} 0 0`;
+	return { cm: upright.cm === null ? scale : `${upright.cm} cm ${scale}`, flipHeight: upright.flipHeight * userUnit };
+}
+
+/**
+ * The scale a /UserUnit asks for, to nine places: `pdfNum` keeps two, and a
+ * unit of 1.5 written as 0.67 would move a mark at the far edge of a large
+ * page by a point or more. Never exponent notation, as `pdfNum`.
+ */
+function unitNum(v: number): string {
+	const s = v.toFixed(9).replace(/0+$/, "").replace(/\.$/, "");
+	return s === "-0" || s === "" ? "0" : s;
+}
+
+/**
+ * The page's /UserUnit as the viewer takes it: from the page's own dictionary
+ * (it is not inherited), through a reference if it is one, and 1 for anything
+ * that is not a number above 0.
+ */
+function userUnitOf(doc: PdfDoc, page: PdfPageInfo): number {
+	const body = objectBody(doc, page.num);
+	if (body === null) return 1;
+	let v = dictEntries(body).get("/UserUnit");
+	const ref = asRef(v);
+	if (ref !== null) v = objectBody(doc, ref) ?? undefined;
+	const t = v?.trim() ?? "";
+	if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(t)) return 1;
+	const u = Number(t);
+	return Number.isFinite(u) && u > 0 ? u : 1;
+}
+
+function turnOf(page: PdfPageInfo): { cm: string | null; flipHeight: number } {
 	const { x, y, w, h } = page.box;
 	switch (page.rotate) {
 		case 90:
@@ -228,14 +273,160 @@ export function appendInkToPdf(
 		closeNum = add(streamObject("Q"));
 	};
 
-	const freeName = (taken: ReadonlySet<string>): string => {
-		if (!taken.has(`/${GS_BASE}`)) return GS_BASE;
-		for (let i = 1; ; i++) if (!taken.has(`/${GS_BASE}${i}`)) return `${GS_BASE}${i}`;
+	const freeName = (taken: ReadonlySet<string>, base = GS_BASE): string => {
+		if (!taken.has(`/${base}`)) return base;
+		for (let i = 1; ; i++) if (!taken.has(`/${base}${i}`)) return `${base}${i}`;
 	};
 
 	/**
-	 * Highlighter needs a transparency state, and a `gs` operator can only
-	 * name one the page's resources already reach. Whichever dictionary has to
+	 * A dictionary value as written or behind its reference. `undefined` when
+	 * the key is absent, `null` when it is there and this writer cannot read
+	 * it: a missing object, or something that is not a dictionary.
+	 */
+	const dictAt = (value: string | undefined): string | null | undefined => {
+		if (value === undefined) return undefined;
+		const ref = asRef(value);
+		const dict = ref === null ? value : objectBody(doc, ref);
+		return dict !== null && dict.startsWith("<<") ? dict : null;
+	};
+
+	/**
+	 * A level above the page's nearest /Resources, as the viewer merges it:
+	 * its dictionary; `undefined` for one the viewer passes over, a value that
+	 * is not a dictionary or a reference to an object the file does not have;
+	 * null for an object the file has and this writer cannot read, which the
+	 * viewer may.
+	 */
+	const levelAt = (value: string): string | null | undefined => {
+		const ref = asRef(value);
+		if (ref === null) return value.startsWith("<<") ? value : undefined;
+		if (!doc.offsets.has(ref) && !doc.packed.has(ref)) return undefined;
+		const body = objectBody(doc, ref);
+		if (body === null) return null;
+		return body.startsWith("<<") ? body : undefined;
+	};
+
+	// One state per kind, each written once per file: a page reaches the one its own shade asks for.
+	let multiplyNum = 0;
+	let plainNum = 0;
+
+	/**
+	 * A page's highlights laid on the way the screen lays them: one
+	 * transparency group, each stroke an opaque fill inside it in the order
+	 * drawn, the group drawn once under the highlighter's alpha. So two
+	 * crossing highlights are one coat, the later colour, never two
+	 * (PdfInkBand.ts, HighlightLayer). `multiply` (a page the file draws
+	 * light) draws it multiplied, so the page's own text stays dark under a
+	 * highlight; every other page draws it with no blend mode, which stays
+	 * readable on any shade.
+	 *
+	 * The page gets a /Resources of its OWN, copied from the one it reaches,
+	 * with its /ExtGState and /XObject copied in beside it and one free name
+	 * added to each. Nothing the original wrote is rewritten. Pages commonly
+	 * share resources, and a name placed in a shared dictionary is one name
+	 * for every page: each page's group would answer to the first page's, and
+	 * a dictionary reached two ways would be written twice, the second write
+	 * replacing the first.
+	 *
+	 * An /ExtGState or /XObject the nearest level lacks is copied from the
+	 * first level above that holds one (`PdfPageInfo.above`). Obsidian's
+	 * viewer merges a page's levels by key, so a file may keep a page's fonts
+	 * on the page and its pictures on a node above it, and the viewer shows
+	 * both; a copy of its own naming only ours would hide them, the page's own
+	 * key reached first. A level above is read only for a key the nearest
+	 * lacks. One the viewer passes over (`levelAt`) is passed over here; one
+	 * the file has and this writer cannot read refuses the copy, as an
+	 * unreadable nearest level does. The key found is read as the nearest
+	 * level's would be.
+	 *
+	 * The group draws in the page's own space, so its box is the page box and
+	 * the turn and flip sit inside its stream; it names no state, since a
+	 * group starts from the default one and the alpha and blend belong to the
+	 * one draw of it.
+	 *
+	 * `{ wash: true }` for a page whose /XObject is there and this writer
+	 * cannot read, on its nearest level or the level above it is taken from,
+	 * or behind a level above that this writer cannot read: the group has
+	 * nowhere to be named, and that page keeps the wash (`placeAlpha`). Its
+	 * /XObject is never read as absent: a dictionary this writer missed may be
+	 * one a reader finds, with the page's pictures. Behind a level above that
+	 * this writer cannot read, the wash needs the nearest level's own
+	 * /ExtGState, where it places its state; without one it would write an
+	 * /ExtGState on the page and hide the level above's, so that page is refused.
+	 */
+	const highlightGroup = (
+		page: PdfPageInfo,
+		fills: string,
+		cm: string | null,
+		flipHeight: number,
+		multiply: boolean
+	): { draw: string; resources: string } | { reason: string } | { wash: true } => {
+		const res = page.resources === null ? "<< >>" : dictAt(page.resources);
+		if (res == null) return { reason: `page ${page.index} has resources this writer cannot read` };
+		const entries = dictEntries(res);
+		const own = (key: string): string | null | undefined => dictAt(entries.get(key));
+		let states = own("/ExtGState");
+		if (states === null) return { reason: `page ${page.index} has a graphics state this writer cannot read` };
+		// The wash places its state in the nearest level's own /ExtGState: with one there, it hides nothing above.
+		const washFits = states !== undefined;
+		let forms = own("/XObject");
+		if (forms === null) return { wash: true };
+		const fromAbove = (key: string): string | null | undefined | false => {
+			for (const level of page.above ?? []) {
+				const dict = levelAt(level);
+				if (dict === null) return false;
+				if (dict === undefined) continue;
+				const value = dictEntries(dict).get(key);
+				if (value !== undefined) return dictAt(value);
+			}
+			return undefined;
+		};
+		if (states === undefined) {
+			const up = fromAbove("/ExtGState");
+			if (up === false) return { reason: `page ${page.index} has resources this writer cannot read` };
+			if (up === null) return { reason: `page ${page.index} has a graphics state this writer cannot read` };
+			states = up;
+		}
+		if (forms === undefined) {
+			const up = fromAbove("/XObject");
+			if (up === false) return washFits ? { wash: true } : { reason: `page ${page.index} has resources this writer cannot read` };
+			if (up === null) return { wash: true };
+			forms = up;
+		}
+
+		const alpha = `/ca ${pdfNum(HIGHLIGHTER_ALPHA)} /CA ${pdfNum(HIGHLIGHTER_ALPHA)}`;
+		if (multiply && multiplyNum === 0) multiplyNum = add(`<< /Type /ExtGState ${alpha} /BM /Multiply >>`);
+		if (!multiply && plainNum === 0) plainNum = add(`<< /Type /ExtGState ${alpha} >>`);
+		const stateNum = multiply ? multiplyNum : plainNum;
+		const { x, y, w, h } = page.box;
+		// Outward to the hundredth, so rounding never trims the page edge.
+		const down = (v: number): string => pdfNum(Math.floor(v * 100) / 100);
+		const up = (v: number): string => pdfNum(Math.ceil(v * 100) / 100);
+		const inner = `q 1 0 0 -1 0 ${pdfNum(flipHeight)} cm ${fills}Q`;
+		const body = cm === null ? inner : `q ${cm} cm ${inner} Q`;
+		const groupNum = add(
+			`<< /Type /XObject /Subtype /Form /BBox [${down(x)} ${down(y)} ${up(x + w)} ${up(y + h)}] ` +
+				`/Group << /S /Transparency /I true >> /Resources << >> /Length ${body.length} >>\n` +
+				`stream\n${body}\nendstream`
+		);
+
+		const stateName = freeName(new Set(dictEntries(states ?? "<< >>").keys()));
+		const groupName = freeName(new Set(dictEntries(forms ?? "<< >>").keys()), GROUP_BASE);
+		const resources = setEntries(
+			res,
+			new Map([
+				["/ExtGState", setEntries(states ?? "<< >>", new Map([[`/${stateName}`, `${stateNum} 0 R`]]))],
+				["/XObject", setEntries(forms ?? "<< >>", new Map([[`/${groupName}`, `${groupNum} 0 R`]]))],
+			])
+		);
+		return { draw: `q /${stateName} gs /${groupName} Do Q`, resources };
+	};
+
+	/**
+	 * Highlighter on a page whose /XObject this writer cannot read (see
+	 * `highlightGroup`) keeps the plain wash, which needs a transparency
+	 * state, and a `gs` operator
+	 * can only name one the page's resources already reach. Whichever dictionary has to
 	 * change is rewritten once and remembered, because pages commonly share
 	 * one resources object and adding our name twice would write the key
 	 * twice.
@@ -303,21 +494,18 @@ export function appendInkToPdf(
 		const ref = asRef(had);
 		const target = ref === null ? had : (objectBody(doc, ref) ?? had);
 		const list = target.startsWith("[") ? target.slice(1, -1).trim() : had;
-		return `[${openNum} 0 R ${list} ${closeNum} 0 R ${ink} 0 R]`;
+		// A comment runs to the end of its line: when the old list's last line
+		// holds one, ours start a line of their own, or they and the `]` would
+		// be part of it. A content list holds references only, so a `%` in it
+		// is a comment.
+		const gap = /%[^\r\n]*$/.test(list) ? "\n" : " ";
+		return `[${openNum} 0 R ${list}${gap}${closeNum} 0 R ${ink} 0 R]`;
 	};
 
 	for (const page of pages) {
 		const on = byPage.get(page.index);
 		if (on === undefined) continue;
-		let gsName = "GSa";
-		let resources: string | null = null;
-		if (on.some((s) => s.tool === "highlighter")) {
-			const placed = placeAlpha(page);
-			if ("reason" in placed) return { ok: false, reason: placed.reason };
-			gsName = placed.name;
-			resources = placed.resources;
-		}
-		const { cm, flipHeight } = pageMatrix(page);
+		const { cm, flipHeight } = pageMatrix(page, userUnitOf(doc, page));
 		// A DESTINATION THIS MODULE CANNOT SEE, so the user answers it. The
 		// page already exists and we read its dictionary, never its pixels.
 		//
@@ -347,8 +535,46 @@ export function appendInkToPdf(
 		// `inkToPdf` is deliberately NOT given this control: it CREATES its
 		// page and paints no background, and a PDF page with none is white in
 		// every reader, so there the destination is a fact, not a guess.
-		const inner = inkPdfContent(on, flipHeight, gsName, pdfPageDestination(assumption));
-		const contentNum = add(streamObject(cm === null ? inner : `q ${cm} cm ${inner} Q`));
+		const destination = pdfPageDestination(assumption);
+		// Every page lays its highlights on as one group, as the screen does, and
+		// a page the FILE draws light multiplies it. Every other page draws it
+		// with no blend mode: a page "lighten" says is dark, a page the file
+		// itself draws dark, and a page whose shade its content does not say (a
+		// scan is one picture). The setting cannot tell these apart: "darken" is
+		// the default, and a multiply over a page the file draws black is a
+		// multiply over black - the band vanishes. See `pageShade`, which is
+		// asked only here, under a light-page setting, for a page with
+		// highlights, so pen-only pages and "lighten" never open a stream. The
+		// one page with no group is a page whose /XObject this writer cannot
+		// read (`highlightGroup`).
+		const highlighted = on.some((s) => s.tool === "highlighter");
+		const lightPage = assumption !== "lighten" && highlighted && pageShade(doc, page) === "light";
+		const fills = highlighted ? highlightFills(on, destination) : "";
+		const pen = on.filter((s) => s.tool !== "highlighter");
+		const group = fills === "" ? null : highlightGroup(page, fills, cm, flipHeight, lightPage);
+		if (group !== null && "reason" in group) return { ok: false, reason: group.reason };
+		let resources: string | null = null;
+		let stream: string;
+		if (group !== null && "draw" in group) {
+			resources = group.resources;
+			const ink = pen.length === 0 ? "" : inkPdfContent(pen, flipHeight, "GSa", destination);
+			stream = ink === "" ? group.draw : `${group.draw} ${cm === null ? ink : `q ${cm} cm ${ink} Q`}`;
+		} else {
+			// No group. Pen ink only, or highlights whose outlines draw nothing:
+			// no state to place. Or a page whose /XObject this writer cannot
+			// read, which keeps the wash the copy wrote before the group, pen and
+			// highlights in the order drawn, whatever the page's shade.
+			let gsName = "GSa";
+			if (group !== null) {
+				const placed = placeAlpha(page);
+				if ("reason" in placed) return { ok: false, reason: placed.reason };
+				gsName = placed.name;
+				resources = placed.resources;
+			}
+			const inner = inkPdfContent(group === null ? pen : on, flipHeight, gsName, destination);
+			stream = cm === null ? inner : `q ${cm} cm ${inner} Q`;
+		}
+		const contentNum = add(streamObject(stream));
 
 		const body = objectBody(doc, page.num);
 		if (body === null) return { ok: false, reason: `page ${page.index} could not be read back` };

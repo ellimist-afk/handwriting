@@ -182,7 +182,7 @@ function tabFor(plugin: Plugin) {
 }
 
 type Row = { name?: string; desc?: string; items?: Row[]; control?: { type: string; key: string } };
-const DESC = "Faint lines where each page ends, on Infinite canvas notes. Not in exports. Default on.";
+const DESC = "Show faint lines where each page ends, on Infinite canvas notes. Won't appear in exports. Default on.";
 
 /** Lets the settings write the toggle schedules land in saveData: the save chain is promises only, no timer. */
 async function flushSaves(): Promise<void> {

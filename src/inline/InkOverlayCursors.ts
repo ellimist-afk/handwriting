@@ -23,6 +23,8 @@ declare module "./InkOverlay" {
 		refreshPenCursor(): void;
 		paintPenCursor(sample: PenSample, cursorScale: number, cursorZoom: number, feedbackSample: PenSample | null): void;
 		hidePenCursor(): void;
+		hidePenRing(): void;
+		mouseRingLit(): boolean;
 		concealPenCursor(): void;
 		armHoverWatchdog(): void;
 		clearHoverWatchdog(): void;
@@ -72,6 +74,24 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 	if (changed) el.setCssStyles(changed);
 }
 
+/**
+ * Whether the ring last painted on each overlay was a MOUSE's. A finger landing stands a mouse's ring down with the
+ * hover class, so the reader gets the native pointer back, and any other ring alone (GitHub issue 53). Written once per
+ * painted sample in `showPenCursor`, read through the `mouseRingLit` method.
+ */
+const ringForMouse = new WeakMap<object, boolean>();
+
+/**
+ * A pointer this surface paints no ring for meets a hover class still on: take it off, so the pointer is not left
+ * under `cursor: none`. Since GitHub issue 53 a pen that only goes away keeps the class (`hidePenRing`), because each
+ * add or remove restyles the whole note; the refusals in `showPenCursor` are where such a pointer arrives. Read first,
+ * like the add in `showPenCursor`, so a refused sample with the class already off writes nothing.
+ */
+function dropPenHoverClass(plugin: InkOverlayPlugin): void {
+	const classes = plugin.view.scrollDOM.classList;
+	if (classes.contains(PEN_HOVER_CLASS)) classes.remove(PEN_HOVER_CLASS);
+}
+
 	function showPenCursor(this: InkOverlayPlugin, sample: PenSample, pointerType?: string): void {
 		// Keyboard mode is an overarching pause for mouse ink. The router keeps
 		// an already-claimed mouse alive so its samples can commit, and these
@@ -80,7 +100,11 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		const mousePaused =
 			!penInkEnabled() &&
 			(pointerType === "mouse" || (pointerType === undefined && this.mouseStroke));
-		if (mousePaused) return;
+		// Refused, so not left under `cursor: none` either: a class a pen left on comes off on this first row.
+		if (mousePaused) {
+			dropPenHoverClass(this);
+			return;
+		}
 		// Visibility for anything that can ink - a mouse hovering with mouse
 		// ink armed still wants the strip, and gating that would silently take
 		// the toolbar away from every mouse-ink user. Alan ruled for exactly
@@ -101,8 +125,12 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		if (pointerType === "pen") markPenHardwareSeen();
 		else if (pointerRaisesPenTools(pointerType)) markPenSeen();
 		this.ensurePenTools();
-		// Reticle off: the native cursor stays, so no hover class either.
-		if (!penReticleOn) return;
+		// Reticle off: the native cursor stays, so no hover class either - one a pen left on before the reticle went off
+		// comes off on this first row.
+		if (!penReticleOn) {
+			dropPenHoverClass(this);
+			return;
+		}
 		if (!this.penCursorEl) return;
 		// A PAN DRAG PAINTS NO RETICLE - the rule and the defect behind it are
 		// written down at `penReticleShown` (PenCursor.ts). The two call sites
@@ -163,9 +191,11 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		// REFUSES, LIKE THE PAN GATE ABOVE, and for the same reason spelled
 		// out there: `PEN_HOVER_CLASS` two lines down is `cursor: none` over
 		// the whole scroller, so painting nothing while ADDING it is the
-		// no-pointer-at-all defect of 2026-09-04. Returning here leaves the
-		// class exactly as the stand-down left it - off - so the reader keeps
-		// the native cursor for as long as the ring is refused.
+		// no-pointer-at-all defect of 2026-09-04. Returning here takes the
+		// class off if it is still on - the stand-down takes it with a mouse's
+		// ring, but a pen's ring goes alone and leaves it on (GitHub issue 53)
+		// - so the reader keeps the native cursor for as long as the ring is
+		// refused.
 		//
 		// AND ABOVE THE WATCHDOG, which is not tidiness either. A refused
 		// mouse sample must not settle a timer it is not going to paint for:
@@ -187,12 +217,16 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		// ORs the same derived answer over every live router and carries the
 		// cost note; it is read only under `mousePointer`, so nothing on the
 		// pen or touch path pays for it.
-		if (mousePointer && anyHandOnGlass()) return;
+		if (mousePointer && anyHandOnGlass()) {
+			dropPenHoverClass(this);
+			return;
+		}
 		// Every branch below returns, so the watchdog is settled here, once.
 		if (mousePointer) this.clearHoverWatchdog();
 		else this.armHoverWatchdog();
 		// `contains` is a read; an `add` of a class already there still writes.
 		if (!this.view.scrollDOM.classList.contains(PEN_HOVER_CLASS)) this.view.scrollDOM.classList.add(PEN_HOVER_CLASS);
+		ringForMouse.set(this, mousePointer);
 		const client = this.penCursorPinned ? this.router?.clientPointForSample(sample) : null;
 		const position = client ? { ...sample, x: client.x, y: client.y } : sample;
 		this.penCursorClient = client ? position : null;
@@ -306,9 +340,10 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		// The pan drag's grabbing hand comes off wherever the reticle does,
 		// and that is not tidiness: this is the ONE place every abandon path
 		// already passes through. `resetGestureState` (a file switch, an
-		// unmount, a window blur mid-gesture) calls it, `onPenLeave` calls it,
-		// and `hidePenCursorsEverywhere` calls it on every open surface when
-		// mouse ink goes off. A pan drag torn down by any of those would
+		// unmount, a window blur mid-gesture) calls it, the pan's own lift calls
+		// it, and `hidePenCursorsEverywhere` calls it on every open surface when
+		// mouse ink goes off. (A pen that only goes away does not come here any
+		// more: `hidePenRing` below.) A pan drag torn down by any of those would
 		// otherwise leave the scroller wearing `cursor: grabbing` with no
 		// gesture behind it, for the rest of the session - the same shape of
 		// stranded-cursor defect the mouse-ink-off edge was fixed for on
@@ -319,6 +354,44 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		// The Attach button's words go with the reticle: Obsidian's tooltip has no timer, and a pen leaving hover range
 		// sends no pointerout it would hear.
 		this.attachHoverOff();
+	}
+
+	/**
+	 * The ring alone, for a pen that only goes away: the pen-gone hide (the
+	 * watchdog), a pen's leave, a lasso or space lift, a finger landing with no
+	 * mouse ring lit. `hidePenCursor` less its two scroller class removals.
+	 *
+	 * GitHub issue 53. PEN_HOVER_CLASS is matched by a rule on every element
+	 * under the scroller, so taking it off here and putting it back at the
+	 * next approach restyled the whole note twice: on a note with equations, a
+	 * task of 200 ms and more each time. So the class stays. A pointer that
+	 * then gets no ring takes it off by its first row: the refusals in
+	 * `showPenCursor` (`dropPenHoverClass`), and the router's
+	 * `onForeignPointer` for a plain mouse and for a pen with the tool off.
+	 *
+	 * PAN_DRAG_CLASS is never on here: the watchdog is cleared when a pan drag
+	 * starts and cannot be armed during one, the leave and the finger landing
+	 * come only with no contact claimed, and the lasso and space lifts are not
+	 * a pan. The drag's own lift and every abandon path go through
+	 * `hidePenCursor`.
+	 */
+	function hidePenRing(this: InkOverlayPlugin): void {
+		this.penCursorClient = null;
+		// The same space-drag exception as `hidePenCursor`, for its reason.
+		if (this.mode !== "space" || this.spacePlan === null) this.clearSpaceFeedback();
+		this.clearHoverWatchdog();
+		this.concealPenCursor();
+		this.attachHoverOff();
+	}
+
+	/**
+	 * Is a ring on screen, and was it painted for a mouse? A method, not an
+	 * export: InkOverlayLifecycle.ts importing this module made an import
+	 * cycle through InkOverlay.ts that runs `installLifecycle` before
+	 * Lifecycle's own imports are bound.
+	 */
+	function mouseRingLit(this: InkOverlayPlugin): boolean {
+		return this.penCursorShown && ringForMouse.get(this) === true;
 	}
 
 	/** Hide the reticle by opacity only: a compositor change, never a layout or root repaint. */
@@ -348,18 +421,43 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 	 * fires, re-arms for the rest of the second if a sample came since, and
 	 * hides only once none has. A timer replaced per hover sample woke the
 	 * main thread on every one of them.
+	 *
+	 * A PEN IN CONTACT SENDS NO HOVER, so a stroke longer than a second used to
+	 * look like a pen that had gone, and the hide took PEN_HOVER_CLASS off the
+	 * scroller mid-stroke. That class is matched by a rule on every element
+	 * under the scroller, so the whole note was restyled in the middle of the
+	 * stroke: on a note with rendered equations a task of 200 ms and more, the
+	 * hitch of GitHub issue 53. While a contact is claimed in any pane
+	 * (`anyPenDown`, one hand, so one pane's stroke protects the others too)
+	 * the timer stamps the time and looks again a quarter of a second later;
+	 * after the lift the hide comes 750 to 1000 ms on unless a hover arrives.
+	 * Not a full second: a re-arm that long can land just after the lift,
+	 * before the first hover sample, and take the class off and put it back,
+	 * two restyles at the lift. No cap: the router's contact flag already has
+	 * its own ways home (InlinePenRouter.handOnGlass lists them), and a cap
+	 * would take the class off in the middle of a long contact.
+	 *
+	 * AND THE HIDE IS THE RING ALONE (`hidePenRing`): the class stays on, so a
+	 * pen that goes away and comes back costs the note no restyle at all.
 	 */
 	function armHoverWatchdog(this: InkOverlayPlugin): void {
 		this.hoverSeenAt = performance.now();
 		if (this.hoverWatchdog === null) startHoverWatchdog(this, HOVER_GHOST_MS);
 	}
 
+	const CONTACT_POLL_MS = HOVER_GHOST_MS / 4;
+
 	function startHoverWatchdog(plugin: InkOverlayPlugin, ms: number): void {
 		plugin.hoverWatchdog = plugin.winRef.setTimeout(() => {
 			plugin.hoverWatchdog = null;
+			if (plugin.router?.anyPenDown()) {
+				plugin.hoverSeenAt = performance.now();
+				startHoverWatchdog(plugin, CONTACT_POLL_MS);
+				return;
+			}
 			const rest = plugin.hoverSeenAt + HOVER_GHOST_MS - performance.now();
 			if (rest > 0) { startHoverWatchdog(plugin, rest); return; }
-			plugin.hidePenCursor();
+			plugin.hidePenRing();
 		}, ms);
 	}
 
@@ -417,13 +515,20 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 	/**
 	 * Put the lasso reticle away with the gesture, not the watchdog - a
 	 * released lasso should not strand its ring on screen for up to a
-	 * second. Reuses `hidePenCursor` because lasso, space and pan all paint
-	 * through the SAME element hover does (`penCursorEl`), unlike the eraser
-	 * which has its own (`eraserEl`) - pan by hiding it for the length of the
-	 * drag rather than by keeping it lit, but through that element either way.
+	 * second. Reuses the hover's own hide because lasso, space and pan all
+	 * paint through the SAME element hover does (`penCursorEl`), unlike the
+	 * eraser which has its own (`eraserEl`) - pan by hiding it for the length
+	 * of the drag rather than by keeping it lit, but through that element
+	 * either way.
+	 *
+	 * The ring alone (`hidePenRing`, GitHub issue 53): the lift leaves the
+	 * pointer where it was, so the hover class stays on and the next hover
+	 * sample costs no restyle. Its one caller is the lasso branch of
+	 * `penUp`, which a window blur and a pointercancel reach too; the abandon
+	 * paths that do not (`resetGestureState`) call `hidePenCursor` themselves.
 	 */
 	function hideLassoCursor(this: InkOverlayPlugin): void {
-		this.hidePenCursor();
+		this.hidePenRing();
 	}
 
 	/**
@@ -508,9 +613,9 @@ function writePenCursor(el: HTMLElement, modeClass: string | null | undefined, s
 		this.showPenCursor(sample);
 	}
 
-	/** Put the insert-space reticle away with the gesture. See hideLassoCursor. */
+	/** Put the insert-space reticle away with the gesture, the ring alone. See hideLassoCursor; its caller is `penUp`'s space branch. */
 	function hideSpaceCursor(this: InkOverlayPlugin): void {
-		this.hidePenCursor();
+		this.hidePenRing();
 	}
 
 	/**
@@ -531,6 +636,8 @@ export function installCursors(proto: InkOverlayPlugin): void {
 		refreshPenCursor,
 		paintPenCursor,
 		hidePenCursor,
+		hidePenRing,
+		mouseRingLit,
 		concealPenCursor,
 		armHoverWatchdog,
 		clearHoverWatchdog,

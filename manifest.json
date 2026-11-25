@@ -1,10 +1,11 @@
 {
 	"id": "handwriting",
 	"name": "Handwriting",
-	"version": "1.5.1",
+	"version": "1.5.2",
 	"minAppVersion": "1.12.3",
-	"description": "Handwrite, highlight, erase and lasso on your notes and PDFs. Your notes stay Markdown.",
+	"description": "Handwrite, draw, highlight, and erase directly on your notes and PDFs. Your notes stay Markdown.",
 	"author": "Alan",
+	"authorUrl": "https://handwriting.md",
 	"fundingUrl": {
 		"Ko-fi": "https://ko-fi.com/ellimistafk"
 	},

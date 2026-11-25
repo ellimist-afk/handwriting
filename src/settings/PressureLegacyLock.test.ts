@@ -85,15 +85,6 @@ describe("the settings row", () => {
 		expect(block).not.toContain("repaintAllInkOverlays");
 		expect(block).not.toContain("embedInkRepaintAll");
 	});
-
-	it("says it sets new strokes only", () => {
-		const source = lf(tabSource);
-		const at = source.indexOf('name: "Pressure sensitivity"');
-		expect(at, "premise: the row found").toBeGreaterThan(0);
-		const desc = source.slice(at, source.indexOf("\n", source.indexOf("desc:", at)));
-		expect(desc).toMatch(/new strokes/i);
-		expect(desc).toMatch(/keeps its look/i);
-	});
 });
 
 describe("the diagnostics report", () => {

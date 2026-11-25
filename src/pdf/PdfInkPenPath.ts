@@ -149,15 +149,23 @@ declare module "./PdfInkController" {
 		const content = this.toContent(sample, scroller);
 		const box = pageAt(boxes, content.x, content.y);
 		if (!box) return;
-		if (this.rotated.has(box.pageNumber)) {
+		const intent = penContactIntent(ev?.buttons ?? 0, ev?.button ?? -1, tipMode());
+		// A live turn refuses every page, not only the ones already measured:
+		// a page with no ink is never painted, so it never joins `rotated`,
+		// and its first stroke would be saved at the turned screen's numbers
+		// in the upright page's frame. The pan tool alone goes on: it moves
+		// the scroller and saves nothing. An unreadable turn is not a turn.
+		const turn = this.viewTurn();
+		if (this.rotated.has(box.pageNumber) || (turn !== null && turn !== 0 && intent !== "pan")) {
 			if (!this.warnedRotated.has(box.pageNumber)) {
 				this.warnedRotated.add(box.pageNumber);
 				this.notify("Handwriting: ink on a rotated PDF page is not supported");
 			}
 			return;
 		}
-		const intent = penContactIntent(ev?.buttons ?? 0, ev?.button ?? -1, tipMode());
-		if (intent !== "ink" && intent !== "pan" && !this.inkReady()) {
+		// Also while an opening on the path is carrying older ink into a fresh id: an erase taken then
+		// would book the carried strokes into its own undo step, and that undo would delete them.
+		if (intent !== "ink" && intent !== "pan" && (!this.inkReady() || this.openingCarries())) {
 			if (!this.warnedInkNotReady) {
 				this.warnedInkNotReady = true;
 				this.notify("Handwriting: this PDF's ink is not ready - try again in a moment");
@@ -252,7 +260,9 @@ declare module "./PdfInkController" {
 		// Above pan and space for the same reason the note surface puts it
 		// above them: the selection is an object, and reaching for it should
 		// not depend on which mode the strip was left in.
-		if (!this.erasing && this.selected.length > 0) {
+		// Not under a live turn: the gate above lets only the pan tool through
+		// then, and a drag would move the ink through the turned screen.
+		if (!this.erasing && this.selected.length > 0 && (turn === null || turn === 0)) {
 			const p = toPagePoint(box, scale, content.x, content.y);
 			if (p && this.selectionGrabbed(box.pageNumber, p, scale)) {
 				this.lassoDown(box, scale, sample, probed.scroller);
@@ -827,6 +837,13 @@ declare module "./PdfInkController" {
 				head.pressure,
 				pair.wet.liveHalfWidth(this.strokeStyle, head.pressure)
 			);
+			// A highlighter's tip keeps out of the strip's end disc where the pair wears the wash itself: that disc is
+			// ink the washed wet canvas already shows. Gated
+			// on the wash dressWet last put on this pair (washedPair), never on a fresh read of the page's answer: on a
+			// layered page the pair sits at full opacity in the group, which washes once, and a cut there leaves a lighter
+			// seam. The tip's run goes with it, so the cut takes the back ring the tip shares with the disc's edge.
+			const end = this.washedPair === pair ? pair.wet.stripEnd() : undefined;
+			if (end) pair.tail.cutDisc(cam, end, head);
 		}
 	}
 

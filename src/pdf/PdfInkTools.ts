@@ -295,6 +295,11 @@ declare module "./PdfInkController" {
 		// contains the scroller, so every signal the old placement saw still
 		// arrives here.
 		const mo = new MutationObserver((mutations) => {
+			// The canvases of ours the viewer just took off a page that still
+			// shows its picture go back now, before the next paint, and before
+			// the filter below: a highlight group taken alone reads as our own
+			// write there. See `putBackTaken`.
+			this.putBackTaken(mutations);
 			// Audit doc §5b/D1: filter our own writes before anything else
 			// runs, so a hovering pen - which only ever touches the reticle
 			// and the scroller's hover class - stops re-invalidating the
@@ -325,6 +330,11 @@ declare module "./PdfInkController" {
 			const turn = this.viewTurn();
 			const turned = turn !== null && turn !== 0;
 			if (turned) for (const pageNumber of this.pageSize.keys()) this.rotated.add(pageNumber);
+			// Back upright, a page the pen gate refused for the live turn alone
+			// is told again on the next turned spell, as a measured page is when
+			// its upright repaint clears it. A page still in `rotated` keeps its
+			// warning: the repaint decides that one.
+			if (turn === 0) for (const pageNumber of this.warnedRotated) if (!this.rotated.has(pageNumber)) this.warnedRotated.delete(pageNumber);
 			const frame = this.frame;
 			if (frame && !this.idle) {
 				const el = this.pageElement(frame.scroller, this.strokePageNumber);
@@ -333,11 +343,19 @@ declare module "./PdfInkController" {
 					this.penUp();
 				}
 			}
-			// Throttled, which is what scheduleThrottled was written for and
-			// never actually got: this fires on every viewer reflow, and each
-			// sync probes every page div. A zoom or a fast scroll produced
-			// sixty of them a second.
-			this.scheduleThrottled();
+			// A page with ink that just got a canvas of the viewer's, with none
+			// of ours over it, is synced now, before the next paint, not after
+			// the floor: see `inkedPageShownBare`. A page rendering is a few
+			// records a second, never the per-frame restyle the floor is for.
+			// That sync reads no pixels of a page read before: see
+			// `syncShownBare`.
+			//
+			// Everything else is throttled, which is what scheduleThrottled was
+			// written for and never actually got: this fires on every viewer
+			// reflow, and each sync probes every page div. A zoom or a fast
+			// scroll produced sixty of them a second.
+			if (this.inkedPageShownBare(records)) this.syncShownBare();
+			else this.scheduleThrottled();
 		});
 		mo.observe(this.root, {
 			childList: true,

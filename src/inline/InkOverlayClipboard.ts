@@ -6,11 +6,12 @@
 import { installMethods } from "./InstallMethods";
 import { Notice } from "obsidian";
 import { CameraState } from "../camera/coordinates";
-import { clipboardSize, copyInk, inkClipboardMarker, pasteInk } from "./InkClipboard";
+import { clipboardSize, copyInk, inkClipboardMarker, keepCutOnDevice, pasteInk } from "./InkClipboard";
 import { withInkDestination } from "../ink/InkTheme";
+import { EXPORT_PAGE_DARK, exportPageNow } from "../ink/InkPdf";
 import { InkStroke } from "../ink/Stroke";
 import { drawStroke } from "../ink/StrokeRenderer";
-import { snipViewport } from "../pdf/PageMap";
+import { noteSnipViewport } from "../pdf/PageMap";
 import { type DeleteSelectionOutcome, removeSelectedInlineStrokes } from "./InlineSelectionDelete";
 import { visualToNote } from "./ZoomScale";
 import { inlineInk, type CutSelectionOutcome, type InkOverlayPlugin } from "./InkOverlay";
@@ -120,14 +121,28 @@ function publishInkMarker(win: Window): void {
 const NOTE_SNIP_CAP_PX = 4_000_000;
 
 /**
- * The page a note snip paints for itself, and therefore the destination its
- * ink has to be readable on. One constant so the fill and the readability
- * rule cannot be changed apart.
+ * The pages a note snip paints for itself, white or dark as the export page
+ * setting says, and therefore the destination its ink has to be readable on.
+ * One constant per page so the fill and the readability rule cannot be
+ * changed apart. Dark is the PDF export's dark page: one dark for both.
  */
-const SNIP_PAGE = "#ffffff";
+const SNIP_PAGE = { white: "#ffffff", dark: EXPORT_PAGE_DARK } as const;
+
+/**
+ * Where a snip reads the export page setting. The overlay has no route to the
+ * plugin's settings, so the plugin hands it this when it registers its
+ * commands. Until then, and for an overlay no plugin set up, it reads nothing,
+ * which is white.
+ */
+let snipPageSetting: () => unknown = () => undefined;
+
+export function setSnipPageSetting(read: () => unknown): void {
+	snipPageSetting = read;
+}
 
 	/**
-	 * The lassoed region as a PNG: ink on white, cropped to the selection
+	 * The lassoed region as a PNG: ink on the export page, white unless the
+	 * settings say dark, or say Match theme in a dark theme, cropped to the selection
 	 * plus a little air. The pdf surface composites the page under its
 	 * strokes; a note's ground is live editor DOM, which is not honestly
 	 * rasterizable, so this is the drawing alone - the same bargain the SVG
@@ -140,31 +155,34 @@ const SNIP_PAGE = "#ffffff";
 		if (!bounds) return { ok: false, reason: "nothing is selected to snip" };
 		const strokes = this.strokesHere();
 		const pxPerWorld = this.winRef.devicePixelRatio || 1;
-		// No page to clamp to: a note's canvas is as big as its ink.
-		const vp = snipViewport(bounds, 8, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, pxPerWorld, NOTE_SNIP_CAP_PX);
+		// No page to clamp to: a note's canvas is as big as its ink, on every side, ink left of or above the origin too.
+		const vp = noteSnipViewport(bounds, 8, pxPerWorld, NOTE_SNIP_CAP_PX);
 		if (!vp) return { ok: false, reason: "the selection could not be framed" };
+		// Read once, Match theme's look at the theme included: the fill and the
+		// destination below are this one value.
+		const page = SNIP_PAGE[exportPageNow(snipPageSetting())];
 		const out = createEl("canvas");
 		try {
 			out.width = Math.max(1, Math.round((vp.x1 - vp.x0) * vp.scale));
 			out.height = Math.max(1, Math.round((vp.y1 - vp.y0) * vp.scale));
 			const ctx = out.getContext("2d");
 			if (!ctx) return { ok: false, reason: "the image could not be drawn" };
-			// ONE constant for the page and the destination, because the two
+			// ONE value for the page and the destination, because the two
 			// must not drift: the ink is made readable against exactly the
 			// rectangle that was just painted under it.
-			ctx.fillStyle = SNIP_PAGE;
+			ctx.fillStyle = page;
 			ctx.fillRect(0, 0, out.width, out.height);
 			ctx.setTransform(1, 0, 0, 1, -vp.x0 * vp.scale, -vp.y0 * vp.scale);
 			const cam = { x: 0, y: 0, zoom: vp.scale };
 			// A snip PNG is NOT transparent and does not inherit the note's
-			// theme - it lands on the white rectangle above whatever theme it
-			// was taken under - so its destination is known here and the ink
-			// adapts to it, same direction as the PDF and for the same reason.
+			// theme - it lands on the rectangle above whatever theme it was
+			// taken under - so its destination is known here and the ink
+			// adapts to it, as the PDF's does and for the same reason.
 			//
 			// The scope, rather than an argument: these strokes are drawn by
 			// the shared committed renderer, whose colour accessor is the hot
 			// path and may not grow a per-stroke parameter.
-			withInkDestination(SNIP_PAGE, () => {
+			withInkDestination(page, () => {
 				// The pdf snip's layering exactly: highlighter as a wash under
 				// the pen, both from committed geometry.
 				ctx.globalAlpha = 0.35;
@@ -199,6 +217,8 @@ const SNIP_PAGE = "#ffffff";
 	function cutSelectedInk(this: InkOverlayPlugin): CutSelectionOutcome {
 		const n = this.copySelectedInk();
 		if (n === 0) return { kind: "empty" };
+		// Kept on this device before the delete, so the ink outlives a restart between the cut and the paste.
+		keepCutOnDevice();
 		// A cut is a copy AND a delete. When the delete removes nothing the
 		// ink is still on the page, so answering "cut" here would report a
 		// cut that did not happen - the clipboard holds the strokes and so

@@ -6,6 +6,7 @@ import { contentOrigin } from "./ContentOrigin";
 import { anchorTop } from "./DocumentTop";
 import { RUNG_SPACING } from "./DocumentAnchor";
 import { fontZoomFactor, ownedEffectiveScale, visualToNote } from "./ZoomScale";
+import { paperRowPx } from "./PaperPlan";
 import { installMethods } from "./InstallMethods";
 import { CAMERA_STILL_BACKING_PX, cameraWithin, SCALE_EPSILON, type InkOverlayPlugin } from "./InkOverlay";
 
@@ -140,9 +141,15 @@ declare module "./InkOverlay" {
 			// The paper too, on the same change and no other: this is the one
 			// place a font change lands without the refresh path.
 			this.paperFontPx = Number.parseFloat(fontStr);
+			// The row height off the same style object, in the same task: the paper is never a frame behind the text.
+			this.paperRowPx = paperRowPx(this.contentStyle?.lineHeight, this.view.defaultLineHeight);
 			this.updatePaperSpacing();
 			// And the line anchors' signature.
 			this.requestLineSignature();
+			// And the held column, the note's width times the new ratio. This
+			// sync returns early while a stroke owns the frame, so the column
+			// never moves under the pen: the first sync after the lift asks it.
+			this.applyColumnHold();
 		}
 		// Unconditionally, not inside the epsilon branch above: the font zoom
 		// can move on a frame where the css scale did not, and leaving

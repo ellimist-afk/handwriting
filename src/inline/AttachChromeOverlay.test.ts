@@ -159,6 +159,16 @@ describe("the redraw draws attached ink's chrome from boxes and the camera", () 
 		expect(calls.filter((c) => c.startsWith("button "))).toEqual(["button loose"]);
 	});
 
+	it("the drawn Attach button: one whole group wears the attached fill, two groups the loose one", () => {
+		// Defect: the fill read off the chips' Detach, so two whole groups selected drew the attached fill while a tap attaches them as one.
+		const r = rig((currentPath = "button-fill.md"), [record("g1", ["s1", "s2"], "line 3 words"), record("g2", ["s3"], "line 11 words")]);
+		const buttons = () => r.redraw().filter((c) => c.startsWith("button "));
+		r.selection.selectExactly(["s1", "s2"]);
+		expect(buttons(), "one whole group").toEqual(["button attached"]);
+		r.selection.selectExactly(["s1", "s2", "s3"]);
+		expect(buttons(), "two groups").toEqual(["button loose"]);
+	});
+
 	it("a drag of the selection, grabbed inside it or at a corner, hides the Attach button and its hit until the lift; the lift draws it again", () => {
 		// Defect: the redraw asks the button without the drag, so it rides a moving selection and a tap on it lands mid-drag.
 		// This rig has no picture, so a corner grab is a plain drag here; LassoDragPicture.test.ts holds the resize and the turn.

@@ -196,13 +196,13 @@ export const OVERSCROLL_GIVE_PX = 96;
 
 /**
  * HOW FAR A TRAVELLED EASE MAY SLIDE BACK LEFTWARD OR UPWARD, in band px, per axis: one maximal band margin at the
- * ink's css scale, and never more than the scroll room on the side the ease uncovers. The settle eases a correction
+ * ink's css scale and the pinch (bandMarginMax), and never more than the scroll room on the side the ease uncovers. The settle eases a correction
  * within it and refuses one past it, and syncBand widens the band for the ease by no more than it, so the band is
  * never asked to cover a slide of thousands of px (a zoom-out to 0.322 at scrollTop 5000 settled a 3433 px
  * correction, and widening the band for it crashed the renderer).
  */
 export function travelledEaseRoom(v: BandViewport): { x: number; y: number } {
-	const max = bandMarginMax(v.scale ?? 1);
+	const max = bandMarginMax(v.scale ?? 1, v.pinch);
 	return {
 		x: Math.min(max, Math.max(0, v.scrollWidth - v.scrollLeft - v.clientWidth)),
 		y: Math.min(max, Math.max(0, v.scrollHeight - v.scrollTop - v.clientHeight)),

@@ -45,6 +45,7 @@ import { InkStroke } from "../ink/Stroke";
 import { StrokeBuilder } from "../ink/StrokeBuilder";
 import { StrokeIndex } from "../ink/StrokeIndex";
 import { DEFAULT_PEN } from "../ink/PenStyle";
+import type { PenSample } from "../input/PointerRouter";
 
 const PATH = "note.md";
 
@@ -181,6 +182,14 @@ interface Rig {
 		mouse: boolean;
 		dwell: boolean;
 	}): void;
+	/**
+	 * A mouse stroke driven through the move path (`penRaw`), one sample per event, at the note scale `scale`, then
+	 * let go at `liftAt` on the note window's clock. Samples are [x, y, ms] in sample space (note px). The hold is
+	 * whatever the move path stamped, not set by hand as `draw` does.
+	 */
+	mouseRun(opts: { scale: number; fontZoom?: number; samples: Array<[number, number, number]>; liftAt: number }): void;
+	/** The move path's stamp after a run: the last place, and time, the pointer moved. */
+	stamp(): { t: number; x: number; y: number };
 	/** The ops `penUp` (or a chip click) published, in order. */
 	ops: InkOp[];
 	/** The standing chip, or null. */
@@ -317,6 +326,47 @@ function makeRig(): Rig {
 			view.rawLastMoveT = dwell ? performance.now() - DWELL_MS * 2 : performance.now();
 			proto.penUp.call(view);
 		},
+		mouseRun({ scale, fontZoom = 1, samples, liftAt }) {
+			// Only what the move path reaches past the builder: the wet layer's head, the tail's draws, the
+			// prediction and the present probe. None of them reads or writes the hold.
+			view.activeWet = { ...wet, appendPoint: () => undefined, head: () => null,
+				contactHalfWidth: () => 1, liveHalfWidth: () => 1 };
+			view.tail = { ...(view.tail as object), drawHead: () => undefined, draw: () => undefined,
+				cutDisc: () => undefined };
+			view.strokeGain = 1;
+			view.predReal = [];
+			view.planPredictedTail = () => null;
+			view.schedulePresentProbe = () => undefined;
+			// As the zoom commit leaves it: cssScale the note's scale, `scale` that times the font zoom.
+			view.cssScale = scale;
+			view.scale = scale * fontZoom;
+			view.fontZoom = fontZoom;
+			// `penUp` reads the hold on the note window's clock; the lift is when it reads it.
+			const win = (view.view as { dom: { ownerDocument: { defaultView: Record<string, unknown> } } })
+				.dom.ownerDocument.defaultView;
+			win.performance = { now: () => liftAt };
+			const builder = new StrokeBuilder("pen", DEFAULT_PEN.color, DEFAULT_PEN.baseWidth, undefined, "mouse");
+			const [x0, y0, t0] = samples[0]!;
+			builder.start(t0);
+			builder.add(x0, y0, 0.5, t0);
+			view.builder = builder;
+			view.mode = "ink";
+			view.mouseStroke = true;
+			view.strokePenGesture = false;
+			// Pen-down stamps the first sample (InkOverlayPenPath.ts penDown), as here.
+			view.rawLastMoveT = t0;
+			view.rawLastMoveX = x0;
+			view.rawLastMoveY = y0;
+			const raw = (InkOverlayPlugin.prototype as unknown as {
+				penRaw(this: unknown, s: PenSample[], ev: PointerEvent): void;
+			}).penRaw;
+			for (const [x, y, t] of samples.slice(1)) {
+				raw.call(view, [{ x, y, pressure: 0.5, timestamp: t, tiltX: 0, tiltY: 0 }],
+					{ timeStamp: t } as PointerEvent);
+			}
+			proto.penUp.call(view);
+		},
+		stamp: () => ({ t: view.rawLastMoveT as number, x: view.rawLastMoveX as number, y: view.rawLastMoveY as number }),
 		chip: () => container.find(SNAP_CHIP_CLASS),
 		undoLast() {
 			proto.applyInkOp.call(view, invertInkOp(ops[ops.length - 1]!));
@@ -568,4 +618,93 @@ describe("where the chip sits", () => {
 		// going negative and hanging off the other side.
 		expect(snapChipOrigin(0, 0, { width: 10, height: 10 })).toEqual({ left: 0, top: 0 });
 	});
+});
+
+/**
+ * A slow mouse stroke along a line: `count` samples, each 10 screen px on from the last, 250 ms apart, in sample space
+ * at note scale `scale` (a screen px is 1 / scale note px). A 1 screen px wobble keeps it from being a perfect line.
+ */
+function slowLine(scale: number, count: number): Array<[number, number, number]> {
+	return Array.from({ length: count }, (_, i) => [i * 10 / scale, (i % 2) / scale, i * 250]);
+}
+
+describe("the mouse's hold reads the same on screen at every zoom", () => {
+	// Zoomed in to 4, each 10 screen px step is 2.5 note px. Read as 4 note px, the hold only moves every second step,
+	// so a release one step after an odd sample reads 500 ms held. Read as 4 screen px (1 note px), every step moves
+	// it and the same release reads 250 ms: no offer.
+	it("offers nothing at scale 4 for a slow stroke that never paused", () => {
+		const rig = makeRig();
+		const samples = slowLine(4, 48);
+		rig.mouseRun({ scale: 4, samples, liftAt: samples[47]![2] + 250 });
+		expect(rig.stamp().t, "premise: the move path stamped the samples").toBeGreaterThan(samples[0]![2]);
+		expect(rig.ops.map((o) => o.type)).toEqual(["add"]);
+		expect(rig.chip()).toBe(null);
+	});
+
+	it("still offers at scale 4 when that stroke ends in a real pause", () => {
+		const rig = makeRig();
+		const samples = slowLine(4, 48);
+		rig.mouseRun({ scale: 4, samples, liftAt: samples[47]![2] + 600 });
+		expect(rig.chip()).not.toBe(null);
+	});
+
+	it("offers nothing at scale 1 for the same slow stroke", () => {
+		const rig = makeRig();
+		const samples = slowLine(1, 12);
+		rig.mouseRun({ scale: 1, samples, liftAt: samples[11]![2] + 250 });
+		// Every 10 px step is past the slack, so the stamp is the last moving sample, on the clock `penUp` reads.
+		expect(rig.stamp(), "premise: the stamp is the last moving sample")
+			.toEqual({ t: samples[11]![2], x: samples[11]![0], y: samples[11]![1] });
+		expect(rig.ops.map((o) => o.type)).toEqual(["add"]);
+		expect(rig.chip()).toBe(null);
+	});
+
+	it("offers at scale 1 when that stroke ends in a real pause", () => {
+		const rig = makeRig();
+		const samples = slowLine(1, 12);
+		rig.mouseRun({ scale: 1, samples, liftAt: samples[11]![2] + 600 });
+		expect(rig.chip()).not.toBe(null);
+	});
+
+	// Zoomed out to 0.25, a hand on a held button still wanders: here 1.2 screen px, which is 4.8 note px, past a bare
+	// 4 note px. Read as 4 screen px (16 note px), the wander is still and the 600 ms hold earns the offer.
+	it("offers at scale 0.25 after a 600 ms hold whose samples range 1.2 screen px", () => {
+		const rig = makeRig();
+		const line = slowLine(0.25, 12).map(([x, y, i]): [number, number, number] => [x, y, i / 5]);
+		const [ex, ey, et] = line[11]!;
+		const held = Array.from({ length: 12 }, (_, k): [number, number, number] =>
+			[ex + (k % 2 === 0 ? 1.2 / 0.25 : 0), ey, et + (k + 1) * 50]);
+		rig.mouseRun({ scale: 0.25, samples: [...line, ...held], liftAt: et + 600 });
+		expect(rig.stamp().t, "premise: the move path stamped the samples").toBeGreaterThan(line[0]![2]);
+		expect(rig.ops.map((o) => o.type)).toEqual(["add"]);
+		const chip = rig.chip();
+		expect(chip).not.toBe(null);
+		// The chip stands off the stamp, so it lags the last sample by at most the slack: 4 screen px at every zoom.
+		const last = held[held.length - 1]!;
+		expect(Math.abs(parseFloat(String(chip!.style.left)) - SNAP_CHIP_OFFSET - last[0]) * 0.25).toBeLessThanOrEqual(4);
+		expect(Math.abs(parseFloat(String(chip!.style.top)) - SNAP_CHIP_OFFSET - last[1]) * 0.25).toBeLessThanOrEqual(4);
+	});
+
+	// Zoomed in to 4 with a font zoom of 2, `scale` is 8 and the router still maps by 4. A rest whose samples range
+	// 3 screen px (0.75 note px) is still on screen; read through `scale`, the slack is 2 screen px and the rest moves.
+	it("offers at scale 4 with font zoom 2 after a 400 ms rest ranging 3 screen px", () => {
+		const rig = makeRig();
+		const line = Array.from({ length: 12 }, (_, i): [number, number, number] => [i * 10, (i % 2) / 4, i * 50]);
+		const [ex, ey, et] = line[11]!;
+		const rest = Array.from({ length: 8 }, (_, k): [number, number, number] =>
+			[ex + (k % 2 === 0 ? 3 / 4 : 0), ey, et + (k + 1) * 50]);
+		rig.mouseRun({ scale: 4, fontZoom: 2, samples: [...line, ...rest], liftAt: et + 400 });
+		expect(rig.stamp().t, "premise: the move path stamped the samples").toBeGreaterThan(line[0]![2]);
+		expect(rig.chip()).not.toBe(null);
+	});
+
+	// A scale that is not finite or not above 0 reads as 1, as the router maps it: 10 px steps are no pause.
+	it.each([["0", 0], ["NaN", Number.NaN]])("offers nothing at a note scale of %s for steps that never paused",
+		(_name, k) => {
+			const rig = makeRig();
+			const samples = slowLine(1, 12);
+			rig.mouseRun({ scale: k, samples, liftAt: samples[11]![2] + 250 });
+			expect(rig.ops.map((o) => o.type)).toEqual(["add"]);
+			expect(rig.chip()).toBe(null);
+		});
 });

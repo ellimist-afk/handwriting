@@ -304,6 +304,19 @@ export class AttachedLayer {
 	}
 
 	/**
+	 * The browser gave the canvases back blank, the sprites' tiles too, each context at the identity transform: every sprite
+	 * goes, and the backing size is forgotten so the next paint allocates, which sets the standing scale a rect paint draws at,
+	 * and paints whole.
+	 */
+	canvasesRestored(): void {
+		this.clearSprites();
+		this.backing = 0;
+		this.paintedAt = null;
+		this.occupied = false;
+		this.dirty = "all";
+	}
+
+	/**
 	 * Whether this layer was last painted whole at `cam`'s zoom and `backing`, its place within 1/16 device px of `cam`'s (the held
 	 * raster's own test). A landing on a stand-in recomputes the camera, which can move it by a millionth of a world unit from where
 	 * the layer painted; an exact test then put up no tiles.

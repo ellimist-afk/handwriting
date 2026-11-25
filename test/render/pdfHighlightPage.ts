@@ -29,6 +29,10 @@ let pageEl: HTMLElement | null = null;
 let strokes: InkStroke[] = [];
 let clock = 0;
 let ids = 0;
+/** What the reader declares of the page, read live by the controller at every ask. */
+let assumptionNow: PdfPageAssumption = "darken";
+/** The held stroke's last sample, for `holdTo`. */
+let heldAt: Pt | null = null;
 
 function line(a: Pt, b: Pt, step = 10): Pt[] {
 	const n = Math.max(1, Math.round(Math.hypot(b.x - a.x, b.y - a.y) / step));
@@ -45,6 +49,8 @@ async function open(dark: boolean, assumption: PdfPageAssumption): Promise<void>
 	controller?.unmount();
 	root?.remove();
 	strokes = [];
+	heldAt = null;
+	assumptionNow = assumption;
 	document.body.className = "theme-light";
 	root = document.body.createDiv();
 	root.style.cssText = "position:absolute;left:0;top:0;width:620px;height:820px";
@@ -76,7 +82,7 @@ async function open(dark: boolean, assumption: PdfPageAssumption): Promise<void>
 		() => {},
 		() => {},
 		() => false,
-		() => assumption
+		() => assumptionNow
 	);
 	controller.mount();
 	await frames(4);
@@ -106,7 +112,85 @@ async function hold(tool: "pen" | "highlighter", a: Pt, b: Pt, color?: string): 
 		await frames(1);
 		pen().penRaw([at(p)], { pointerType: "pen", buttons: 1, button: -1 });
 	}
+	heldAt = b;
 	await frames(3);
+}
+
+/** The held stroke carried on from where it is held to b, 20 px a sample, still held. No dressing of the pair runs here. */
+async function holdTo(b: Pt): Promise<void> {
+	if (!heldAt) throw new Error("no stroke held");
+	for (const p of line(heldAt, b, 20).slice(1)) {
+		await frames(1);
+		pen().penRaw([at(p)], { pointerType: "pen", buttons: 1, button: -1 });
+	}
+	heldAt = b;
+	await frames(3);
+}
+
+/** A change of the reader's declaration with no event behind it (as a theme flip reads before its repaint lands). */
+function setAssumption(a: PdfPageAssumption): void {
+	assumptionNow = a;
+}
+
+type RibbonEnd = { x: number; y: number; hw: number };
+type LiveWet = { lastRibbon?: RibbonEnd; head(): { from: Pt; to: Pt; pressure: number } | undefined; liveHalfWidth(style: unknown, pressure: number): number };
+
+/**
+ * The strip's end disc and the head on screen, placed by the page's camera (PdfInkPenPath.ts cameraFor: origin at the
+ * page's corner, zoom = the page's css width over its width in points), in client px.
+ */
+function place(): {
+	zoom: number;
+	last: (Pt & { hwWorld: number }) | null;
+	r: number | null;
+	from: Pt | null;
+	to: Pt | null;
+	hw: number | null;
+	layered: boolean;
+} | null {
+	const c = controller as unknown as {
+		pair: { wet: LiveWet } | null;
+		pageSize: Map<number, { wPt: number }>;
+		strokeStyle: unknown;
+		highlightLayered(page: number): boolean;
+	};
+	if (!c.pair || !pageEl) return null;
+	const wet = c.pair.wet, last = wet.lastRibbon, head = wet.head();
+	const wPt = c.pageSize.get(1)?.wPt ?? 0, box = pageEl.getBoundingClientRect(), z = wPt > 0 ? box.width / wPt : 0;
+	const client = (w: Pt): Pt => ({ x: box.left + w.x * z, y: box.top + w.y * z });
+	return {
+		zoom: z,
+		last: last ? { ...client(last), hwWorld: last.hw } : null,
+		r: last ? Math.max(0.25, last.hw * z) : null,
+		from: head ? client(head.from) : null,
+		to: head ? client(head.to) : null,
+		hw: head ? wet.liveHalfWidth(c.strokeStyle, head.pressure) * z : null,
+		layered: c.highlightLayered(1),
+	};
+}
+
+/** The screenshot's RGB in a box, row by row, three numbers a pixel. */
+async function region(b64: string, x0: number, y0: number, w: number, h: number): Promise<number[]> {
+	const img = new Image();
+	img.src = `data:image/png;base64,${b64}`;
+	await img.decode();
+	const c = document.createElement("canvas");
+	c.width = img.naturalWidth;
+	c.height = img.naturalHeight;
+	const g = c.getContext("2d", { willReadFrequently: true })!;
+	g.drawImage(img, 0, 0);
+	const d = g.getImageData(x0, y0, w, h).data, out: number[] = [];
+	for (let i = 0; i < d.length; i += 4) out.push(d[i]!, d[i + 1]!, d[i + 2]!);
+	return out;
+}
+
+/** The live pair's head canvas (the tail) hidden or shown again, nothing else touched: the strip alone, same frame. */
+async function tailHidden(on: boolean): Promise<string> {
+	const c = controller as unknown as { pair: { headCanvas: HTMLCanvasElement } | null };
+	if (!c.pair) return "no pair";
+	c.pair.headCanvas.style.visibility = on ? "hidden" : "";
+	await frames(1);
+	return getComputedStyle(c.pair.headCanvas).visibility;
 }
 
 async function lift(): Promise<void> {
@@ -147,7 +231,7 @@ async function snip(): Promise<{ b64: string; x0: number; y0: number; scale: num
 	return { b64: btoa(s), x0: vp.x0, y0: vp.y0, scale: vp.scale };
 }
 
-const api = { open, save, hold, lift, layers, snip, sample, frames };
+const api = { open, save, hold, holdTo, setAssumption, place, region, tailHidden, lift, layers, snip, sample, frames };
 declare global {
 	interface Window {
 		pdfHighlight: typeof api;

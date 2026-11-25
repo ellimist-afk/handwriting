@@ -55,11 +55,11 @@ describe("chip states: the follow's kept map gives attachmentSelection's answer"
 		});
 	}
 
-	it("the plan's table: one group Detach on; group plus free ink Attach on, Detach off; two groups Detach on, Attach off", () => {
+	it("the plan's table: one group Detach on; group plus free ink Attach on, Detach off; two groups Attach and Detach on", () => {
 		expect(chipState(map, ["a", "b"])).toMatchObject({ attach: true, detach: true });
 		expect(chipState(map, ["a", "free"])).toMatchObject({ attach: true, detach: false });
-		expect(chipState(map, ["a", "c"])).toMatchObject({ attach: false, detach: true });
-		expect(chipState(map, ["a", "c", "free"]), "loose ink in the lasso").toMatchObject({ attach: false, detach: true });
+		expect(chipState(map, ["a", "c"])).toMatchObject({ attach: true, detach: true });
+		expect(chipState(map, ["a", "c", "free"]), "loose ink in the lasso").toMatchObject({ attach: true, detach: true });
 	});
 
 	it("selectionChips keeps its answer while the selection and the membership hold, and none with nothing selected", () => {
@@ -71,7 +71,7 @@ describe("chip states: the follow's kept map gives attachmentSelection's answer"
 		expect(first).toMatchObject({ attach: true, detach: true });
 		sel.revision = 2;
 		sel.strokeIds = ["a", "c"];
-		expect(selectionChips(surface, LIST)).toMatchObject({ attach: false, detach: true });
+		expect(selectionChips(surface, LIST)).toMatchObject({ attach: true, detach: true });
 		expect(sets).toBe(3);
 		expect(selectionChips({ ...surface, selection: { strokeIds: [], revision: 3, isEmpty: true } }, LIST)).toMatchObject({ attach: false, detach: false });
 	});
@@ -274,15 +274,15 @@ describe("the Attach button's one tap", () => {
 		return { o, calls };
 	};
 
-	it("detaches one whole group or two groups or more, attaches anything else that can attach", () => {
-		// Defect: free ink detaches, a whole group attaches again, or two groups do nothing.
+	it("detaches one whole group, attaches anything else that can attach, two groups or more included", () => {
+		// Defect: free ink detaches, a whole group attaches again, or two groups detach (the palette's Detach does that).
 		const cases: Array<[string, string[], string[], string | null]> = [
 			["free ink", ["free"], ["attach"], "attached"],
 			["one whole group", ["a", "b"], ["detach"], "detached"],
 			["a group and free ink", ["a", "b", "free"], ["attach"], "attached"],
 			["part of a group, no free ink: every selected stroke in the one group", ["a"], ["detach"], "detached"],
-			["two groups", ["a", "c"], ["detach"], "detached"],
-			["two groups and free ink", ["a", "c", "free"], ["detach"], "detached"],
+			["two groups", ["a", "c"], ["attach"], "attached"],
+			["two groups and free ink", ["a", "c", "free"], ["attach"], "attached"],
 			["nothing", [], [], null],
 		];
 		for (const [name, ids, want, did] of cases) {

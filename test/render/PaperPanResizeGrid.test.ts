@@ -56,11 +56,17 @@
  * 3. THE MOVE CLEARS THE READER'S OWN ALIASING FLOOR: `abs.x` is a circular
  *    mean modulo the pitch, so a move that lands close to a whole number of
  *    pitches would look like no change even on a broken build. For the
- *    stage that satisfies premise 2, `d = circ(move in layout px, PITCH) x
+ *    stage that satisfies premise 2, `d = circ(move in layout px, pitch) x
  *    DSF x zoom` must clear `2 x RESIZE_TOL_DEV + 1` device px, logged
  *    either way; a stage that cannot clear this is VOID for this arm's
  *    contract regardless of premise 2, and the fix is a different stage
  *    width, not a looser threshold.
+ *
+ * THE PITCH is one plain body row's height, read from the page (`--handwriting-paper-pitch` on the editor), so
+ * premises 2 and 3 run at the period actually painted. The figures under MEASURED were taken at the older 28 px
+ * pitch. The column moves by half the width change, 130 and 60 layout px (which gives the 20 and 8 device px read
+ * at 28); at the row pitch (24 px at 16 px text and 1.5) those leave 10 and 12 layout px past a whole pitch, 20 and
+ * 24 device px, still clear of the aliasing floor, so the stage widths stand. Premise 3 checks it every run.
  *
  * MEASURED: both stages (900, 520) clear premises 2 and 3. On the build
  * before this fix, which anchors the grid to the scroller's edge rather than
@@ -102,7 +108,8 @@ declare const process: { env: Record<string, string | undefined> };
 
 let realBrowser: Browser, script: string;
 const OBSIDIAN_CAMERA_CSS = readFileSync(fileURLToPath(new URL("./noteViewportCamera.css", import.meta.url)), "utf8");
-const DSF = 2, PITCH = 28;
+/** The paper's pitch is one plain body row's height: every reading takes it from the page (the `--handwriting-paper-pitch` the overlay wrote on the editor, layout px), never from a constant here. */
+const DSF = 2;
 const PAGE_GREY = 255, RULE_GREY = 0x77;
 /** The contract's own tolerance, within 1 device px of the pre-resize reading, distinct from the AT REST family's 2 px absolute-to-anchor tolerance. */
 const RESIZE_TOL_DEV = 1;
@@ -212,6 +219,7 @@ async function readPatch(p: Page) {
 		const line = (document.querySelector(".cm-line") as HTMLElement).getBoundingClientRect();
 		return { scrollerLeft: r.left, scrollerTop: r.top, zoom: (window as any).viewportFixture.snap("paper").state.zoom as number, sizerLeft: s.left, sizerTop: s.top,
 			lineLeft: line.left, lineTop: line.top, rule: Number.parseFloat(getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).getPropertyValue("--handwriting-paper-rule")) || 1,
+			pitch: Number.parseFloat(getComputedStyle(document.querySelector(".cm-editor") as HTMLElement).getPropertyValue("--handwriting-paper-pitch")),
 			sizer: sizer.style.transform, scrollLeft: sc.scrollLeft, scrollTop: sc.scrollTop,
 			vars: ["--handwriting-paper-pitch", "--handwriting-paper-rule", "--handwriting-paper-dot", "--handwriting-paper-phase"].map(k => getComputedStyle(sc).getPropertyValue(k).trim()).join("|") };
 	});
@@ -225,29 +233,29 @@ async function readPatch(p: Page) {
 		rows[y] = rows[y]! + f / d.width; cols[x] = cols[x]! + f / d.height;
 	}
 	const after = await g();
-	const k = before.zoom;
+	const k = before.zoom, pitch = before.pitch;
 	const centres: Record<Axis, number[]> = { x: bandCentres(cols), y: bandCentres(rows) };
 	const edge: Record<Axis, number> = { x: (before.sizerLeft - clip.x) * DSF, y: (before.sizerTop - clip.y) * DSF };
 	const rel = (a: Axis) => {
 		const c = centres[a];
 		if (!c.length) return Number.NaN;
-		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % PITCH) + PITCH) % PITCH) / PITCH);
+		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % pitch) + pitch) % pitch) / pitch);
 		const m = Math.atan2(ang.reduce((s, v) => s + Math.sin(v), 0), ang.reduce((s, v) => s + Math.cos(v), 0));
-		return (((m / (2 * Math.PI)) * PITCH) + PITCH) % PITCH;
+		return (((m / (2 * Math.PI)) * pitch) + pitch) % pitch;
 	};
 	const tight = (a: Axis) => {
 		const c = centres[a];
 		if (!c.length) return 0;
-		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % PITCH) + PITCH) % PITCH) / PITCH);
+		const ang = c.map(v => 2 * Math.PI * (((((v - edge[a]) / (k * DSF)) % pitch) + pitch) % pitch) / pitch);
 		return Math.hypot(ang.reduce((s, v) => s + Math.sin(v), 0), ang.reduce((s, v) => s + Math.cos(v), 0)) / c.length;
 	};
 	const medianGap = (xs: number[]) => { const gs = xs.slice(1).map((v, i) => v - xs[i]!).sort((a, b) => a - b); return gs.length ? gs[Math.floor(gs.length / 2)]! : Number.NaN; };
 	const pan = panXY(before.sizer);
-	const pDevHere = PITCH * k * DSF, ruleDev = before.rule * k * DSF;
+	const pDevHere = pitch * k * DSF, ruleDev = before.rule * k * DSF;
 	const anchor: Record<Axis, number> = { x: (before.lineLeft - clip.x) * DSF, y: (before.lineTop - clip.y) * DSF };
 	const markOffset = -ruleDev / 2;
 	const abs = (a: Axis) => centres[a].length ? Math.max(...centres[a].slice(0, 6).map(c => circ(c - (anchor[a] + markOffset), pDevHere))) : Number.NaN;
-	return { geo: before, stable: JSON.stringify(before) === JSON.stringify(after), abs: { x: abs("x"), y: abs("y") } as Record<Axis, number>,
+	return { geo: before, pitch, stable: JSON.stringify(before) === JSON.stringify(after), abs: { x: abs("x"), y: abs("y") } as Record<Axis, number>,
 		rel: { x: rel("x"), y: rel("y") } as Record<Axis, number>, tight: { x: tight("x"), y: tight("y") } as Record<Axis, number>, count: { x: centres.x.length, y: centres.y.length } as Record<Axis, number>, pitchDev: { x: medianGap(centres.x), y: medianGap(centres.y) } as Record<Axis, number>,
 		pan: { x: pan.x * k * DSF, y: pan.y * k * DSF } as Record<Axis, number> };
 }
@@ -352,7 +360,7 @@ it("WINDOW RESIZE, grid paper, readable line length on: the grid stays on the te
 			stages.push({ label: `${width}px`, width, r, probe });
 		}
 
-		const pDev = PITCH * rest.geo.zoom * DSF;
+		const pDev = rest.pitch * rest.geo.zoom * DSF;
 		const moves = stages.map(s => ({ label: s.label, movedDev: Math.abs(columnFromEdge(s.r) - columnFromEdge(rest)) }));
 		// eslint-disable-next-line no-console
 		console.log("PAPER-RESIZE-GRID", JSON.stringify({ restColumnFromEdge: columnFromEdge(rest), moves, pDev, rest, stages }));
@@ -363,7 +371,7 @@ it("WINDOW RESIZE, grid paper, readable line length on: the grid stays on the te
 		// PREMISE 3: that move must clear the reader's own aliasing floor, or a broken build's offset could alias back near zero here.
 		for (const s of qualifying) {
 			const moveLayoutPx = (columnFromEdge(s.r) - columnFromEdge(rest)) / DSF;
-			const d = circ(moveLayoutPx, PITCH) * DSF * s.r.geo.zoom;
+			const d = circ(moveLayoutPx, s.r.pitch) * DSF * s.r.geo.zoom;
 			// eslint-disable-next-line no-console
 			console.log("PAPER-RESIZE-GRID-ALIAS", JSON.stringify({ label: s.label, moveLayoutPx, d, aliasFloor: ALIAS_FLOOR_DEV }));
 			expect(d, `PREMISE 3 at ${s.label}: the column's move modulo the pitch (d=${d.toFixed(2)} device px, from a ${moveLayoutPx.toFixed(2)} layout px move) must clear ${ALIAS_FLOOR_DEV} device px, or this stage cannot show a broken phase-x - pick a different stage width if this fails`).toBeGreaterThanOrEqual(ALIAS_FLOOR_DEV);

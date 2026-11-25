@@ -141,9 +141,31 @@ it.each([{textOnly:true},{markup:true},{end:"pointercancel"}])("preserves text, 
  }finally{await page.close();}
 });
 
+/** The pane on screen and the ink's origin, read from the page as the probe reads its origin (one editor on the page). */
+const paneNow=()=>{
+ const sc=document.querySelector(".cm-scroller") as HTMLElement,content=sc.querySelector(".cm-content") as HTMLElement;
+ // k: screen px per layout px, from the scroller's own box (the camera scales the editor, by transform or zoom).
+ const rr=sc.getBoundingClientRect(),k=rr.width/sc.offsetWidth,cr=content.getBoundingClientRect(),cs=getComputedStyle(content);
+ return {editors:document.querySelectorAll(".cm-scroller").length,left:rr.left+sc.clientLeft*k,top:rr.top+sc.clientTop*k,right:rr.left+(sc.clientLeft+sc.clientWidth)*k,bottom:rr.top+(sc.clientTop+sc.clientHeight)*k,
+  x0:cr.left+Number.parseFloat(cs.paddingLeft)*k,y0:cr.top+Number.parseFloat(cs.paddingTop)*k};
+};
 it.each([[1,""],[.1,""],[4,""],[1,"short typed line"]] as const)("keeps an ink-only split precise at zoom %s with text %j",async(zoom,shortText)=>{
  const page=await mounted();try{
-  const r=await page.evaluate(([zoom,shortText])=>(window as any).insertSpaceProbe(zoom,1,zoom===4?40:0,false,{shortText,dy:13}),[zoom,shortText]);
+  // At zoom 4 the pane holds 120 layout px, so row-1 starts at 170 (not 210) and the page scrolls to 84: the contact and both
+  // rows are on the pane at the hover, and the hover list is read for ink the reader sees.
+  const r=await page.evaluate(([zoom,shortText])=>(window as any).insertSpaceProbe(zoom,1,zoom===4?84:0,false,{shortText,dy:13,...(zoom===4?{rowY:[90,170]}:{})}),[zoom,shortText]);
+  if(zoom===4){
+   const p=await page.evaluate(paneNow),on=(x0:number,y0:number,x1:number,y1:number)=>x0>=p.left&&x1<=p.right&&y0>=p.top&&y1<=p.bottom;
+   expect(p.editors,"premise: one editor on the page").toBe(1);
+   expect(r.before.scroll.top,"premise: the page scrolled to 84").toBeCloseTo(84,1);
+   expect(r.redone.scroll,"premise: the page sits as it did at the hover").toEqual(r.before.scroll);
+   expect(p.y0,"premise: the pane read after the probe is the hover's (same ink origin)").toBeCloseTo(r.origin,1);
+   expect(on(r.contact.x,r.contact.y,r.contact.x,r.contact.y),`premise: the contact (${r.contact.x}, ${r.contact.y}) is on the pane (${p.left} to ${p.right}, ${p.top} to ${p.bottom})`).toBe(true);
+   for(const s of r.before.strokes){
+    const b=s.bbox,box=[p.x0+b.x*r.scale,r.origin+b.y*r.scale,p.x0+(b.x+b.width)*r.scale,r.origin+(b.y+b.height)*r.scale] as const;
+    expect(on(...box),`premise: ${s.id}'s box (${box.join(", ")}) is on the pane (${p.left} to ${p.right}, ${p.top} to ${p.bottom}) at the hover`).toBe(true);
+   }
+  }
   expect(r.down.cut).toBeCloseTo(104,6);expect(r.down.ids).toEqual(["row-1"]);
   expect(r.hover).toBeCloseTo(r.origin+104*r.scale,1);
   expect(r.hoverFeedback.guides[0]).toBeCloseTo(104,6);
