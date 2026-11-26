@@ -33,262 +33,250 @@
 })(document);
 </script>
 <style>
-@font-face { font-family: "Instrument Serif"; font-style: normal;
-  font-weight: 400; font-display: swap;
-  src: url(fonts/instrument-serif.woff2) format("woff2"); }
-@font-face { font-family: "Instrument Serif"; font-style: italic;
-  font-weight: 400; font-display: swap;
-  src: url(fonts/instrument-serif-italic.woff2) format("woff2"); }
+@font-face { font-family: "Alegreya"; font-style: normal;
+  font-weight: 400 900; font-display: swap;
+  src: url(fonts/alegreya.ttf) format("truetype"); }
+@font-face { font-family: "Alegreya"; font-style: italic;
+  font-weight: 400 900; font-display: swap;
+  src: url(fonts/alegreya-italic.ttf) format("truetype"); }
 @font-face { font-family: "Instrument Sans"; font-style: normal;
   font-weight: 400 700; font-display: swap;
   src: url(fonts/instrument-sans.woff2) format("woff2"); }
-@font-face { font-family: "Dancing Script"; font-style: normal;
-  font-weight: 600; font-display: swap;
-  src: url(fonts/dancing-script-600.woff2) format("woff2"); }
 
-/* Arctic slate: cold blue-grey ground, pale ice text, one electric blue for
-   the download buttons. Heads in Instrument Serif, the rest in Instrument
-   Sans. Everything left-aligned on a 1240 px column. */
+/* page colours: paper, ink, rubric, link */
 :root {
-  --page: #0f151c;
-  --floor: #0a0f15;
-  --card: #161f29;
-  --card-hi: #1d2935;
-  --slate: #2b4157;
-  --slate-hi: #3a5a77;
-  --line: #2a3846;
-  --line-hi: #3c4f62;
-  --ink: #eaf0f6;
-  --ink-soft: #c6d2dd;
-  --dim: #9aabba;
-  --blue: #2f6fed;
-  --blue-hover: #255fd4;
-  --ice: #8fc1e3;
-  --shade: #05080c;
+  color-scheme: dark;
+  --paper: #0e1320;
+  --ink: #edf0f6;
+  --rubric: #f7c85f;
+  --lapis: #f7c85f;
+  --lapis-hover: #ffdb85;
+  --on-lapis: #1a1304;
+  /* text links on paper */
+  --link: #f7c85f;
+  --dim: #909bb0;
+  --line: #283247;
+  --plate: #070a12;
+  /* the wheel's band: ink ground, paper text */
+  --band: #070a12;
+  --band-ink: #edf0f6;
+  --band-dim: #909bb0;
+  /* the app's own colours, inside the attach diagrams only */
   --pen: #f472a6;
   --lasso: #7f9cf5;
   --no: #ff5549;
-  --serif: "Instrument Serif", Georgia, serif;
+  --range: #2f6fed;
+  --serif: "Alegreya", Georgia, serif;
   --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
-  --measure: 1240px;
+  --side: clamp(20px, 4vw, 56px);
+  --gut: 24px;
   --bar: 68px;
-  --inset: clamp(8px, 1.8vw, 24px);
   --sec-gap: clamp(88px, 11vw, 160px);
-  --r-lit: clamp(24px, 3.4vw, 44px);
-  --r-box: 20px;
   --glide: cubic-bezier(.2, .7, .2, 1);
+}
+/* night: the one token swap */
+html.night {
+  color-scheme: dark;
+  --paper: #0f1722;
+  --ink: #e9eef4;
+  --line: #2a3644;
+  --dim: #93a2b4;
+  /* night colours */
+  --link: #4d84f0;
+  --band: #eef2f6;
+  --band-ink: #0e1a2b;
+  --band-dim: #5a6a7d;
 }
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
-html.moves { scroll-behavior: smooth; }
-body { margin: 0; color: var(--ink); background: var(--page);
-  font: 17px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+body { margin: 0; color: var(--ink); background: var(--paper);
+  font: 18px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
 a { color: inherit; }
 img, video { display: block; max-width: 100%; }
 figure, blockquote { margin: 0; }
 h1, h2, h3, p { margin: 0; }
 ul, ol { margin: 0; padding: 0; list-style: none; }
 button { cursor: pointer; }
-::selection { background: var(--blue); color: #fff; }
-:focus-visible { outline: 2px solid var(--ice); outline-offset: 3px;
-  border-radius: 6px; }
-code { font: 0.9em var(--mono); color: var(--ink); background: var(--card-hi);
-  padding: 2px 7px; border-radius: 5px; }
+::selection { background: var(--lapis); color: var(--on-lapis); }
+:focus-visible { outline: 2px solid var(--lapis); outline-offset: 2px; }
+:focus-visible { outline-color: var(--link); }
+code { font: .88em var(--mono); padding: 1px 6px;
+  border: 1px solid var(--line); border-radius: 4px; }
 main { overflow-x: clip; }
 main section[id], main header[id], main [id] { scroll-margin-top:
   calc(var(--bar) + 20px); }
-.wrap { width: min(var(--measure), 100% - 48px); margin: 0 auto; }
-.jump { position: absolute; z-index: 30; left: 50%; top: 0;
-  transform: translate(-50%, -120%); padding: 10px 16px;
-  border-radius: 0 0 10px 10px; background: var(--ink);
-  color: var(--page); font-weight: 600; text-decoration: none; }
-.jump:focus { transform: translate(-50%, 0); }
+.wrap { width: min(1600px, 100% - 2 * var(--side)); margin: 0 auto; }
+.jump { position: absolute; z-index: 30; left: var(--side); top: 0;
+  transform: translateY(-120%); padding: 10px 16px;
+  border-radius: 0 0 6px 6px; background: var(--ink);
+  color: var(--paper); font-weight: 600; text-decoration: none; }
+.jump:focus { transform: none; }
 
-/* type scale: 13 / 15 / 17 / 21 / 28 / 44 / 64 / 108 */
-h1, h2 { font-family: var(--serif); font-weight: 400; text-wrap: balance; }
-h1 { font-size: clamp(52px, 7.4vw, 108px); line-height: .95;
-  letter-spacing: -.025em; }
-h2 { font-size: clamp(38px, 4.6vw, 64px); line-height: 1.02;
-  letter-spacing: -.02em; }
-h3 { font: 400 clamp(24px, 2vw, 28px)/1.15 var(--serif);
-  letter-spacing: -.01em; }
-.lead { font-size: clamp(18px, 1.5vw, 21px); line-height: 1.45;
-  color: var(--ink-soft); max-width: 34ch; }
+/* type: Alegreya for headings and quotes, Instrument Sans for the rest */
+h1, h2, h3 { font-family: var(--serif); text-wrap: balance; }
+h1 { font-weight: 800; font-size: clamp(48px, 9.4vw, 136px);
+  line-height: .92; letter-spacing: -.02em; color: var(--rubric); }
+h2 { font-weight: 700; font-size: clamp(34px, 4.6vw, 72px);
+  line-height: 1; letter-spacing: -.01em; color: var(--rubric); }
+h3 { font-weight: 600; font-size: clamp(21px, 1.7vw, 25px);
+  line-height: 1.2; }
+.lead { font-size: clamp(19px, 1.6vw, 23px); line-height: 1.45;
+  max-width: 40ch; }
 .sec { padding-top: var(--sec-gap); }
-.head-row { display: grid; gap: 14px;
-  margin-bottom: clamp(32px, 4vw, 56px); }
+/* text block: columns 1 to 8; margin: columns 10 to 12 */
+.head-row, .begin, .reach-head { display: grid; gap: 14px;
+  margin-bottom: clamp(28px, 3.4vw, 48px);
+  max-width: calc(66.6667% - 8px); }
 
-/* buttons: the blue one downloads, the quiet one goes somewhere else */
-.btn { position: relative; overflow: hidden; display: inline-flex;
-  align-items: center; justify-content: center; gap: 10px; min-height: 52px;
-  padding: 0 1.4em; border: 0; border-radius: 999px; white-space: nowrap;
+/* buttons: rectangles. Blue downloads; the quiet one has an ink edge. */
+.btn { display: inline-flex; align-items: center; justify-content: center;
+  gap: 10px; min-height: 52px; padding: 0 22px;
+  border: 1px solid var(--ink); border-radius: 6px; white-space: nowrap;
   font: 600 16px/1 var(--sans); text-decoration: none; color: var(--ink);
-  background: var(--card-hi);
-  box-shadow: inset 0 0 0 1px var(--line-hi),
-    inset 0 1px 0 rgba(255, 255, 255, .08); }
+  background: transparent; }
 .btn svg { width: 19px; height: 19px; flex-shrink: 0; }
-.btn.primary { color: #fff; background: var(--blue);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .3),
-    0 14px 30px -14px rgba(47, 111, 237, .95); }
+.btn.primary { color: var(--on-lapis); background: var(--lapis);
+  border-color: var(--lapis); }
 @media (hover: hover) {
-  .btn:hover { box-shadow: inset 0 0 0 1px var(--dim),
-    inset 0 1px 0 rgba(255, 255, 255, .08); }
-  .btn.primary:hover { background: var(--blue-hover);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .3),
-      0 14px 30px -14px rgba(47, 111, 237, .95); }
+  .btn:hover { color: var(--paper); background: var(--ink); }
+  .btn.primary:hover { color: var(--on-lapis); background: var(--lapis-hover);
+    border-color: var(--lapis-hover); }
 }
-.ico { display: inline-grid; place-items: center; width: 44px; height: 44px;
-  padding: 0; border: 0; border-radius: 50%; color: var(--ink);
-  background: var(--card-hi); box-shadow: inset 0 0 0 1px var(--line-hi); }
+.ico { display: inline-grid; place-items: center; width: 52px;
+  height: 52px; padding: 0; border: 1px solid var(--ink);
+  border-radius: 6px; color: var(--ink); background: transparent; }
 .ico svg { width: 18px; height: 18px; }
 .ico[hidden] { display: none; }
 
-/* bar */
+/* bar: paper, a hairline under it */
 nav.top { position: sticky; top: 0; z-index: 20; height: var(--bar);
-  background: color-mix(in srgb, var(--page) 82%, transparent);
-  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); }
+  background: var(--paper); border-bottom: 1px solid var(--line); }
 nav.top .wrap { display: flex; align-items: center; height: 100%;
-  gap: clamp(16px, 2.6vw, 36px); width: min(1400px, 100% - 48px); }
-.brand { font: 26px/1 var(--serif); text-decoration: none; color: var(--ink);
-  flex: none; }
+  gap: clamp(16px, 2.6vw, 36px); }
+.brand { font: 800 26px/1 var(--serif); letter-spacing: -.01em;
+  text-decoration: none; color: var(--ink); flex: none; }
 .links { display: flex; gap: clamp(14px, 2vw, 28px); margin-right: auto;
   font-size: 15px; color: var(--dim); }
-.links a { text-decoration: none; white-space: nowrap; padding: 6px 0;
-  background: linear-gradient(var(--ice), var(--ice)) 0 100% / 0 1px
-    no-repeat; transition: background-size .5s var(--glide), color .3s; }
-.links a:hover { color: var(--ink); background-size: 100% 1px; }
-nav.top .btn { min-height: 44px; font-size: 15px; margin-left: auto;
-  flex: none; }
+.links a { text-decoration: none; white-space: nowrap; padding: 6px 0; }
+.links a:hover { color: var(--ink); text-decoration: underline;
+  text-decoration-thickness: 1px; text-underline-offset: 5px; }
+nav.top .btn { margin-left: auto; flex: none; font-size: 15px; }
 
-/* hero: one centred column. The headline with a pen stroke under it, the
-   two buttons, the count and three facts, then the film, wide enough to
-   read. Its top is on the first screen and it runs on under the fold. */
+/* hero: headline, line, buttons, facts and the film */
 .hero { position: relative; overflow: clip;
-  padding: clamp(34px, 4.4vw, 58px) 0 clamp(44px, 6vw, 84px); }
-.aurora { position: absolute; inset: -30% -10% 0; pointer-events: none;
-  background:
-    radial-gradient(38% 46% at 16% 30%, rgba(47, 111, 237, .30),
-      transparent 70%),
-    radial-gradient(34% 44% at 78% 18%, rgba(143, 193, 227, .20),
-      transparent 70%),
-    radial-gradient(46% 40% at 60% 96%, rgba(64, 190, 200, .10),
-      transparent 70%);
-  -webkit-mask-image: linear-gradient(#000 55%, transparent);
-  mask-image: linear-gradient(#000 55%, transparent); }
-.moves .aurora { animation: drift 26s ease-in-out infinite alternate;
-  will-change: transform; }
-@keyframes drift {
-  from { transform: translate3d(-4%, 0, 0) rotate(-2deg) scale(1); }
-  to { transform: translate3d(5%, 3%, 0) rotate(3deg) scale(1.12); } }
-.opening { position: relative; display: grid; justify-items: center;
-  gap: 20px; text-align: center; width: min(1180px, 100% - 48px);
-  margin: 0 auto; }
-.hero h1 { font-family: var(--sans); font-weight: 600;
-  font-size: clamp(32px, 7vw, 90px); line-height: 1.05; letter-spacing: -.03em; }
-.penline { position: absolute; left: 3%; bottom: 0; width: 94%;
-  height: .2em; overflow: visible; }
-.penline path { fill: none; stroke: var(--pen); stroke-width: 5;
-  stroke-linecap: round; vector-effect: non-scaling-stroke; }
-/* the name right under the headline (-20px takes back the grid gap): Dancing Script 600,
-   with the pen stroke under it */
-.hero .name { position: relative; margin-top: -20px; padding-bottom: .12em;
-  font-family: "Dancing Script", cursive; font-weight: 600;
-  font-size: clamp(30px, 5.7vw, 76px); line-height: normal; color: var(--ink); }
-.hero .name .penline { height: .16em; }
-/* the same pen stroke under the word Handwriting in "Why Handwriting?" */
-.inked { position: relative; }
-.inked .penline { bottom: .01em; }
-/* it draws when the heading fades in, not at page load far above it */
-.moves .inked .penline { animation: none; }
-.moves .seen .inked .penline { animation: draw 1.1s .35s var(--glide) both; }
-.hero .sub { font-size: clamp(19px, 1.6vw, 23px); line-height: 1.4;
-  color: var(--ink-soft); max-width: 26em; text-wrap: balance; }
-.cta { display: flex; flex-wrap: wrap; justify-content: center;
-  gap: 12px; }
-.cta .btn { min-height: 58px; font-size: 17px; }
-.facts { display: flex; flex-wrap: wrap; justify-content: center;
-  gap: 6px 0; font-size: 15px; color: var(--dim); }
+  padding: clamp(40px, 5vw, 72px) 0 clamp(56px, 7vw, 104px); }
+.aurora, .penline { display: none; }
+.opening { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: var(--gut); align-items: start;
+  width: min(1600px, 100% - 2 * var(--side)); margin: 0 auto; }
+.opening > h1 { grid-column: 1 / 9; grid-row: 1; align-self: baseline; }
+.hero .sub { grid-column: 1 / 9; grid-row: 2;
+  margin-top: clamp(20px, 2.2vw, 32px); font-size: clamp(19px, 1.6vw, 23px);
+  line-height: 1.45; max-width: 30em; text-wrap: pretty; }
+.cta { grid-column: 1 / 9; grid-row: 3; display: flex; flex-wrap: wrap;
+  gap: 12px; margin-top: 28px; }
+.facts { grid-column: 1 / 9; grid-row: 4; display: flex; flex-wrap: wrap;
+  gap: 6px 0; margin-top: 22px; font-size: 15px; color: var(--dim); }
 .facts li { padding: 0 16px; }
-.facts li + li { border-left: 1px solid var(--line-hi); }
+.facts li:first-child { padding-left: 0; }
+.facts li + li { border-left: 1px solid var(--line); }
 .facts b { color: var(--ink); font-weight: 600;
   font-variant-numeric: tabular-nums; }
-.film { margin-top: 4px;
-  width: min(100%, max(720px, (100svh - 380px) * 1.7778)); }
-.screen { padding: 8px; border-radius: 22px; background: #06090d;
-  aspect-ratio: 16 / 9;
-  box-shadow: inset 0 0 0 1px #33414f, 0 0 0 1px #020305,
-    0 50px 90px -48px var(--shade),
-    0 0 150px -20px rgba(47, 111, 237, .36); }
-.screen > :is(img, video) { width: 100%; height: 100%; object-fit: cover;
-  border-radius: 14px; }
+.opening > .film { display: contents; }
+/* the film whole: 16:9, contained, never cropped */
+.screen { grid-column: 1 / 10; grid-row: 5;
+  margin-top: clamp(36px, 4.4vw, 60px); overflow: hidden;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--plate); }
+.screen > :is(img, video) { width: 100%; height: auto;
+  aspect-ratio: 16 / 9; object-fit: contain; }
 #tower { cursor: pointer; }
-.film-bar { display: flex; justify-content: center; gap: 8px;
-  margin-top: 14px; }
+/* tablet: the film's frame tilts, leans toward the mouse and drifts */
+.screen { --rest: 8deg;
+  --depth: calc(min(1600px, 100vw - 2 * var(--side)) * 1.5 - 12px);
+  transform: perspective(var(--depth)) translateY(var(--iz, 0px))
+    rotateX(calc(var(--rest) + var(--tx, 0deg) + var(--ix, 0deg)))
+    rotateY(calc(var(--ty, 0deg) + var(--iy, 0deg)));
+  transform-origin: 50% 0;
+  animation: tablet-drift 9s ease-in-out infinite alternate; }
+@property --ix { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --iy { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --iz { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@keyframes tablet-drift {
+  0% { --ix: -1deg; --iy: -1.5deg; --iz: 0px; }
+  50% { --ix: 0.5deg; --iy: 0.3deg; --iz: -10px; }
+  100% { --ix: -0.3deg; --iy: 1.5deg; --iz: -4px; } }
+.film-bar { position: relative; }
+@media (max-width: 899px) {
+  .screen { --rest: 5deg; --depth: calc(200vw - 4 * var(--side));
+    transform: perspective(var(--depth))
+      rotateX(calc(var(--rest) + var(--tx, 0deg))) rotateY(var(--ty, 0deg));
+    animation: none; margin-bottom: 3%; }
+}
+@media (min-width: 1100px) {
+  .screen {
+    --depth: calc(min(1600px, 100vw - 2 * var(--side)) * 4 / 3 - 16px);
+    margin-bottom: calc(3% + 12px); }
+}
+/* tablet body: a dark edge and round corners about the film */
+.screen { padding: 1.1%; border-radius: 2.6% / 4.545%;
+  box-shadow: 0 48px 80px -28px var(--plate); }
+.screen > :is(img, video) { border-radius: 1.4315% / 2.545%; }
+.film-bar { grid-column: 10 / 13; grid-row: 5; align-self: start;
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-top: clamp(36px, 4.4vw, 60px); }
 .film-bar[hidden] { display: none; }
-.film-bar .btn { min-height: 44px; font-size: 14px; font-weight: 500; }
+.film-bar .btn { font-size: 15px; font-weight: 600; }
 .film-bar .ico-play, .film-bar .held .ico-pause { display: none; }
 .film-bar .held .ico-play { display: block; }
-.film-bar [aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--ice); }
-/* the one page-load moment: the pen stroke draws under the headline while
-   the rest fades up to full */
-@keyframes show { from { opacity: 0; } }
-@keyframes draw { from { clip-path: inset(-12px 100% -12px -12px); }
-  to { clip-path: inset(-12px); } }
-.moves .opening > * { animation: show .7s ease-out both; }
-.moves .opening > .film { animation-delay: .25s; }
-.moves .penline { animation: draw 1.1s .35s var(--glide) both; }
+.film-bar [aria-pressed="true"] { color: var(--paper);
+  background: var(--ink); }
 
-/* as you scroll: words fade in, shots are wiped in from the left the way a
-   pen crosses a page. Once each. Only under html.moves. */
-.moves [data-fade] { opacity: 0;
-  transition: opacity .8s ease-out var(--d, 0s); }
-.moves [data-wipe] { opacity: 0; clip-path: inset(-60px 100% -60px -60px);
-  transition: opacity .5s ease-out var(--d, 0s),
-    clip-path 1.1s var(--glide) var(--d, 0s); }
-.moves [data-fade].seen { opacity: 1; }
-.moves [data-wipe].seen { opacity: 1; clip-path: inset(-60px); }
-
-/* shots: the clip itself, a hairline, a cold glow. No mat. */
+/* plates: the clip, a hairline edge, a dark ground while it loads */
 .clipfig > :is(img, video), .frame > :is(img, video) { width: 100%;
   height: auto; aspect-ratio: 16 / 9; object-fit: cover;
-  object-position: top center; border-radius: var(--r-box);
-  background: var(--card);
-  box-shadow: 0 0 0 1px var(--line), 0 30px 60px -34px var(--shade); }
+  object-position: top center; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--plate); }
 .frame > :is(img, video) { object-position: top left; }
-.clipfig figcaption { padding: 16px 2px 0; }
-.clipfig figcaption p { margin-top: 6px; color: var(--dim); font-size: 16px;
-  line-height: 1.5; max-width: 36ch; }
+.clipfig figcaption { padding-top: 14px; }
+.clipfig figcaption p { margin-top: 4px; color: var(--dim); font-size: 16px;
+  line-height: 1.5; max-width: 44ch; }
 
-/* the wheel: seven quotes under the film, before the reasons. One sits in
-   the middle in the serif at full ink, its neighbours dim at each side and
-   running off the page; it turns by itself, the next one in from the right
-   (the script). No box and no links. Without the script it
-   is a sideways scroller that snaps each quote to the middle. The hero's
-   bottom padding is the gap above it. */
+/* the wheel: the one dark band, full bleed */
 .pull { --slide: clamp(280px, 62vw, 720px); --gap: clamp(20px, 4vw, 56px);
-  padding-bottom: clamp(40px, 5vw, 72px); }
+  padding: clamp(56px, 7vw, 104px) 0; color: var(--band-ink);
+  background: var(--band); }
 .wheel { display: flex; gap: var(--gap); overflow-x: auto;
   scroll-snap-type: x mandatory;
   padding-inline: calc((100% - var(--slide)) / 2);
-  scrollbar-color: var(--line) var(--page); }
+  scrollbar-color: var(--band-dim) var(--band); }
 .wheel > li { flex: none; width: var(--slide); align-self: center;
   scroll-snap-align: center; }
 .wheel blockquote, .wheel .by { text-align: center; }
-.wheel blockquote p { font: 400 clamp(24px, 2.3vw, 32px)/1.3 var(--serif);
+.wheel blockquote p { font: 500 clamp(26px, 3vw, 46px)/1.25 var(--serif);
   text-wrap: balance; }
-/* with the script: the seven share one spot and slide sideways from it, so
-   the wheel is as tall as its tallest quote and nothing under it moves. The
-   8 px above and below keep a focus ring inside the edge fade. */
+.pull .by { margin-top: 20px; color: var(--band-dim); }
+.pull .by b { color: var(--band-ink); }
+.pull :focus-visible { outline-color: var(--band-ink); }
+/* the wheel's name lines: links to the sources */
+.wheel .by a { text-decoration: none; }
+.wheel .by a:focus-visible b { text-decoration: underline;
+  text-decoration-thickness: 1px; text-underline-offset: 3px; }
+@media (hover: hover) {
+  html:not(.js) .wheel .by a:hover b, .js .wheel > li.on .by a:hover b {
+    text-decoration: underline; text-decoration-thickness: 1px;
+    text-underline-offset: 3px; }
+}
+/* with the script: the seven quotes share one spot */
 .js .wheel { display: grid; grid-template-columns: var(--slide);
   justify-content: center; padding: 8px 0; margin: -8px 0;
   overflow-x: clip; overflow-y: visible; touch-action: pan-y;
   -webkit-user-select: none; user-select: none;
   -webkit-tap-highlight-color: transparent; }
-.js .wheel > li { grid-area: 1 / 1; opacity: .3;
+.js .wheel > li { grid-area: 1 / 1; opacity: .14;
   transform: translateX(calc(var(--k) * (var(--slide) + var(--gap))));
-  transition: transform .7s var(--glide), opacity .7s var(--glide); }
+  transition: transform .6s var(--glide), opacity .6s var(--glide); }
 .js .wheel > li.on { opacity: 1; }
 .js .wheel > li.jump { transition: none; }
 .js .wheel > li:nth-child(1) { --k: 0; }
@@ -298,121 +286,81 @@ nav.top .btn { min-height: 44px; font-size: 15px; margin-left: auto;
 .js .wheel > li:nth-child(5) { --k: -3; }
 .js .wheel > li:nth-child(6) { --k: -2; }
 .js .wheel > li:nth-child(7) { --k: -1; }
-@media (min-width: 768px) {
-  .js .wheel { -webkit-mask-image: linear-gradient(90deg, transparent,
-      #000 5vw, #000 calc(100% - 5vw), transparent);
-    mask-image: linear-gradient(90deg, transparent, #000 5vw,
-      #000 calc(100% - 5vw), transparent); }
-}
 
-/* why handwriting: four plain lines, two by two, a hairline over each. No
-   cards, no pictures; the wheel's bottom padding is the gap above it. */
-.why { padding: clamp(20px, 3vw, 44px) 0 clamp(64px, 8vw, 116px); }
-.whys { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: clamp(32px, 6vw, 96px); }
-.whys li { padding: 22px 0 28px; border-top: 1px solid var(--line-hi);
-  font: 400 clamp(24px, 2vw, 28px)/1.2 var(--serif);
-  letter-spacing: -.01em; text-wrap: balance; }
+/* why: four lines in one column, each led by a paragraph mark */
+.why { padding: clamp(64px, 8vw, 120px) 0 clamp(64px, 8vw, 116px); }
+.whys { max-width: calc(66.6667% - 8px); }
+.whys li { padding: 18px 0 20px;
+  font: 500 clamp(22px, 2.4vw, 34px)/1.3 var(--serif); text-wrap: pretty; }
+.whys li:first-child { padding-top: 4px; }
+.whys li + li { border-top: 1px solid var(--line); }
+.whys li::before { content: "\00B6"; content: "\00B6" / "";
+  margin-right: .35em; color: var(--rubric); }
 
-/* PDFs: a lit steel slab; the white pages read as paper on it. Three
-   features share one screen: pick one and its clip plays; when a clip
-   ends the next one starts. Without the script the three stack as rows. */
-.pdfs { padding: 0 var(--inset); }
-.lit { position: relative; margin: 0 auto;
-  width: min(1400px, 100%); border-radius: var(--r-lit);
-  padding: clamp(48px, 7vw, 104px) clamp(20px, 5vw, 80px);
-  --dim: #c3d1de; --line: rgba(255, 255, 255, .16);
-  background: linear-gradient(105deg, var(--slate-hi) 0%, var(--slate) 36%,
-    #1b2a3a 100%);
-  box-shadow: inset 1px 1px 0 rgba(255, 255, 255, .22),
-    inset -1px -1px 0 rgba(255, 255, 255, .06),
-    0 50px 90px -50px var(--shade); }
-.lit .head-row { max-width: var(--measure); margin-inline: auto; }
-.player { max-width: var(--measure); margin: 0 auto; display: grid; gap: 56px; }
-.pf { display: grid; gap: 20px clamp(28px, 4vw, 64px); align-items: center;
-  grid-template-columns: minmax(0, .7fr) minmax(0, 1.5fr); }
-.pf-words p { margin-top: 8px; color: var(--dim); max-width: 30ch; }
+/* PDFs: the clip plate and its three features */
+.lit { width: min(1600px, 100% - 2 * var(--side)); margin: 0 auto; }
+.player { display: grid; gap: 56px; }
+.pf { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: var(--gut); align-items: start; }
+.pf-shot { grid-column: 1 / 9; grid-row: 1; }
+.pf-words { grid-column: 10 / 13; grid-row: 1; }
+.pf-words p { margin-top: 6px; color: var(--dim); font-size: 16px;
+  line-height: 1.5; max-width: 30ch; }
 .pf-words button { all: unset; cursor: pointer; }
-.pf-words button:focus-visible { outline: 2px solid var(--ice);
-  outline-offset: 4px; border-radius: 6px; }
-.js .player { gap: 10px clamp(28px, 4vw, 64px); align-items: start;
-  grid-template-columns: minmax(0, .7fr) minmax(0, 1.5fr);
+.pf-words button:focus-visible { outline: 2px solid var(--lapis);
+  outline-offset: 2px; }
+.js .player { grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 6px var(--gut); align-items: start;
   grid-template-rows: auto auto auto 1fr; }
 .js .pf { display: contents; }
-.js .pf-words { grid-column: 1; position: relative; cursor: pointer;
-  padding: 20px 22px 24px; border-radius: var(--r-box);
-  transition: background-color .4s; }
+.js .pf-words { grid-column: 10 / 13; cursor: pointer;
+  padding: 6px 0 16px 18px; border-left: 2px solid transparent; }
 .js .pf:nth-child(1) .pf-words { grid-row: 1; }
 .js .pf:nth-child(2) .pf-words { grid-row: 2; }
 .js .pf:nth-child(3) .pf-words { grid-row: 3; }
-.js .pf-shot { grid-column: 2; grid-row: 1 / 5; opacity: 0;
-  visibility: hidden; transition: opacity .5s, visibility 0s .5s; }
-.js .pf.cur .pf-shot { opacity: 1; visibility: visible;
-  transition: opacity .5s; }
-.js .pf.cur .pf-words { background: rgba(255, 255, 255, .09);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .14); }
-.js .pf:not(.cur) .pf-words:hover { background: rgba(255, 255, 255, .04); }
-.js .pf-words::after { content: ""; position: absolute; left: 22px;
-  right: 22px; bottom: 10px; height: 2px; border-radius: 2px;
-  background: var(--ice); transform-origin: 0 50%; opacity: 0;
-  transform: scaleX(var(--p, 0)); }
-.js.moves .pf.cur .pf-words::after { opacity: 1; }
-
-/* notes: six clips in three columns, the middle column set lower. "Where
-   ink attaches" sits in the grid right after the attach clip: a full row of
-   its own, its pill lined up under the attach card; dense lets the clip
-   after it fill the gap it leaves. */
-.mosaic { --gap-y: clamp(40px, 5vw, 64px); --gap-x: clamp(14px, 1.8vw, 24px);
-  display: grid; gap: var(--gap-y) var(--gap-x); grid-auto-flow: dense;
-  grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
-@media (min-width: 1024px) {
-  .mosaic > figure:nth-of-type(3n + 2) { margin-top: 64px; }
+.js .pf-shot { grid-column: 1 / 9; grid-row: 1 / 5; visibility: hidden; }
+.js .pf.cur .pf-shot { visibility: visible; }
+.js .pf.cur .pf-words { border-left-color: var(--rubric); }
+@media (hover: hover) {
+  .js .pf:not(.cur) .pf-words:hover h3 { text-decoration: underline;
+    text-decoration-thickness: 1px; text-underline-offset: 4px; }
 }
-.mosaic > .more { grid-column: 1 / -1; margin-top: calc(22px - var(--gap-y)); }
-.mosaic > .more > summary { margin-left: calc((100% + var(--gap-x)) / 3); }
 
-/* a row that opens: more detail for the reader who wants it */
+/* notes: the clips two by two, captions under them */
+.mosaic { --gap-y: clamp(40px, 4.4vw, 56px); display: grid;
+  gap: var(--gap-y) var(--gut); grid-auto-flow: dense;
+  grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start;
+  max-width: calc(66.6667% - 8px); }
+.mosaic > .more { grid-column: 1 / -1; margin-top: calc(20px - var(--gap-y)); }
+.mosaic > .more > summary { margin-left: calc(50% + var(--gut) / 2); }
+
+/* a row that opens: a rectangle with a plus that turns to a minus */
 .more { margin-top: clamp(36px, 5vw, 64px); }
-.more > summary { display: inline-flex; align-items: center; gap: 12px;
-  min-height: 48px; padding: 0 20px 0 14px; border-radius: 999px;
-  cursor: pointer; list-style: none; font-weight: 500; font-size: 16px;
-  background: var(--card); box-shadow: inset 0 0 0 1px var(--line-hi); }
+.more > summary { display: inline-flex; align-items: center; gap: 10px;
+  min-height: 52px; padding: 0 20px 0 14px; border: 1px solid var(--ink);
+  border-radius: 6px; cursor: pointer; list-style: none; font-weight: 600;
+  font-size: 16px; }
 .more > summary::-webkit-details-marker { display: none; }
-.more > summary::before, .qa > summary::after { content: ""; flex: none;
-  width: 28px; height: 28px; border-radius: 50%;
-  background:
-    linear-gradient(currentColor, currentColor) center / 12px 1.5px no-repeat,
-    linear-gradient(currentColor, currentColor) center / 1.5px 12px no-repeat,
-    var(--card-hi);
-  transition: transform .45s var(--glide); }
+.more > summary::before, .qa > summary::after { content: "+";
+  content: "+" / ""; flex: none; display: inline-grid; place-items: center;
+  width: 22px; font: 400 24px/1 var(--sans); }
 .more[open] > summary::before, .qa[open] > summary::after {
-  transform: rotate(135deg); }
-.more > summary:hover { box-shadow: inset 0 0 0 1px var(--dim); }
-@supports (interpolate-size: allow-keywords) {
-  :root { interpolate-size: allow-keywords; }
-  .moves details::details-content { block-size: 0; overflow: clip;
-    transition: block-size .45s var(--glide),
-      content-visibility .45s allow-discrete; }
-  .moves details[open]::details-content { block-size: auto; }
+  content: "\2212"; content: "\2212" / ""; }
+@media (hover: hover) {
+  .more > summary:hover { color: var(--paper); background: var(--ink); }
 }
 
-/* where ink attaches: five diagrams, three a row from 1024 px with the
-   last two centred under them, two a row from 600 with the last one
-   centred, one below. Text rows are
-   quiet bars; the row the ink sticks to is lit. Pink ink, a blue band two
-   lines deep for the attach range, a dashed line only on empty card. The
-   last one has a red X over all of it: that ink does not attach. Round
-   the ink in all five, the app's own dotted lasso. */
+/* where ink attaches: five diagrams */
 .range { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 24px; padding-top: 28px; }
 .rp { grid-column: span 2; }
-.rp:nth-child(4) { grid-column: 2 / span 2; }
-.rp:nth-child(5) { grid-column: 4 / span 2; }
-.rp svg { width: 100%; height: auto; display: block; border-radius: 12px;
-  background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
-.rp .row { fill: #3d4c5b; }
-.rp .row.on { fill: #9aabba; }
-.rp .band { fill: var(--blue); fill-opacity: .35; }
+.rp:nth-child(4) { grid-column: 1 / span 2; }
+.rp:nth-child(5) { grid-column: 3 / span 2; }
+.rp svg { width: 100%; height: auto; display: block;
+  border: 1px solid var(--line); border-radius: 8px; }
+.rp .row { fill: var(--line); }
+.rp .row.on { fill: var(--dim); }
+.rp .band { fill: var(--range); fill-opacity: .3; }
 .rp .ink { fill: none; stroke: var(--pen); stroke-width: 3.2;
   stroke-linecap: round; stroke-linejoin: round; }
 .rp .no { fill: none; stroke: var(--no); stroke-width: 5;
@@ -421,339 +369,355 @@ nav.top .btn { min-height: 44px; font-size: 15px; margin-left: auto;
   stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
 .rp .lasso { fill: none; stroke: var(--lasso); stroke-width: 1.5;
   stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
-.rp figcaption { margin-top: 14px; font-size: 15px; line-height: 1.5;
+.rp figcaption { margin-top: 12px; font-size: 16px; line-height: 1.5;
   color: var(--dim); }
 .rp figcaption b { color: var(--ink); font-weight: 600; }
 @media (max-width: 1023px) {
   .range { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .rp, .rp:nth-child(n) { grid-column: span 2; }
-  .rp:nth-child(5) { grid-column: 2 / span 2; }
+  .rp:nth-child(5) { grid-column: 1 / span 2; }
 }
 @media (max-width: 599px) {
-  .range { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+  .range { grid-template-columns: minmax(0, 1fr); }
   .rp, .rp:nth-child(n) { grid-column: auto; }
-  .rp { width: 100%; max-width: 420px; }
+  .rp { max-width: 420px; }
 }
 
-/* the clip strip: its own sideways scroller. Without the script it scrolls
-   and snaps; with it, it loops, drifts slowly and drags. */
+/* the clip strip: a sideways scroller, window edge to window edge */
 .clips { padding-top: clamp(56px, 7vw, 96px); }
-.strip-head { display: flex; justify-content: space-between;
-  align-items: baseline; gap: 16px; padding-bottom: 12px; }
-.strip-head p { font-size: 14px; color: var(--dim); }
-.strip { --gut: max(24px, calc((100vw - var(--measure)) / 2));
-  overflow-x: auto; scroll-snap-type: x mandatory;
-  scroll-padding-left: var(--gut);
-  scrollbar-color: var(--line) var(--page); }
+.strip-head { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: var(--gut); align-items: baseline; padding-bottom: 12px; }
+.strip-head h3 { grid-column: 1 / 9; font-weight: 600;
+  font-size: clamp(24px, 2.2vw, 32px); }
+.strip-head p { grid-column: 10 / 13; font-size: 15px; color: var(--dim); }
+.strip { overflow-x: auto; scroll-snap-type: x mandatory;
+  scrollbar-color: var(--line) var(--paper); }
 .strip.looping { scroll-snap-type: none; cursor: grab; touch-action: pan-y;
   scrollbar-width: none; }
 .strip.dragging { cursor: grabbing; user-select: none; }
 .strip.dragging a { pointer-events: none; }
 .reel { display: flex; gap: 16px; width: max-content;
-  padding: 12px var(--gut) 20px; }
+  padding: 12px 0 20px; }
 .reel li { scroll-snap-align: start; width: clamp(240px, 24vw, 330px); }
 .reel a { display: block; text-decoration: none; }
 .reel :is(video, img) { width: 100%; height: auto; aspect-ratio: 16 / 9;
-  object-fit: cover; object-position: top center; border-radius: 12px;
-  background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
-.reel span { display: block; padding: 10px 2px 0; font-size: 15px;
-  font-weight: 500; }
-.reel small { display: block; padding: 2px 2px 0; font-size: 13px;
+  object-fit: cover; object-position: top center;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--plate); }
+.reel span { display: block; padding-top: 10px; font-size: 15px;
+  font-weight: 600; }
+.reel small { display: block; padding-top: 2px; font-size: 15px;
   line-height: 1.45; color: var(--dim); }
-.reel a:hover span, .reel a:focus-visible span { color: var(--ice); }
-/* pointer on the strip: the drift eases to a stop (the script), the clip
-   under the pointer lifts with a lit edge and the others step back */
-.reel li { transition: opacity .35s var(--glide); }
-.reel :is(video, img) { transition: transform .35s var(--glide),
-  box-shadow .35s var(--glide); }
-.reel a:focus-visible :is(video, img) { transform: scale(1.06);
-  box-shadow: inset 0 0 0 1px var(--line), 0 0 0 2px var(--ice),
-    0 18px 40px -16px rgba(47, 111, 237, .9); }
-@media (hover: hover) {
-  .strip:not(.dragging) .reel:has(li:hover) li:not(:hover) { opacity: .5; }
-  .strip:not(.dragging) .reel a:hover :is(video, img) {
-    transform: scale(1.06);
-    box-shadow: inset 0 0 0 1px var(--line), 0 0 0 2px var(--ice),
-      0 18px 40px -16px rgba(47, 111, 237, .9); }
-}
+.reel a:hover span, .reel a:focus-visible span { color: var(--link);
+  text-decoration: underline; text-decoration-thickness: 1px;
+  text-underline-offset: 3px; }
 
-/* clip pop-out: a strip click opens the clip big over the page */
-.pop { border: 0; padding: 0; background: transparent; color: var(--ink);
+/* clip pop-out: a strip click opens the clip big on a paper sheet */
+.pop { border: 1px solid var(--line); border-radius: 8px; padding: 0;
+  color: var(--ink); background: var(--paper);
   width: min(1120px, 94vw, 150vh); max-width: none; max-height: none; }
-.pop::backdrop { background: rgba(3, 6, 10, .88); }
-.pop figure { padding: 14px 14px 18px; }
+.pop::backdrop { background: rgba(5, 7, 12, .88); }
+.pop figure { padding: 14px 14px 16px; }
 .pop :is(video, img) { width: 100%; height: auto; aspect-ratio: 16 / 9;
-  object-fit: cover; object-position: top center; border-radius: 10px; }
+  object-fit: cover; object-position: top center; border-radius: 6px;
+  background: var(--plate); }
 .pop [hidden] { display: none; }
+.pop .bar { display: flex; justify-content: space-between;
+  align-items: center; gap: 16px; padding: 12px 0 0; font-size: 15px; }
 
-/* how did you hear: asks once, over the page, while an install click opens
-   the plugin page in a new tab (stats.js). Words live in the dialog only. */
+/* how did you hear: a sheet over the page */
 .heard { width: min(520px, 100% - 24px); max-width: none;
   max-height: calc(100% - 24px); max-height: calc(100dvh - 24px);
-  margin: auto; padding: clamp(20px, 2.8vw, 32px); border: 0;
-  border-radius: 24px; overflow: hidden; color: var(--ink);
-  background: radial-gradient(circle at 0 0, color-mix(in srgb,
-    var(--slate) 50%, transparent), transparent 60%) var(--card);
-  box-shadow: inset 0 0 0 1px var(--line-hi),
-    0 30px 60px -20px var(--shade); }
+  margin: auto; padding: clamp(20px, 2.8vw, 32px);
+  border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+  color: var(--ink); background: var(--paper); }
 .heard[open] { display: flex; flex-direction: column; }
 .heard:not([open]) { display: none; } /* also where <dialog> is unknown */
-.heard::backdrop { background: rgba(5, 8, 12, .62); }
+.heard::backdrop { background: rgba(5, 7, 12, .62); }
 .heard > * { flex: none; }
 .heard-top { display: flex; align-items: center; gap: 12px;
   justify-content: space-between; margin: -8px -8px 0 0; }
 .heard-note { display: flex; align-items: center; gap: 8px;
-  font-size: 14px; line-height: 1.4; color: var(--dim); }
-.heard-note svg { flex: none; width: 16px; height: 16px; color: var(--ice); }
-.heard-top .ico { flex: none; }
+  font-size: 15px; line-height: 1.4; color: var(--dim); }
+.heard-note svg { flex: none; width: 16px; height: 16px; color: var(--ink); }
+.heard-top .ico { flex: none; width: 44px; height: 44px;
+  border-color: var(--line); }
 .heard h2 { margin-top: 10px; font-size: clamp(28px, 3vw, 40px);
-  line-height: 1.05; color: var(--ink); }
+  line-height: 1.05; }
 .heard h2:focus { outline: none; }
-.heard-sub { margin-top: 8px; font-size: 15px; line-height: 1.5;
+.heard-sub { margin-top: 8px; font-size: 16px; line-height: 1.5;
   color: var(--dim); }
 .heard .heard-chips { flex: 0 1 auto; min-height: 0; overflow-y: auto;
   display: flex; flex-wrap: wrap; gap: 8px; margin: 17px -5px 0;
   padding: 5px; }
-.heard-chips button { position: relative; isolation: isolate;
-  flex: 1 1 auto; min-height: 44px; padding: 0 18px; border: 0;
-  border-radius: 999px; white-space: nowrap; font: 500 15px/1.2 var(--sans);
-  color: var(--ink); background: var(--card-hi);
-  box-shadow: inset 0 0 0 1px var(--line-hi); }
-.heard-chips button::before { content: ""; position: absolute; inset: 0;
-  z-index: -1; border-radius: inherit; background: var(--blue); opacity: 0;
-  transition: opacity 120ms linear; }
-.heard-chips .on { color: #fff; background-color: var(--blue);
-  transition: background-color 0s 120ms; }
-.heard-chips .on::before { opacity: 1; }
+.heard-chips button { flex: 1 1 auto; min-height: 44px; padding: 0 18px;
+  border: 1px solid var(--line); border-radius: 6px; white-space: nowrap;
+  font: 500 15px/1.2 var(--sans); color: var(--ink);
+  background: transparent; }
+.heard-chips .on { color: var(--on-lapis); background: var(--lapis);
+  border-color: var(--lapis); }
 .heard-end { display: flex; justify-content: flex-end; margin-top: 14px; }
 .heard-skip { min-height: 44px; margin-right: -14px; padding: 0 14px;
-  border: 0; border-radius: 999px; background: none;
+  border: 0; border-radius: 6px; background: none;
   font: 600 15px/1 var(--sans); color: var(--dim); }
 @media (hover: hover) {
-  .heard-chips button:hover { box-shadow: inset 0 0 0 1px var(--dim); }
+  .heard-chips button:hover { border-color: var(--ink); }
+  .heard-chips .on:hover { border-color: var(--lapis); }
   .heard-skip:hover { color: var(--ink); }
-}
-.heard.go { animation: heard-in 380ms var(--glide) both; }
-.heard.go::backdrop { animation: heard-fade 200ms linear both; }
-.heard.go .heard-chips button { animation: heard-chip 240ms var(--glide)
-  both; animation-delay: calc(60ms + 25ms * var(--i, 0)); }
-.heard.go.out { animation: heard-out 150ms ease-in both; }
-.heard.go.out::backdrop { animation: heard-gone 150ms ease-in both; }
-/* opened while the tab was hidden: wait at the first state, play on return */
-.heard.held { opacity: 0; transform: translateY(16px) scale(.96); }
-.heard.held::backdrop { opacity: 0; }
-.heard.held .heard-chips button { opacity: 0; transform: translateY(8px); }
-@keyframes heard-in { from { opacity: 0;
-  transform: translateY(16px) scale(.96); } }
-@keyframes heard-chip { from { opacity: 0; transform: translateY(8px); } }
-@keyframes heard-fade { from { opacity: 0; } }
-@keyframes heard-out { to { opacity: 0;
-  transform: translateY(8px) scale(.98); } }
-@keyframes heard-gone { to { opacity: 0; } }
-/* the page's reduced-motion rule does not reach ::backdrop */
-@media (prefers-reduced-motion: reduce) {
-  .heard::backdrop { animation: none !important; }
 }
 @media (max-width: 640px) {
   .heard { width: calc(100% - 24px); margin: auto 12px 12px; }
 }
-.pop .bar { display: flex; justify-content: space-between;
-  align-items: center; gap: 16px; padding: 12px 4px 0; font-size: 15px; }
 
-/* files */
-.files { display: grid; align-items: center;
-  grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr);
-  gap: 32px clamp(32px, 6vw, 96px); }
-.files .words { display: grid; gap: 20px; }
-.files .words p { color: var(--ink-soft); font-size: clamp(17px, 1.4vw, 19px);
-  max-width: 34ch; }
-/* the second row: the note with its one hidden property. From 900 px the
-   shot comes first and the words sit after it. */
-.files + .files { margin-top: clamp(56px, 7vw, 96px); }
-@media (min-width: 900px) {
-  .files.flip { grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr); }
-  .files.flip .words { order: 2; }
-}
+/* files: the head, its line and two clips */
+.files { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 28px var(--gut); align-items: start; }
+.files .words { grid-column: 1 / 9; display: grid; gap: 18px; }
+.files .words p { font-size: clamp(18px, 1.4vw, 20px); max-width: 40ch; }
+.files > .frame { grid-column: 1 / 9; }
+.files + .files { margin-top: clamp(48px, 6vw, 80px); }
+.files.flip > .frame { grid-row: 1; }
+.files.flip .words { grid-column: 10 / 13; grid-row: 1; }
+.files.flip .words p { font-size: 16px; line-height: 1.55; }
 
-/* how to start: the head, then the four steps side by side under a rule,
-   each with a big italic numeral. Where it runs and the button come last,
-   after the steps. */
-.begin { display: grid; gap: 14px; margin-bottom: 40px; }
-.steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid var(--line-hi); }
-.step { display: grid; align-content: start; gap: 10px;
-  padding: 26px 28px 6px 0; }
-.step + .step { padding-left: 28px; border-left: 1px solid var(--line); }
-.step .num { font: italic 400 68px/.9 var(--serif); color: var(--ice); }
-.step-t { font: 400 clamp(25px, 2.2vw, 30px)/1.15 var(--serif); }
+/* how to start: the four steps as rows */
+.steps { max-width: calc(66.6667% - 8px); border-top: 1px solid var(--line); }
+.step { display: grid; grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px 20px; align-items: baseline; padding: 22px 0;
+  border-bottom: 1px solid var(--line); }
+.step > * { grid-column: 2; }
+.step > .num { grid-column: 1; grid-row: 1;
+  font: 800 44px/1 var(--serif); }
+.step-t { font: 600 clamp(24px, 2.2vw, 32px)/1.15 var(--serif); }
 .step ol.sub { display: grid; gap: 2px; padding-left: 1.2em;
   list-style: decimal; font-size: 15px; color: var(--dim); }
-.step ol.sub li::marker { color: var(--ice); }
-.step-go { font-size: 15px; }
+.step-go { font-size: 16px; }
 .tlink { display: inline-flex; align-items: center; gap: 6px;
-  color: var(--ice); font-weight: 500; text-decoration: none;
-  border-bottom: 1px solid color-mix(in srgb, var(--ice) 40%, transparent); }
-.tlink:hover { border-bottom-color: var(--ice); }
+  color: var(--link); font-weight: 600; text-decoration: underline;
+  text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .tlink svg { width: 14px; height: 14px; }
 .steps-end { display: flex; flex-wrap: wrap; align-items: center;
   gap: 16px 28px; margin-top: 30px; }
 .runs { font-size: 15px; color: var(--dim); }
 
-/* switching: real posts, word for word, each one a link to the post. They
-   sit in rows of three (two, then one, on smaller screens); the cards in a
-   row share its height and keep the name at the foot, so the columns end
-   level. */
-.said { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px; }
-.say { display: grid;
-  border-radius: 6px 20px 20px 6px; background: var(--card);
-  box-shadow: inset 3px 0 0 var(--slate-hi), inset 0 0 0 1px var(--line);
-  transition: box-shadow .3s, background-color .3s; }
-.say a { display: flex; flex-direction: column;
-  justify-content: space-between; padding: 22px 24px 20px 28px;
-  text-decoration: none; border-radius: inherit; }
-.say a:focus-visible { outline-offset: -4px; }
-.say blockquote p { font-size: 17px; line-height: 1.5; text-wrap: pretty; }
-.by { margin-top: 16px; font-size: 14px; color: var(--dim); }
-.by b { margin-right: 8px; font-weight: 600; color: var(--ink);
-  overflow-wrap: anywhere; }
-.by small { font-size: 13px; }
-@media (hover: hover) {
-  .say:hover { background: var(--card-hi);
-    box-shadow: inset 3px 0 0 var(--ice), inset 0 0 0 1px var(--line-hi); }
-}
-
-/* how to export from the other apps, opened on demand */
+/* switching: the export steps, then the posts */
+.switch .more { margin: 0 0 clamp(26px, 3.6vw, 44px); }
+.switch .more > .apps, .switch .more > .then {
+  max-width: calc(66.6667% - 8px); }
 .apps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  padding-top: 32px; }
-.app { padding: 0 32px; }
+  padding-top: 28px; }
+.app { padding: 0 24px; }
 .app:first-child { padding-left: 0; }
 .app:last-child { padding-right: 0; }
 .app + .app { border-left: 1px solid var(--line); }
-.app ol { margin-top: 14px; padding-left: 1.3em; list-style: decimal;
-  color: var(--dim); font-size: 16px; display: grid; gap: 8px; }
-.app li::marker { color: var(--ice); }
-.app .src { margin-top: 14px; font-size: 14px; color: var(--dim); }
-.then { display: grid; gap: 16px 40px; margin-top: 40px; padding-top: 32px;
-  border-top: 1px solid var(--line);
-  grid-template-columns: minmax(0, 1fr) minmax(0, 36em); }
-.then p { color: var(--dim); text-wrap: pretty; }
-.then p + p { margin-top: 14px; }
-.switch .more { margin: 0 0 clamp(26px, 3.6vw, 44px); }
-
-/* questions: one column, the head above the rows */
-.asks { display: grid; gap: 32px; }
-.asks-list { display: grid; gap: 10px; max-width: 900px; }
-.qa { border-radius: 30px; background: var(--card);
-  box-shadow: inset 0 0 0 1px var(--line); }
-.qa[open] { border-radius: var(--r-box); }
-.qa > summary { display: flex; align-items: center;
-  justify-content: space-between; gap: 20px; min-height: 60px;
-  padding: 12px 14px 12px 26px; cursor: pointer; list-style: none;
-  border-radius: inherit; }
-.qa > summary::-webkit-details-marker { display: none; }
-.qa > summary::after { width: 36px; height: 36px; }
-.qa .q { font: 600 clamp(17px, 1.35vw, 19px)/1.35 var(--sans);
-  letter-spacing: 0; }
-.qa .a { padding: 0 26px; color: var(--dim); max-width: 60ch;
+.app ol { margin-top: 12px; padding-left: 1.3em; list-style: decimal;
+  color: var(--dim); font-size: 16px; line-height: 1.5; display: grid; gap: 8px; }
+.app .src { margin-top: 12px; font-size: 15px; }
+.app .src a { color: var(--link); text-decoration-thickness: 1px;
+  text-underline-offset: 3px; }
+.then { display: grid; gap: 14px; margin-top: 36px; padding-top: 28px;
+  border-top: 1px solid var(--line); }
+.then p { max-width: 62ch; text-wrap: pretty; }
+.then p + p { margin-top: 12px; }
+.said { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--gut); max-width: calc(66.6667% - 8px); }
+.say { display: grid; border-top: 1px solid var(--line); }
+.say a { display: flex; flex-direction: column;
+  justify-content: space-between; padding: 20px 0 26px;
+  text-decoration: none; }
+.say blockquote p { font: 500 clamp(21px, 1.7vw, 25px)/1.4 var(--serif);
   text-wrap: pretty; }
-.qa .a + .a { margin-top: 12px; }
-.qa .a:first-of-type { padding-top: 2px; }
-.qa .a:last-child { padding-bottom: 24px; }
+.by { margin-top: 14px; font-size: 15px; color: var(--dim); }
+.by b { margin-right: 8px; font-weight: 600; color: var(--ink);
+  overflow-wrap: anywhere; }
+.by small { font-size: 15px; }
+@media (hover: hover) {
+  .say a:hover .by b { color: var(--link); text-decoration: underline;
+    text-decoration-thickness: 1px; text-underline-offset: 3px; }
+}
 
-/* contact: three plain rows, a name on the left, the sentence and its
-   link on the right */
-.reach-head { display: grid; gap: 14px; margin-bottom: 34px; }
-.reach li { display: grid; gap: 6px 36px; padding: 22px 0;
-  grid-template-columns: minmax(0, 15em) minmax(0, 1fr);
+/* questions: hairline rows in the block */
+.asks { display: grid; gap: 28px; }
+.asks-list { display: grid; max-width: calc(66.6667% - 8px);
+  border-bottom: 1px solid var(--line); }
+.qa { border-top: 1px solid var(--line); }
+.qa > summary { display: flex; align-items: center;
+  justify-content: space-between; gap: 20px; min-height: 64px;
+  padding: 14px 0; cursor: pointer; list-style: none; }
+.qa > summary::-webkit-details-marker { display: none; }
+.qa .q { font-weight: 600; font-size: clamp(19px, 1.6vw, 23px);
+  line-height: 1.3; }
+.qa .a { max-width: 62ch; text-wrap: pretty; }
+.qa .a + .a { margin-top: 12px; }
+.qa .a:last-child { padding-bottom: 24px; }
+.qa .clipfig { max-width: 760px; margin: 16px 0 24px; }
+
+/* contact and foot: the colophon. Plain, small, block width. */
+.reach { max-width: calc(66.6667% - 8px); font-size: 16px; line-height: 1.5; }
+.reach li { display: grid; gap: 4px 32px; padding: 16px 0;
+  grid-template-columns: minmax(0, 13em) minmax(0, 1fr);
   border-top: 1px solid var(--line); }
 .reach li:last-child { border-bottom: 1px solid var(--line); }
-.reach b { font: 400 26px/1.15 var(--serif); }
-.reach span { color: var(--dim); max-width: 52ch; overflow-wrap: anywhere; }
-.reach a { color: var(--ice); white-space: nowrap;
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--ice) 45%, transparent);
+.reach b { font-weight: 600; }
+.reach span { color: var(--dim); max-width: 60ch; overflow-wrap: anywhere; }
+.reach a { color: var(--link); white-space: nowrap;
+  text-decoration: underline; text-decoration-thickness: 1px;
   text-underline-offset: 3px; }
-.reach a:hover { text-decoration-color: var(--ice); }
 
-/* email */
+/* email sign-up (hidden) */
 .signup-bar { display: grid; align-items: center; gap: 20px 48px;
   grid-template-columns: minmax(0, 1fr) auto;
-  margin-top: clamp(38px, 5.4vw, 72px); padding: clamp(22px, 2.8vw, 36px);
-  border-radius: var(--r-box); background: var(--floor);
-  box-shadow: inset 0 0 0 1px var(--line); }
+  margin-top: clamp(38px, 5.4vw, 72px); padding: 28px 0;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  max-width: calc(66.6667% - 8px); }
 .signup h2 { font-size: clamp(28px, 3vw, 40px); }
-.signup p { margin-top: 8px; color: var(--dim); }
+.signup p { margin-top: 8px; color: var(--dim); text-wrap: balance; }
 .signup form { display: flex; flex-wrap: wrap; gap: 8px; }
-.signup input { min-height: 52px; width: min(300px, 100%);
-  padding: 0 20px; border-radius: 999px; font: inherit; color: var(--ink);
-  background: var(--card); border: 1px solid var(--line-hi); }
-.signup .fine { grid-column: 1 / -1; margin: 0; font-size: 14px; }
+.signup input { min-height: 52px; width: min(300px, 100%); padding: 0 16px;
+  border: 1px solid var(--ink); border-radius: 6px; font: inherit;
+  color: var(--ink); background: transparent; }
+.signup .fine { grid-column: 1 / -1; margin: 0; font-size: 15px; }
 
-/* foot: the page's line, the links, the counter */
-footer { margin-top: var(--sec-gap); background: var(--floor);
-  padding: clamp(48px, 6vw, 80px) 0 clamp(36px, 4vw, 56px);
-  color: var(--dim); font-size: 15px; }
-.foot-row { display: flex; flex-wrap: wrap; justify-content: space-between;
-  gap: 28px 48px; }
-.foot-name { font: 400 clamp(28px, 3vw, 40px)/1.05 var(--serif);
+footer { margin-top: var(--sec-gap);
+  padding: clamp(40px, 5vw, 64px) 0 clamp(36px, 4vw, 56px);
+  border-top: 1px solid var(--line); color: var(--dim); font-size: 15px; }
+.foot-row { display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 18px 44px; max-width: calc(66.6667% - 8px); }
+.foot-name { font: 800 26px/1 var(--serif); letter-spacing: -.01em;
   color: var(--ink); }
-footer nav { display: flex; flex-wrap: wrap; gap: 10px 28px;
-  align-content: flex-start; }
+footer nav { display: flex; flex-wrap: wrap; gap: 8px 24px; }
 footer nav a { text-decoration: none; }
-footer nav a:hover { color: var(--ink); }
-footer .viewers { margin-top: 32px; font-size: 13px; }
+footer nav a:hover { color: var(--ink); text-decoration: underline;
+  text-decoration-thickness: 1px; text-underline-offset: 3px; }
+footer .viewers { margin-top: 28px; font-size: 15px; }
 footer .viewers[hidden] { display: none; }
 footer .digits { display: inline-flex; gap: 2px; margin-left: 6px;
   vertical-align: middle; }
-footer .digits span { padding: 3px 4px; border-radius: 2px;
-  font: 600 14px/1 var(--mono); color: var(--ink); background: #05080c;
-  box-shadow: inset 0 0 0 1px var(--line); }
+footer .digits span { padding: 3px 4px; border: 1px solid var(--line);
+  border-radius: 2px; font: 600 15px/1 var(--mono); color: var(--ink); }
 
-@media (max-width: 1023px) {
-  .said { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .step:nth-child(odd) { padding-left: 0; border-left: 0; }
-  .step:nth-child(n + 3) { border-top: 1px solid var(--line); }
-  .mosaic { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mosaic > .more > summary { margin-left: calc((100% + var(--gap-x)) / 2); }
-}
+/* one column under 900 px */
 @media (max-width: 899px) {
   .links { display: none; }
-  .head-row, .files, .then, .whys {
+  .head-row, .begin, .reach-head, .whys, .mosaic, .said, .asks-list,
+  .reach, .steps, .signup-bar, .foot-row, .switch .more > .apps,
+  .switch .more > .then { max-width: none; }
+  .opening, .strip-head, .files, .pf, .js .player {
     grid-template-columns: minmax(0, 1fr); }
-  .pf { grid-template-columns: minmax(0, 1fr); }
-  .pf-shot { order: -1; }
-  .js .player { grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: none; }
-  .js .pf .pf-shot { grid-column: 1; grid-row: 1; }
+  .opening > h1, .hero .sub, .cta, .facts, .screen,
+  .film-bar { grid-column: 1; }
+  .opening > h1 { grid-row: 2; align-self: start; }
+  .hero .sub { grid-row: 3; }
+  .cta { grid-row: 4; }
+  .facts { grid-row: 5; }
+  .screen { grid-row: 6; }
+  .film-bar { grid-row: 7; margin-top: 12px; }
+  .strip-head h3, .strip-head p { grid-column: 1; }
+  .strip-head p { margin-top: 4px; }
+  .files .words, .files > .frame, .files.flip .words { grid-column: 1; }
+  .files.flip > .frame { grid-row: 1; }
+  .files.flip .words { grid-row: 2; }
+  .pf-shot, .pf-words { grid-column: 1; }
+  .pf-words { grid-row: 2; margin-top: 14px; }
+  .js .player { grid-template-rows: none; }
+  .js .pf .pf-shot { grid-column: 1; grid-row: 1; margin-bottom: 14px; }
+  .js .pf .pf-words { grid-column: 1; margin-top: 0; }
   .js .pf:nth-child(1) .pf-words { grid-row: 2; }
   .js .pf:nth-child(2) .pf-words { grid-row: 3; }
   .js .pf:nth-child(3) .pf-words { grid-row: 4; }
-  .apps { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+  .apps { grid-template-columns: minmax(0, 1fr); gap: 24px; }
   .app, .app + .app { padding: 0; border-left: 0; }
-  .app + .app { padding-top: 28px; border-top: 1px solid var(--line); }
+  .app + .app { padding-top: 24px; border-top: 1px solid var(--line); }
   .signup-bar { grid-template-columns: minmax(0, 1fr); }
   .reach li { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 699px) {
-  .said { grid-template-columns: minmax(0, 1fr); padding-bottom: 18px; }
-  .mosaic { grid-template-columns: minmax(0, 1fr); }
+  .said, .mosaic { grid-template-columns: minmax(0, 1fr); }
   .mosaic > .more > summary { margin-left: 0; }
-  .steps { grid-template-columns: minmax(0, 1fr); }
-  .step, .step + .step { padding: 22px 0 18px; border-left: 0; }
-  .step + .step { border-top: 1px solid var(--line); }
-  .step .num { font-size: 54px; }
-  .cta .btn { flex: 1 1 auto; min-height: 54px; font-size: 16px; }
-  .facts { flex-direction: column; align-items: center; }
+  .cta .btn { flex: 1 1 auto; }
+  .facts { flex-direction: column; }
+  .facts li, .facts li:first-child { padding: 0; }
   .facts li + li { border-left: 0; }
-  .screen { padding: 5px; border-radius: 14px; }
-  .screen > :is(img, video) { border-radius: 10px; }
+  .step { grid-template-columns: 44px minmax(0, 1fr); }
+  .step > .num { font-size: 34px; }
 }
 @media (max-width: 420px) {
-  .wrap, nav.top .wrap, .opening { width: calc(100% - 32px); }
-  .strip { --gut: 16px; }
-  nav.top .btn { padding: 0 14px; font-size: 14px; }
+  nav.top .btn { padding: 0 14px; font-size: 15px; }
+}
+
+/* 1100 px and up: the margin on the left, the block on the right */
+@media (min-width: 1100px) {
+  /* hero: the headline full width, the film in the block */
+  .opening { grid-template-rows: auto auto auto auto auto 1fr; }
+  .opening > h1 { grid-column: 1 / -1; grid-row: 2; align-self: start; }
+  .hero .sub { grid-column: 1 / 4; grid-row: 3; }
+  .cta { grid-column: 1 / 4; grid-row: 4; flex-direction: column; }
+  .facts { grid-column: 1 / 4; grid-row: 5; flex-direction: column;
+    gap: 0; margin-top: 28px; }
+  .facts li, .facts li:first-child { padding: 10px 0; }
+  .facts li, .facts li + li { border-left: 0;
+    border-top: 1px solid var(--line); }
+  .opening > .film { display: block; grid-column: 5 / 13; grid-row: 3 / 7;
+    margin-top: clamp(20px, 2.2vw, 32px); }
+  .screen { margin-top: 0; }
+  .film-bar { margin-top: 12px; }
+
+  /* every section: on the twelve column grid */
+  .why > .wrap, .lit, #features > .wrap, #files, #start > .wrap,
+  .switch > .wrap, .asks, #contact > .wrap {
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 0 var(--gut); align-items: start; }
+  #files { width: min(1600px, 100% - 2 * var(--side)); margin: 0 auto; }
+  .head-row, .begin, .reach-head, #files > .wrap, #files .words {
+    display: contents; }
+  .head-row > h2, .begin > h2, .reach-head > h2, .asks > h2,
+  #files .words > h2 { grid-column: 1 / 4; grid-row: 1 / span 9;
+    align-self: start; position: sticky; top: calc(var(--bar) + 32px);
+    font-size: clamp(33px, 3.06vw, 44px); }
+  .head-row > .lead, .begin > .lead, .reach-head > .lead,
+  #files .files:not(.flip) .words > p { grid-column: 5 / 13;
+    margin-bottom: clamp(28px, 3.4vw, 48px); }
+  .why .whys, .lit > .player, #features > .wrap > .mosaic, #start .begin + div,
+  .switch > .wrap > .more, .switch > .wrap > .said, .asks > .asks-list,
+  #contact .reach { grid-column: 5 / 13; max-width: none; }
+  .steps, .switch .more > .apps, .switch .more > .then { max-width: none; }
+
+  /* Your notes stay plain Markdown: the line and two clips */
+  #files .files:not(.flip) .words > p { grid-row: 1; }
+  #files .files:not(.flip) > .frame { grid-column: 5 / 13; grid-row: 2; }
+  #files .flip > .frame { grid-column: 5 / 13; grid-row: 3;
+    margin-top: clamp(48px, 6vw, 80px); }
+  #files .flip .words > p { grid-column: 5 / 13; grid-row: 4;
+    margin-top: 16px; max-width: 40ch; }
+
+  /* Write on PDFs: the plate, the three glosses under it */
+  .pf { grid-template-columns: minmax(0, 1fr); }
+  .pf-shot, .pf-words { grid-column: 1; }
+  .pf-words { grid-row: 2; margin-top: 14px; }
+  .js .player { grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: auto auto; gap: 0 var(--gut); }
+  .js .pf .pf-shot { grid-column: 1 / -1; grid-row: 1; margin-bottom: 18px; }
+  .js .pf .pf-words { margin-top: 0; padding: 14px 0 0; border-left: 0;
+    border-top: 2px solid transparent; }
+  .js .pf:nth-child(1) .pf-words { grid-column: 1; grid-row: 2; }
+  .js .pf:nth-child(2) .pf-words { grid-column: 2; grid-row: 2; }
+  .js .pf:nth-child(3) .pf-words { grid-column: 3; grid-row: 2; }
+  .js .pf.cur .pf-words { border-top-color: var(--rubric); }
+
+  /* the strip head on the block's lines */
+  .strip-head h3 { grid-column: 5 / 13; grid-row: 1; }
+  .strip-head p { grid-column: 5 / 13; grid-row: 1; justify-self: end; }
+
+  /* sign-up and foot */
+  .signup > .wrap { display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr)); column-gap: var(--gut); }
+  .signup-bar { grid-column: 5 / 13; max-width: none; }
+  .foot-row { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 18px var(--gut); max-width: none; }
+  .foot-name { grid-column: 1 / 4; }
+  footer nav { grid-column: 5 / 13; }
+  footer .viewers { margin-left: calc((100% - 11 * var(--gut)) / 3
+    + 4 * var(--gut)); }
 }
 @media (prefers-reduced-motion: reduce) {
   /* No motion anywhere. Every clip keeps its poster and gets its own
@@ -761,6 +725,7 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   html, .strip { scroll-behavior: auto; }
   *, *::before, *::after { transition: none !important;
     animation: none !important; }
+  .heard::backdrop { animation: none !important; }
 }
 </style>
 </head>
@@ -788,9 +753,6 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   <div class="aurora" aria-hidden="true"></div>
   <div class="opening">
     <h1>Write on your notes</h1>
-    <p class="name">Handwriting<svg class="penline" viewBox="0 0 400 12"
-      preserveAspectRatio="none" aria-hidden="true"><path
-      d="M3 8C52 3 96 10 148 6s104-4 152 0 68 3 97-1"/></svg></p>
     <p class="sub">Handwrite, draw, highlight, and erase directly on your
       notes and PDFs.</p>
     <div class="cta">
@@ -816,9 +778,9 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
         <video id="tower" autoplay muted loop playsinline width="1280"
           height="720" poster="assets/landing/hero/short-2026-11-07-8-17PM.png"
           aria-label="The Handwriting demo: writing, highlighting, erasing,
-          lasso, shapes, insert space, canvas, PDFs, snip and flatten, one
-          after another on Obsidian notes."><source
-          src="assets/landing/hero/short-2026-11-09-4-19PM.mp4"
+          lasso, attaching ink to text, shapes, insert space, canvas,
+          PDFs, snip and flatten, one after another on Obsidian notes."><source
+          src="assets/landing/hero/short-2026-11-24-pen.mp4"
           type="video/mp4"><img
           src="assets/landing/hero/short-2026-11-07-8-17PM.png" width="1280"
           height="720" alt="Handwriting on an Obsidian note, the first frame
@@ -843,31 +805,31 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   <ul class="wheel">
     <li class="on" tabindex="0">
       <blockquote><p>a quality plugin... really head and shoulders above everyone else who's tried something like this. it's really great.</p></blockquote>
-      <p class="by"><b>starkruzr</b><small>Reddit</small></p>
+      <p class="by"><a href="https://www.reddit.com/r/ObsidianMD/comments/1xszbri/comment/19sngu9ufswp0/"><b>starkruzr</b><small>Reddit</small></a></p>
     </li>
     <li tabindex="0">
       <blockquote><p>… It's absolutely the plugin in Obsidian with the best handwriting feel, even comparable to dedicated handwriting note-taking apps on the iPad.</p></blockquote>
-      <p class="by"><b>@gatsbyleonardo1330</b><small>YouTube</small></p>
+      <p class="by"><a href="https://www.youtube.com/watch?v=TUeniA9BZcc&amp;lc=UgxBfIaOqjF8KpKUgD94AaABAg"><b>@gatsbyleonardo1330</b><small>YouTube</small></a></p>
     </li>
     <li tabindex="0">
       <blockquote><p>THIS! THIS IS WHAT I NEEDED!!! AMAZING WORK!</p></blockquote>
-      <p class="by"><b>ExtensionPea4869</b><small>Reddit</small></p>
+      <p class="by"><a href="https://www.reddit.com/r/ObsidianMD/comments/1xszbri/comment/19sg7k8qfovb6/"><b>ExtensionPea4869</b><small>Reddit</small></a></p>
     </li>
     <li tabindex="0">
       <blockquote><p>… the flatten command pops out a nice clean pdf with my handwritten notes exactly as I drew them. This is super impressive...</p></blockquote>
-      <p class="by"><b>Droux</b><small>Reddit</small></p>
+      <p class="by"><a href="https://www.reddit.com/r/ObsidianMD/comments/1xszbri/comment/19sjdjp2zhtoi/"><b>Droux</b><small>Reddit</small></a></p>
     </li>
     <li tabindex="0">
       <blockquote><p>Thank YOU!!! This plugin changed the way I take notes at school, you are the goat.</p></blockquote>
-      <p class="by"><b>ZoeGR14</b><small>GitHub</small></p>
+      <p class="by"><a href="https://github.com/ellimist-afk/handwriting/issues/22#issuecomment-5755289332"><b>ZoeGR14</b><small>GitHub</small></a></p>
     </li>
     <li tabindex="0">
       <blockquote><p>… being able to write/draw in the same default Obsidian canvas while keeping regular .md files is huge.</p></blockquote>
-      <p class="by"><b>Unopened5-Pajamas2-W</b><small>GitHub</small></p>
+      <p class="by"><a href="https://github.com/ellimist-afk/handwriting/issues/32#issuecomment-5838113363"><b>Unopened5-Pajamas2-W</b><small>GitHub</small></a></p>
     </li>
     <li tabindex="0">
       <blockquote><p>This is literally THE feature i was hoping to see in obsidian for learning coz i draw my notes - thank you!</p></blockquote>
-      <p class="by"><b>just-a-growing-tree</b><small>Reddit</small></p>
+      <p class="by"><a href="https://www.reddit.com/r/ObsidianMD/comments/1xszbri/comment/19sg2l3vi2cud/"><b>just-a-growing-tree</b><small>Reddit</small></a></p>
     </li>
   </ul>
 </div>
@@ -875,7 +837,7 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
 <section id="why" class="why" data-section="why">
   <div class="wrap">
     <div class="head-row">
-      <h2 data-fade>Why <span class="inked">Handwriting<svg class="penline"
+      <h2 data-fade>Why <span class="inked" style="color: var(--ink)">Handwriting<svg class="penline"
         viewBox="0 0 400 12" preserveAspectRatio="none" aria-hidden="true"><path
         d="M3 8C52 3 96 10 148 6s104-4 152 0 68 3 97-1"/></svg></span>?</h2>
     </div>
@@ -900,11 +862,11 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
           on the PDF itself.</p></div>
         <figure class="clipfig pf-shot">
           <video autoplay muted loop playsinline width="1200" height="674"
-            poster="assets/landing/posters/pdf.png"
-            aria-label="Writing “why?” in the margin of the Handwriting manual PDF, then switching to the highlighter and highlighting a line."><source
-            src="assets/landing/clips/pdf.mp4" type="video/mp4"><img
-            src="assets/landing/posters/pdf.png" width="1200" height="674"
-            alt="Writing “why?” in the margin of the Handwriting manual PDF, then switching to the highlighter and highlighting a line."></video>
+            poster="assets/landing/posters/pdf-hand-2.png"
+            aria-label="Writing “clouds need dust to form” by hand in the notes column of a PDF, then switching to the highlighter and highlighting a line."><source
+            src="assets/landing/clips/pdf-hand-2.mp4" type="video/mp4"><img
+            src="assets/landing/posters/pdf-hand-2.png" width="1200" height="674"
+            alt="Writing “clouds need dust to form” by hand in the notes column of a PDF, then switching to the highlighter and highlighting a line."></video>
         </figure>
       </article>
       <article class="pf" id="export">
@@ -912,11 +874,11 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
           to a copy with your ink drawn in so you can open it in any PDF app.</p></div>
         <figure class="clipfig pf-shot">
           <video autoplay muted loop playsinline width="1200" height="674"
-            poster="assets/landing/posters/flatten.png"
-            aria-label="Flattening the Handwriting manual PDF into a copy with the highlight and handwriting drawn in."><source
-            src="assets/landing/clips/flatten.mp4" type="video/mp4"><img
-            src="assets/landing/posters/flatten.png" width="1200" height="674"
-            alt="Flattening the Handwriting manual PDF into a copy with the highlight and handwriting drawn in."></video>
+            poster="assets/landing/posters/flatten-hand.png"
+            aria-label="Flattening a PDF into a copy with the highlight and handwriting drawn in."><source
+            src="assets/landing/clips/flatten-hand.mp4" type="video/mp4"><img
+            src="assets/landing/posters/flatten-hand.png" width="1200" height="674"
+            alt="Flattening a PDF into a copy with the highlight and handwriting drawn in."></video>
         </figure>
       </article>
       <article class="pf" id="snip">
@@ -925,11 +887,11 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
           page.</p></div>
         <figure class="clipfig pf-shot">
           <video autoplay muted loop playsinline width="1200" height="674"
-            poster="assets/landing/posters/snip.png"
-            aria-label="Lassoing a phrase of the Handwriting manual PDF, snipping it, and pasting the image with its link back into a note."><source
-            src="assets/landing/clips/snip.mp4" type="video/mp4"><img
-            src="assets/landing/posters/snip.png" width="1200" height="674"
-            alt="Lassoing a phrase of the Handwriting manual PDF, snipping it, and pasting the image with its link back into a note."></video>
+            poster="assets/landing/posters/snip-clouds.png"
+            aria-label="Lassoing a handwritten line and the typed lines beside it on a PDF page, snipping it, and pasting the image with its link back into a note."><source
+            src="assets/landing/clips/snip-clouds.mp4" type="video/mp4"><img
+            src="assets/landing/posters/snip-clouds.png" width="1200" height="674"
+            alt="Lassoing a handwritten line and the typed lines beside it on a PDF page, snipping it, and pasting the image with its link back into a note."></video>
         </figure>
       </article>
     </div>
@@ -1303,8 +1265,14 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
       </li>
       <li class="say" data-fade>
         <a href="https://www.reddit.com/r/ObsidianMD/comments/1vxbvz1/comment/p5onity/">
-          <blockquote><p>incredible ! I never thought anything like this was possible in Obsidian. WOW. It's very Onenote like.</p></blockquote>
+          <blockquote><p>incredible ! I never thought anything like this was possible in Obsidian. WOW.</p></blockquote>
           <p class="by"><b>SunkTheBirdie</b><small>Reddit</small></p>
+        </a>
+      </li>
+      <li class="say" data-fade>
+        <a href="https://ko-fi.com/ellimistafk">
+          <blockquote><p>You have done a fantastic job with the plug in. ...the switch from onenote is almost seamless</p></blockquote>
+          <p class="by"><b>Hezzynator</b><small>Ko-fi</small></p>
         </a>
       </li>
       <li class="say" data-fade>
@@ -1329,12 +1297,6 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
         <a href="https://github.com/ellimist-afk/handwriting/issues/39#issue-5718448201">
           <blockquote><p>… this is definitely the one that supports my stylus best.</p></blockquote>
           <p class="by"><b>Davidekiller1999</b><small>GitHub</small></p>
-        </a>
-      </li>
-      <li class="say" data-fade>
-        <a href="https://www.reddit.com/r/ObsidianMD/comments/1xszbri/comment/19sn5g99ddr42/">
-          <blockquote><p>I was testing this out on windows with a graphic tablet. This is amazing.</p></blockquote>
-          <p class="by"><b>Teddysorous</b><small>Reddit</small></p>
         </a>
       </li>
       <li class="say" data-fade>
@@ -1380,6 +1342,24 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
         <p class="a">Yes.</p>
       </details>
       <details class="qa item">
+        <summary><h3 class="q">Is it free?</h3></summary>
+        <p class="a">Yes.</p>
+      </details>
+      <details class="qa item">
+        <summary><h3 class="q">What does it run on?</h3></summary>
+        <p class="a">iPad, Android, BOOX, Windows, Mac and Linux.</p>
+      </details>
+      <details class="qa item">
+        <summary><h3 class="q">Does it work with Apple Pencil?</h3></summary>
+        <p class="a">Yes. On iPad, turn Scribble off first: iPad Settings > Apple Pencil >
+          Scribble > Off.</p>
+      </details>
+      <details class="qa item">
+        <summary><h3 class="q">Do I need a pen?</h3></summary>
+        <p class="a">No. Run the command “Handwriting: Mouse on / off” and draw with the
+          mouse.</p>
+      </details>
+      <details class="qa item">
         <summary><h3 class="q">What happens to my notes if I uninstall or disable it?</h3></summary>
         <p class="a">Disable the plugin and your text stays exactly the same; the ink just
           stops rendering. Your notes stay .md. The only thing ever written into
@@ -1397,12 +1377,7 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
         <summary><h3 class="q">Can I use different devices to view the same note?</h3></summary>
         <p class="a">Yes. Your ink lives in a file inside your vault, so it syncs along with your notes.</p>
         <p class="a">If you use Obsidian Sync, iCloud, or Dropbox to sync your notes, you may have to Turn on a compatibility option in Handwriting settings as those services do not sync hidden folders by default.</p>
-      </details>
-      <details class="qa item">
-        <summary><h3 class="q">Will it look the same on both devices?</h3></summary>
-        <p class="a">I have tried very hard to make it look the same. A phone will wrap a paragraph into more lines than the desktop screen does, meaning the text will wrap. Ink you drew will always stay at its spot on the page. Do you see the problem?</p>
-        <p class="a">The solution to this in the short term is the lasso and attach ink to text feature; ink attached to text will then be spatially positioned according to that text.</p>
-        <p class="a">To attach ink: lasso the ink next to the text; tap the link button on the selection. You may also select attached ink with your finger.</p>
+        <p class="a">Obsidian Sync also needs Sync all other types turned on (Settings > Sync > selective sync). Your ink is saved as json files and Obsidian Sync skips those by default.</p>
       </details>
       <details class="qa item">
         <summary><h3 class="q">Can I write on PDFs in Obsidian like Notability?</h3></summary>
@@ -1410,9 +1385,17 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
           you use on notes. Highlight, erase and lasso work there too.</p>
       </details>
       <details class="qa item">
-        <summary><h3 class="q">Does it work with Apple Pencil?</h3></summary>
-        <p class="a">Yes. On iPad, turn Scribble off first: iPad Settings > Apple Pencil >
-          Scribble > Off.</p>
+        <summary><h3 class="q">Can I export a note to PDF with my ink on it?</h3></summary>
+        <p class="a">Yes. Use Obsidian's own Export to PDF. Your ink comes out on the
+          page with your text.</p>
+        <figure class="clipfig">
+          <video data-clip autoplay muted loop playsinline width="1200"
+            height="674" poster="assets/landing/posters/note-export.png"
+            aria-label="Exporting a note with handwriting on it using Obsidian's own Export to PDF. The ink is on the page with the text."><source
+            src="assets/landing/clips/note-export.mp4" type="video/mp4"><img
+            src="assets/landing/posters/note-export.png" width="1200" height="674"
+            alt="Exporting a note with handwriting on it using Obsidian's own Export to PDF. The ink is on the page with the text."></video>
+        </figure>
       </details>
       <details class="qa item">
         <summary><h3 class="q">Can I send someone the PDF with my ink on it?</h3></summary>
@@ -1426,12 +1409,10 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
           back to the PDF page.</p>
       </details>
       <details class="qa item">
-        <summary><h3 class="q">What does it run on?</h3></summary>
-        <p class="a">iPad, Android, BOOX, Windows, Mac and Linux.</p>
-      </details>
-      <details class="qa item">
-        <summary><h3 class="q">Is it free?</h3></summary>
-        <p class="a">Yes.</p>
+        <summary><h3 class="q">Will it look the same on both devices?</h3></summary>
+        <p class="a">I have tried very hard to make it look the same. A phone will wrap a paragraph into more lines than the desktop screen does, meaning the text will wrap. Ink you drew will always stay at its spot on the page. Do you see the problem?</p>
+        <p class="a">The solution to this in the short term is the lasso and attach ink to text feature; ink attached to text will then be spatially positioned according to that text.</p>
+        <p class="a">To attach ink: lasso the ink next to the text; tap the link button on the selection. You may also select attached ink with your finger.</p>
       </details>
     </div>
   </div>
@@ -1439,23 +1420,25 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
 {"@type":"Question","name":"So can I draw directly on my notes?","acceptedAnswer":{"@type":"Answer","text":"Yes."}},
+{"@type":"Question","name":"Is it free?","acceptedAnswer":{"@type":"Answer","text":"Yes."}},
+{"@type":"Question","name":"What does it run on?","acceptedAnswer":{"@type":"Answer","text":"iPad, Android, BOOX, Windows, Mac and Linux."}},
+{"@type":"Question","name":"Does it work with Apple Pencil?","acceptedAnswer":{"@type":"Answer","text":"Yes. On iPad, turn Scribble off first: iPad Settings > Apple Pencil > Scribble > Off."}},
+{"@type":"Question","name":"Do I need a pen?","acceptedAnswer":{"@type":"Answer","text":"No. Run the command “Handwriting: Mouse on / off” and draw with the mouse."}},
 {"@type":"Question","name":"What happens to my notes if I uninstall or disable it?","acceptedAnswer":{"@type":"Answer","text":"Disable the plugin and your text stays exactly the same; the ink just stops rendering. Your notes stay .md. The only thing ever written into one is a single handwriting-page-id line in the properties."}},
 {"@type":"Question","name":"Is there a risk of corruption?","acceptedAnswer":{"@type":"Answer","text":"A note you never inked on is never modified. A note you have inked on gets one line in its properties: handwriting-page-id. Nothing else. This is the same method Excalidraw and several other ink plugins use; they mark their notes with a property line the same way. Your ink lives in its own file in .handwriting/ at your vault root."}},
-{"@type":"Question","name":"Can I use different devices to view the same note?","acceptedAnswer":{"@type":"Answer","text":"Yes. Your ink lives in a file inside your vault, so it syncs along with your notes. If you use Obsidian Sync, iCloud, or Dropbox to sync your notes, you may have to Turn on a compatibility option in Handwriting settings as those services do not sync hidden folders by default."}},
-{"@type":"Question","name":"Will it look the same on both devices?","acceptedAnswer":{"@type":"Answer","text":"I have tried very hard to make it look the same. A phone will wrap a paragraph into more lines than the desktop screen does, meaning the text will wrap. Ink you drew will always stay at its spot on the page. Do you see the problem? The solution to this in the short term is the lasso and attach ink to text feature; ink attached to text will then be spatially positioned according to that text. To attach ink: lasso the ink next to the text; tap the link button on the selection. You may also select attached ink with your finger."}},
+{"@type":"Question","name":"Can I use different devices to view the same note?","acceptedAnswer":{"@type":"Answer","text":"Yes. Your ink lives in a file inside your vault, so it syncs along with your notes. If you use Obsidian Sync, iCloud, or Dropbox to sync your notes, you may have to Turn on a compatibility option in Handwriting settings as those services do not sync hidden folders by default. Obsidian Sync also needs Sync all other types turned on (Settings > Sync > selective sync). Your ink is saved as json files and Obsidian Sync skips those by default."}},
 {"@type":"Question","name":"Can I write on PDFs in Obsidian like Notability?","acceptedAnswer":{"@type":"Answer","text":"Yes. Open the PDF in Obsidian and write on it with the same toolbar you use on notes. Highlight, erase and lasso work there too."}},
-{"@type":"Question","name":"Does it work with Apple Pencil?","acceptedAnswer":{"@type":"Answer","text":"Yes. On iPad, turn Scribble off first: iPad Settings > Apple Pencil > Scribble > Off."}},
+{"@type":"Question","name":"Can I export a note to PDF with my ink on it?","acceptedAnswer":{"@type":"Answer","text":"Yes. Use Obsidian's own Export to PDF. Your ink comes out on the page with your text."}},
 {"@type":"Question","name":"Can I send someone the PDF with my ink on it?","acceptedAnswer":{"@type":"Answer","text":"Yes. Run the command “Handwriting: Flatten ink into a copy of this PDF”. It draws your ink into a copy that opens in any PDF app."}},
 {"@type":"Question","name":"Can I pull part of a PDF into a note?","acceptedAnswer":{"@type":"Answer","text":"Yes. Snip part of the page and paste it into a note. The snip links back to the PDF page."}},
-{"@type":"Question","name":"What does it run on?","acceptedAnswer":{"@type":"Answer","text":"iPad, Android, BOOX, Windows, Mac and Linux."}},
-{"@type":"Question","name":"Is it free?","acceptedAnswer":{"@type":"Answer","text":"Yes."}}
+{"@type":"Question","name":"Will it look the same on both devices?","acceptedAnswer":{"@type":"Answer","text":"I have tried very hard to make it look the same. A phone will wrap a paragraph into more lines than the desktop screen does, meaning the text will wrap. Ink you drew will always stay at its spot on the page. Do you see the problem? The solution to this in the short term is the lasso and attach ink to text feature; ink attached to text will then be spatially positioned according to that text. To attach ink: lasso the ink next to the text; tap the link button on the selection. You may also select attached ink with your finger."}}
 ]}
 </script>
 
 <section id="contact" class="sec" data-section="contact">
   <div class="wrap">
     <div class="reach-head">
-      <h2 data-fade>Contact Alan</h2>
+      <h2 data-fade>Contact <span style="color: var(--ink)">Alan</span></h2>
       <p class="lead" data-fade>Thank you for using my plugin.</p>
     </div>
     <ul class="reach" data-fade>
@@ -1477,8 +1460,8 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   <div class="wrap">
     <div class="signup-bar">
       <div>
-        <h2>Get an email when I update Handwriting</h2>
-        <p>I'll send you the release notes when a new version comes out.</p>
+        <h2>Get an email when I update <span style="color: var(--ink)">Handwriting</span></h2>
+        <p>You get to know first when a new version is coming out&nbsp;:)</p>
       </div>
       <form method="post" data-signup>
         <input type="email" name="email_address" placeholder="you@example.com"
@@ -1500,7 +1483,7 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
       stroke-linecap="round" aria-hidden="true"><path
       d="M6 6l12 12M18 6 6 18"/></svg></button>
   </div>
-  <h2 id="heard-title" tabindex="-1">How did you hear about Handwriting?</h2>
+  <h2 id="heard-title" tabindex="-1">How did you hear about <span style="color: var(--ink)">Handwriting</span>?</h2>
   <p class="heard-sub">This helps me know where to post</p>
   <div class="heard-chips">
     <button type="button" data-source="reddit">Reddit</button>
@@ -1561,10 +1544,7 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
   }
   function part(fn) { try { fn(); } catch (e) { if (window.console) console.error(e); } }
 
-  /* Hero film: loops muted. One button pauses it, and so does a click or
-     tap on the film itself; the other turns the film's sound on and off
-     and never moves the film. Off screen it is paused while muted; with
-     the sound on it plays on. */
+  /* Hero film: loops muted, with pause and sound controls and the song */
   part(function () {
     var film = document.getElementById("tower");
     var ctl = document.getElementById("film-bar");
@@ -1573,6 +1553,9 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
     if (!film || !ctl || !pp || !snd) return;
     var held = still;
     var seen = true;
+    var LAP = 91.8667, SONG = "assets/landing/hero/she-break-straight-1.m4a";
+    var song = null, dead = false, lap = 0, last = 0, tick = 0;
+    var stuck = false, sent = -1, prev = -1e9, jumped = false;
     if (still) { film.removeAttribute("autoplay"); film.pause(); }
     ctl.hidden = false;
     function sync() {
@@ -1583,20 +1566,90 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
     ["play", "playing", "pause"].forEach(function (t) {
       film.addEventListener(t, sync);
     });
+    function hush(fn) { try { fn(); } catch (e) {} }
+    function halt() { stuck = true; sent = -1; song.loop = true; }
+    function seek(want, start) {
+      var now = Date.now();
+      if (!start && !jumped && !film.seeking) {
+        if (now - prev < 3000) halt();
+        prev = now;
+      }
+      sent = want;
+      song.currentTime = want;
+    }
+    function step() {
+      if (!song || dead || film.muted) return;
+      var t = film.currentTime;
+      if (t < last - LAP / 2) lap = (lap + 1) % 3;
+      last = t;
+      hush(function () {
+        var want = lap * LAP + t;
+        if (!stuck && !song.seeking && Math.abs(song.currentTime - want) > 0.15)
+          seek(want, false);
+      });
+      if (!film.seeking) jumped = false;
+      hush(function () {
+        if (film.paused) { if (!song.paused) song.pause(); }
+        else if (song.paused && !song.ended) play(song);
+      });
+    }
+    ["play", "pause", "seeked"].forEach(function (t) {
+      film.addEventListener(t, step);
+    });
+    film.addEventListener("seeking", function () { jumped = true; });
+    var fade = 0;
+    function fadeIn() {
+      var t0 = Date.now();
+      if (fade) clearInterval(fade);
+      song.volume = 0;
+      fade = setInterval(function () {
+        var k = Math.min(1, (Date.now() - t0) / 150);
+        hush(function () { song.volume = k; });
+        if (k >= 1) { clearInterval(fade); fade = 0; }
+      }, 15);
+    }
+    function songOn() {
+      lap = 0;
+      last = film.currentTime;
+      stuck = false; sent = -1; prev = -1e9; jumped = false;
+      if (!song) hush(function () {
+        song = document.createElement("audio");
+        song.preload = "auto";
+        song.addEventListener("error", function () { dead = true; });
+        song.addEventListener("seeked", function () {
+          if (sent >= 0 && Math.abs(song.currentTime - sent) > 0.15) halt();
+          sent = -1;
+        });
+        song.src = SONG;
+      });
+      if (song && !dead) {
+        hush(function () { song.loop = false; seek(film.currentTime, true); });
+        hush(fadeIn);
+        hush(function () { play(song); });
+      }
+      if (!tick) tick = setInterval(step, 1000);
+    }
+    function songOff() {
+      if (tick) { clearInterval(tick); tick = 0; }
+      if (song) hush(function () { song.pause(); });
+    }
     function toggle() {
       if (film.paused) { held = false; play(film); }
       else { held = true; film.pause(); }
     }
     pp.addEventListener("click", toggle);
-    film.addEventListener("click", toggle);
-    snd.addEventListener("click", function () {
+    film.addEventListener("click", function () {
+      if (film.muted) sound(); else toggle();
+    });
+    function sound() {
       var on = film.muted;
       film.muted = !on;
-      if (on) { held = false; play(film); }
-      else if (!seen && !film.paused) film.pause();
+      if (on) { held = false; play(film); songOn(); }
+      else { songOff(); if (!seen && !film.paused) film.pause(); }
       snd.setAttribute("aria-pressed", on ? "true" : "false");
       snd.textContent = on ? "Turn sound off" : "Turn sound on";
-    });
+    }
+    snd.addEventListener("click", sound);
     if (hasIO) new IntersectionObserver(function (es) {
       es.forEach(function (e) {
         seen = e.isIntersecting;
@@ -1815,20 +1868,21 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
     });
   });
 
-  /* The wheel: seven quotes under the film, one bright in the middle and
-     its neighbours dim. Every 6 s the next one comes in from the right,
-     only while half of the wheel or more is on screen and the tab is
-     shown; a pointer or focus on it holds it. A click on a dim quote, a
-     swipe or drag, the Left and Right keys, or a quote taking focus turn
-     it by hand, and after that it stays put for this page view. The
-     quotes are not links. Under reduced motion it never turns by
-     itself and a turn is a plain swap (the page's reduced-motion rule). */
+  /* The wheel: seven quotes that turn by themselves or by hand */
   part(function () {
     var wheel = document.querySelector(".wheel");
     var items = wheel ? all(":scope > li", wheel) : [];
     var n = items.length, half = Math.floor(n / 2);
     if (n < 2) return;
-    var at = 0, hand = false, hover = false, focus = false;
+    var REST = 20000;
+    var WAIT = items.map(function (li) {
+      var q = li.querySelector("blockquote");
+      var w = ((q && q.textContent) || "").split(/\s+/).filter(function (s) {
+        return /[\p{L}\p{N}]/u.test(s);
+      }).length;
+      return Math.max(2500, 2050 + 200 * (w + 2));
+    });
+    var at = 0, handAt = 0, hover = false, focus = false;
     var seen = !hasIO, timer = 0, press = null, moved = false;
     /* where quote i sits when quote c is in the middle: -half .. half */
     function slot(i, c) { return ((i - c) % n + n + half) % n - half; }
@@ -1846,24 +1900,44 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
         if (jump) { void li.offsetWidth; li.classList.remove("jump"); }
         li.classList.toggle("on", i === to);
       });
+      stops(to);
+    }
+    /* The one tab stop. */
+    function stop(li) { return li.querySelector(".by a") || li; }
+    function stops(c) {
+      items.forEach(function (li, i) {
+        var a = li.querySelector(".by a");
+        if (a) { li.tabIndex = -1; a.tabIndex = i === c ? 0 : -1; }
+        else li.tabIndex = i === c ? 0 : -1;
+      });
     }
     function free() {
-      return !still && !hand && !hover && !focus && seen && !document.hidden;
+      return !still && !hover && !focus && seen && !document.hidden;
     }
+    /* The wait before the next turn. */
     function arm() {
       var f = free();
       if (f && !timer) timer = setTimeout(function () {
         timer = 0; show(at + 1); arm();
-      }, 6000);
+      }, Math.max(WAIT[at], handAt + REST - Date.now()));
       else if (!f && timer) { clearTimeout(timer); timer = 0; }
     }
-    function turn(to) { hand = true; show(to); arm(); }
+    function turn(to) {
+      handAt = Date.now();
+      if (timer) { clearTimeout(timer); timer = 0; }
+      show(to); arm();
+    }
+    /* Focus a keyboard user can see. */
+    function shown(el) {
+      try { return el.matches(":focus-visible"); } catch (x) { return true; }
+    }
     function indexOf(el) {
       return items.indexOf(el && el.closest ? el.closest("li") : null);
     }
     items.forEach(function (li, i) {
       li.style.setProperty("--k", slot(i, 0));
     });
+    stops(0);
     wheel.addEventListener("pointerenter", function (e) {
       if (e.pointerType !== "touch") { hover = true; arm(); }
     });
@@ -1873,12 +1947,13 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
     /* A quote that takes focus from the keyboard comes to the middle; one
        taken by a press waits for the click. */
     wheel.addEventListener("focusin", function (e) {
-      focus = true;
+      focus = shown(e.target);
       var i = indexOf(e.target);
       if (!press && i >= 0 && i !== at) turn(i); else arm();
     });
+    /* Focus moving inside the wheel keeps the hold. */
     wheel.addEventListener("focusout", function (e) {
-      focus = wheel.contains(e.relatedTarget); arm();
+      focus = focus && wheel.contains(e.relatedTarget); arm();
     });
     wheel.addEventListener("pointerdown", function (e) {
       if (e.button !== 0) return;
@@ -1916,12 +1991,20 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
       if (moved) { moved = false; e.preventDefault(); return; }
       if (i >= 0 && i !== was) { e.preventDefault(); turn(i); }
     });
+    /* A middle or right press takes no focus. */
+    wheel.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) e.preventDefault();
+    });
+    wheel.addEventListener("auxclick", function (e) {
+      var i = indexOf(e.target);
+      if (i >= 0 && i !== at) e.preventDefault();
+    });
     wheel.addEventListener("keydown", function (e) {
       var d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
       if (!d || e.altKey || e.ctrlKey || e.metaKey) return;
       e.preventDefault();
       turn(at + d);
-      items[at].focus({ preventScroll: true });
+      stop(items[at]).focus({ preventScroll: true });
     });
     document.addEventListener("visibilitychange", arm);
     if (hasIO) new IntersectionObserver(function (es) {
@@ -1967,6 +2050,35 @@ footer .digits span { padding: 3px 4px; border-radius: 2px;
     window.HANDWRITING_READY = true;
   });
 
+})();
+</script>
+<script>
+/* Tablet lean: the hero film's frame follows the mouse */
+(function () {
+  var frame = document.querySelector(".opening .screen");
+  if (!frame) return;
+  var still = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var MAX = 4, EASE = 0.1;
+  var want = { x: 0, y: 0 }, have = { x: 0, y: 0 }, live = false;
+  window.addEventListener("pointermove", function (e) {
+    if (e.pointerType !== "mouse" || still.matches) return;
+    var r = frame.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    var dx = (e.clientX - cx) / (window.innerWidth / 2);
+    var dy = (e.clientY - cy) / (window.innerHeight / 2);
+    want.x = Math.max(-1, Math.min(1, dx)) * MAX;
+    want.y = Math.max(-1, Math.min(1, dy)) * MAX * -0.6;
+    if (!live) { live = true; requestAnimationFrame(step); }
+  }, { passive: true });
+  function step() {
+    have.x += (want.x - have.x) * EASE;
+    have.y += (want.y - have.y) * EASE;
+    frame.style.setProperty("--ty", have.x.toFixed(3) + "deg");
+    frame.style.setProperty("--tx", have.y.toFixed(3) + "deg");
+    if (Math.abs(want.x - have.x) + Math.abs(want.y - have.y) < 0.002) {
+      live = false; return; }
+    requestAnimationFrame(step);
+  }
 })();
 </script>
 <script>
